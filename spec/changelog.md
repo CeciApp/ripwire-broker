@@ -88,6 +88,7 @@
 | 2026-09-27 19:49 | S5.13: `install --online` acrescenta a flag e referencia a chave pelo nome (`${VAR}` no Claude Code, `env_vars` no Codex, validado pelo parser do Codex 0.157); hooks continuam offline; 219/230 verdes | [D-084](#d-084--install---online) |
 | 2026-09-27 19:51 | S5.14: dois testes live ignorados (corpus sintético e caminho completo com Ripwire real); ao vivo verdes, digest idêntico ao S4.0b; 219/230 verdes, 4 ignorados no `online` | [D-085](#d-085--testes-live) |
 | 2026-09-27 19:53 | Documentação da Fase 5 (README, skill, AGENTS.md, PRD); ponto de parada 4: Fases 4 e 5 completas, exceto o A/B; falha intermitente identificada (`a_hung_model_is_killed_at_the_hard_limit`) e corrigida | [D-086](#d-086--documentação-e-ponto-de-parada-4) |
+| 2026-09-27 19:56 | Branch `fase-4-online` publicado e PR #1 aberto para o `master` | [D-087](#d-087--pr-das-fases-4-e-5) |
 
 ---
 
@@ -1987,4 +1988,15 @@ Seção §5.4 do plano.
     era do teste.
   - Correção só no teste: o limite passou para 2 s. A checagem de término em menos de 5 s
     continua. Rodou 20 vezes sem falha, 10 delas sob carga de 24 processos em 12 CPUs.
+
+## D-087 — PR das Fases 4 e 5
+
+- O branch `fase-4-online` foi publicado no `CeciApp/ripwire-broker`, e o
+  [PR #1](https://github.com/CeciApp/ripwire-broker/pull/1) foi aberto para o `master`. São 18
+  commits, do plano (D-058) à documentação (D-086), e 49 arquivos.
+- Antes da publicação, o diff inteiro foi varrido atrás da chave do provider: nenhuma
+  ocorrência. O `master` local estava igual ao `origin/master`.
+- O PR descreve o que revisar com atenção: o teste de CA-10 sobre o grafo resolvido (D-059), o
+  piso de 512 tokens (D-072), a sintonia do lookahead (D-081) e a correção do teste
+  intermitente (D-086). O item em aberto é o corpus A/B com a barra de produto (§23.15).
 
