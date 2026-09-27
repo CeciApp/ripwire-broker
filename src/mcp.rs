@@ -8,18 +8,21 @@ use crate::broker::{
 use crate::model::SCHEMA_VERSION;
 use crate::upstream::{RipwireUpstream, UpstreamConfig};
 use async_trait::async_trait;
+use rust_mcp_sdk::McpObserver;
 use rust_mcp_sdk::mcp_server::ServerHandler;
-use rust_mcp_sdk::schema::schema_utils::CallToolError;
+use rust_mcp_sdk::schema::schema_utils::{CallToolError, ClientMessage, ServerMessage};
 use rust_mcp_sdk::schema::{
-    CallToolRequestParams, CallToolResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, ReadResourceRequestParams, RpcError, ServerResult, Tool,
+    CallToolRequestParams, CallToolResult, CancelledNotificationParams, ListResourcesResult,
+    ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, RpcError, ServerResult,
+    Tool,
 };
 use rust_mcp_sdk::{McpServer, RequestContext};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 pub const STATUS_URI: &str = "ripwire-broker://status";
 
@@ -34,6 +37,85 @@ pub struct BrokerServer {
     settings: Settings,
     broker: Mutex<Option<Arc<Broker>>>,
     last_connect_error: Mutex<Option<BrokerError>>,
+    inflight: Arc<Inflight>,
+}
+
+/// Tool calls in flight by JSON-RPC id, so `notifications/cancelled` can stop one (RF-14).
+/// The SDK hands handlers no request id, so the message observer, which sees every raw
+/// request, queues each `tools/call` id under its (tool, arguments) key and the handler
+/// takes it back. Two identical concurrent calls may swap ids; cancelling either then stops
+/// identical work.
+#[derive(Default)]
+struct Inflight {
+    waiting: std::sync::Mutex<HashMap<String, VecDeque<String>>>,
+    running: std::sync::Mutex<HashMap<String, Arc<Notify>>>,
+    /// Cancelled before its handler registered.
+    early: std::sync::Mutex<HashSet<String>>,
+}
+
+fn call_key(name: &str, arguments: &Value) -> String {
+    format!("{name} {arguments}")
+}
+
+impl Inflight {
+    fn received(&self, message: &ClientMessage) {
+        let Ok(v) = serde_json::to_value(message) else {
+            return;
+        };
+        if v["method"] != "tools/call" {
+            return;
+        }
+        let name = v["params"]["name"].as_str().unwrap_or_default();
+        let key = call_key(name, &v["params"]["arguments"]);
+        self.waiting
+            .lock()
+            .unwrap()
+            .entry(key)
+            .or_default()
+            .push_back(v["id"].to_string());
+    }
+
+    /// Claims this call's id and a signal that fires if the client cancels it.
+    fn start(&self, params: &CallToolRequestParams) -> Option<(String, Arc<Notify>)> {
+        let arguments = params
+            .arguments
+            .clone()
+            .map(Value::Object)
+            .unwrap_or(Value::Null);
+        let key = call_key(&params.name, &arguments);
+        let id = self.waiting.lock().unwrap().get_mut(&key)?.pop_front()?;
+        let signal = Arc::new(Notify::new());
+        if self.early.lock().unwrap().remove(&id) {
+            signal.notify_one();
+        }
+        self.running
+            .lock()
+            .unwrap()
+            .insert(id.clone(), signal.clone());
+        Some((id, signal))
+    }
+
+    fn finish(&self, id: &str) {
+        self.running.lock().unwrap().remove(id);
+    }
+
+    fn cancel(&self, id: String) {
+        match self.running.lock().unwrap().get(&id) {
+            Some(signal) => signal.notify_one(),
+            None => {
+                self.early.lock().unwrap().insert(id);
+            }
+        }
+    }
+}
+
+/// Feeds raw requests to `Inflight`; see there.
+struct CancelObserver(Arc<Inflight>);
+
+impl McpObserver<ClientMessage, ServerMessage> for CancelObserver {
+    fn on_receive(&self, message: &ClientMessage) {
+        self.0.received(message);
+    }
 }
 
 impl BrokerServer {
@@ -42,6 +124,7 @@ impl BrokerServer {
             settings,
             broker: Mutex::new(None),
             last_connect_error: Mutex::new(None),
+            inflight: Arc::default(),
         };
         let _ = server.broker().await;
         server
@@ -70,6 +153,11 @@ impl BrokerServer {
         }
     }
 
+    /// Pass it as the server's `message_observer`: it lets client cancellations reach tool calls.
+    pub fn observer(&self) -> Arc<dyn McpObserver<ClientMessage, ServerMessage>> {
+        Arc::new(CancelObserver(self.inflight.clone()))
+    }
+
     async fn status_json(&self) -> Value {
         let connected = self.broker.lock().await.clone();
         match connected {
@@ -85,6 +173,7 @@ impl BrokerServer {
                     "upstream": {
                         "ripwire_version": self.settings.broker.ripwire_version,
                         "available": false,
+                        "busy": false,
                         "restarts": 0,
                         "last_error": err.map(|e| e.error),
                     },
@@ -294,7 +383,31 @@ impl ServerHandler for BrokerServer {
         _context: &RequestContext,
         _runtime: Arc<dyn McpServer>,
     ) -> Result<ServerResult, CallToolError> {
-        Ok(tool_result(self.dispatch(&params).await).into())
+        let Some((id, cancelled)) = self.inflight.start(&params) else {
+            return Ok(tool_result(self.dispatch(&params).await).into());
+        };
+        // Dropping `dispatch` on cancellation stops the rest of its upstream work; the
+        // broker records the call as `cancelled` (RF-14).
+        let result = tokio::select! {
+            r = self.dispatch(&params) => r,
+            _ = cancelled.notified() => Err(BrokerError {
+                error: "cancelled",
+                message: "cancelled by the client".into(),
+            }),
+        };
+        self.inflight.finish(&id);
+        Ok(tool_result(result).into())
+    }
+
+    async fn handle_cancelled_notification(
+        &self,
+        params: CancelledNotificationParams,
+        _runtime: Arc<dyn McpServer>,
+    ) -> Result<(), RpcError> {
+        if let Ok(id) = serde_json::to_value(&params.request_id) {
+            self.inflight.cancel(id.to_string());
+        }
+        Ok(())
     }
 
     async fn handle_list_resources_request(

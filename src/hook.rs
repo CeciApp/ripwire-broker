@@ -36,6 +36,9 @@ pub struct SessionState {
     /// The last `LOG_ENTRIES` injections, for `hook-log`.
     #[serde(default)]
     pub log: Vec<LogEntry>,
+    /// Next `request_id`: each hook event is a new process, so the count lives here.
+    #[serde(default)]
+    pub next_request: u64,
 }
 
 pub const LOG_ENTRIES: usize = 5;
@@ -251,11 +254,13 @@ pub async fn handle(
     policy: &Policy,
 ) -> Option<Value> {
     broker.restore_session(state.memory.clone());
+    broker.resume_request_ids(state.next_request);
     let out = match respond(event, input, broker, state, policy).await {
         Ok(out) => out,
         Err(e) => Some(failure(&e)),
     };
     state.memory = broker.session_snapshot();
+    state.next_request = broker.next_request_id();
     out
 }
 

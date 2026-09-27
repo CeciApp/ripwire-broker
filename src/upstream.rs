@@ -51,6 +51,8 @@ pub trait Upstream: Send + Sync {
 pub struct UpstreamConfig {
     pub binary: PathBuf,
     pub workspace: PathBuf,
+    /// `(broker binary, MiB)`: start ripwire through `__supervise` with that memory limit.
+    pub supervisor: Option<(PathBuf, u64)>,
     pub timeout: Duration,
 }
 
@@ -60,6 +62,7 @@ impl UpstreamConfig {
             binary: PathBuf::from("ripwire"),
             workspace: workspace.to_path_buf(),
             timeout: Duration::from_secs(60),
+            supervisor: None,
         }
     }
 }
@@ -114,22 +117,31 @@ impl RipwireUpstream {
 
 async fn launch(config: &UpstreamConfig) -> Result<Arc<ClientRuntime>, UpstreamError> {
     // Arguments are passed as an array, never through a shell (PRD 14.3 / 15.3).
-    let args = vec![
+    let mut program = config.binary.to_string_lossy().into_owned();
+    let mut args = vec![
         config.workspace.to_string_lossy().into_owned(),
         "--mcp".into(),
     ];
+    if let Some((broker, mb)) = &config.supervisor {
+        args.splice(
+            0..0,
+            [
+                "__supervise".into(),
+                "--max-rss-mb".into(),
+                mb.to_string(),
+                "--".into(),
+                program,
+            ],
+        );
+        program = broker.to_string_lossy().into_owned();
+    }
     // Our own timeout (in `call_once`) is authoritative; the transport's is only a backstop.
     let options = TransportOptions {
         timeout: config.timeout * 2,
         ..Default::default()
     };
-    let transport = StdioTransport::create_with_server_launch(
-        config.binary.to_string_lossy(),
-        args,
-        None,
-        options,
-    )
-    .map_err(|e| UpstreamError::Unavailable(e.to_string()))?;
+    let transport = StdioTransport::create_with_server_launch(program, args, None, options)
+        .map_err(|e| UpstreamError::Unavailable(e.to_string()))?;
     let details = ClientDetails {
         client_info: Implementation {
             name: "ripwire-broker".into(),

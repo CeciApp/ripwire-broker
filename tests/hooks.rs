@@ -581,3 +581,41 @@ async fn session_state_is_private_and_holds_no_prompt_or_code() {
         "corrupt → fresh session"
     );
 }
+
+#[tokio::test]
+async fn request_ids_keep_counting_across_hook_processes() {
+    let fixture = || edit_fake().answer("explore", "explore_export_auth");
+    let (first, _f, ws) = hook_broker(fixture()).await;
+    std::fs::write(ws.path().join("a.txt"), "x").unwrap();
+    let mut state = SessionState::default();
+    let prompt = hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &event("claude_code_user_prompt_submit", ws.path()),
+        &first,
+        &mut state,
+        &Policy::default(),
+    )
+    .await
+    .unwrap();
+
+    // Each hook event is a new process, so a new Broker, with the saved state.
+    let mut config = BrokerConfig::new(ws.path());
+    config.incremental = true;
+    let second = Broker::connect(Arc::new(fixture()), config).await.unwrap();
+    let edit = hook::handle(
+        Host::ClaudeCode,
+        Event::PostToolUse,
+        &event("claude_code_post_tool_use", ws.path()),
+        &second,
+        &mut state,
+        &Policy::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(injected(&prompt)["provenance"]["request_id"], 1);
+    assert_eq!(injected(&edit)["provenance"]["request_id"], 2);
+    let ids: Vec<u64> = state.log.iter().map(|e| e.request_id).collect();
+    assert_eq!(ids, vec![1, 2], "hook-log tells the injections apart");
+}

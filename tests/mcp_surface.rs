@@ -328,3 +328,131 @@ async fn the_server_adds_notes_with_a_command_summarizer() {
     assert!(!st.to_string().contains("Authentication helpers"), "{st}");
     client.shut_down().await.unwrap();
 }
+
+/// The broker binary spoken to in raw JSON-RPC, so the test owns the request ids.
+struct Raw {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Raw {
+    fn start(args: &[&str]) -> Self {
+        use std::io::BufRead;
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let out = child.stdout.take().unwrap();
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                if let Ok(v) = serde_json::from_str(&line) {
+                    let _ = tx.send(v);
+                }
+            }
+        });
+        Self { child, lines }
+    }
+
+    fn send(&mut self, msg: Value) {
+        use std::io::Write;
+        let stdin = self.child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{msg}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    fn request(&mut self, id: i64, method: &str, mut params: Value) {
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "raw", "version": "0"},
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        });
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+    }
+
+    fn response(&self, id: i64, within: std::time::Duration) -> Option<Value> {
+        let deadline = std::time::Instant::now() + within;
+        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+            match self.lines.recv_timeout(left) {
+                Ok(v) if v["id"] == id => return Some(v),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for Raw {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+#[test]
+fn a_client_cancellation_stops_the_tool_call() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let ripwire = common::slow_ripwire(bin.path());
+    let mut broker = Raw::start(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--ripwire",
+        ripwire.to_str().unwrap(),
+    ]);
+
+    broker.request(
+        7,
+        "tools/call",
+        json!({"name": "context_for_task", "arguments": {"task": "slow task", "mode": "orient"}}),
+    );
+    // Cancel only once ripwire is actually busy with this call.
+    let busy = bin.path().join("busy");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !busy.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the slow call never reached ripwire"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    broker.send(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": 7, "reason": "user pressed escape"},
+    }));
+
+    let answer = broker
+        .response(7, std::time::Duration::from_secs(5))
+        .expect("the cancelled call returns at once, not after the 30 s upstream call");
+    let out = &answer["result"]["structuredContent"];
+    assert_eq!(out["error"], "cancelled", "{answer}");
+
+    broker.request(
+        8,
+        "resources/read",
+        json!({"uri": "ripwire-broker://status"}),
+    );
+    let status = broker
+        .response(8, std::time::Duration::from_secs(5))
+        .expect("the status answers even while ripwire is busy (RF-13)");
+    let text = status["result"]["contents"][0]["text"].as_str().unwrap();
+    let status: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        status["metrics"]["tools"]["context_for_task"]["cancelled"], 1,
+        "{status}"
+    );
+    let last = status["metrics"]["recent_requests"]
+        .as_array()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(last["outcome"], "cancelled");
+    // ripwire is still busy with the abandoned call: the status says so instead of hanging.
+    assert_eq!(status["upstream"]["busy"], true, "{status}");
+    assert_eq!(status["upstream"]["available"], false);
+}

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 pub const USAGE: &str = "\
 usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [--redact-workspace] [--incremental]
+                      [--ripwire-max-rss-mb N]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
@@ -53,6 +54,8 @@ pub struct ServeArgs {
     pub incremental: bool,
     /// Local model for notes (Phase 3); `None` keeps it off.
     pub summarizer: Option<SummarizerArgs>,
+    /// Kill and restart ripwire above this resident memory (PRD 15.3); `None`: no limit.
+    pub ripwire_max_rss_mb: Option<u64>,
 }
 
 /// `--summarizer-cmd "ollama run phi4"` and its companions (D-034..D-036).
@@ -122,6 +125,11 @@ pub enum Command {
     Install(InstallArgs),
     /// `--help` or `--version`: print and exit successfully.
     Info(String),
+    /// Internal: run `argv` under a memory limit (how the server starts ripwire, D-050).
+    Supervise {
+        max_rss_mb: u64,
+        argv: Vec<String>,
+    },
 }
 
 fn usage(detail: impl std::fmt::Display) -> String {
@@ -158,6 +166,7 @@ struct Flags {
     summarizer_version_cmd: Option<String>,
     summarizer_wait: Option<Duration>,
     summarizer_timeout: Option<Duration>,
+    max_rss_mb: Option<u64>,
     switches: Vec<&'static str>,
     words: Vec<String>,
 }
@@ -235,6 +244,7 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             "--codex-home" => f.codex_home = Some(value.into()),
             "--budget" => f.budget = Some(number(&value)? as u32),
             "--summarizer-cmd" => f.summarizer_cmd = Some(value),
+            "--ripwire-max-rss-mb" | "--max-rss-mb" => f.max_rss_mb = Some(number(&value)?),
             "--summarizer-version-cmd" => f.summarizer_version_cmd = Some(value),
             "--summarizer-wait-ms" => {
                 f.summarizer_wait = Some(Duration::from_millis(number(&value)?))
@@ -269,10 +279,14 @@ fn no_words(f: &Flags) -> Result<(), String> {
 }
 
 pub fn parse(args: Vec<String>) -> Result<Command, String> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
+    let own = args
+        .iter()
+        .position(|a| a == "--")
+        .map_or(&args[..], |i| &args[..i]);
+    if own.iter().any(|a| a == "-h" || a == "--help") {
         return Ok(Command::Info(USAGE.into()));
     }
-    if args.iter().any(|a| a == "--version") {
+    if own.iter().any(|a| a == "--version") {
         return Ok(Command::Info(format!(
             "ripwire-broker {}",
             env!("CARGO_PKG_VERSION")
@@ -290,6 +304,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 &with(&[
                     "--redact-workspace",
                     "--incremental",
+                    "--ripwire-max-rss-mb",
                     SUMMARIZER[0],
                     SUMMARIZER[1],
                     SUMMARIZER[2],
@@ -304,7 +319,23 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 redact_workspace: f.on("--redact-workspace"),
                 incremental: f.on("--incremental"),
                 summarizer: f.summarizer()?,
+                ripwire_max_rss_mb: f.max_rss_mb,
             }))
+        }
+        Some("__supervise") => {
+            let rest: Vec<String> = it.collect();
+            let split = rest
+                .iter()
+                .position(|a| a == "--")
+                .ok_or_else(|| usage("__supervise needs -- COMMAND"))?;
+            let f = flags(rest[..split].iter().cloned(), &["--max-rss-mb"])?;
+            no_words(&f)?;
+            Ok(Command::Supervise {
+                max_rss_mb: f
+                    .max_rss_mb
+                    .ok_or_else(|| usage("--max-rss-mb is required"))?,
+                argv: rest[split + 1..].to_vec(),
+            })
         }
         Some("hook") => {
             let (host, event) = (host(it.next())?, event(it.next())?);

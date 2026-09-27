@@ -1321,3 +1321,53 @@ async fn a_find_symbol_timeout_is_still_an_error() {
         "only a refusal means 'not in the repo'"
     );
 }
+
+// --- RF-14: a cancelled tool call stops and leaves a trace (D-049) ---
+
+#[tokio::test]
+async fn a_cancelled_call_stops_its_upstream_work_and_is_recorded() {
+    let (b, fake, ws) = broker(edit_fake()).await;
+    common::write(ws.path(), "src/auth.py", "changed");
+    let _held = fake.hold("edit_check");
+    let b = Arc::new(b);
+    let req = EditRequest {
+        files: vec!["src/auth.py".into()],
+        symbols: vec!["login".into(), "validate_token".into()],
+        ..EditRequest::default()
+    };
+    let running = tokio::spawn({
+        let b = b.clone();
+        async move { b.context_after_edit(req).await }
+    });
+    while !fake.called().contains(&"edit_check".to_string()) {
+        tokio::task::yield_now().await;
+    }
+
+    running.abort();
+    assert!(running.await.unwrap_err().is_cancelled());
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        fake.called(),
+        vec!["situational_awareness", "edit_check"],
+        "nothing after the cancellation"
+    );
+    let status = to_json(&b.status().await);
+    let last = status["metrics"]["recent_requests"]
+        .as_array()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(last["tool"], "context_after_edit");
+    assert_eq!(last["outcome"], "cancelled");
+    assert_eq!(last["upstream"][0]["verb"], "situational_awareness");
+    assert_eq!(
+        status["metrics"]["tools"]["context_after_edit"]["cancelled"],
+        1
+    );
+    let next = b.context_after_edit(EditRequest::default()).await;
+    assert!(next.is_ok(), "the broker still serves: {next:?}");
+}

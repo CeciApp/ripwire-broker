@@ -12,7 +12,6 @@ use crate::upstream::{Upstream, UpstreamError};
 use crate::workspace::Workspace;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,15 +21,47 @@ use std::time::{Duration, Instant};
 /// concurrent tool calls never mix their upstream calls (PRD 14.2).
 struct RequestCtx {
     id: u64,
-    spans: Vec<UpstreamSpan>,
+    /// Shared with the call's `Unfinished` guard, which reports them if the call is dropped.
+    spans: Arc<Mutex<Vec<UpstreamSpan>>>,
 }
 
 tokio::task_local! {
-    static REQUEST: RefCell<RequestCtx>;
+    static REQUEST: RequestCtx;
+}
+
+/// Records a tool call that was dropped before it finished (client cancellation, RF-14).
+struct Unfinished<'a> {
+    broker: &'a Broker,
+    tool: &'static str,
+    id: u64,
+    started: Instant,
+    spans: Arc<Mutex<Vec<UpstreamSpan>>>,
+    finished: bool,
+}
+
+impl Drop for Unfinished<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let took = self.started.elapsed();
+        let mut metrics = self.broker.metrics.lock().unwrap();
+        metrics.cancelled(self.tool);
+        metrics.request(RequestRecord {
+            request_id: self.id,
+            tool: self.tool,
+            outcome: "cancelled",
+            total_us: took.as_micros() as u64,
+            upstream: std::mem::take(&mut *self.spans.lock().unwrap()),
+        });
+    }
 }
 
 /// Risks that decide a gate's status; never suppressed, so the status keeps its evidence (CA-05).
 const GATE_RISKS: &[&str] = &["cochange_missing", "contract_change"];
+
+/// Longest the status resource waits for ripwire to answer its availability probe.
+pub const STATUS_PROBE: Duration = Duration::from_secs(1);
 
 /// Smallest budget that still fits the envelope skeleton plus a few limitations.
 pub const MIN_BUDGET_TOKENS: u32 = 256;
@@ -261,6 +292,9 @@ pub struct UpstreamStatus {
     pub ripwire_version: String,
     pub available: bool,
     pub restarts: u32,
+    /// Did not answer the availability probe within `STATUS_PROBE`: alive but occupied,
+    /// e.g. with a long or abandoned call.
+    pub busy: bool,
     /// Error kind only; messages can quote symbols or paths.
     pub last_error: Option<&'static str>,
 }
@@ -309,7 +343,10 @@ impl Broker {
     }
 
     pub async fn status(&self) -> BrokerStatus {
-        let available = self.upstream.list_tools().await.is_ok();
+        // Never let a busy ripwire hang the status resource (RF-13).
+        let probe = tokio::time::timeout(STATUS_PROBE, self.upstream.list_tools()).await;
+        let busy = probe.is_err();
+        let available = matches!(probe, Ok(Ok(_)));
         BrokerStatus {
             broker_version: env!("CARGO_PKG_VERSION"),
             schema_version: SCHEMA_VERSION,
@@ -324,6 +361,7 @@ impl Broker {
             upstream: UpstreamStatus {
                 ripwire_version: self.ripwire_version.clone(),
                 available,
+                busy,
                 restarts: self.upstream.restarts(),
                 last_error: *self.last_error.lock().unwrap(),
             },
@@ -365,6 +403,17 @@ impl Broker {
         }
     }
 
+    /// The id the next tool call will get.
+    pub fn next_request_id(&self) -> u64 {
+        self.next_request.load(Ordering::Relaxed)
+    }
+
+    /// Continues request ids from an earlier process of the same session (hooks), so
+    /// `provenance.request_id` stays unique within it. Never moves backwards.
+    pub fn resume_request_ids(&self, next: u64) {
+        self.next_request.fetch_max(next, Ordering::Relaxed);
+    }
+
     /// What this session was already shown, to persist between processes (hooks).
     pub fn session_snapshot(&self) -> SessionMemory {
         self.session.lock().unwrap().clone()
@@ -383,16 +432,22 @@ impl Broker {
     ) -> Result<Envelope, BrokerError> {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
-        let ctx = RefCell::new(RequestCtx { id, spans: vec![] });
-        let (result, spans) = REQUEST
-            .scope(ctx, async {
-                let result = inner.await;
-                (
-                    result,
-                    REQUEST.with(|c| std::mem::take(&mut c.borrow_mut().spans)),
-                )
-            })
-            .await;
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let mut guard = Unfinished {
+            broker: self,
+            tool,
+            id,
+            started,
+            spans: spans.clone(),
+            finished: false,
+        };
+        let ctx = RequestCtx {
+            id,
+            spans: spans.clone(),
+        };
+        let result = REQUEST.scope(ctx, inner).await;
+        guard.finished = true;
+        let spans = std::mem::take(&mut *spans.lock().unwrap());
         let took = started.elapsed();
         let mut metrics = self.metrics.lock().unwrap();
         metrics.tool(tool, took, &result);
@@ -463,13 +518,15 @@ impl Broker {
             Status::Ready
         };
         Ok(self.envelope(
-            "context_after_edit",
-            None,
-            status,
-            verbs,
+            Shape {
+                tool: "context_after_edit",
+                intent: None,
+                status,
+                verbs,
+                budget: req.budget_tokens,
+                suppress_seen: !req.include_seen,
+            },
             entries,
-            req.budget_tokens,
-            !req.include_seen,
         ))
     }
 
@@ -497,7 +554,7 @@ impl Broker {
             }
         };
         let _ = REQUEST.try_with(|c| {
-            c.borrow_mut().spans.push(UpstreamSpan {
+            c.spans.lock().unwrap().push(UpstreamSpan {
                 verb,
                 us: took.as_micros() as u64,
                 outcome,
@@ -595,13 +652,16 @@ impl Broker {
             Status::Ready
         };
         Ok(self.envelope(
-            "context_before_finish",
-            None,
-            status,
-            verbs,
+            Shape {
+                tool: "context_before_finish",
+                intent: None,
+                status,
+                verbs,
+                budget: req.budget_tokens,
+                // The gate's evidence must always show (CA-05).
+                suppress_seen: false,
+            },
             entries,
-            req.budget_tokens,
-            false,
         ))
     }
 
@@ -786,13 +846,15 @@ impl Broker {
             Status::Unknown
         };
         self.envelope_full(
-            "context_for_task",
-            Some(intent),
-            status,
-            verbs,
+            Shape {
+                tool: "context_for_task",
+                intent: Some(intent),
+                status,
+                verbs,
+                budget: req.budget_tokens,
+                suppress_seen: !req.include_seen,
+            },
             entries,
-            req.budget_tokens,
-            !req.include_seen,
         )
     }
 
@@ -813,35 +875,21 @@ impl Broker {
         Ok(entries)
     }
 
-    /// `suppress_seen` is false for the finish gate, whose evidence must always show (CA-05).
-    #[allow(clippy::too_many_arguments)] // private; a parameter struct is left to review
-    fn envelope(
-        &self,
-        tool: &'static str,
-        intent: Option<Intent>,
-        status: Status,
-        verbs: Vec<&'static str>,
-        entries: Vec<Entry>,
-        budget: u32,
-        suppress_seen: bool,
-    ) -> Envelope {
-        self.envelope_full(tool, intent, status, verbs, entries, budget, suppress_seen)
-            .0
+    fn envelope(&self, shape: Shape, entries: Vec<Entry>) -> Envelope {
+        self.envelope_full(shape, entries).0
     }
 
     /// The envelope plus the full version of every item it includes (a session reference
     /// resolved to the item it points to): the evidence notes may use.
-    #[allow(clippy::too_many_arguments)]
-    fn envelope_full(
-        &self,
-        tool: &'static str,
-        intent: Option<Intent>,
-        status: Status,
-        verbs: Vec<&'static str>,
-        entries: Vec<Entry>,
-        budget: u32,
-        suppress_seen: bool,
-    ) -> (Envelope, Vec<Item>) {
+    fn envelope_full(&self, shape: Shape, entries: Vec<Entry>) -> (Envelope, Vec<Item>) {
+        let Shape {
+            tool,
+            intent,
+            status,
+            verbs,
+            budget,
+            suppress_seen,
+        } = shape;
         let lead = match intent {
             Some(i) => serde_json::to_value(i)
                 .ok()
@@ -864,7 +912,7 @@ impl Broker {
             limitations: vec![],
             notes: vec![],
             provenance: Provenance {
-                request_id: REQUEST.try_with(|c| c.borrow().id).unwrap_or(0),
+                request_id: REQUEST.try_with(|c| c.id).unwrap_or(0),
                 upstream_tools: verbs,
                 workspace: self.workspace.root().display().to_string(),
                 ripwire_version: self.ripwire_version.clone(),
@@ -953,6 +1001,17 @@ impl Broker {
             .collect();
         (env, included)
     }
+}
+
+/// What a tool decided about its answer, before the entries are shaped into an envelope.
+struct Shape {
+    tool: &'static str,
+    intent: Option<Intent>,
+    status: Status,
+    verbs: Vec<&'static str>,
+    budget: u32,
+    /// False for the finish gate, whose evidence must always show (CA-05).
+    suppress_seen: bool,
 }
 
 fn push_once(verbs: &mut Vec<&'static str>, verb: &'static str) {

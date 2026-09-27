@@ -70,3 +70,44 @@ pub fn flaky_ripwire(dir: &Path, first_launch: &str) -> std::path::PathBuf {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     script
 }
+
+/// A stand-in `ripwire --mcp` (Python, line-delimited JSON-RPC) whose `explore` takes 30 s
+/// when the task contains "slow", after creating `<dir>/busy`; everything else answers at
+/// once. For cancellation tests.
+pub fn slow_ripwire(dir: &Path) -> std::path::PathBuf {
+    let verbs = crate::common::fake::RIPWIRE_TOOLS
+        .iter()
+        .map(|v| format!("\"{v}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = dir.join("slow-ripwire");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, sys, time
+if "--version" in sys.argv:
+    print("ripwire 0.6.4"); sys.exit(0)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    if msg.get("method") == "tools/list":
+        result = {{"tools": [{{"name": v, "inputSchema": {{"type": "object"}}}} for v in [{verbs}]]}}
+    else:
+        args = msg.get("params", {{}}).get("arguments", {{}})
+        if "slow" in str(args.get("task", "")):
+            open("{busy}", "w").close()
+            time.sleep(30)
+        result = {{"content": [{{"type": "text", "text": "<ctx></ctx>"}}]}}
+    sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": result}}) + "\n")
+    sys.stdout.flush()
+"#,
+            busy = dir.join("busy").display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}

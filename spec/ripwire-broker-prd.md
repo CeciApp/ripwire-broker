@@ -692,6 +692,8 @@ Retorna somente dados operacionais não sensíveis:
 - workspace fixado, com opção de redigir o caminho;
 - quantidade de chamadas e reinícios;
 - último erro upstream, só o tipo (as mensagens podem citar símbolos e caminhos);
+- `upstream.busy`: o Ripwire não respondeu à sonda de disponibilidade em 1 s. O status
+  nunca espera mais que isso (D-049);
 - configuração de orçamento;
 - modo offline e política de telemetria;
 - métricas locais (§16.1) e as últimas 32 requisições (`recent_requests`), cada uma
@@ -1007,10 +1009,15 @@ conteúdo das respostas.
 Chamadas devem respeitar cancelamento do cliente e timeouts configuráveis. O
 processo upstream travado deve ser encerrado e reiniciado de forma controlada.
 
-Estado no MVP: timeout (`--timeout-ms`) e reinício controlado estão implementados e
-testados. O cancelamento vindo do cliente ainda não tem teste automatizado e não é
-repassado ao Ripwire, que não expõe essa operação. A pendência está registrada em
-[D-021](changelog.md#d-021--pendências-conhecidas).
+Estado: implementado e testado.
+- Timeout (`--timeout-ms`) e reinício controlado.
+- Cancelamento pelo cliente: `notifications/cancelled` interrompe a tool call em
+  andamento, que responde `cancelled` e não faz mais nenhuma chamada upstream. O status
+  a registra em `recent_requests` e `metrics.tools.*.cancelled`.
+- A chamada que já estava no Ripwire não é interrompida, porque o Ripwire não expõe
+  essa operação. Se ela mantiver o processo ocupado, o status responde com `busy: true`
+  em vez de travar.
+- Detalhes em [D-049](changelog.md#d-049--cancelamento-pelo-cliente-e-status-que-não-trava).
 
 ---
 
@@ -1090,9 +1097,11 @@ pareça instrução ao agente. O broker deve:
   conexão com `incompatible_upstream`; uma versão ilegível não recusa, e os verbos
   obrigatórios decidem ([D-023](changelog.md#d-023--versão-mínima-do-ripwire));
 - ausência de acesso aos três verbos upstream de edição;
-- timeouts e limite de memória configuráveis. No MVP só o timeout está
-  implementado; o limite de memória está pendente
-  ([D-021](changelog.md#d-021--pendências-conhecidas));
+- timeouts e limite de memória configuráveis. O limite é
+  `--ripwire-max-rss-mb`, desligado por padrão. O Ripwire roda sob um supervisor
+  interno que mede o RSS e mata o processo acima do limite, e o reinício controlado
+  assume. Funciona igual no macOS e no Linux, onde `RLIMIT_AS` não serviria
+  ([D-050](changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor));
 - stderr tratado como diagnóstico, não como instrução.
 
 ### 15.4 Transporte remoto futuro
@@ -1247,8 +1256,8 @@ conexão de rede é necessária ou iniciada.
 - iniciar Ripwire MCP como child process;
 - executar `explore`, `situational_awareness` e `quality_delta`;
 - medir schemas, payloads e latência;
-- validar cancelamento e reinício. O reinício foi validado; o cancelamento ficou
-  pendente ([D-021](changelog.md#d-021--pendências-conhecidas)).
+- validar cancelamento e reinício. O reinício foi validado na Fase 0, e o
+  cancelamento depois, em [D-049](changelog.md#d-049--cancelamento-pelo-cliente-e-status-que-não-trava).
 
 ### Fase 1 — MVP
 

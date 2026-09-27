@@ -32,6 +32,10 @@ fn settings(a: ServeArgs) -> Result<Settings, String> {
     broker.redact_workspace = a.redact_workspace;
     broker.incremental = a.incremental;
     broker.ripwire_version = ripwire_version(&upstream.binary);
+    if let Some(mb) = a.ripwire_max_rss_mb {
+        let me = std::env::current_exe().map_err(|e| format!("own path: {e}"))?;
+        upstream.supervisor = Some((me, mb));
+    }
     if let Some(m) = a.summarizer {
         // Like a missing ripwire, a broken model setup degrades instead of stopping the server.
         match CommandSummarizer::from_command_line(&m.command, m.timeout, m.version_cmd.as_deref())
@@ -50,6 +54,9 @@ fn settings(a: ServeArgs) -> Result<Settings, String> {
 async fn main() -> ExitCode {
     let serve = match cli::parse(std::env::args().skip(1).collect()) {
         Ok(Command::Serve(a)) => a,
+        Ok(Command::Supervise { max_rss_mb, argv }) => {
+            return ripwire_broker::supervise::run(max_rss_mb, &argv);
+        }
         Ok(Command::Info(text)) => {
             println!("{text}");
             return ExitCode::SUCCESS;
@@ -169,6 +176,7 @@ async fn main() -> ExitCode {
         meta: None,
     };
     let handler = BrokerServer::start(settings).await;
+    let observer = handler.observer();
     let transport = match StdioTransport::new(TransportOptions::default()) {
         Ok(t) => t,
         Err(e) => {
@@ -180,7 +188,7 @@ async fn main() -> ExitCode {
         transport,
         handler: handler.to_mcp_server_handler(),
         server_details: details,
-        message_observer: None,
+        message_observer: Some(observer),
     });
     match server.start().await {
         Ok(()) => ExitCode::SUCCESS,

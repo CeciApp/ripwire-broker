@@ -805,3 +805,58 @@ fn doctor_checks_the_configured_local_model_without_running_it() {
     );
     assert_eq!(check(&unwrapped, "summarizer")["status"], "ok");
 }
+
+// --- §15.3: memory limit for ripwire through the internal supervisor (D-050) ---
+
+#[test]
+fn the_supervisor_passes_stdio_through_under_the_limit() {
+    let (code, out, err) = run(
+        &["__supervise", "--max-rss-mb", "512", "--", "cat"],
+        "line one\nline two\n",
+    );
+
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "line one\nline two\n");
+}
+
+#[test]
+fn the_supervisor_kills_a_process_over_the_memory_limit() {
+    let hog = "import time; x = bytearray(300 * 1024 * 1024); x[::4096] = b'1' * len(x[::4096]); time.sleep(30)";
+    let started = std::time::Instant::now();
+
+    let (code, _, err) = run(
+        &[
+            "__supervise",
+            "--max-rss-mb",
+            "100",
+            "--",
+            "python3",
+            "-c",
+            hog,
+        ],
+        "",
+    );
+
+    assert_ne!(code, 0);
+    assert!(err.contains("memory limit"), "{err}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "killed, not waited out"
+    );
+}
+
+#[test]
+fn serve_takes_a_memory_limit_for_ripwire() {
+    let Ok(Command::Serve(s)) = parse(&["--workspace", "/w", "--ripwire-max-rss-mb", "2048"])
+    else {
+        panic!()
+    };
+    assert_eq!(s.ripwire_max_rss_mb, Some(2048));
+    let Ok(Command::Serve(d)) = parse(&["--workspace", "/w"]) else {
+        panic!()
+    };
+    assert_eq!(
+        d.ripwire_max_rss_mb, None,
+        "no limit and no supervisor by default"
+    );
+}

@@ -18,6 +18,8 @@ pub struct ToolMetrics {
     pub ready: u64,
     pub attention_required: u64,
     pub unknown: u64,
+    /// Dropped before finishing, e.g. cancelled by the client (RF-14).
+    pub cancelled: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -68,6 +70,10 @@ impl Metrics {
         self.upstream_calls += 1;
         self.upstream_us += took.as_micros() as u64;
         *self.upstream_verbs.entry(verb).or_default() += 1;
+    }
+
+    pub fn cancelled(&mut self, tool: &'static str) {
+        self.tools.entry(tool).or_default().cancelled += 1;
     }
 
     pub fn request(&mut self, record: RequestRecord) {

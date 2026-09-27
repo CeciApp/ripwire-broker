@@ -147,3 +147,60 @@ async fn capabilities_are_discovered_from_a_pre_2026_server() {
         );
     }
 }
+
+fn supervised(repo: &std::path::Path, mb: u64) -> UpstreamConfig {
+    let mut config = UpstreamConfig::new(repo);
+    config.supervisor = Some((env!("CARGO_BIN_EXE_ripwire-broker").into(), mb));
+    config.timeout = std::time::Duration::from_secs(20);
+    config
+}
+
+#[tokio::test]
+async fn ripwire_works_through_the_memory_supervisor() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    let up = RipwireUpstream::spawn(supervised(repo.path(), 4096))
+        .await
+        .unwrap();
+
+    let text = up
+        .call("explore", json!({"task": "validate the login token"}))
+        .await
+        .unwrap();
+
+    assert!(text.contains("validate_token"), "{text}");
+    assert_eq!(up.restarts(), 0);
+}
+
+#[tokio::test]
+async fn a_ripwire_over_its_memory_limit_is_killed_and_restarted() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    // 1 MiB: an idle ripwire is always above it. The supervisor measures every 200 ms, so a
+    // fast first call may still answer; the process does not survive the next measurements.
+    let up = RipwireUpstream::spawn(supervised(repo.path(), 1))
+        .await
+        .unwrap();
+    let _ = up
+        .call("explore", json!({"task": "validate the login token"}))
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    let started = std::time::Instant::now();
+    let outcome = up
+        .call("explore", json!({"task": "validate the login token"}))
+        .await;
+
+    assert!(
+        up.restarts() >= 1,
+        "the killed process was restarted: {outcome:?}"
+    );
+    assert!(
+        outcome.is_ok() || matches!(outcome, Err(UpstreamError::Unavailable(_))),
+        "either the restart answered or the outage is reported: {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "no hang"
+    );
+}

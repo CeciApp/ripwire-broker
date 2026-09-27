@@ -16,5 +16,6 @@ mod router;
 pub mod session;
 pub mod state;
 pub mod summarizer;
+pub mod supervise;
 pub mod upstream;
 pub mod workspace;

@@ -50,6 +50,9 @@
 | 2026-09-27 14:02 | Início da Fase 3 com cache de notas só em memória; cache em disco (S3.15) adiado até medir `session_hits` | [D-046](#d-046--fase-3-com-cache-em-memória) |
 | 2026-09-27 14:25 | Achado com o modelo real: `ollama run` emite códigos de terminal pela pipe; saneamento remove ANSI, e `--nowordwrap` é exigido pelo `doctor` | [D-047](#d-047--códigos-de-terminal-na-saída-do-modelo) |
 | 2026-09-27 14:25 | Ponto de parada 4: Fase 3 implementada (notas por modelo local, cache em memória); 110 verdes + 1 opt-in com phi4 real | [D-048](#d-048--ponto-de-parada-4-fase-3) |
+| 2026-09-27 15:36 | Cancelamento pelo cliente implementado (RF-14); D-019 estava errada; status não trava com ripwire ocupado (`busy`) | [D-049](#d-049--cancelamento-pelo-cliente-e-status-que-não-trava) |
+| 2026-09-27 15:36 | Limite de memória do ripwire por supervisor interno (`--ripwire-max-rss-mb`) | [D-050](#d-050--limite-de-memória-do-ripwire-por-supervisor) |
+| 2026-09-27 15:36 | `request_id` contínuo nos hooks; `Shape` substitui os 7 parâmetros de `envelope()`; pendências de D-021 fechadas; 118 verdes | [D-051](#d-051--pendências-técnicas-fechadas) |
 
 ---
 
@@ -887,4 +890,92 @@ e `AGENTS.md` (notas são pistas geradas; verificar `derived_from`), PRD §9.1 (
   (§21.3);
 - o `request_id` dos hooks é sempre 1 (D-042);
 - o cancelamento continua pendente, como estava (D-021).
+
+## D-049 — Cancelamento pelo cliente e status que não trava
+
+- **Correção de D-019.** D-019 dizia que, quando o cliente cancela, o future da tool é
+  descartado. Não era verdade. No `rust-mcp-sdk` 2.0.0, o `handle_cancelled_notification`
+  padrão não faz nada, e o handler de cada requisição roda numa tarefa própria até o fim.
+  O broker não respeitava o cancelamento (RF-14).
+- **Como foi resolvido.** O SDK não entrega o id JSON-RPC ao `ServerHandler`. Trocar
+  para `ServerHandlerCore` obrigaria reimplementar o despacho e as checagens de
+  capability. Em vez disso:
+  - o `McpObserver` vê cada requisição bruta e enfileira o id de cada `tools/call` sob a
+    chave (tool, argumentos);
+  - o handler pega o id de volta e registra um `Notify`;
+  - `handle_cancelled_notification` dispara o sinal, e um `tokio::select!` descarta o
+    `dispatch`;
+  - um cancelamento que chega antes do handler fica guardado ("early").
+  - Duas chamadas idênticas e simultâneas podem trocar de id. Cancelar qualquer uma
+    interrompe trabalho idêntico, o que é aceitável.
+  - O §7.5 fica valendo: as métricas continuam no núcleo, e o observador só correlaciona
+    ids.
+- **Núcleo:** `traced()` ganhou a guarda `Unfinished`. Uma tool call descartada antes
+  de terminar é registrada com `outcome: "cancelled"` e as chamadas upstream já
+  concluídas, e soma em `metrics.tools.*.cancelled`. Os spans agora ficam num
+  `Arc<Mutex>` compartilhado com a guarda.
+- **Achado no mesmo teste:** o status sondava o ripwire com `list_tools` sem limite de
+  tempo. Com o ripwire ocupado numa chamada longa, o status travava até o timeout
+  (60 s). A sonda agora espera no máximo `STATUS_PROBE` = 1 s, e o novo campo
+  `upstream.busy` indica que o ripwire não respondeu a tempo (RF-13).
+- **Testes:**
+  - `a_cancelled_call_stops_its_upstream_work_and_is_recorded`, no seam 1, com
+    `FakeUpstream::hold`;
+  - `a_client_cancellation_stops_the_tool_call`, e2e com JSON-RPC bruto, porque o teste
+    precisa controlar os ids, e um ripwire falso em Python cujo `explore` leva 30 s.
+    Hoje a resposta chega em cerca de 1,8 s; sem a correção, só depois de 30 s.
+  - A primeira versão do e2e tinha uma corrida: cancelava depois de 500 ms fixos, às
+    vezes antes de a chamada começar. Agora espera um marcador gravado pelo ripwire
+    falso.
+  - Mutação sem o `handle_cancelled_notification`: o teste falha. Rodado 3 vezes seguidas,
+    passou em todas.
+- **Limite:** a chamada que já está no ripwire não é interrompida, porque o ripwire não
+  expõe cancelamento.
+
+## D-050 — Limite de memória do ripwire por supervisor
+
+- **Problema:** quem lança o ripwire é o SDK (`create_with_server_launch`), e ele não
+  expõe o PID nem aceita `pre_exec`. Além disso, o macOS não impõe `RLIMIT_AS`.
+- **Solução:** com `--ripwire-max-rss-mb N`, o broker lança o próprio binário como
+  supervisor:
+  `ripwire-broker __supervise --max-rss-mb N -- ripwire <ws> --mcp`.
+  - O supervisor herda o stdio, mede o RSS do filho com `ps -o rss=` a cada 200 ms e, se
+    passar do limite, mata o processo e sai com 137.
+  - O SDK vê a conexão cair, e o reinício controlado de D-005 assume.
+  - Não usa shell e funciona igual no macOS e no Linux. Sem a flag, nada muda.
+  - Tudo depois de `--` é argv literal, e `--help`/`--version` só valem antes dele.
+- **Limites:**
+  - O intervalo de 200 ms significa que uma chamada rápida pode terminar antes da
+    medição. O limite serve para processos que crescem ao longo do tempo.
+  - Se o supervisor levar `SIGKILL`, o ripwire fica órfão até ler EOF no stdin.
+- **Testes:**
+  - seam 5: o supervisor repassa o stdio abaixo do limite, e um `python3` que aloca
+    300 MiB é morto em segundos;
+  - parse de `--ripwire-max-rss-mb`;
+  - seam 3, com o ripwire real: ele funciona sob o supervisor, e um limite de 1 MiB
+    provoca a morte e o reinício (`restarts ≥ 1`).
+  - A primeira versão do teste de seam 3 supunha a morte antes da primeira resposta, o
+    que contradiz a medição a cada 200 ms. Foi reescrita.
+  - Mutação "supervisor nunca mata": os dois testes falham.
+
+## D-051 — Pendências técnicas fechadas
+
+- **`request_id` nos hooks.** `SessionState.next_request` guarda o próximo id, e o
+  `Broker` ganhou `next_request_id()` e `resume_request_ids()`, que nunca volta para
+  trás. Teste: `request_ids_keep_counting_across_hook_processes`. Resolve a observação
+  de D-042.
+- **Refatoração.** A struct privada `Shape` (tool, intent, status, verbos, orçamento,
+  `suppress_seen`) substitui os 7 parâmetros de `envelope()` e `envelope_full()`, e os
+  dois `#[allow(clippy::too_many_arguments)]` saíram (D-040). Não entrou teste novo: a
+  suíte inteira protege o comportamento.
+- **D-021 fechada:**
+  - cancelamento, em D-049;
+  - limite de memória, em D-050;
+  - deduplicação por sessão, em D-040.
+
+  Continua aberta a reconexão do upstream fora de chamadas de tool, que não foi pedida.
+- **PRD:** RF-14, §15.3, §9.4 (`busy`) e a Fase 0 foram atualizados. O README ganhou a
+  flag, o `busy` e o cancelamento.
+- **Suíte:** 118 verdes, mais 1 opt-in, clippy sem avisos e fmt ok.
+- **Fora do escopo:** nenhum commit novo; o último é o `3d1b85a`.
 

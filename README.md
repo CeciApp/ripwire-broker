@@ -50,6 +50,7 @@ secrets. All configuration comes from command-line arguments:
 | `--timeout-ms N` | `60000` | Timeout per ripwire call; a hung process is restarted |
 | `--redact-workspace` | off | Hides the workspace path in the status resource |
 | `--incremental` | off | Sends unchanged items only once per server process ([below](#incremental-context)) |
+| `--ripwire-max-rss-mb N` | no limit | Kills ripwire above N MiB of resident memory; the broker restarts it |
 | `--summarizer-cmd CMD` | off | Local model CLI for architectural notes ([below](#architectural-notes-local-model)) |
 | `--summarizer-version-cmd CMD` | none | Prints the model's version; its hash invalidates cached notes |
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
@@ -113,6 +114,11 @@ argument or a committed file.
 
 The resource `ripwire-broker://status` carries versions, upstream availability, restarts,
 default budgets and local metrics. It never includes prompts, code, symbols or responses.
+It answers within about a second even when ripwire is occupied (`upstream.busy: true`).
+
+A client's `notifications/cancelled` stops the tool call: it answers `cancelled`, makes no
+further ripwire calls, and shows up in `recent_requests`. The ripwire call already running
+is not interrupted, because ripwire does not support that.
 
 Every answer uses the `ripwire-broker.context/v1` envelope: `status`, `intent`, `summary`,
 `items[]` (with `role`, `why_included` and `source.verb`), `tests[]`, `risks[]`,

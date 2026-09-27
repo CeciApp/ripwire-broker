@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use ripwire_broker::upstream::{Upstream, UpstreamError};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 /// Every verb ripwire 0.6.4 lists, including the ones the broker must never expose.
 pub const RIPWIRE_TOOLS: &[&str] = &[
@@ -57,6 +58,8 @@ pub struct FakeUpstream {
     answers: HashMap<String, Result<String, UpstreamError>>,
     /// Answers consumed in order before falling back to `answers`.
     sequences: Mutex<HashMap<String, Vec<String>>>,
+    /// Calls to these tools wait until the test releases them.
+    holds: Mutex<HashMap<String, Arc<Notify>>>,
     calls: Mutex<Vec<(String, Value)>>,
 }
 
@@ -87,6 +90,13 @@ impl FakeUpstream {
             texts.iter().rev().map(|t| t.to_string()).collect(),
         );
         self
+    }
+
+    /// Calls to `tool` wait for `notify_one()` on the returned handle.
+    pub fn hold(&self, tool: &str) -> Arc<Notify> {
+        let gate = Arc::new(Notify::new());
+        self.holds.lock().unwrap().insert(tool.into(), gate.clone());
+        gate
     }
 
     pub fn fail(mut self, tool: &str, err: UpstreamError) -> Self {
@@ -124,6 +134,10 @@ impl Upstream for FakeUpstream {
         self.calls.lock().unwrap().push((tool.into(), args));
         if self.down {
             return Err(UpstreamError::Unavailable("process exited".into()));
+        }
+        let hold = self.holds.lock().unwrap().get(tool).cloned();
+        if let Some(gate) = hold {
+            gate.notified().await;
         }
         if let Some(next) = self
             .sequences
