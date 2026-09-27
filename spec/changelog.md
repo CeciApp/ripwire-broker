@@ -72,6 +72,7 @@
 | 2026-09-27 18:19 | S4.1–S4.6: flags `--online`/`--jev-*`, recusa sem a feature, credencial redigida, teste de CA-10 sobre o grafo resolvido, consentimento, CI nas duas configurações | [D-068](#d-068--configuração-credencial-e-garantia-offline) |
 | 2026-09-27 18:24 | S4.7–S4.11: validação da resposta, thresholds estritos, batcher com tamanho exato, `trait Classifier` e `JevClient` (reqwest/rustls atrás da feature) | [D-069](#d-069--protocolo-validação-e-cliente-http) |
 | 2026-09-27 18:28 | S4.12–S4.14: `WorkspaceReader` (elegibilidade, snapshot com sha256, preview) e unidades; ponto de parada 1, 152/159 verdes | [D-070](#d-070--leitura-do-workspace-e-ponto-de-parada-1) |
+| 2026-09-27 18:37 | S4.15–S4.19: scheduler com `JoinSet`, fila limitada, teto em voo, limite de requests, auth e cancelamento abortam irmãs; 158/165 verdes | [D-071](#d-071--scheduler-mínimo) |
 
 ---
 
@@ -1406,4 +1407,39 @@ Fatias S4.12 a S4.14 do plano.
   Clippy e fmt limpos nas duas configurações.
   - A crate `ignore` trouxe só dependências locais (`globset`, `walkdir`, `crossbeam`,
     `regex-automata`, `bstr`), e a guarda de CA-10 continua verde.
+
+## D-071 — Scheduler mínimo
+
+Fatias S4.15 a S4.19 do plano, sem retry nem cooldown (Fase 5).
+
+- `online::scheduler::Scheduler::run` recebe jobs de uma fila `mpsc` limitada
+  (`SchedulerConfig.queue`), cada um com o id do produtor. Cada request vira uma task num
+  `JoinSet` que pertence ao scheduler. O `Report` traz os resultados na ordem de término, os
+  jobs admitidos e não respondidos (`unfinished`), os requests enviados e o motivo da parada.
+- **Teto em voo.** No máximo `max_in_flight` tasks vivas. A contagem é feita pelas tasks do
+  próprio `JoinSet`, não por um `Semaphore`: o limite é o mesmo e fica determinístico. Na
+  Fase 5, a espera de cooldown acontece no laço do scheduler, fora das tasks, por isso nenhuma
+  vaga fica ocupada só esperando (v0.1 §11.8).
+- **Backpressure.** Com o provider lento, o produtor fica parado no `send` da fila cheia, e só
+  L requests começam (CA-ONLINE-05).
+- **Associação por id.** Respostas que terminam fora de ordem continuam ligadas ao job certo.
+- **Auth.** Um `401`/`403` aborta as irmãs em voo (o drop da future cancela o request HTTP),
+  nenhum request novo começa, e a fila é fechada, o que faz o produtor parar.
+- **Limite de requests.** No 25º job, com limite 24, a admissão para, a fila é fechada, e o
+  que estava na fila entra em `unfinished`. `Report::incomplete()` fica verdadeiro.
+- **Cancelamento.** Um `CancellationToken` aborta as tasks em voo e fecha a fila. O
+  cancelamento vindo do MCP e o aborto do request HTTP real são o S5.4.
+- **Achado:** a primeira versão travou. O ramo de cancelamento do `select!` nunca fica
+  inativo, então o `else => break` nunca disparava quando o trabalho acabava. A saída agora é
+  explícita no topo do laço (sem admissão e sem tasks).
+- **Correção de teste:** o teste de limite usava 30 jobs, e com uma fila de 8 todos cabiam
+  antes do fechamento. Passou a usar 100 e a conferir que todo job admitido foi respondido ou
+  reportado.
+- Dublê `tests/common/classifier.rs`: responde por id de item, pode falhar, atrasar ou segurar
+  requests, e conta chamadas, concorrência e requests abortados. Uma falha roteirizada
+  responde sem esperar o gate.
+- Dependências: `tokio-util` 0.7 no build padrão (`CancellationToken`, sem rede) e a feature
+  `test-util` do tokio só para testes (relógio pausado).
+- Os testes do scheduler rodaram 30 vezes seguidas sem falha. Suítes: 158 verdes no build
+  padrão e 165 com `online`, 1 ignorado; clippy e fmt limpos nas duas.
 

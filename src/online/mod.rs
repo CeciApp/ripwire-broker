@@ -12,6 +12,7 @@ pub mod prompt;
 pub mod reader;
 pub mod request;
 pub mod response;
+pub mod scheduler;
 
 use crate::model::{Item, Role};
 use serde::Serialize;

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod classifier;
 pub mod fake;
 pub mod summarizer;
 use std::path::Path;
