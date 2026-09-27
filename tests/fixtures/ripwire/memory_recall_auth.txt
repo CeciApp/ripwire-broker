@@ -1,0 +1,6 @@
+ripwire recall — "authentication decision" — 1 relevant of 1 document files, best-first — total=1 shown=1 capped=0 max_tokens=400 est_tokens=150
+
+━━ docs/auth.md  (relevance 1.350) ━━  [sections: 1 of 1, section-granular; whole doc 110 B; lines="1-2"]
+# Authentication decision
+Tokens are validated by validate_token. Routes must call login before serving data.
+

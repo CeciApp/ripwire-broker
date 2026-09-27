@@ -1,0 +1,8 @@
+# Append to ~/.codex/config.toml (adjust the paths).
+[mcp_servers.ripwire-broker]
+command = "/path/to/ripwire-broker"
+args = ["--workspace", "/path/to/repo"]
+
+# Needed for ~/.codex/hooks.json (see integrations/codex/hooks.json):
+# [features]
+# hooks = true

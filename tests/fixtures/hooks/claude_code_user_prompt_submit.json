@@ -1,0 +1,9 @@
+{
+ "session_id": "b24451d5-7348-4ffd-81b7-354ef6a544fb",
+ "transcript_path": "__TRANSCRIPT__",
+ "cwd": "__WORKSPACE__",
+ "prompt_id": "f8f76ebe-b169-429e-bca4-4967abb8ca7f",
+ "permission_mode": "acceptEdits",
+ "hook_event_name": "UserPromptSubmit",
+ "prompt": "Edit a.txt so that it contains exactly: hello. Then reply done."
+}

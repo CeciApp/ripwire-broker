@@ -1,0 +1,1 @@
+{"handle":"sym#c5ce4673b570faea@dc0094a8845bbd57","name":"login","kind":"fn","file":"src/auth.py","line":5,"start_line":1,"end_line":4,"total_lines":4,"partial":false,"bytes":111,"body":"def login(user, token):\n    if not validate_token(token):\n        raise ValueError(\"bad token\")\n    return user"}

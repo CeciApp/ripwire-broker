@@ -1,0 +1,962 @@
+//! The broker core: routes a request to ripwire verbs, normalizes, and shapes the envelope.
+
+use crate::budget;
+use crate::metrics::{Metrics, RequestRecord, UpstreamSpan};
+use crate::model::*;
+use crate::normalize::{self, Entry};
+use crate::notes::{self as note_engine, NoteEngine, SummarizerStatus};
+use crate::router;
+use crate::session::{self, SessionMemory};
+use crate::summarizer::Summarizer;
+use crate::upstream::{Upstream, UpstreamError};
+use crate::workspace::Workspace;
+use serde::Serialize;
+use serde_json::{Value, json};
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// The tool call being served: its id and the upstream calls made for it. Task-local, so
+/// concurrent tool calls never mix their upstream calls (PRD 14.2).
+struct RequestCtx {
+    id: u64,
+    spans: Vec<UpstreamSpan>,
+}
+
+tokio::task_local! {
+    static REQUEST: RefCell<RequestCtx>;
+}
+
+/// Risks that decide a gate's status; never suppressed, so the status keeps its evidence (CA-05).
+const GATE_RISKS: &[&str] = &["cochange_missing", "contract_change"];
+
+/// Smallest budget that still fits the envelope skeleton plus a few limitations.
+pub const MIN_BUDGET_TOKENS: u32 = 256;
+
+/// Oldest ripwire whose verbs and payload formats the fixtures were recorded from (PRD 15.3).
+pub const MIN_RIPWIRE_VERSION: (u64, u64, u64) = (0, 6, 4);
+
+/// `"0.6.4"` → `(0, 6, 4)`; `None` when the version could not be read.
+fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = v.trim().trim_start_matches('v').split('.');
+    let mut next = || {
+        parts
+            .next()?
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    Some((next()?, next()?, next()?))
+}
+
+/// Refuses a ripwire older than `MIN_RIPWIRE_VERSION`; an unreadable version passes.
+pub fn check_version(version: &str) -> Result<(), BrokerError> {
+    match parse_version(version) {
+        Some(v) if v < MIN_RIPWIRE_VERSION => {
+            let (a, b, c) = MIN_RIPWIRE_VERSION;
+            Err(BrokerError {
+                error: "incompatible_upstream",
+                message: format!("ripwire {version} is older than the minimum {a}.{b}.{c}"),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_budget(budget: u32) -> Result<(), BrokerError> {
+    if budget < MIN_BUDGET_TOKENS {
+        return Err(BrokerError {
+            error: "invalid_input",
+            message: format!("budget_tokens must be at least {MIN_BUDGET_TOKENS}"),
+        });
+    }
+    Ok(())
+}
+
+/// The read-only verbs the broker calls; also its allowlist (PRD 15.3). The upstream edit
+/// verbs and `quality_baseline` are deliberately absent.
+pub const REQUIRED_VERBS: &[&str] = &[
+    "explore",
+    "from_trace",
+    "find_symbol",
+    "fetch_body",
+    "impact",
+    "memory_recall",
+    "situational_awareness",
+    "edit_check",
+    "affected",
+    "quality_delta",
+];
+
+#[derive(Debug, Clone)]
+pub struct BrokerConfig {
+    pub workspace: PathBuf,
+    pub ripwire_version: String,
+    /// Upper bound on `edit_check` calls per `context_after_edit`.
+    pub max_edit_checks: usize,
+    /// Hide the workspace path in the status resource.
+    pub redact_workspace: bool,
+    /// Ceiling for a single item's content, so one body cannot take the whole budget.
+    pub max_item_tokens: u32,
+    /// Send unchanged items only once per session (PRD 11.1, D-029).
+    pub incremental: bool,
+    /// Local model for architectural notes (PRD 10.3); `None` keeps Phase 3 off.
+    pub summarizer: Option<Arc<dyn Summarizer>>,
+    /// Longest a response waits for a note before moving on (D-036).
+    pub summarizer_wait: Duration,
+}
+
+impl BrokerConfig {
+    pub fn new(workspace: &Path) -> Self {
+        Self {
+            workspace: workspace.to_path_buf(),
+            ripwire_version: "unknown".into(),
+            max_edit_checks: 5,
+            redact_workspace: false,
+            max_item_tokens: 800,
+            incremental: false,
+            summarizer: None,
+            summarizer_wait: Duration::from_millis(1500),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BrokerError {
+    pub error: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for BrokerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.error, self.message)
+    }
+}
+
+impl From<UpstreamError> for BrokerError {
+    fn from(e: UpstreamError) -> Self {
+        let error = match e {
+            UpstreamError::Refused(_) => "upstream_refused",
+            UpstreamError::Timeout => "upstream_timeout",
+            UpstreamError::Unavailable(_) => "upstream_unavailable",
+        };
+        Self {
+            error,
+            message: e.to_string(),
+        }
+    }
+}
+
+/// `context_for_task` mode: `auto` lets the router decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Auto,
+    Orient,
+    Debug,
+    Change,
+    Review,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskRequest {
+    pub task: String,
+    pub budget_tokens: u32,
+    pub mode: Mode,
+    pub include_docs: bool,
+    pub include_bodies: bool,
+    /// Ignore the session memory and send everything again (D-029).
+    pub include_seen: bool,
+}
+
+impl TaskRequest {
+    pub fn new(task: &str) -> Self {
+        Self {
+            task: task.into(),
+            budget_tokens: 2500,
+            mode: Mode::Auto,
+            include_docs: true,
+            include_bodies: true,
+            include_seen: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EditRequest {
+    /// Changed files known to the host; empty means the working tree.
+    pub files: Vec<String>,
+    /// Symbols deliberately modified.
+    pub symbols: Vec<String>,
+    pub budget_tokens: u32,
+    /// Ignore the session memory and send everything again (D-029).
+    pub include_seen: bool,
+}
+
+impl Default for EditRequest {
+    fn default() -> Self {
+        Self {
+            files: vec![],
+            symbols: vec![],
+            budget_tokens: 1500,
+            include_seen: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FinishRequest {
+    pub budget_tokens: u32,
+    pub include_test_commands: bool,
+    /// Also treat minor findings as blocking.
+    pub strict: bool,
+}
+
+impl Default for FinishRequest {
+    fn default() -> Self {
+        Self {
+            budget_tokens: 1800,
+            include_test_commands: true,
+            strict: false,
+        }
+    }
+}
+
+pub struct Broker {
+    upstream: Arc<dyn Upstream>,
+    workspace: Workspace,
+    ripwire_version: String,
+    max_edit_checks: usize,
+    redact_workspace: bool,
+    max_item_tokens: u32,
+    incremental: bool,
+    session: Mutex<SessionMemory>,
+    notes: Option<NoteEngine>,
+    metrics: Mutex<Metrics>,
+    last_error: Mutex<Option<&'static str>>,
+    next_request: AtomicU64,
+}
+
+/// The `ripwire-broker://status` payload (PRD 9.4): operational data only.
+#[derive(Debug, Serialize)]
+pub struct BrokerStatus {
+    pub broker_version: &'static str,
+    pub schema_version: &'static str,
+    pub mcp_protocol: String,
+    pub workspace: String,
+    pub offline: bool,
+    pub telemetry: &'static str,
+    pub upstream: UpstreamStatus,
+    pub budget_defaults: Value,
+    pub summarizer: SummarizerStatus,
+    pub metrics: Metrics,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpstreamStatus {
+    pub ripwire_version: String,
+    pub available: bool,
+    pub restarts: u32,
+    /// Error kind only; messages can quote symbols or paths.
+    pub last_error: Option<&'static str>,
+}
+
+impl Broker {
+    pub async fn connect(
+        upstream: Arc<dyn Upstream>,
+        config: BrokerConfig,
+    ) -> Result<Self, BrokerError> {
+        check_version(&config.ripwire_version)?;
+        let tools = upstream.list_tools().await?;
+        let missing: Vec<&str> = REQUIRED_VERBS
+            .iter()
+            .copied()
+            .filter(|v| !tools.iter().any(|t| t == v))
+            .collect();
+        if !missing.is_empty() {
+            return Err(BrokerError {
+                error: "incompatible_upstream",
+                message: format!(
+                    "the installed ripwire lacks required verbs: {}",
+                    missing.join(", ")
+                ),
+            });
+        }
+        let workspace = Workspace::new(&config.workspace).map_err(|message| BrokerError {
+            error: "workspace_violation",
+            message,
+        })?;
+        Ok(Self {
+            upstream,
+            workspace,
+            ripwire_version: config.ripwire_version,
+            max_edit_checks: config.max_edit_checks,
+            redact_workspace: config.redact_workspace,
+            max_item_tokens: config.max_item_tokens,
+            incremental: config.incremental,
+            session: Mutex::new(SessionMemory::default()),
+            notes: config
+                .summarizer
+                .map(|m| NoteEngine::new(m, config.summarizer_wait)),
+            metrics: Mutex::new(Metrics::default()),
+            last_error: Mutex::new(None),
+            next_request: AtomicU64::new(1),
+        })
+    }
+
+    pub async fn status(&self) -> BrokerStatus {
+        let available = self.upstream.list_tools().await.is_ok();
+        BrokerStatus {
+            broker_version: env!("CARGO_PKG_VERSION"),
+            schema_version: SCHEMA_VERSION,
+            mcp_protocol: rust_mcp_sdk::schema::ProtocolVersion::latest().to_string(),
+            workspace: if self.redact_workspace {
+                "<redacted>".into()
+            } else {
+                self.workspace.root().display().to_string()
+            },
+            offline: true,
+            telemetry: "none",
+            upstream: UpstreamStatus {
+                ripwire_version: self.ripwire_version.clone(),
+                available,
+                restarts: self.upstream.restarts(),
+                last_error: *self.last_error.lock().unwrap(),
+            },
+            budget_defaults: json!({
+                "context_for_task": TaskRequest::new("").budget_tokens,
+                "context_after_edit": EditRequest::default().budget_tokens,
+                "context_before_finish": FinishRequest::default().budget_tokens,
+            }),
+            summarizer: match &self.notes {
+                Some(engine) => engine.status(),
+                None => SummarizerStatus {
+                    enabled: false,
+                    program: None,
+                    generated: 0,
+                    cache_hits: 0,
+                    pending: 0,
+                    failures: 0,
+                    cached_notes: 0,
+                },
+            },
+            metrics: {
+                let mut m = self.metrics.lock().unwrap().clone();
+                m.session.remembered = self.session.lock().unwrap().len();
+                m
+            },
+        }
+    }
+
+    /// `path` (absolute, or relative to the root) as workspace-relative, or `None` if it
+    /// resolves outside (CA-08).
+    pub fn in_workspace(&self, path: &str) -> Option<String> {
+        self.workspace.relative(path).ok()
+    }
+
+    /// Waits for a note still being written in the background, if any.
+    pub async fn wait_background(&self) {
+        if let Some(engine) = &self.notes {
+            engine.wait_background().await;
+        }
+    }
+
+    /// What this session was already shown, to persist between processes (hooks).
+    pub fn session_snapshot(&self) -> SessionMemory {
+        self.session.lock().unwrap().clone()
+    }
+
+    /// Continues a session saved by `session_snapshot`.
+    pub fn restore_session(&self, memory: SessionMemory) {
+        *self.session.lock().unwrap() = memory;
+    }
+
+    /// Runs one tool call under a fresh request id and records it with its upstream calls.
+    async fn traced(
+        &self,
+        tool: &'static str,
+        inner: impl Future<Output = Result<Envelope, BrokerError>>,
+    ) -> Result<Envelope, BrokerError> {
+        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let ctx = RefCell::new(RequestCtx { id, spans: vec![] });
+        let (result, spans) = REQUEST
+            .scope(ctx, async {
+                let result = inner.await;
+                (
+                    result,
+                    REQUEST.with(|c| std::mem::take(&mut c.borrow_mut().spans)),
+                )
+            })
+            .await;
+        let took = started.elapsed();
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.tool(tool, took, &result);
+        metrics.request(RequestRecord {
+            request_id: id,
+            tool,
+            outcome: match &result {
+                Ok(env) => env.status.as_str(),
+                Err(e) => e.error,
+            },
+            total_us: took.as_micros() as u64,
+            upstream: spans,
+        });
+        result
+    }
+
+    pub async fn context_after_edit(&self, req: EditRequest) -> Result<Envelope, BrokerError> {
+        self.traced("context_after_edit", self.context_after_edit_inner(req))
+            .await
+    }
+
+    async fn context_after_edit_inner(&self, req: EditRequest) -> Result<Envelope, BrokerError> {
+        check_budget(req.budget_tokens)?;
+        // Refuse before any upstream call (CA-08).
+        let violation = |message| BrokerError {
+            error: "workspace_violation",
+            message,
+        };
+        let files = req
+            .files
+            .iter()
+            .map(|f| self.workspace.relative(f))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(violation)?;
+        for symbol in &req.symbols {
+            self.workspace.check_symbol(symbol).map_err(violation)?;
+        }
+        let mut verbs = vec!["situational_awareness"];
+        let args = if files.is_empty() {
+            json!({})
+        } else {
+            json!({"files": files.join(",")})
+        };
+        let mut entries = normalize::situation(&self.call("situational_awareness", args).await?);
+        let mut impact_needed = Vec::new();
+        for symbol in req.symbols.iter().take(self.max_edit_checks) {
+            push_once(&mut verbs, "edit_check");
+            let (found, changed) =
+                normalize::edit_check(&self.call("edit_check", json!({"symbol": symbol})).await?);
+            entries.extend(found);
+            if changed {
+                impact_needed.push(symbol);
+            }
+        }
+        // `impact` only to clarify a high-risk change: a contract that actually changed.
+        for symbol in impact_needed {
+            push_once(&mut verbs, "impact");
+            entries.extend(normalize::impact(
+                &self.call("impact", json!({"symbol": symbol})).await?,
+            ));
+        }
+        let attention = entries
+            .iter()
+            .any(|e| matches!(e, Entry::Risk(_, r) if GATE_RISKS.contains(&r.kind)));
+        let status = if attention {
+            Status::AttentionRequired
+        } else {
+            Status::Ready
+        };
+        Ok(self.envelope(
+            "context_after_edit",
+            None,
+            status,
+            verbs,
+            entries,
+            req.budget_tokens,
+            !req.include_seen,
+        ))
+    }
+
+    async fn call(&self, verb: &'static str, args: Value) -> Result<String, BrokerError> {
+        Ok(self.guarded_call(verb, args).await?)
+    }
+
+    /// The single path to ripwire: only allowlisted, read-only verbs get through.
+    async fn guarded_call(&self, verb: &'static str, args: Value) -> Result<String, UpstreamError> {
+        if !REQUIRED_VERBS.contains(&verb) {
+            return Err(UpstreamError::Refused(format!(
+                "{verb} is not an allowlisted read-only verb"
+            )));
+        }
+        let started = Instant::now();
+        let result = self.upstream.call(verb, args).await;
+        let took = started.elapsed();
+        self.metrics.lock().unwrap().upstream(verb, took);
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(e) => {
+                let kind = BrokerError::from(e.clone()).error;
+                *self.last_error.lock().unwrap() = Some(kind);
+                kind
+            }
+        };
+        let _ = REQUEST.try_with(|c| {
+            c.borrow_mut().spans.push(UpstreamSpan {
+                verb,
+                us: took.as_micros() as u64,
+                outcome,
+            })
+        });
+        result
+    }
+
+    /// Like `call`, but a refusal or timeout becomes missing evidence instead of an error.
+    /// An unavailable upstream is still an error: the broker never fabricates context (RF-12).
+    async fn evidence(
+        &self,
+        verb: &'static str,
+        args: Value,
+    ) -> Result<Result<String, Entry>, BrokerError> {
+        match self.guarded_call(verb, args).await {
+            Ok(p) => Ok(Ok(p)),
+            Err(e @ UpstreamError::Unavailable(_)) => Err(e.into()),
+            Err(e) => Ok(Err(normalize::missing_evidence(verb, &e.to_string()))),
+        }
+    }
+
+    pub async fn context_before_finish(&self, req: FinishRequest) -> Result<Envelope, BrokerError> {
+        self.traced(
+            "context_before_finish",
+            self.context_before_finish_inner(req),
+        )
+        .await
+    }
+
+    async fn context_before_finish_inner(
+        &self,
+        req: FinishRequest,
+    ) -> Result<Envelope, BrokerError> {
+        check_budget(req.budget_tokens)?;
+        let mut verbs = vec!["situational_awareness", "quality_delta"];
+        let mut entries = Vec::new();
+        let mut unknown = false;
+        let mut changed = Vec::new();
+        match self.evidence("situational_awareness", json!({})).await? {
+            Ok(p) => {
+                changed = normalize::changed_files(&p);
+                entries.extend(normalize::situation(&p));
+            }
+            Err(missing) => {
+                unknown = true;
+                entries.push(missing);
+            }
+        }
+        let (mut regressions, mut minor) = (0, 0);
+        match self.evidence("quality_delta", json!({})).await? {
+            Ok(p) => match normalize::quality_delta(&p) {
+                Some(q) => {
+                    (regressions, minor) = (q.regressions, q.minor);
+                    entries.extend(q.entries);
+                }
+                None => {
+                    unknown = true;
+                    entries.push(normalize::missing_evidence(
+                        "quality_delta",
+                        "unreadable answer",
+                    ));
+                }
+            },
+            Err(missing) => {
+                unknown = true;
+                entries.push(missing);
+            }
+        }
+        if !changed.is_empty() {
+            verbs.push("affected");
+            match self
+                .evidence("affected", json!({"files": changed.join(",")}))
+                .await?
+            {
+                Ok(p) => entries.extend(normalize::affected(&p)),
+                Err(missing) => entries.push(missing),
+            }
+        }
+        if !req.include_test_commands {
+            for e in &mut entries {
+                if let Entry::Test(_, t) = e {
+                    t.run = None;
+                }
+            }
+        }
+        let open_obligation = entries
+            .iter()
+            .any(|e| matches!(e, Entry::Risk(_, r) if GATE_RISKS.contains(&r.kind)));
+        let status = if regressions > 0 || (req.strict && minor > 0) || open_obligation {
+            Status::AttentionRequired
+        } else if unknown {
+            Status::Unknown
+        } else {
+            Status::Ready
+        };
+        Ok(self.envelope(
+            "context_before_finish",
+            None,
+            status,
+            verbs,
+            entries,
+            req.budget_tokens,
+            false,
+        ))
+    }
+
+    pub async fn context_for_task(&self, req: TaskRequest) -> Result<Envelope, BrokerError> {
+        self.traced("context_for_task", self.context_for_task_inner(req))
+            .await
+    }
+
+    async fn context_for_task_inner(&self, req: TaskRequest) -> Result<Envelope, BrokerError> {
+        check_budget(req.budget_tokens)?;
+        let route = router::route(&req.task, req.mode);
+        let mut verbs = Vec::new();
+        let entries = match (route.intent, route.symbol.as_deref()) {
+            (Intent::Debug, _) => {
+                verbs.push("from_trace");
+                let payload = self
+                    .call(
+                        "from_trace",
+                        json!({"trace": req.task, "budget_tokens": req.budget_tokens}),
+                    )
+                    .await?;
+                normalize::ctx("from_trace", &payload)
+            }
+            (Intent::Review, _) => {
+                verbs.push("situational_awareness");
+                let payload = self.call("situational_awareness", json!({})).await?;
+                normalize::situation(&payload)
+            }
+            (Intent::Docs, _) => {
+                verbs.push("memory_recall");
+                let payload = self
+                    .call(
+                        "memory_recall",
+                        json!({"task": req.task, "budget_tokens": req.budget_tokens}),
+                    )
+                    .await?;
+                normalize::recall(&payload)
+            }
+            (intent @ (Intent::Symbol | Intent::Change), Some(symbol)) => {
+                verbs.push("find_symbol");
+                let found = match self
+                    .guarded_call("find_symbol", json!({"symbol": symbol}))
+                    .await
+                {
+                    Ok(payload) => payload,
+                    // Not in the repository (often a word the router misread): explore
+                    // instead of failing the whole request.
+                    Err(UpstreamError::Refused(_)) => {
+                        verbs.push("explore");
+                        let payload = self
+                            .call(
+                                "explore",
+                                json!({"task": req.task, "budget_tokens": req.budget_tokens}),
+                            )
+                            .await?;
+                        let mut entries = normalize::ctx("explore", &payload);
+                        entries.push(normalize::symbol_not_found(symbol));
+                        return Ok(self.complete_task(&req, route.intent, verbs, entries).await);
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                let mut entries = self.symbol_context(&found, &req, &mut verbs).await?;
+                if intent == Intent::Change {
+                    verbs.push("impact");
+                    let payload = self.call("impact", json!({"symbol": symbol})).await?;
+                    entries.extend(normalize::impact(&payload));
+                }
+                entries
+            }
+            _ => {
+                verbs.push("explore");
+                // In auto mode `orient` is the fallback, i.e. the router saw no signal.
+                let uncertain = req.mode == Mode::Auto && route.intent == Intent::Orient;
+                let asked = if uncertain {
+                    (req.budget_tokens / 2).max(MIN_BUDGET_TOKENS)
+                } else {
+                    req.budget_tokens
+                };
+                let payload = self
+                    .call("explore", json!({"task": req.task, "budget_tokens": asked}))
+                    .await?;
+                let mut entries = normalize::ctx("explore", &payload);
+                if uncertain {
+                    entries.push(normalize::route_uncertain(
+                        "explore",
+                        asked,
+                        req.budget_tokens,
+                    ));
+                }
+                entries
+            }
+        };
+        Ok(self.complete_task(&req, route.intent, verbs, entries).await)
+    }
+
+    /// The task's envelope, with notes when a local model is configured (PRD 10.3).
+    async fn complete_task(
+        &self,
+        req: &TaskRequest,
+        intent: Intent,
+        verbs: Vec<&'static str>,
+        entries: Vec<Entry>,
+    ) -> Envelope {
+        let (mut env, included) = self.finish_task(req, intent, verbs, entries);
+        if let Some(engine) = &self.notes {
+            self.attach_notes(engine, &mut env, &included, !req.include_seen)
+                .await;
+        }
+        env
+    }
+
+    /// Notes from the items this envelope includes, in full even when the session sent
+    /// them as references, so a repeated task still hits the note cache.
+    async fn attach_notes(
+        &self,
+        engine: &NoteEngine,
+        env: &mut Envelope,
+        included: &[Item],
+        suppress_seen: bool,
+    ) {
+        let model = engine.model_id();
+        let mut fresh = vec![];
+        let mut limitations = vec![];
+        for (scope, items) in note_engine::groups(included) {
+            let evidence = note_engine::evidence(&items);
+            let key = note_engine::key(&model, &scope, &evidence);
+            match engine
+                .note(key, note_engine::prompt(&scope, &evidence))
+                .await
+            {
+                note_engine::Outcome::Ready { text, cached } => fresh.push(note_engine::note(
+                    scope,
+                    text,
+                    model.clone(),
+                    &items,
+                    cached,
+                )),
+                note_engine::Outcome::Pending => limitations.push(note_engine::pending(&scope)),
+                note_engine::Outcome::Failed(why) => {
+                    limitations.push(note_engine::unavailable(&scope, &why))
+                }
+            }
+        }
+        if self.incremental && suppress_seen {
+            let memory = self.session.lock().unwrap();
+            let before = fresh.len();
+            fresh.retain(|n| !memory.has(&session::note_fingerprint(n)));
+            let repeated = before - fresh.len();
+            env.budget.already_delivered += repeated;
+            self.metrics.lock().unwrap().session_hits += repeated as u64;
+        }
+        budget::add_notes(env, fresh, limitations);
+        if self.incremental {
+            let mut memory = self.session.lock().unwrap();
+            for n in &env.notes {
+                memory.remember(session::note_fingerprint(n));
+            }
+        }
+    }
+
+    /// Applies the task's switches (docs, bodies) and shapes the envelope.
+    fn finish_task(
+        &self,
+        req: &TaskRequest,
+        intent: Intent,
+        verbs: Vec<&'static str>,
+        entries: Vec<Entry>,
+    ) -> (Envelope, Vec<Item>) {
+        let entries: Vec<Entry> = entries
+            .into_iter()
+            .filter(|e| req.include_docs || !matches!(e, Entry::Item(_, i) if i.role == Role::Doc))
+            .map(|mut e| {
+                if let (false, Entry::Item(_, i)) = (req.include_bodies, &mut e) {
+                    i.content = None;
+                }
+                e
+            })
+            .collect();
+        let status = if entries.iter().any(|e| !matches!(e, Entry::Limitation(_))) {
+            Status::Ready
+        } else {
+            Status::Unknown
+        };
+        self.envelope_full(
+            "context_for_task",
+            Some(intent),
+            status,
+            verbs,
+            entries,
+            req.budget_tokens,
+            !req.include_seen,
+        )
+    }
+
+    /// Bodies and relations of a symbol `find_symbol` located.
+    async fn symbol_context(
+        &self,
+        find_symbol: &str,
+        req: &TaskRequest,
+        verbs: &mut Vec<&'static str>,
+    ) -> Result<Vec<Entry>, BrokerError> {
+        let (mut entries, handle) = normalize::find_symbol(find_symbol);
+        if let (true, Some(handle)) = (req.include_bodies, handle) {
+            verbs.push("fetch_body");
+            let body = self.call("fetch_body", json!({"handle": handle})).await?;
+            let extra = normalize::attach_body(&mut entries, &body);
+            entries.extend(extra);
+        }
+        Ok(entries)
+    }
+
+    /// `suppress_seen` is false for the finish gate, whose evidence must always show (CA-05).
+    #[allow(clippy::too_many_arguments)] // private; a parameter struct is left to review
+    fn envelope(
+        &self,
+        tool: &'static str,
+        intent: Option<Intent>,
+        status: Status,
+        verbs: Vec<&'static str>,
+        entries: Vec<Entry>,
+        budget: u32,
+        suppress_seen: bool,
+    ) -> Envelope {
+        self.envelope_full(tool, intent, status, verbs, entries, budget, suppress_seen)
+            .0
+    }
+
+    /// The envelope plus the full version of every item it includes (a session reference
+    /// resolved to the item it points to): the evidence notes may use.
+    #[allow(clippy::too_many_arguments)]
+    fn envelope_full(
+        &self,
+        tool: &'static str,
+        intent: Option<Intent>,
+        status: Status,
+        verbs: Vec<&'static str>,
+        entries: Vec<Entry>,
+        budget: u32,
+        suppress_seen: bool,
+    ) -> (Envelope, Vec<Item>) {
+        let lead = match intent {
+            Some(i) => serde_json::to_value(i)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            None => serde_json::to_value(status)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        };
+        let mut env = Envelope {
+            schema_version: SCHEMA_VERSION,
+            tool,
+            status,
+            intent,
+            summary: normalize::summary(&lead, &entries),
+            items: vec![],
+            tests: vec![],
+            risks: vec![],
+            limitations: vec![],
+            notes: vec![],
+            provenance: Provenance {
+                request_id: REQUEST.try_with(|c| c.borrow().id).unwrap_or(0),
+                upstream_tools: verbs,
+                workspace: self.workspace.root().display().to_string(),
+                ripwire_version: self.ripwire_version.clone(),
+                broker_version: env!("CARGO_PKG_VERSION"),
+            },
+            budget: Budget {
+                requested_tokens: budget,
+                estimated_tokens: 0,
+                truncated: false,
+                shown: 0,
+                omitted: 0,
+                next_step: None,
+                already_delivered: 0,
+            },
+        };
+        let entries = normalize::cap_items(entries, self.max_item_tokens as usize * 4);
+        if !self.incremental {
+            budget::fill(&mut env, entries);
+            let included = env.items.clone();
+            return (env, included);
+        }
+        let originals: Vec<Item> = entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Item(_, i) => Some(i.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut memory = self.session.lock().unwrap();
+        let mut entries = entries;
+        if suppress_seen {
+            let before = entries.len();
+            entries = entries
+                .into_iter()
+                .filter_map(|e| match e {
+                    Entry::Item(p, i) if memory.has(&session::item_fingerprint(&i)) => {
+                        Some(Entry::Item(p, session::reference(&i)))
+                    }
+                    Entry::Test(_, t) if memory.has(&session::test_fingerprint(&t)) => None,
+                    Entry::Risk(_, r)
+                        if !GATE_RISKS.contains(&r.kind)
+                            && memory.has(&session::risk_fingerprint(&r)) =>
+                    {
+                        None
+                    }
+                    other => Some(other),
+                })
+                .collect();
+            env.budget.already_delivered = before - entries.len();
+            let references = entries
+                .iter()
+                .filter(
+                    |e| matches!(e, Entry::Item(_, i) if i.why_included == session::SEEN_REFERENCE),
+                )
+                .count();
+            self.metrics.lock().unwrap().session_hits +=
+                (env.budget.already_delivered + references) as u64;
+        }
+        budget::fill(&mut env, entries);
+        for i in env
+            .items
+            .iter()
+            .filter(|i| i.why_included != session::SEEN_REFERENCE)
+        {
+            memory.remember(session::item_fingerprint(i));
+        }
+        for t in &env.tests {
+            memory.remember(session::test_fingerprint(t));
+        }
+        for r in &env.risks {
+            memory.remember(session::risk_fingerprint(r));
+        }
+        let included = env
+            .items
+            .iter()
+            .map(|i| {
+                originals
+                    .iter()
+                    .find(|o| {
+                        i.why_included == session::SEEN_REFERENCE
+                            && (&o.path, o.line, &o.symbol) == (&i.path, i.line, &i.symbol)
+                    })
+                    .unwrap_or(i)
+                    .clone()
+            })
+            .collect();
+        (env, included)
+    }
+}
+
+fn push_once(verbs: &mut Vec<&'static str>, verb: &'static str) {
+    if !verbs.contains(&verb) {
+        verbs.push(verb);
+    }
+}

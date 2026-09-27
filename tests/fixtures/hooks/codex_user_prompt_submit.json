@@ -1,0 +1,10 @@
+{
+ "session_id": "01a0e3b2-cb82-7c00-a0b0-f2248cd2a980",
+ "turn_id": "01a0e3b2-cc3c-7701-92c7-4c581d742207",
+ "transcript_path": null,
+ "cwd": "__WORKSPACE__",
+ "hook_event_name": "UserPromptSubmit",
+ "model": "gpt-5.6-sol",
+ "permission_mode": "bypassPermissions",
+ "prompt": "Edit a.txt so that it contains exactly: hello. Use apply_patch. Then reply done."
+}
