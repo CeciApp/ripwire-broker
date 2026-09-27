@@ -59,6 +59,16 @@
 | 2026-09-27 15:59 | Licença MIT adicionada (`LICENSE`, `Cargo.toml`, README) | [D-055](#d-055--licença-mit) |
 | 2026-09-27 17:35 | Adaptador `--online` fundido no PRD 0.3 (`ripwire-broker-mcp.md`) a partir da spec Jev v0.1; Fase 4→6 (Times e CI), novas Fases 4 e 5 | [D-056](#d-056--fusão-do-adaptador---online-no-prd) |
 | 2026-09-27 17:40 | Specs antigas movidas para `spec/old/`; `ripwire-broker-mcp.md` passa a ser o PRD vigente | [D-057](#d-057--reorganização-das-specs) |
+| 2026-09-27 17:55 | Plano das Fases 4 e 5 (proposta): Sprint 0, 31 fatias na Fase 4 e 14 na Fase 5, cinco pontos de parada | [D-058](#d-058--plano-das-fases-4-e-5) |
+| 2026-09-27 17:55 | Proposta: feature Cargo `online` + flag `--online`; credencial só no `env`; teste de CA-10 sobre o grafo do build padrão | [D-059](#d-059--feature-online-e-ca-10-proposta) |
+| 2026-09-27 17:55 | Proposta: classificador só nas rotas que terminam em `explore`; demais rotas com `semantic_skipped` | [D-060](#d-060--gate-por-rota-proposta) |
+| 2026-09-27 17:55 | Proposta: `RankedPath`, rescore dos paths do planner, lookahead de um nível e unidades por chunk | [D-061](#d-061--candidatos-e-unidades-proposta) |
+| 2026-09-27 17:55 | Proposta: rascunho de `prompts/v1` e tetos 4 em voo / 24 requests | [D-062](#d-062--prompts-v1-e-tetos-proposta) |
+| 2026-09-27 17:55 | Proposta: `provenance.online.discovery`, `Basis::RemoteClassifier`, `Item.semantic`; `interrupted` só por prazo de descoberta | [D-063](#d-063--envelope-online-e-interrupted-proposta) |
+| 2026-09-27 17:55 | Proposta: cache por pergunta; `doctor --jev-probe` sintético; `install --online`; hooks e wrapper offline | [D-064](#d-064--cache-diagnóstico-e-integração-proposta) |
+| 2026-09-27 18:01 | Usuário aprovou D-059 a D-064 e o início do Sprint 0 | [D-065](#d-065--aprovação-das-propostas-das-fases-4-e-5) |
+| 2026-09-27 18:01 | Sprint 0 parcial: S4.0a, S4.0c (golden provisório) e S4.0d feitos; S4.0b aguarda a credencial; 131 verdes | [D-066](#d-066--sprint-0-parcial) |
+| 2026-09-27 18:14 | S4.0b: gravação live contra `jev-1.13.0` confirma o contrato e `prompts/v1`; golden congelado; Sprint 0 concluído, 132 verdes | [D-067](#d-067--gravação-live-e-ponto-de-parada-0) |
 
 ---
 
@@ -1117,3 +1127,157 @@ Cada achado de D-052 ganhou um teste vermelho, confirmado antes da correção.
   ele, e o §23 cita a fonte Jev em `spec/old/`.
 - O D-056 continua citando os caminhos da época.
 - `.DS_Store` entrou no `.gitignore`.
+
+## D-058 — Plano das Fases 4 e 5
+
+Plano completo em [plan-fases-4-5.md](plan-fases-4-5.md). Estado: **proposta, aguardando
+aprovação do usuário**. As decisões D-059 a D-064 também são propostas até essa aprovação.
+
+- Fonte: PRD §19 (Fases 4 e 5) e §23. Cada lacuna *sem fonte na v0.1* do §23.17 recebe
+  uma proposta explícita (tabela do §1 do plano).
+- Sprint 0 (S4.0a–S4.0d): `RankedPath` sem mudança de comportamento, registro live contra
+  `jev-1.13.0` com corpus sintético, golden de `prompts/v1` e spike das unidades do Ripwire.
+- Fase 4: S4.1–S4.31. Fase 5: S5.1–S5.14, mais a avaliação A/B como entregável de medição.
+- Sete seams: quatro novos (`tests/online.rs`, `online_units.rs`, `online_scheduler.rs`,
+  `online_protocol.rs`), a CLI e a superfície MCP existentes, e um teste live ignorado.
+- A lógica do adaptador roda no build padrão com `FakeClassifier`; só o `JevClient` exige
+  `--features online`.
+- Linha de base: 127 verdes, 1 ignorado. A única edição de teste existente é a do CA-10
+  (D-059).
+- Cinco pontos de parada; o 2 é a barra de merge da Fase 4 (§23.15).
+
+## D-059 — Feature `online` e CA-10 (proposta)
+
+- O cliente HTTP (`reqwest` com rustls, `secrecy`) só compila com a feature Cargo `online`,
+  desligada por padrão. A ativação continua pela flag `--online` no startup (v0.1 §3.1).
+- O `env` do servidor MCP carrega só `RIPWIRE_BROKER_JEV_API_KEY`. Não há variável que
+  ative o modo online, o que mantém D-022 (configuração por argumentos, `env` só para
+  segredos). Isso resolve a lacuna 11 do §23.17.
+- Um binário sem a feature recusa `--online` com erro de uso.
+- Achado: `the_build_has_no_network_stack` procura crates de rede no `Cargo.lock`, que
+  lista também dependências opcionais. Com a feature declarada, ele falharia mesmo no build
+  padrão. Proposta: verificar o grafo resolvido do build padrão (`cargo tree -e normal`),
+  que é o que o CA-10 afirma. É a única edição de teste existente do plano.
+
+## D-060 — Gate por rota (proposta)
+
+- O classificador roda só nas rotas que terminam em `explore`: `orient` (inclusive o caso
+  incerto), `change` sem símbolo e o fallback `symbol_not_found`.
+- Ficam de fora `debug`, `symbol`/`change` com símbolo encontrado, `review` e `docs`: os
+  casos de ganho pequeno da v0.1 §5.3.
+- A v0.1 §3.3 exige a etapa semântica em toda chamada. A proposta a contraria de forma
+  explícita: nas rotas puladas, `provenance.online.discovery = "skipped"` e a limitação
+  `semantic_skipped`. O broker nunca declara uso online sem avaliação, que é o objetivo
+  daquela regra.
+
+## D-061 — Candidatos e unidades (proposta)
+
+- `RankedPath { path, rank, priority, origin, lines }`, construído por função pura depois
+  da rota e antes de `complete_task`, portanto antes do budgeter (lacuna 9).
+- Rescore (Fase 4, lacuna 7): os paths distintos dos itens estruturais, exceto docs, na
+  ordem do Ripwire, até 16 (`--jev-max-candidates`). `file_admission` sobre preview de
+  16 KiB; `source_selection` sobre as unidades dos admitidos. O rescore só promove; nada
+  estrutural é rebaixado nem removido.
+- Lookahead de um nível (Fase 5, lacuna 8): arquivos elegíveis diretamente nos diretórios
+  dos paths admitidos, sem descer, até 32 no total (`--jev-lookahead-max`).
+- Unidades (RF-ONLINE-07): chunks de ~3 KiB alinhados a linhas, ligados ao símbolo do
+  Ripwire cuja linha contêm. O spike S4.0d decide se `analyze`/`for` entram como fonte de
+  ranges, como verbo opcional fora de `REQUIRED_VERBS`.
+
+## D-062 — `prompts/v1` e tetos (proposta)
+
+- Guidance literal da v0.1 §16.4. Rascunho das duas perguntas em inglês no §3.2 do plano,
+  com a regra "coincidência temática não basta". O texto só é congelado por golden depois
+  do registro live (S4.0b), que confirma como uma pergunta referencia um item.
+- Tetos da fusão aceitos como padrões configuráveis: 4 requests em voo e 24 por chamada
+  (lacuna 13).
+
+## D-063 — Envelope online e `interrupted` (proposta)
+
+- `provenance.online = {enabled, provider, model, requests, cache_hits, incomplete,
+  discovery}`, com `discovery ∈ complete | incomplete | interrupted | skipped`. O booleano
+  `incomplete` da v0.1 continua (lacuna 14).
+- Item só-semântico: `source = {verb: "jev", basis: "remote_classifier"}`. Item estrutural
+  confirmado mantém `source` e ganha `semantic` (estágio, probabilidade, threshold, modelo,
+  digest, hash da fonte, cache hit). Equivale à proveniência dupla do §23.7 sem mudar a
+  forma v1 de `source`.
+- Cancelamento do cliente MCP mantém o RF-14 (`cancelled`), agora propagado até as
+  requests HTTP. `interrupted` fica para o prazo de descoberta (`--jev-deadline-ms`, 8.000
+  por padrão, sem fonte): o estrutural sai com a evidência fresca já validada (lacuna 15).
+
+## D-064 — Cache, diagnóstico e integração (proposta)
+
+- Cache em memória com chave por pergunta (provider, endpoint, modelo, versões de prompt e
+  política, estágio, query, hash da fonte, range). A chave por request da v0.1 quase nunca
+  acertaria, porque os lotes mudam a cada chamada. O valor guarda só a probabilidade
+  validada e o timestamp.
+- `doctor --jev-probe`: uma request com texto sintético embutido no binário, nenhum byte do
+  workspace. `doctor` sem a opção nunca usa a rede.
+- `install --online`: acrescenta `--online` aos args e um bloco `env` que referencia a
+  variável, nunca o valor da credencial.
+- `hook` e `prompt` continuam offline nas duas fases e recusam `--online`: processo curto,
+  timeout do host e consentimento por processo não combinam com envio a cada prompt.
+
+## D-065 — Aprovação das propostas das Fases 4 e 5
+
+- O usuário aprovou D-059 a D-064 sem alterações e pediu o início do Sprint 0.
+- D-058 continua sendo o plano de referência. As propostas deixam de ser propostas.
+
+## D-066 — Sprint 0 parcial
+
+- **S4.0a:** `online::ranked_paths` foi implementado como função pura sobre `(prioridade, &Item)`,
+  porque `Entry` é privado e o seam 2 só usa API pública. A ordem é: melhor prioridade, depois
+  a primeira aparição na saída do Ripwire; docs ficam de fora e as linhas são ordenadas e
+  distintas.
+  - Desvio do plano: a chamada dentro de `context_for_task_inner` não entrou. Sem um motor
+    online ela seria código morto. Entra em S4.22, junto com `BrokerConfig.online`, e o teste
+    de guarda do envelope offline vai junto.
+- **S4.0c:** `online::prompt` (versão `v1`, guidance literal e as duas perguntas do rascunho de
+  D-062) e `online::request::build`, puro. O golden foi escrito à mão em
+  `tests/online_units.rs`. Ele é **provisório** até o S4.0b confirmar a forma real de
+  `state.items` e como uma pergunta referencia um item.
+  - Desvio do plano: sem `indexmap`. Um `Serialize` de mapa sobre `Vec` mantém `q0..qn` na
+    ordem de inserção, e um teste cobre mais de dez perguntas. Assim o build não ganha
+    dependência nova.
+- **S4.0d (spike, Ripwire 0.6.4):**
+  - `find_symbol` dá só a linha inicial.
+  - `analyze` exige um diretório e lista nomes sem linhas.
+  - `fetch_body` dá `line` e `total_lines`, isto é, o intervalo completo, mas custa uma chamada
+    por símbolo.
+  - Decisão (dentro de D-061): na Fase 4, as unidades são chunks ligados à linha do item. Só o
+    corpo que o broker já busca (o símbolo central) usa o intervalo de `fetch_body`. Nenhum
+    verbo entra na allowlist.
+- **S4.0b:** preparado, não executado. `examples/jev_record.rs` imprime os dois requests de um
+  corpus sintético, inventado para isso e sem ler o workspace, para que o `curl` os envie. Assim
+  o Sprint 0 não põe crate de rede no build. Falta a credencial
+  `RIPWIRE_BROKER_JEV_API_KEY`, que não está no ambiente.
+- Suíte: 131 verdes, 1 ignorado; clippy e fmt limpos.
+
+## D-067 — Gravação live e ponto de parada 0
+
+- **S4.0b.** Com a credencial em `~/.config/ripwire-broker/jev.key` (`0600`) e a autorização
+  do usuário, os dois requests de `examples/jev_record.rs` foram enviados por `curl` a
+  `https://api.typesafe.ai/v1/systemone`, com HTTPS obrigatório e sem redirect. A chave foi
+  lida do arquivo no próprio comando e nunca impressa.
+- **Contrato confirmado** (v0.1 §10):
+  - `200`, `Content-Type: application/json`, HTTP/2;
+  - a resposta é `{model, answers: {qN: {type: "noul", noul: p}}, usage: {input_tokens,
+    output_tokens}}`, com uma resposta por pergunta e os mesmos ids;
+  - latência de 300–350 ms para 2–3 perguntas;
+  - o header `x-typesafe-request-id` existe, mas não é gravado.
+- **`prompts/v1` validado.** Uma pergunta referencia seu item por id (`item i0`, `code block
+  i1`) dentro de `state.items = [{id, path, text}]`, e o modelo discrimina:
+  - admissão: `auth.py` 0,81, o teste 0,83 e um CSV sem relação 0,03;
+  - seleção: `validate_token` 0,81 e `login` 0,64.
+  O rascunho de D-062 fica como texto definitivo da `v1`, e o golden deixa de ser provisório.
+- **Fixture** `tests/fixtures/jev/live_v1.json`: só digest sha256 e tamanho de cada request,
+  ids das perguntas, status, content type, latência e a resposta (probabilidades e uso). Não
+  tem fonte, query, credencial nem id do provider.
+- O corpus sintético saiu do exemplo para `tests/common/jev_corpus.rs`, compartilhado com o
+  teste `the_live_recording_still_matches_prompts_v1`. Esse teste recalcula os digests; se
+  `prompts/v1` mudar, ele pede uma nova gravação.
+- Não registrado ainda: as formas de erro do provider (`401`, `429`, `5xx`). O S4.11 usa o
+  servidor fixture com as formas da v0.1; o teste live S5.14 confere.
+- **Ponto de parada 0:** Sprint 0 concluído (S4.0a–S4.0d). D-061 e D-062 confirmados pela
+  evidência. Suíte: 132 verdes, 1 ignorado; clippy e fmt limpos.
+

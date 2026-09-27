@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod model;
 mod normalize;
 pub mod notes;
+pub mod online;
 mod router;
 pub mod session;
 pub mod state;
