@@ -1323,3 +1323,99 @@ fn a_probe_without_the_online_feature_fails_clearly() {
         "{probe}"
     );
 }
+
+// --- S5.13: install --online ---
+
+fn run_with_key(args: &[&str]) -> (i32, String, String) {
+    let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args(args)
+        .env("RIPWIRE_BROKER_JEV_API_KEY", "tok-install-secret")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn install_online_adds_the_flag_and_an_env_reference_never_the_key() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let root_s = root.to_str().unwrap();
+
+    // Dry run: says what it would do, with the consent notice, and writes nothing.
+    let (code, dry, err) =
+        run_with_key(&["install", "claude-code", "--workspace", root_s, "--online"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(dry.contains(
+        "O modo online envia previews e trechos elegíveis do workspace ao provider Jev."
+    ));
+    assert!(!root.join(".mcp.json").exists());
+
+    // Claude Code, written, with hooks.
+    let (code, out, err) = run_with_key(&[
+        "install",
+        "claude-code",
+        "--workspace",
+        root_s,
+        "--online",
+        "--hooks",
+        "--write",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let m = read_json(&root.join(".mcp.json"));
+    let server = &m["mcpServers"]["ripwire-broker"];
+    assert_eq!(server["args"], json!(["--workspace", root_s, "--online"]));
+    assert_eq!(
+        server["env"],
+        json!({"RIPWIRE_BROKER_JEV_API_KEY": "${RIPWIRE_BROKER_JEV_API_KEY}"})
+    );
+    let settings = read_json(&root.join(".claude/settings.json"));
+    for event in ["UserPromptSubmit", "PostToolUse", "Stop"] {
+        assert!(
+            commands(&settings, event)
+                .iter()
+                .all(|c| !c.contains("--online")),
+            "hooks stay offline (D-064)"
+        );
+    }
+
+    // Codex: the TOML snippet forwards the variable by name.
+    let home = tempfile::tempdir().unwrap();
+    let (code, codex, err) = run_with_key(&[
+        "install",
+        "codex",
+        "--workspace",
+        root_s,
+        "--online",
+        "--codex-home",
+        home.path().to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(codex.contains("\"--online\""), "{codex}");
+    assert!(
+        codex.contains("env_vars = [\"RIPWIRE_BROKER_JEV_API_KEY\"]"),
+        "{codex}"
+    );
+
+    // The key itself appears nowhere.
+    let written = std::fs::read_to_string(root.join(".mcp.json")).unwrap()
+        + &std::fs::read_to_string(root.join(".claude/settings.json")).unwrap();
+    for text in [&dry, &out, &codex, &written] {
+        assert!(
+            !text.contains("tok-install-secret"),
+            "the key leaked: {text}"
+        );
+    }
+
+    // Installing again without --online turns it off.
+    let (code, _, err) =
+        run_with_key(&["install", "claude-code", "--workspace", root_s, "--write"]);
+    assert_eq!(code, 0, "{err}");
+    let server = read_json(&root.join(".mcp.json"))["mcpServers"]["ripwire-broker"].clone();
+    assert_eq!(server["args"], json!(["--workspace", root_s]));
+    assert!(server.get("env").is_none());
+}

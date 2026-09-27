@@ -20,7 +20,10 @@ pub enum CredentialError {
 impl std::fmt::Display for CredentialError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Missing => write!(f, "--online needs {ENV_VAR} in the server's environment"),
+            Self::Missing => write!(
+                f,
+                "{ENV_VAR} is not set in the environment (--online and --jev-probe need it)"
+            ),
             Self::InternalWhitespace => write!(f, "{ENV_VAR} contains whitespace inside the value"),
         }
     }

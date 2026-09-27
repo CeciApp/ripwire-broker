@@ -20,7 +20,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--jev-probe [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
-       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--write] [--codex-home DIR]
+       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--write] [--codex-home DIR] [--online]
 
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
 Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
@@ -151,6 +151,9 @@ pub struct InstallArgs {
     pub hooks: bool,
     pub write: bool,
     pub codex_home: Option<PathBuf>,
+    /// Start the server with `--online`, the credential referenced from the host's
+    /// environment, never written (D-064). Hooks stay offline.
+    pub online: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -544,7 +547,16 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
         }
         Some("install") => {
             let host = host(it.next())?;
-            let f = flags(it, &["--workspace", "--hooks", "--write", "--codex-home"])?;
+            let f = flags(
+                it,
+                &[
+                    "--workspace",
+                    "--hooks",
+                    "--write",
+                    "--codex-home",
+                    "--online",
+                ],
+            )?;
             no_words(&f)?;
             Ok(Command::Install(InstallArgs {
                 host,
@@ -552,6 +564,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 hooks: f.on("--hooks"),
                 write: f.on("--write"),
                 codex_home: f.codex_home.clone(),
+                online: f.on("--online"),
             }))
         }
         Some(other) => Err(usage(format_args!("unknown command '{other}'"))),

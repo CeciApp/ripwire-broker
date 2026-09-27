@@ -85,6 +85,7 @@
 | 2026-09-27 19:35 | Usuário escolheu previews de 4 KiB no lookahead e ordem por probabilidade; a frio com os padrões, `src/budget.rs` aparece (p=0,89) em 19 requests; 3ª falha intermitente | [D-081](#d-081--equilíbrio-do-lookahead) |
 | 2026-09-27 19:41 | S5.10–S5.11: as 15 métricas do §23.11 em `status.online.metrics` e as etapas online em `recent_requests[].stages`; só contagens e tempos; 213/224 verdes | [D-082](#d-082--métricas-e-etapas-online) |
 | 2026-09-27 19:45 | S5.12: `doctor --jev-probe` envia uma pergunta sintética embutida no binário; ao vivo, `jev-1.13.0` respondeu em 304 ms; 218/229 verdes | [D-083](#d-083--doctor---jev-probe) |
+| 2026-09-27 19:49 | S5.13: `install --online` acrescenta a flag e referencia a chave pelo nome (`${VAR}` no Claude Code, `env_vars` no Codex, validado pelo parser do Codex 0.157); hooks continuam offline; 219/230 verdes | [D-084](#d-084--install---online) |
 
 ---
 
@@ -1895,5 +1896,33 @@ Fatia S5.12 do plano (§23.6, D-064).
   - Detalhe menor: essa mensagem é a mesma do `serve` e começa com "--online needs...". No
     `doctor` ela continua clara, mas pode ganhar um texto próprio no S5.13.
 - Suítes: 218 verdes no build padrão e 229 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-084 — `install --online`
+
+Fatia S5.13 do plano (§23.6, D-064).
+
+- **Claude Code.** No `.mcp.json`, o servidor ganha `--online` nos `args` e
+  `"env": {"RIPWIRE_BROKER_JEV_API_KEY": "${RIPWIRE_BROKER_JEV_API_KEY}"}`. É uma referência
+  que o Claude Code expande do próprio ambiente ao subir o servidor; o valor nunca é gravado.
+- **Codex.** O trecho de `config.toml` continua só impresso (D-033) e ganha `"--online"` nos
+  `args` e `env_vars = ["RIPWIRE_BROKER_JEV_API_KEY"]`, que repassa a variável pelo nome.
+  - Achado: `codex mcp add --env` só aceita `KEY=VALUE` literal, o que gravaria a chave. O
+    campo `env_vars` foi achado nos tipos do binário do Codex 0.157 (`RawMcpServerConfig`).
+  - Validado com o próprio Codex: com o trecho num `CODEX_HOME` temporário, `codex mcp list`
+    e `codex mcp get` leem a configuração e mostram `RIPWIRE_BROKER_JEV_API_KEY=*****`.
+- **Hooks continuam offline** (D-064): os comandos de hook nunca recebem `--online`.
+- O texto de consentimento do §23.6 sai com todo `install --online`. Ele lembra também que a
+  chave vem do ambiente do host, que o binário precisa da feature `online` e que
+  `doctor --jev-probe` confere a instalação.
+- Reinstalar sem `--online` desliga o modo: a entrada do servidor é substituída e perde a flag
+  e o `env`.
+- O `install` nunca lê a variável da chave. O teste roda o binário com a chave no ambiente e
+  confere que ela não aparece nem na saída nem nos arquivos gravados.
+- **Mensagem da credencial ausente** (D-083): agora diz "RIPWIRE_BROKER_JEV_API_KEY is not set
+  in the environment (--online and --jev-probe need it)", o que serve ao `serve` e ao `doctor`.
+- **Teste.** Um e2e do binário no seam 5 cobre dry-run, `--write` com hooks, Codex, ausência
+  da chave em tudo e reinstalação sem `--online`.
+- Suítes: 219 verdes no build padrão e 230 com `online`, 2 ignorados; clippy e fmt limpos nas
   duas.
 
