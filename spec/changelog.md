@@ -83,6 +83,7 @@
 | 2026-09-27 19:16 | S5.6: texto remoto sanitizado, limitado e com a credencial redigida; o `Retry-After` era o único vazamento possível; 201/212 verdes | [D-079](#d-079--redaction-de-texto-remoto) |
 | 2026-09-27 19:28 | S5.7–S5.9: lookahead de um nível, `--jev-lookahead-max`, ganho além do Ripwire no status; ao vivo acha `src/budget.rs` (p=0,90), mas os 24 requests padrão se esgotam na admissão em chamada fria (decisão pendente); 2ª falha intermitente não reproduzida | [D-080](#d-080--lookahead-de-um-nível) |
 | 2026-09-27 19:35 | Usuário escolheu previews de 4 KiB no lookahead e ordem por probabilidade; a frio com os padrões, `src/budget.rs` aparece (p=0,89) em 19 requests; 3ª falha intermitente | [D-081](#d-081--equilíbrio-do-lookahead) |
+| 2026-09-27 19:41 | S5.10–S5.11: as 15 métricas do §23.11 em `status.online.metrics` e as etapas online em `recent_requests[].stages`; só contagens e tempos; 213/224 verdes | [D-082](#d-082--métricas-e-etapas-online) |
 
 ---
 
@@ -1831,4 +1832,40 @@ vizinhos continuam.
   - Não se confirmou em 15 execuções sob carga de 24 processos em 12 CPUs.
   - Mudança de procedimento: toda verificação passa a guardar a saída completa no
     scratchpad, para registrar o nome do teste na próxima ocorrência.
+
+## D-082 — Métricas e etapas online
+
+Fatias S5.10 e S5.11 do plano (PRD §23.11).
+
+- **Métricas.** `status.online.metrics` traz as 15 métricas do §23.11, com os mesmos nomes.
+  - Por request, medidas pelo `online::metrics::Metered`, que embrulha o classificador
+    configurado; o scheduler só vê o embrulho:
+    - `jev_requests_total` e `jev_questions_total`;
+    - `jev_in_flight`, um medidor que também desce quando o request é abortado;
+    - `jev_batch_items` e `jev_request_bytes`, cada um como `{total, max}`;
+    - `jev_latency_ms` com p50/p95/p99 nas últimas 256 latências.
+  - `jev_response_bytes` vem do próprio `JevClient`, que conta o corpo lido; a trait
+    `Classifier` ganhou `response_bytes()`, que vale zero por padrão.
+  - Por descoberta, vindas do relatório do scheduler e do coordenador:
+    `jev_cache_hits_total`, `jev_rate_limit_total`, `jev_retry_total`, `jev_split_total`,
+    `semantic_candidates_total` (arquivos perguntados, do planner e do lookahead),
+    `semantic_selected_ranges_total` e `semantic_only_candidates_total`.
+  - `online_context_tokens_estimated` mede o envelope final: bytes dos itens
+    `semantic_location` e das anotações `semantic` que chegaram ao agente, divididos por 4
+    como no orçamento.
+  - Os campos já existentes do bloco `status.online` continuam, por compatibilidade.
+- **Etapas (spans).** Cada chamada de um processo `--online` ganha `stages` no seu registro de
+  `recent_requests`, com nome, duração e número de requests. Aparecem na ordem em que terminam:
+  `semantic.navigation.batch` (admissão, com lookahead), `semantic.selection.batch`,
+  `semantic.discovery` (a descoberta inteira), `context.merge` e `context.budget`.
+  - O registro compartilha o `request_id` de `provenance.request_id` e nunca traz query, path
+    ou código.
+  - Processos offline não têm o campo.
+  - Decisão do plano mantida: nada do crate `tracing`. As etapas são registros do status,
+    como as chamadas upstream.
+- **Testes.** Quatro novos no seam 1: todas as métricas conferidas contra o que o dublê
+  recebeu, sem path nem query; retry, split e `429` contados; as etapas sob o `request_id`;
+  nenhuma etapa no offline. O e2e com o cliente real passou a conferir `jev_response_bytes`.
+- Overhead local, em release: p95 21,5 ms, sem mudança. Suítes: 213 verdes no build padrão e
+  224 com `online`, 2 ignorados; clippy e fmt limpos nas duas.
 

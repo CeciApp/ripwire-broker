@@ -5,7 +5,8 @@
 
 use super::cache::{self, KeyParts, SemanticCache};
 use super::classifier::Classifier;
-use super::decision::{FileDecision, file_decision};
+use super::decision::{FileDecision, SourceDecision, file_decision, select};
+use super::metrics::{Metered, OnlineMetrics};
 use super::reader::{LOOKAHEAD_PREVIEW_BYTES, Snapshot, Unit, WorkspaceReader, units};
 use super::request::{self, JevRequest, StateItem};
 use super::scheduler::{Freshness, Job, Scheduler, SchedulerConfig};
@@ -130,6 +131,14 @@ pub struct Discovery {
     pub interrupted: Option<u128>,
     /// Lookahead files the classifier admitted: candidates ripwire did not rank.
     pub semantic_only: usize,
+    /// Files the classifier was asked about, planner and lookahead.
+    pub candidates: usize,
+    pub selected_ranges: usize,
+    pub retries: usize,
+    pub splits: usize,
+    pub rate_limited: usize,
+    /// Timings of the admission and selection stages, for the request record.
+    pub stages: Vec<crate::metrics::StageSpan>,
 }
 
 impl Discovery {
@@ -154,10 +163,18 @@ pub struct OnlineTotals {
     pub last_error: Option<&'static str>,
     /// `semantic_only_candidates_total` (PRD §23.11): the gain beyond ripwire.
     pub semantic_only: u64,
+    pub candidates: u64,
+    pub selected_ranges: u64,
+    pub retries: u64,
+    pub splits: u64,
+    pub rate_limited: u64,
+    pub context_tokens: u64,
 }
 
 pub struct OnlineEngine {
     config: OnlineConfig,
+    /// The configured classifier, measured; the scheduler only ever sees this one.
+    metered: Arc<Metered>,
     reader: Arc<WorkspaceReader>,
     cache: Mutex<SemanticCache>,
     totals: Mutex<OnlineTotals>,
@@ -180,6 +197,7 @@ impl OnlineEngine {
     pub fn new(config: OnlineConfig, root: &Path) -> Result<Self, String> {
         Ok(Self {
             reader: Arc::new(WorkspaceReader::new(root)?),
+            metered: Arc::new(Metered::new(config.classifier.clone())),
             config,
             cache: Mutex::default(),
             totals: Mutex::default(),
@@ -200,6 +218,39 @@ impl OnlineEngine {
 
     pub fn cached_decisions(&self) -> usize {
         self.cache.lock().unwrap().len()
+    }
+
+    /// The §23.11 metrics for the status resource.
+    pub fn metrics(&self) -> OnlineMetrics {
+        let t = self.totals();
+        let mut m = OnlineMetrics {
+            jev_cache_hits_total: t.cache_hits,
+            jev_rate_limit_total: t.rate_limited,
+            jev_retry_total: t.retries,
+            jev_split_total: t.splits,
+            semantic_candidates_total: t.candidates,
+            semantic_selected_ranges_total: t.selected_ranges,
+            semantic_only_candidates_total: t.semantic_only,
+            online_context_tokens_estimated: t.context_tokens,
+            ..OnlineMetrics::default()
+        };
+        self.metered.fill(&mut m);
+        m
+    }
+
+    /// Counts the tokens of semantic evidence that reached the agent in `env`: the
+    /// `semantic_location` items and the `semantic` annotations, estimated like the budget.
+    pub fn delivered(&self, env: &crate::model::Envelope) {
+        let bytes: usize = env
+            .items
+            .iter()
+            .map(|i| match (i.kind, &i.semantic) {
+                ("semantic_location", _) => serde_json::to_vec(i).map_or(0, |b| b.len()),
+                (_, Some(s)) => serde_json::to_vec(s).map_or(0, |b| b.len()),
+                _ => 0,
+            })
+            .sum();
+        self.totals.lock().unwrap().context_tokens += bytes.div_ceil(4) as u64;
     }
 
     fn key(
@@ -233,6 +284,8 @@ impl OnlineEngine {
             }
         }
 
+        let navigation = std::time::Instant::now();
+        let before = disc.requests;
         let mut admitted = self
             .ask(
                 query,
@@ -295,6 +348,12 @@ impl OnlineEngine {
                 .await;
             admitted.extend(extra);
         }
+        disc.stages.push(crate::metrics::StageSpan {
+            stage: "semantic.navigation.batch",
+            us: navigation.elapsed().as_micros() as u64,
+            batches: disc.requests - before,
+        });
+        disc.candidates = files.len();
 
         let mut selection: Vec<Pending> = vec![];
         let mut owner: HashMap<String, (usize, Unit)> = HashMap::new();
@@ -352,6 +411,8 @@ impl OnlineEngine {
             .iter()
             .map(|p| (p.item.id.clone(), p.item.text.clone()))
             .collect();
+        let selecting = std::time::Instant::now();
+        let before = disc.requests;
         let selected = self
             .ask(
                 query,
@@ -372,6 +433,17 @@ impl OnlineEngine {
                 scored: selected.get(id).cloned().unwrap_or_else(Scored::unknown),
             });
         }
+        disc.selected_ranges = disc
+            .files
+            .iter()
+            .flat_map(|f| &f.units)
+            .filter(|u| select(u.scored.probability) == SourceDecision::Selected)
+            .count();
+        disc.stages.push(crate::metrics::StageSpan {
+            stage: "semantic.selection.batch",
+            us: selecting.elapsed().as_micros() as u64,
+            batches: disc.requests - before,
+        });
 
         // Before the output: evidence about a version that no longer exists is dropped
         // (RF-ONLINE-10, CA-ONLINE-11). The file's structural facts stay untouched.
@@ -388,6 +460,11 @@ impl OnlineEngine {
         totals.requests += disc.requests as u64;
         totals.cache_hits += disc.cache_hits as u64;
         totals.semantic_only += disc.semantic_only as u64;
+        totals.candidates += disc.candidates as u64;
+        totals.selected_ranges += disc.selected_ranges as u64;
+        totals.retries += disc.retries as u64;
+        totals.splits += disc.splits as u64;
+        totals.rate_limited += disc.rate_limited as u64;
         if let Some((category, _)) = disc.failures.iter().next() {
             totals.last_error = Some(category);
         }
@@ -475,7 +552,7 @@ impl OnlineEngine {
             return out;
         }
         let scheduler = Scheduler::new(
-            self.config.classifier.clone(),
+            self.metered.clone(),
             SchedulerConfig {
                 max_in_flight: self.config.max_in_flight,
                 request_limit: *left,
@@ -523,6 +600,9 @@ impl OnlineEngine {
         disc.requests += report.requests;
         disc.unfinished += report.unfinished.len();
         disc.stale_batches += report.stale.len();
+        disc.retries += report.retries;
+        disc.splits += report.splits;
+        disc.rate_limited += report.rate_limited;
         if report.stop == Some(super::scheduler::Stop::RequestLimit) {
             disc.limit_reached = true;
         }

@@ -10,6 +10,11 @@ use async_trait::async_trait;
 pub trait Classifier: Send + Sync {
     /// The pinned model; part of every cache key.
     fn model(&self) -> &str;
+    /// Response body bytes received so far, for `jev_response_bytes`; `0` when unknown.
+    fn response_bytes(&self) -> super::metrics::Sized {
+        super::metrics::Sized::default()
+    }
+
     /// One attempt: the probability of each question, in request order (`None`: unknown).
     /// Retries, cooldown and splitting belong to the scheduler, never to the client.
     async fn classify(&self, req: &JevRequest) -> Result<Vec<Option<f64>>, ClassifyError>;

@@ -11,6 +11,7 @@ pub mod decision;
 #[cfg(feature = "online")]
 pub mod jev;
 pub(crate) mod merge;
+pub mod metrics;
 pub mod prompt;
 pub mod reader;
 pub mod redact;

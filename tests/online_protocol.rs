@@ -422,6 +422,12 @@ async fn the_broker_enriches_a_task_through_the_real_client() {
         .unwrap();
     assert_eq!(login["semantic"]["state"], "selected_source");
     assert_eq!(login["semantic"]["probability"], 0.9);
+    let status = serde_json::to_value(broker.status().await).unwrap();
+    let received = &status["online"]["metrics"]["jev_response_bytes"]["total"];
+    assert!(
+        received.as_u64().unwrap() > 0,
+        "the real client counts response bytes: {status}"
+    );
 }
 
 // --- S5.4: an MCP cancel reaches the HTTP request (CA-ONLINE-12) ---

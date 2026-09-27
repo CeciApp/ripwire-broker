@@ -1,7 +1,7 @@
 //! The broker core: routes a request to ripwire verbs, normalizes, and shapes the envelope.
 
 use crate::budget;
-use crate::metrics::{Metrics, RequestRecord, UpstreamSpan};
+use crate::metrics::{Metrics, RequestRecord, StageSpan, UpstreamSpan};
 use crate::model::*;
 use crate::normalize::{self, Entry};
 use crate::notes::{self as note_engine, NoteEngine, SummarizerStatus};
@@ -24,6 +24,19 @@ struct RequestCtx {
     id: u64,
     /// Shared with the call's `Unfinished` guard, which reports them if the call is dropped.
     spans: Arc<Mutex<Vec<UpstreamSpan>>>,
+    /// `--online` stages of this call (PRD §23.11).
+    stages: Arc<Mutex<Vec<StageSpan>>>,
+}
+
+/// Records an `--online` stage under the current tool call.
+fn stage(name: &'static str, took: Duration, batches: usize) {
+    let _ = REQUEST.try_with(|c| {
+        c.stages.lock().unwrap().push(StageSpan {
+            stage: name,
+            us: took.as_micros() as u64,
+            batches,
+        })
+    });
 }
 
 tokio::task_local! {
@@ -37,6 +50,7 @@ struct Unfinished<'a> {
     id: u64,
     started: Instant,
     spans: Arc<Mutex<Vec<UpstreamSpan>>>,
+    stages: Arc<Mutex<Vec<StageSpan>>>,
     finished: bool,
 }
 
@@ -54,6 +68,7 @@ impl Drop for Unfinished<'_> {
             outcome: "cancelled",
             total_us: took.as_micros() as u64,
             upstream: std::mem::take(&mut *self.spans.lock().unwrap()),
+            stages: std::mem::take(&mut *self.stages.lock().unwrap()),
         });
     }
 }
@@ -319,6 +334,8 @@ pub struct OnlineStatus {
     pub last_error: Option<&'static str>,
     /// Lookahead files admitted: candidates beyond ripwire (`semantic_only_candidates_total`).
     pub semantic_only_candidates: u64,
+    /// The §23.11 metrics: counts and times only.
+    pub metrics: crate::online::metrics::OnlineMetrics,
 }
 
 #[derive(Debug, Serialize)]
@@ -439,6 +456,7 @@ impl Broker {
                     cached_decisions: engine.cached_decisions(),
                     last_error: totals.last_error,
                     semantic_only_candidates: totals.semantic_only,
+                    metrics: engine.metrics(),
                 }
             }),
             metrics: {
@@ -500,17 +518,20 @@ impl Broker {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
         let spans = Arc::new(Mutex::new(Vec::new()));
+        let stages = Arc::new(Mutex::new(Vec::new()));
         let mut guard = Unfinished {
             broker: self,
             tool,
             id,
             started,
             spans: spans.clone(),
+            stages: stages.clone(),
             finished: false,
         };
         let ctx = RequestCtx {
             id,
             spans: spans.clone(),
+            stages: stages.clone(),
         };
         let result = REQUEST.scope(ctx, inner).await;
         guard.finished = true;
@@ -527,6 +548,7 @@ impl Broker {
             },
             total_us: took.as_micros() as u64,
             upstream: spans,
+            stages: std::mem::take(&mut *stages.lock().unwrap()),
         });
         result
     }
@@ -839,7 +861,12 @@ impl Broker {
         entries: Vec<Entry>,
     ) -> Envelope {
         let (entries, online) = self.semantic_step(req, intent, &verbs, entries).await;
+        let shaping = Instant::now();
         let (mut env, included) = self.finish_task(req, intent, verbs, entries, online);
+        if let Some(engine) = &self.online {
+            stage("context.budget", shaping.elapsed(), 0);
+            engine.delivered(&env);
+        }
         if let Some(engine) = &self.notes {
             self.attach_notes(engine, &mut env, &included, !req.include_seen)
                 .await;
@@ -877,17 +904,18 @@ impl Broker {
             Entry::Item(p, i) => Some((*p, i)),
             _ => None,
         }));
+        let started = Instant::now();
         let disc = engine.discover(&req.task, &ranked).await;
+        for s in &disc.stages {
+            stage(s.stage, Duration::from_micros(s.us), s.batches);
+        }
+        stage("semantic.discovery", started.elapsed(), disc.requests);
+        let merging = Instant::now();
         let online = online_merge::provenance(&provider, engine.model(), Some(&disc));
-        (
-            online_merge::merge(
-                entries,
-                &disc,
-                engine.model(),
-                engine.config().max_source_bytes,
-            ),
-            Some(online),
-        )
+        let cap = engine.config().max_source_bytes;
+        let merged = online_merge::merge(entries, &disc, engine.model(), cap);
+        stage("context.merge", merging.elapsed(), 0);
+        (merged, Some(online))
     }
 
     /// Records what `env` delivers in the session memory. The last step of every tool, on

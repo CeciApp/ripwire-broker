@@ -20,6 +20,8 @@ pub struct JevClient {
     endpoint: String,
     key: Credential,
     model: String,
+    /// Response body bytes read, for `jev_response_bytes`.
+    received: std::sync::Mutex<super::metrics::Sized>,
 }
 
 impl JevClient {
@@ -60,6 +62,7 @@ impl JevClient {
             endpoint,
             key,
             model: model.into(),
+            received: std::sync::Mutex::default(),
         })
     }
 
@@ -87,6 +90,10 @@ fn transport(e: reqwest::Error) -> ClassifyError {
 impl Classifier for JevClient {
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn response_bytes(&self) -> super::metrics::Sized {
+        self.received.lock().unwrap().clone()
     }
 
     async fn classify(&self, req: &JevRequest) -> Result<Vec<Option<f64>>, ClassifyError> {
@@ -132,6 +139,7 @@ impl Classifier for JevClient {
             }
             bytes.extend_from_slice(&chunk);
         }
+        self.received.lock().unwrap().add(bytes.len() as u64);
         let text = String::from_utf8(bytes)
             .map_err(|_| ClassifyError::Invalid(InvalidResponse::Malformed))?;
         let ids: Vec<String> = req.questions.0.iter().map(|(id, _)| id.clone()).collect();

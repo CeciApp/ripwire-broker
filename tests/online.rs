@@ -1164,6 +1164,160 @@ async fn the_status_reports_online_health_without_content() {
     }
 }
 
+// --- S5.10 / S5.11: metrics and stages (PRD §23.11) ---
+
+const METRICS: [&str; 15] = [
+    "jev_requests_total",
+    "jev_questions_total",
+    "jev_in_flight",
+    "jev_batch_items",
+    "jev_request_bytes",
+    "jev_response_bytes",
+    "jev_latency_ms",
+    "jev_cache_hits_total",
+    "jev_rate_limit_total",
+    "jev_retry_total",
+    "jev_split_total",
+    "semantic_candidates_total",
+    "semantic_selected_ranges_total",
+    "semantic_only_candidates_total",
+    "online_context_tokens_estimated",
+];
+
+#[tokio::test]
+async fn online_metrics_are_counts_and_times_only() {
+    let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let status = json(&s.broker.status().await);
+    let m = &status["online"]["metrics"];
+
+    for key in METRICS {
+        assert!(m.get(key).is_some(), "{key} missing: {m:#}");
+    }
+    let seen = s.classifier.seen.lock().unwrap().clone();
+    assert_eq!(m["jev_requests_total"], seen.len());
+    assert_eq!(
+        m["jev_questions_total"],
+        seen.iter().map(|r| r.questions.0.len()).sum::<usize>()
+    );
+    assert_eq!(m["jev_in_flight"], 0);
+    assert_eq!(
+        m["jev_batch_items"]["max"],
+        seen.iter().map(|r| r.state.items.len()).max().unwrap()
+    );
+    assert_eq!(
+        m["jev_request_bytes"]["total"],
+        seen.iter()
+            .map(|r| serde_json::to_string(r).unwrap().len())
+            .sum::<usize>()
+    );
+    let lat = &m["jev_latency_ms"];
+    assert!(lat["p50"].as_f64().unwrap() <= lat["p95"].as_f64().unwrap());
+    assert!(lat["p95"].as_f64().unwrap() <= lat["p99"].as_f64().unwrap());
+    assert_eq!(m["jev_retry_total"], 0);
+    assert!(
+        m["semantic_candidates_total"].as_u64().unwrap() >= 4,
+        "planner and lookahead files"
+    );
+    assert!(m["semantic_selected_ranges_total"].as_u64().unwrap() >= 1);
+    assert_eq!(m["semantic_only_candidates_total"], 1);
+    assert!(m["online_context_tokens_estimated"].as_u64().unwrap() > 0);
+    let text = m.to_string();
+    for secret in ["routes are authenticated", "src/", "def fit", "budget.py"] {
+        assert!(!text.contains(secret), "{secret} in the metrics");
+    }
+}
+
+#[tokio::test]
+async fn retries_splits_and_rate_limits_are_counted() {
+    let classifier = budget_is_evidence()
+        .fail_times("f0", ClassifyError::Server(503), 1)
+        .fail_times(
+            "f1",
+            ClassifyError::RateLimited {
+                retry_after: Some("0".into()),
+            },
+            1,
+        );
+    let s = online_in(with_siblings(), explore(), classifier).await;
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let m = json(&s.broker.status().await)["online"]["metrics"].clone();
+
+    assert_eq!(
+        m["jev_split_total"], 1,
+        "the multi-file admission batch split after a 503"
+    );
+    assert!(m["jev_retry_total"].as_u64().unwrap() >= 1, "{m}");
+    assert_eq!(m["jev_rate_limit_total"], 1);
+}
+
+#[tokio::test]
+async fn each_stage_is_recorded_under_the_request_id() {
+    let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    let status = json(&s.broker.status().await);
+    let last = status["metrics"]["recent_requests"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+
+    assert_eq!(last["request_id"], out["provenance"]["request_id"]);
+    let stages: Vec<&str> = last["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["stage"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        stages,
+        vec![
+            "semantic.navigation.batch",
+            "semantic.selection.batch",
+            "semantic.discovery",
+            "context.merge",
+            "context.budget"
+        ]
+    );
+    for stage in last["stages"].as_array().unwrap() {
+        assert!(stage["us"].as_u64().is_some());
+    }
+    assert!(last["stages"][0]["batches"].as_u64().unwrap() >= 1);
+    assert!(!last.to_string().contains("src/") && !last.to_string().contains("authenticated"));
+}
+
+#[tokio::test]
+async fn offline_requests_have_no_stages() {
+    let ws = workspace();
+    let b = Broker::connect(Arc::new(explore()), BrokerConfig::new(ws.path()))
+        .await
+        .unwrap();
+    b.context_for_task(TaskRequest::new(TASK)).await.unwrap();
+
+    let status = json(&b.status().await);
+
+    assert!(
+        status["metrics"]["recent_requests"][0]
+            .get("stages")
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn the_status_keeps_the_last_error_category_only() {
     let s = online(
