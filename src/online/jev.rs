@@ -111,7 +111,7 @@ impl Classifier for JevClient {
                     .headers()
                     .get(RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
-                    .map(|v| v.chars().take(64).collect());
+                    .map(|v| super::redact::remote_text(v, Some(self.key.expose()), 64));
                 return Err(ClassifyError::RateLimited { retry_after });
             }
             500..=599 => return Err(ClassifyError::Server(status)),

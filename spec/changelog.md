@@ -80,6 +80,7 @@
 | 2026-09-27 19:07 | Teste manual autorizado com `--online` neste repositório: contrato, cache, gate por rota, status e credencial conferidos; rescore sem candidatos novos confirmado | [D-076](#d-076--teste-manual-com---online) |
 | 2026-09-27 19:10 | S5.4: o cancelamento MCP chega ao request HTTP pelo drop estruturado (sem token extra); provado por teste e por mutação; 197/207 verdes | [D-077](#d-077--cancelamento-até-o-http) |
 | 2026-09-27 19:14 | S5.5: prazo de descoberta com `interrupted` e evidência preservada; `--jev-max-source-bytes` limita a fonte renderizada; 200/210 verdes | [D-078](#d-078--prazo-de-descoberta-e-limite-de-fonte) |
+| 2026-09-27 19:16 | S5.6: texto remoto sanitizado, limitado e com a credencial redigida; o `Retry-After` era o único vazamento possível; 201/212 verdes | [D-079](#d-079--redaction-de-texto-remoto) |
 
 ---
 
@@ -1719,4 +1720,31 @@ Fatia S5.5 do plano; fecha as duas pendências de flags de D-072.
   20 vezes seguidas sem falha.
 - Suítes: 200 verdes no build padrão e 210 com `online`, 2 ignorados; clippy e fmt limpos nas
   duas.
+
+## D-079 — Redaction de texto remoto
+
+Fatia S5.6 do plano (PRD §23.9; v0.1 §13.3 e §17).
+
+- **Mapeamento.** Por construção, nenhum erro carrega o corpo da resposta remota: o
+  `ClassifyError` só leva categoria e status HTTP, e os erros do `reqwest` viram categorias
+  (D-069). O caminho online não escreve em stderr. O único texto remoto que sobrevivia era o
+  `Retry-After` bruto do `429`, visível no `Debug` do erro.
+- **`online::redact::remote_text(texto, segredo, máx)`**, puro: mantém só ASCII visível e
+  espaço (o que remove controles, sequências ANSI, quebras de linha e não-ASCII), troca toda
+  ocorrência do segredo por `[redacted]`, apara e corta em `máx` bytes. A troca vem depois da
+  filtragem, então um segredo partido por um caractere de controle também é pego.
+- O `JevClient` passa o `Retry-After` por ela, com a própria credencial e o limite de 64
+  bytes. Um valor redigido não é lido como espera, e o scheduler usa o padrão de 1 s (D-075).
+- **Testes.**
+  - Seam 2: a função sobre ANSI, BEL, CR/LF, não-ASCII, tamanho e segredo partido.
+  - Seam 4: uma varredura com respostas `429` (duas), `401`, `403`, `500`, `409` e `200` com
+    corpo que ecoa a chave e mensagem remota. Nenhum `Display`, `Debug` ou categoria contém a
+    chave, a mensagem remota ou caracteres fora do ASCII visível.
+  - Achado no próprio teste: a primeira versão pôs um BEL no header, o hyper recusou a resposta
+    inteira (`network`), e o caso passou sem tocar o `Retry-After`. Com a chave ecoada em texto
+    limpo, o teste falhou como devia antes da implementação.
+- O status, os limites de status e os e2e já cobriam a ausência de credencial (D-072).
+- Suítes: 201 verdes no build padrão e 212 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+- **Ponto de parada 3:** CA-ONLINE-09 (D-075), 11 (D-073) e 12 (D-077) verdes.
 

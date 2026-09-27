@@ -1,0 +1,17 @@
+//! Remote text that survives into an error (PRD §23.9, v0.1 §13.3, §17): sanitized to
+//! printable ASCII, capped, and with every occurrence of the credential redacted before it
+//! can reach a status, a log or the agent.
+
+/// `text` reduced to printable ASCII and spaces, trimmed, with `secret` replaced by
+/// `[redacted]`, at most `max` bytes.
+pub fn remote_text(text: &str, secret: Option<&str>, max: usize) -> String {
+    let mut clean: String = text
+        .chars()
+        .filter(|c| *c == ' ' || c.is_ascii_graphic())
+        .collect();
+    if let Some(secret) = secret.filter(|s| !s.is_empty()) {
+        clean = clean.replace(secret, "[redacted]");
+    }
+    let clean = clean.trim();
+    clean[..clean.len().min(max)].to_string()
+}

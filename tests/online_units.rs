@@ -714,3 +714,29 @@ fn retry_after_parses_seconds_and_http_dates() {
     }
     let _ = SystemTime::now();
 }
+
+// --- S5.6: remote text is sanitized, capped and redacted ---
+
+use ripwire_broker::online::redact;
+
+#[test]
+fn remote_text_is_sanitized_capped_and_redacts_the_secret() {
+    let raw = "7\u{7}\u{1b}[31m tok-123\r\nX-Evil: 1 ünïcode tok-123";
+
+    let clean = redact::remote_text(raw, Some("tok-123"), 64);
+
+    assert!(!clean.contains("tok-123"), "{clean:?}");
+    assert!(clean.contains("[redacted]"));
+    assert!(
+        clean.chars().all(|c| c == ' ' || c.is_ascii_graphic()),
+        "{clean:?}"
+    );
+    assert!(
+        !clean.contains('\r') && !clean.contains('\n'),
+        "no header injection"
+    );
+    assert_eq!(redact::remote_text(&"9".repeat(500), None, 64).len(), 64);
+    assert_eq!(redact::remote_text("  12 ", None, 64), "12");
+    // A secret split by a control character is still caught once the character is gone.
+    assert!(!redact::remote_text("tok\u{7}-123", Some("tok-123"), 64).contains("tok-123"));
+}

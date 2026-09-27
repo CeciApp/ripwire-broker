@@ -13,6 +13,7 @@ pub mod jev;
 pub(crate) mod merge;
 pub mod prompt;
 pub mod reader;
+pub mod redact;
 pub mod request;
 pub mod response;
 pub mod retry_after;

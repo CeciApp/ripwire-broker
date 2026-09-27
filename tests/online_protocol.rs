@@ -519,3 +519,57 @@ async fn an_mcp_cancel_aborts_http_requests_in_flight() {
         "no retry or new request after the cancel"
     );
 }
+
+// --- S5.6: no error carries the credential or raw remote text ---
+
+#[tokio::test]
+async fn remote_messages_are_sanitized_capped_and_redact_the_credential() {
+    let echo = r#"{"error":"invalid token tok-123","detail":"\u001b[31mtok-123"}"#;
+    let replies: Vec<Reply> = vec![
+        Some((
+            429,
+            vec![("retry-after", "12 tok-123".into())],
+            echo.as_bytes().to_vec(),
+        )),
+        Some((
+            429,
+            vec![("retry-after", format!("5 {}", "x".repeat(300)))],
+            vec![],
+        )),
+        json(401, echo),
+        json(403, echo),
+        json(500, echo),
+        json(409, echo),
+        json(200, echo),
+        Some((
+            200,
+            vec![("content-type", "text/plain; tok-123".into())],
+            echo.as_bytes().to_vec(),
+        )),
+    ];
+    for reply in replies {
+        let f = fixture(vec![reply]).await;
+
+        let err = client(f.port, Duration::from_secs(5))
+            .classify(&request())
+            .await
+            .unwrap_err();
+
+        let shown = format!("{err} {err:?} {}", err.category());
+        assert!(!shown.contains("tok-123"), "{shown}");
+        assert!(
+            !shown.contains("invalid token"),
+            "no remote message: {shown}"
+        );
+        assert!(
+            shown.chars().all(|c| c == ' ' || c.is_ascii_graphic()),
+            "{shown:?}"
+        );
+        if let ripwire_broker::online::classifier::ClassifyError::RateLimited {
+            retry_after: Some(v),
+        } = &err
+        {
+            assert!(v.len() <= 64, "{v}");
+        }
+    }
+}
