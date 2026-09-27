@@ -86,6 +86,7 @@
 | 2026-09-27 19:41 | S5.10–S5.11: as 15 métricas do §23.11 em `status.online.metrics` e as etapas online em `recent_requests[].stages`; só contagens e tempos; 213/224 verdes | [D-082](#d-082--métricas-e-etapas-online) |
 | 2026-09-27 19:45 | S5.12: `doctor --jev-probe` envia uma pergunta sintética embutida no binário; ao vivo, `jev-1.13.0` respondeu em 304 ms; 218/229 verdes | [D-083](#d-083--doctor---jev-probe) |
 | 2026-09-27 19:49 | S5.13: `install --online` acrescenta a flag e referencia a chave pelo nome (`${VAR}` no Claude Code, `env_vars` no Codex, validado pelo parser do Codex 0.157); hooks continuam offline; 219/230 verdes | [D-084](#d-084--install---online) |
+| 2026-09-27 19:51 | S5.14: dois testes live ignorados (corpus sintético e caminho completo com Ripwire real); ao vivo verdes, digest idêntico ao S4.0b; 219/230 verdes, 4 ignorados no `online` | [D-085](#d-085--testes-live) |
 
 ---
 
@@ -1925,4 +1926,30 @@ Fatia S5.13 do plano (§23.6, D-064).
   da chave em tudo e reinstalação sem `--online`.
 - Suítes: 219 verdes no build padrão e 230 com `online`, 2 ignorados; clippy e fmt limpos nas
   duas.
+
+## D-085 — Testes live
+
+Fatia S5.14 do plano (§23.14).
+
+- `tests/online_live.rs` só compila com a feature `online`, e seus testes são `#[ignore]`: a
+  suíte padrão continua offline (CA-10). Para rodar:
+  `RIPWIRE_BROKER_JEV_API_KEY=... cargo test --features online --test online_live -- --ignored`.
+  Sem a chave, cada teste avisa e sai.
+- Só envia conteúdo inventado (o corpus do S4.0b e o `common::sample_repo`) e só imprime
+  digests, probabilidades e tempos.
+  - `a_real_provider_classifies_the_synthetic_corpus`: respostas válidas, uma por pergunta; o
+    modelo admite `auth.py` e o teste e rejeita o CSV sem relação; `validate_token` é selecionado;
+    o cliente conta os bytes recebidos.
+  - `a_real_provider_enriches_a_synthetic_repository`: o caminho completo, com broker, Ripwire
+    real e `JevClient`. A descoberta sai `complete`, algum item tem evidência `semantic` e o
+    orçamento é respeitado.
+- **Rodada ao vivo** (autorizada em D-076): os dois verdes em 1,1 s.
+  - O digest do request de admissão (`d7d3e4…`) é idêntico ao gravado no S4.0b: o
+    `prompts/v1` não mudou.
+  - As probabilidades variaram pouco em relação à gravação (0,79 contra 0,81; 0,65 contra
+    0,64). O provider não é determinístico, e por isso os testes live conferem decisões
+    (admitido, rejeitado, selecionado), não valores exatos.
+  - O caminho completo levou 620 ms com 2 requests.
+- Suítes: 219 verdes no build padrão (2 ignorados) e 230 com `online` (4 ignorados); clippy e
+  fmt limpos nas duas.
 

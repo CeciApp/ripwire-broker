@@ -1,7 +1,7 @@
 # Plano de implementação — Fases 4 e 5 (adaptador `--online`)
 
-Status: **aprovado (D-065); Fase 4 implementada e testada ao vivo (D-066 a D-072, D-076); Fase 5: S5.1–S5.13 feitos (D-073 a D-084); próximo: S5.14 e documentação** · 2026-09-27 · decisões em
-[D-058 a D-084](changelog.md#d-058--plano-das-fases-4-e-5)
+Status: **aprovado (D-065); Fase 4 implementada e testada ao vivo (D-066 a D-072, D-076); Fase 5: S5.1–S5.14 feitos (D-073 a D-085); próximo: documentação (§5.4) e ponto de parada 4** · 2026-09-27 · decisões em
+[D-058 a D-085](changelog.md#d-058--plano-das-fases-4-e-5)
 
 Fonte: PRD §19 (Fases 4 e 5), §23 inteiro, RF-15, §8.4, §9.1, §9.4 e §21.5. Onde o
 PRD marca um item como *sem fonte na v0.1*, este plano **propõe** uma resolução e a
