@@ -31,6 +31,11 @@ pub struct OnlineConfig {
     pub cache: bool,
     /// Capacity of the queue in front of the scheduler.
     pub queue: usize,
+    /// Past it the semantic stage stops and the answer goes out `interrupted` (D-063).
+    pub deadline: std::time::Duration,
+    /// Caps semantic source rendered in the envelope, not what is evaluated; `None`: the
+    /// token budget alone decides (PRD §23.6).
+    pub max_source_bytes: Option<usize>,
 }
 
 impl OnlineConfig {
@@ -45,6 +50,8 @@ impl OnlineConfig {
             max_candidates: 16,
             cache: true,
             queue: 8,
+            deadline: std::time::Duration::from_millis(8_000),
+            max_source_bytes: None,
         }
     }
 }
@@ -114,6 +121,8 @@ pub struct Discovery {
     pub stale_batches: usize,
     /// Files that changed before the output; their evidence was dropped.
     pub changed_files: usize,
+    /// The discovery deadline (in ms) cut the semantic stage short.
+    pub interrupted: Option<u128>,
 }
 
 impl Discovery {
@@ -126,6 +135,7 @@ impl Discovery {
             || self.limit_reached
             || self.stale_batches > 0
             || self.changed_files > 0
+            || self.interrupted.is_some()
     }
 }
 
@@ -205,6 +215,7 @@ impl OnlineEngine {
     pub async fn discover(&self, query: &str, ranked: &[RankedPath]) -> Discovery {
         let mut disc = Discovery::default();
         let mut left = self.config.request_limit;
+        let deadline = tokio::time::Instant::now() + self.config.deadline;
         let mut files: Vec<(&RankedPath, Arc<Snapshot>)> = vec![];
         for rp in ranked.iter().take(self.config.max_candidates) {
             match self.reader.snapshot(&rp.path) {
@@ -235,6 +246,7 @@ impl OnlineEngine {
                 SemanticStage::FileAdmission,
                 admission,
                 &mut left,
+                deadline,
                 &mut disc,
             )
             .await;
@@ -287,6 +299,7 @@ impl OnlineEngine {
                 SemanticStage::SourceSelection,
                 selection,
                 &mut left,
+                deadline,
                 &mut disc,
             )
             .await;
@@ -328,6 +341,7 @@ impl OnlineEngine {
         stage: SemanticStage,
         pending: Vec<Pending>,
         left: &mut usize,
+        deadline: tokio::time::Instant,
         disc: &mut Discovery,
     ) -> HashMap<String, Scored> {
         let mut out = HashMap::new();
@@ -367,6 +381,11 @@ impl OnlineEngine {
             disc.unfinished += requests.len();
             return out;
         }
+        if tokio::time::Instant::now() >= deadline {
+            disc.interrupted = Some(self.config.deadline.as_millis());
+            disc.unfinished += requests.len();
+            return out;
+        }
         let scheduler = Scheduler::new(
             self.config.classifier.clone(),
             SchedulerConfig {
@@ -399,7 +418,19 @@ impl OnlineEngine {
             }
             drop(tx);
         };
-        let (_, report) = tokio::join!(produce, scheduler.run(rx, CancellationToken::new()));
+        // The deadline cancels the run instead of dropping it, so what already came back
+        // stays usable (v0.1 §11.10).
+        let stop = CancellationToken::new();
+        let run = async { tokio::join!(produce, scheduler.run(rx, stop.clone())).1 };
+        tokio::pin!(run);
+        let report = tokio::select! {
+            report = &mut run => report,
+            _ = tokio::time::sleep_until(deadline) => {
+                stop.cancel();
+                disc.interrupted = Some(self.config.deadline.as_millis());
+                run.await
+            }
+        };
         *left = left.saturating_sub(report.requests);
         disc.requests += report.requests;
         disc.unfinished += report.unfinished.len();

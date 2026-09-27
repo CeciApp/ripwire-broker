@@ -582,6 +582,134 @@ async fn evidence_stale_at_output_is_dropped_and_marked_incomplete() {
     );
 }
 
+// --- S5.5: discovery deadline and rendered source cap ---
+
+async fn online_with(
+    ws: tempfile::TempDir,
+    classifier: FakeClassifier,
+    tune: impl FnOnce(&mut OnlineConfig),
+) -> Setup {
+    let (upstream, classifier) = (Arc::new(explore()), Arc::new(classifier));
+    let mut config = BrokerConfig::new(ws.path());
+    let mut online = OnlineConfig::new(classifier.clone());
+    tune(&mut online);
+    config.online = Some(online);
+    let broker = Broker::connect(upstream.clone(), config).await.unwrap();
+    Setup {
+        broker,
+        upstream,
+        classifier,
+        _ws: ws,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_discovery_deadline_returns_interrupted_with_fresh_evidence() {
+    // Admission answers at once; the first selection batch would take ten seconds.
+    let classifier = login_is_evidence().delay("u0", std::time::Duration::from_secs(10));
+    let s = online_with(workspace(), classifier, |o| {
+        o.deadline = std::time::Duration::from_millis(200)
+    })
+    .await;
+    let t0 = tokio::time::Instant::now();
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    assert!(
+        tokio::time::Instant::now() < t0 + std::time::Duration::from_secs(1),
+        "the answer does not wait"
+    );
+    assert_eq!(out["status"], "ready");
+    assert_eq!(out["provenance"]["online"]["discovery"], "interrupted");
+    assert_eq!(out["provenance"]["online"]["incomplete"], true);
+    let lim = out["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "semantic_incomplete")
+        .unwrap();
+    assert!(
+        lim["detail"].as_str().unwrap().contains("deadline"),
+        "{lim}"
+    );
+    let login = items(&out).iter().find(|i| i["symbol"] == "login").unwrap();
+    assert_eq!(
+        login["semantic"]["stage"], "file_admission",
+        "admission evidence acquired before the deadline stays"
+    );
+    assert_eq!(
+        s.classifier
+            .counters
+            .dropped
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the slow request was aborted"
+    );
+}
+
+#[tokio::test]
+async fn a_deadline_that_is_not_reached_changes_nothing() {
+    let s = online_with(workspace(), login_is_evidence(), |o| {
+        o.deadline = std::time::Duration::from_secs(8)
+    })
+    .await;
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(out["provenance"]["online"]["discovery"], "complete");
+}
+
+#[tokio::test]
+async fn the_rendered_source_cap_turns_selected_blocks_into_locations() {
+    // The import block of routes.py is selected but has no ripwire symbol.
+    let classifier = FakeClassifier::new().rule(|stage, item| match stage {
+        SemanticStage::FileAdmission => Some(0.9),
+        SemanticStage::SourceSelection => Some(if item.text.starts_with("from src.auth") {
+            0.7
+        } else {
+            0.1
+        }),
+    });
+    let s = online_with(workspace(), classifier, |o| o.max_source_bytes = Some(10)).await;
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    let loc = items(&out)
+        .iter()
+        .find(|i| i["kind"] == "semantic_location")
+        .unwrap();
+    assert_eq!(
+        loc["semantic"]["state"], "selected_source",
+        "it was still evaluated and selected"
+    );
+    assert!(
+        loc.get("content").is_none(),
+        "but its source is not rendered"
+    );
+    assert!(
+        loc["why_included"]
+            .as_str()
+            .unwrap()
+            .contains("--jev-max-source-bytes")
+    );
+    assert!(limitation_kinds(&out).contains(&"semantic_source_capped".to_string()));
+}
+
 // --- S4.27: budget ---
 
 #[tokio::test]

@@ -877,7 +877,12 @@ impl Broker {
         let disc = engine.discover(&req.task, &ranked).await;
         let online = online_merge::provenance(&provider, engine.model(), Some(&disc));
         (
-            online_merge::merge(entries, &disc, engine.model()),
+            online_merge::merge(
+                entries,
+                &disc,
+                engine.model(),
+                engine.config().max_source_bytes,
+            ),
             Some(online),
         )
     }

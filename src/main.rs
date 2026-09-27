@@ -82,6 +82,8 @@ fn online_config(o: &cli::OnlineArgs) -> Result<ripwire_broker::online::OnlineCo
     config.request_limit = o.request_limit;
     config.max_candidates = o.max_candidates;
     config.cache = !o.no_cache;
+    config.deadline = o.deadline;
+    config.max_source_bytes = o.max_source_bytes.map(|b| b as usize);
     Ok(config)
 }
 

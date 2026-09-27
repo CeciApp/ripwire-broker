@@ -54,7 +54,14 @@ fn source_state(d: SourceDecision) -> &'static str {
 }
 
 /// `entries` with the discovery's evidence merged in.
-pub(crate) fn merge(entries: Vec<Entry>, disc: &Discovery, model: &str) -> Vec<Entry> {
+pub(crate) fn merge(
+    entries: Vec<Entry>,
+    disc: &Discovery,
+    model: &str,
+    max_source_bytes: Option<usize>,
+) -> Vec<Entry> {
+    let mut rendered = 0usize;
+    let mut capped = 0usize;
     let mut out: Vec<Entry> = entries
         .into_iter()
         .map(|e| match e {
@@ -135,15 +142,30 @@ pub(crate) fn merge(entries: Vec<Entry>, disc: &Discovery, model: &str) -> Vec<E
             let p = u.scored.probability.unwrap_or_default();
             let (start, end) = (u.unit.start_line, u.unit.end_line);
             let (prio, why, content) = match d {
-                SourceDecision::Selected => (
-                    priority::BODY,
-                    format!(
-                        "classifier: lines {start}-{end} are evidence for the task (p={p:.2} > 0.50)"
-                    ),
-                    Some(Untrusted {
-                        untrusted_repository_data: u.text.clone(),
-                    }),
-                ),
+                SourceDecision::Selected
+                    if max_source_bytes.is_some_and(|cap| rendered + u.text.len() > cap) =>
+                {
+                    capped += 1;
+                    (
+                        priority::BODY,
+                        format!(
+                            "classifier: lines {start}-{end} are evidence for the task (p={p:.2} > 0.50); source omitted by --jev-max-source-bytes"
+                        ),
+                        None,
+                    )
+                }
+                SourceDecision::Selected => {
+                    rendered += u.text.len();
+                    (
+                        priority::BODY,
+                        format!(
+                            "classifier: lines {start}-{end} are evidence for the task (p={p:.2} > 0.50)"
+                        ),
+                        Some(Untrusted {
+                            untrusted_repository_data: u.text.clone(),
+                        }),
+                    )
+                }
                 _ => (
                     priority::READING_LEAD,
                     format!(
@@ -205,6 +227,14 @@ pub(crate) fn merge(entries: Vec<Entry>, disc: &Discovery, model: &str) -> Vec<E
         }
     }
     out.extend(limitations(disc).into_iter().map(Entry::Limitation));
+    if capped > 0 {
+        out.push(Entry::Limitation(limitation(
+            "semantic_source_capped",
+            format!(
+                "{capped} selected block(s) shown as locations: --jev-max-source-bytes reached"
+            ),
+        )));
+    }
     out
 }
 
@@ -263,6 +293,9 @@ fn limitations(disc: &Discovery) -> Vec<Limitation> {
                 disc.changed_files
             ));
         }
+        if let Some(ms) = disc.interrupted {
+            why.push(format!("discovery deadline of {ms} ms reached"));
+        }
         if disc.unfinished > 0 {
             why.push(format!("{} request(s) not answered", disc.unfinished));
         }
@@ -304,6 +337,7 @@ pub(crate) fn provenance(
         incomplete: disc.is_some_and(Discovery::incomplete),
         discovery: match disc {
             None => "skipped",
+            Some(d) if d.interrupted.is_some() => "interrupted",
             Some(d) if d.incomplete() => "incomplete",
             Some(_) => "complete",
         },

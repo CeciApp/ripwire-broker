@@ -79,6 +79,7 @@
 | 2026-09-27 19:07 | S5.3: `429` com cooldown compartilhado (`Retry-After` em segundos ou data HTTP), sem ocupar vaga e cancelável; 196/205 verdes | [D-075](#d-075--429-e-cooldown-compartilhado) |
 | 2026-09-27 19:07 | Teste manual autorizado com `--online` neste repositório: contrato, cache, gate por rota, status e credencial conferidos; rescore sem candidatos novos confirmado | [D-076](#d-076--teste-manual-com---online) |
 | 2026-09-27 19:10 | S5.4: o cancelamento MCP chega ao request HTTP pelo drop estruturado (sem token extra); provado por teste e por mutação; 197/207 verdes | [D-077](#d-077--cancelamento-até-o-http) |
+| 2026-09-27 19:14 | S5.5: prazo de descoberta com `interrupted` e evidência preservada; `--jev-max-source-bytes` limita a fonte renderizada; 200/210 verdes | [D-078](#d-078--prazo-de-descoberta-e-limite-de-fonte) |
 
 ---
 
@@ -1685,5 +1686,37 @@ Fatia S5.4 do plano (RF-ONLINE-14, CA-ONLINE-12).
     numa task destacada) derruba o teste do seam 4, o que prova que ele guarda a regra acima.
     O teste do seam 4 rodou 10 vezes seguidas sem falha.
 - Suítes: 197 verdes no build padrão e 207 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-078 — Prazo de descoberta e limite de fonte
+
+Fatia S5.5 do plano; fecha as duas pendências de flags de D-072.
+
+- **Prazo (`--jev-deadline-ms`, padrão 8.000).** `OnlineConfig.deadline` vira um instante
+  absoluto no início da descoberta, que vale para as duas etapas.
+  - Ao vencer, o `CancellationToken` do scheduler é cancelado. O `run` não é descartado: ele
+    aborta os requests em voo e devolve o relatório parcial, então as respostas que já
+    voltaram continuam valendo (v0.1 §11.10).
+  - Se o prazo já venceu antes de uma etapa começar, ela nem envia e os lotes contam como não
+    respondidos.
+  - O envelope sai com o estrutural intacto, a evidência validada (inclusive a revalidação de
+    frescor do S5.1), `discovery: "interrupted"` e `incomplete: true`. A limitação
+    `semantic_incomplete` diz "discovery deadline of N ms reached".
+  - `interrupted` tem precedência sobre `incomplete` no campo `discovery`. O cancelamento pelo
+    cliente MCP continua respondendo `cancelled` (D-063, D-077).
+- **Limite de fonte (`--jev-max-source-bytes`, padrão: só o orçamento de tokens).**
+  `OnlineConfig.max_source_bytes` limita o total de fonte semântica **renderizada** nos itens
+  `semantic_location`, não a avaliação.
+  - Um bloco selecionado que passaria do limite continua `selected_source`, mas sai sem
+    `content`, com o motivo no `why_included`, e a limitação `semantic_source_capped` conta
+    quantos ficaram assim.
+  - O conteúdo dos itens do Ripwire não é afetado.
+- O `main` passa as duas flags para o `OnlineConfig`, e nenhuma opção `--jev-*` fica mais sem
+  efeito.
+- **Testes.** Três novos no seam 1: o prazo com relógio pausado (a admissão responde, o lote
+  de seleção demoraria 10 s e o prazo é de 200 ms), um prazo não atingido e o limite de fonte.
+  Uma mutação que desliga o timer do prazo derruba o teste. Os testes do núcleo online rodaram
+  20 vezes seguidas sem falha.
+- Suítes: 200 verdes no build padrão e 210 com `online`, 2 ignorados; clippy e fmt limpos nas
   duas.
 
