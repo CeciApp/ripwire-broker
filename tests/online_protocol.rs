@@ -423,3 +423,99 @@ async fn the_broker_enriches_a_task_through_the_real_client() {
     assert_eq!(login["semantic"]["state"], "selected_source");
     assert_eq!(login["semantic"]["probability"], 0.9);
 }
+
+// --- S5.4: an MCP cancel reaches the HTTP request (CA-ONLINE-12) ---
+
+/// A provider that reads each request and never answers; `closed` counts connections the
+/// client dropped while waiting.
+async fn silent() -> (u16, Arc<Mutex<usize>>, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(0));
+    let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (log, gone) = (seen.clone(), closed.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let (log, gone) = (log.clone(), gone.clone());
+            tokio::spawn(async move {
+                let mut chunk = [0u8; 8192];
+                let mut first = true;
+                // Reads the request, then waits for the client to hang up.
+                loop {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => {
+                            gone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            return;
+                        }
+                        Ok(_) if first => {
+                            first = false;
+                            *log.lock().unwrap() += 1;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            });
+        }
+    });
+    (port, seen, closed)
+}
+
+#[tokio::test]
+async fn an_mcp_cancel_aborts_http_requests_in_flight() {
+    use ripwire_broker::broker::{Broker, BrokerConfig, TaskRequest};
+    use ripwire_broker::online::OnlineConfig;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let ws = tempfile::tempdir().unwrap();
+    for (path, body) in [
+        ("src/auth.py", "def login(user, token):\n    return user\n"),
+        ("src/routes.py", "def export_route(req):\n    pass\n"),
+        ("tests/test_auth.py", "def test_login():\n    pass\n"),
+    ] {
+        common::write(ws.path(), path, body);
+    }
+    let (port, seen, closed) = silent().await;
+    let mut config = BrokerConfig::new(ws.path());
+    config.online = Some(OnlineConfig::new(Arc::new(client(
+        port,
+        Duration::from_secs(30),
+    ))));
+    let upstream =
+        Arc::new(common::fake::FakeUpstream::new().answer("explore", "explore_export_auth"));
+    let broker = Arc::new(Broker::connect(upstream, config).await.unwrap());
+
+    let call = tokio::spawn({
+        let b = broker.clone();
+        async move {
+            b.context_for_task(TaskRequest::new("how are the routes authenticated?"))
+                .await
+        }
+    });
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while *seen.lock().unwrap() == 0 && tokio::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let sent = *seen.lock().unwrap();
+    assert!(sent > 0, "a request reached the provider");
+
+    call.abort(); // what the MCP handler does on notifications/cancelled (RF-14)
+    let until = tokio::time::Instant::now() + Duration::from_millis(250);
+    while closed.load(SeqCst) < sent && tokio::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    assert_eq!(
+        closed.load(SeqCst),
+        sent,
+        "every HTTP request in flight was aborted within 250 ms"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        sent,
+        "no retry or new request after the cancel"
+    );
+}

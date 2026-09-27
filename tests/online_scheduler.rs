@@ -558,3 +558,34 @@ async fn a_second_429_or_an_excessive_retry_after_is_final() {
     assert!(tokio::time::Instant::now() < t0 + std::time::Duration::from_secs(1));
     assert!(r.incomplete());
 }
+
+// --- S5.4: cancellation reaches every task (RF-ONLINE-14) ---
+
+#[tokio::test(start_paused = true)]
+async fn dropping_the_run_aborts_requests_in_flight_and_queued_retries() {
+    // How an MCP cancel arrives: the tool call's future is dropped (RF-14).
+    let (fake, _gate) = FakeClassifier::new().held();
+    let fake = Arc::new(fake);
+    let scheduler = Arc::new(Scheduler::new(fake.clone(), config(4, 1000)));
+    let (rx, producer) = produce(&scheduler, 50);
+    let run = tokio::spawn({
+        let s = scheduler.clone();
+        async move { s.run(rx, CancellationToken::new()).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    run.abort();
+    let _ = run.await;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    assert_eq!(
+        fake.counters.dropped.load(SeqCst),
+        4,
+        "every request in flight was dropped"
+    );
+    assert_eq!(fake.calls(), 4, "nothing starts afterwards");
+    assert!(
+        producer.await.unwrap() < 50,
+        "the queue closed with the run"
+    );
+}

@@ -78,6 +78,7 @@
 | 2026-09-27 19:02 | S5.2: retry por etapa e divisão ao meio no scheduler; cada tentativa conta no limite e revalida o frescor; 191/200 verdes | [D-074](#d-074--retry-e-divisão-de-lotes) |
 | 2026-09-27 19:07 | S5.3: `429` com cooldown compartilhado (`Retry-After` em segundos ou data HTTP), sem ocupar vaga e cancelável; 196/205 verdes | [D-075](#d-075--429-e-cooldown-compartilhado) |
 | 2026-09-27 19:07 | Teste manual autorizado com `--online` neste repositório: contrato, cache, gate por rota, status e credencial conferidos; rescore sem candidatos novos confirmado | [D-076](#d-076--teste-manual-com---online) |
+| 2026-09-27 19:10 | S5.4: o cancelamento MCP chega ao request HTTP pelo drop estruturado (sem token extra); provado por teste e por mutação; 197/207 verdes | [D-077](#d-077--cancelamento-até-o-http) |
 
 ---
 
@@ -1657,4 +1658,32 @@ deste repositório ao TypeSafe.
     8 itens mostrados em 2.500 tokens, como manda a ordem do §23.4 (fonte selecionada antes de
     caller estrutural). O A/B precisa conferir se essa ordem ajuda o agente.
 - Com isso o ponto de parada 2 fica completo.
+
+## D-077 — Cancelamento até o HTTP
+
+Fatia S5.4 do plano (RF-ONLINE-14, CA-ONLINE-12).
+
+- **Achado.** O caminho já existia por estrutura. No RF-14 (D-049), o `mcp.rs` descarta a
+  future da tool quando chega `notifications/cancelled`. O drop então desce a cadeia:
+  `context_for_task` → `OnlineEngine::discover` → `Scheduler::run` → `JoinSet`, cujo drop
+  aborta todas as tasks → future do `reqwest`, cujo drop fecha a conexão. Filas, retries
+  pendentes, esperas de cooldown e requests em voo terminam juntos, e a tool responde
+  `cancelled`, como hoje.
+- **Decisão.** Manter o cancelamento pelo drop estruturado, sem ligar o `CancellationToken` do
+  scheduler ao `Notify` do RF-14, como o plano previa. Um token duplicaria o que o drop já
+  garante, e o cancelamento MCP continua respondendo `cancelled` (D-063). O token do scheduler
+  fica para o prazo de descoberta (S5.5), que precisa devolver o envelope com `interrupted`.
+- **Regra de código.** Nada no caminho do request pode rodar em task destacada
+  (`tokio::spawn` sem dono): ela sobreviveria ao drop e manteria a conexão aberta.
+- **Testes.**
+  - Seam 3: descartar a future do `run` derruba os 4 requests em voo, nada começa depois, e o
+    produtor para.
+  - Seam 4: o broker com o `JevClient` real contra um provider local que nunca responde.
+    Abortar a chamada fecha todas as conexões em até 250 ms (v0.1 §20.1), e nenhum request
+    novo sai depois.
+  - Os dois nasceram verdes, como a análise previa. Uma mutação plausível (enviar o request
+    numa task destacada) derruba o teste do seam 4, o que prova que ele guarda a regra acima.
+    O teste do seam 4 rodou 10 vezes seguidas sem falha.
+- Suítes: 197 verdes no build padrão e 207 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
 
