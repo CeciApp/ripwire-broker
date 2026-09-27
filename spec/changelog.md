@@ -70,6 +70,7 @@
 | 2026-09-27 18:01 | Sprint 0 parcial: S4.0a, S4.0c (golden provisório) e S4.0d feitos; S4.0b aguarda a credencial; 131 verdes | [D-066](#d-066--sprint-0-parcial) |
 | 2026-09-27 18:14 | S4.0b: gravação live contra `jev-1.13.0` confirma o contrato e `prompts/v1`; golden congelado; Sprint 0 concluído, 132 verdes | [D-067](#d-067--gravação-live-e-ponto-de-parada-0) |
 | 2026-09-27 18:19 | S4.1–S4.6: flags `--online`/`--jev-*`, recusa sem a feature, credencial redigida, teste de CA-10 sobre o grafo resolvido, consentimento, CI nas duas configurações | [D-068](#d-068--configuração-credencial-e-garantia-offline) |
+| 2026-09-27 18:24 | S4.7–S4.11: validação da resposta, thresholds estritos, batcher com tamanho exato, `trait Classifier` e `JevClient` (reqwest/rustls atrás da feature) | [D-069](#d-069--protocolo-validação-e-cliente-http) |
 
 ---
 
@@ -1316,4 +1317,50 @@ Fatias S4.1 a S4.6 do plano, no branch `fase-4-online`.
 - **CI.** O workflow do GitHub Actions também compila e testa com `--features online`.
 - Suítes: 137 verdes no build padrão e 138 com `online`, 1 ignorado em cada; clippy e fmt
   limpos nas duas.
+
+## D-069 — Protocolo, validação e cliente HTTP
+
+Fatias S4.7 a S4.11 do plano.
+
+- **S4.7.** Já estava coberto pelos testes do S4.0c: ordem `q0..qn` além de dez perguntas, tipo
+  `noul`, guidance literal e golden. Nenhum teste novo. A parte do wire veio em S4.11.
+- **S4.8.** `online::response::parse_answers` devolve uma probabilidade por pergunta, na ordem
+  do request e casada por id, não por posição (CA-ONLINE-10).
+  - Viram desconhecido (`None`) uma pergunta sem resposta, tipo diferente de `noul`, valor
+    ausente, que não seja número, negativo ou maior que 1. Os valores 0 e 1 são válidos.
+  - Rejeitam a resposta inteira: JSON inválido (inclusive `NaN`, que não é JSON), falta de
+    `model` ou `answers`, modelo diferente do pinado e resposta a pergunta não feita. Neste
+    último caso a correspondência por id está quebrada.
+- **S4.9.** `online::decision` aplica thresholds estritos: admissão `> 0,25`, seleção `> 0,50`,
+  lead em `(0,25; 0,50]` (CA-ONLINE-06). Um arquivo fica com o maior score entre os fragmentos.
+  - Interpretação: se algum fragmento ficou sem avaliação e o melhor conhecido não passa, o
+    arquivo é `Unknown`, não `Rejected`, porque o fragmento faltante pode conter a evidência.
+- **S4.10.** `online::request::batches` mantém a ordem e fecha o lote antes de 128 perguntas
+  ou 38.000 bytes. Lotes de evidência têm até 8 unidades e ~14 KiB; uma unidade sozinha pode
+  passar dos 14 KiB, desde que caiba em 38.000. O que não cabe nem sozinho volta à parte, para
+  a limitação `request_too_large`.
+  - O tamanho é calculado de forma incremental e exata (`request_bytes`), e um teste o confere
+    contra o JSON real. A primeira versão reserializava o lote a cada item e era quadrática, o
+    que ameaçava a meta de p95 < 75 ms.
+- **S4.11.** `online::classifier::Classifier` é a trait interna do provider e compila no build
+  padrão. `ClassifyError` só carrega categoria e status HTTP.
+  - Mapeamento: `401`/`403` → `auth`; `408` e timeout → `timeout`; `429` → `rate_limited`,
+    com `Retry-After` bruto limitado a 64 caracteres; `5xx` → `server`; demais status e
+    redirects → `rejected`; body malformado ou `Content-Type` diferente de JSON →
+    `invalid_response`; body acima de 256 KiB → `response_too_large`; falha de conexão →
+    `network`.
+  - `online::jev::JevClient`, só com a feature: `reqwest` 0.12 com `rustls-tls` (raízes webpki,
+    ring, sem compilar C) e `http2`. Um cliente por processo, HTTPS obrigatório, sem redirect,
+    sem proxy, timeout por tentativa, header de autorização marcado como sensível e nenhuma
+    retentativa própria.
+  - `JevClient::loopback` (`#[doc(hidden)]`) aceita só `http://127.0.0.1` e existe para os
+    testes; nenhuma opção da CLI chega a ele.
+  - O servidor fixture do seam 4 é um HTTP/1.1 mínimo sobre `TcpListener`, sem crate de
+    servidor. Os 6 testes cobrem body exato com bearer em `/v1/systemone`, os status da v0.1
+    §22, redirect recusado sem contatar o destino, ausência de retry, timeout, conexão fechada
+    e endpoint allowlisted. Nenhum erro mostra a credencial nem o texto remoto.
+- **D-059 confirmado:** com o `reqwest` no `Cargo.lock`, o teste antigo de CA-10 falharia. O
+  teste sobre o grafo resolvido continua verde no build padrão.
+- Suítes: 146 verdes no build padrão e 153 com `online`, 1 ignorado; clippy e fmt limpos nas
+  duas.
 

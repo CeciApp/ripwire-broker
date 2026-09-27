@@ -2,10 +2,15 @@
 //! enriches `context_for_task`. Everything here is off unless the process starts with
 //! `--online`; only the HTTP client needs the `online` Cargo feature (D-059).
 
+pub mod classifier;
 #[cfg(feature = "online")]
 pub mod credential;
+pub mod decision;
+#[cfg(feature = "online")]
+pub mod jev;
 pub mod prompt;
 pub mod request;
+pub mod response;
 
 use crate::model::{Item, Role};
 use serde::Serialize;
