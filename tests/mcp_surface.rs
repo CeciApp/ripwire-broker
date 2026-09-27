@@ -572,3 +572,61 @@ fn finished_calls_and_late_cancels_leave_nothing_behind() {
         "no task text in the status"
     );
 }
+
+#[cfg(feature = "online")]
+#[tokio::test]
+async fn an_online_server_says_so_in_its_status_without_the_credential() {
+    let repo = tempfile::tempdir().unwrap();
+    let args = vec![
+        "--workspace".to_string(),
+        repo.path().display().to_string(),
+        "--ripwire".into(),
+        "/nonexistent/ripwire".into(),
+        "--online".into(),
+    ];
+    let env = std::collections::HashMap::from([(
+        "RIPWIRE_BROKER_JEV_API_KEY".to_string(),
+        "tok-e2e-secret".to_string(),
+    )]);
+    let transport = StdioTransport::create_with_server_launch(
+        env!("CARGO_BIN_EXE_ripwire-broker"),
+        args,
+        Some(env),
+        TransportOptions::default(),
+    )
+    .unwrap();
+    let details = ClientDetails {
+        client_info: Implementation {
+            name: "e2e".into(),
+            version: "0".into(),
+            title: None,
+            description: None,
+            icons: vec![],
+            website_url: None,
+        },
+        capabilities: ClientCapabilities::default(),
+    };
+    let client = client_runtime::create_client(McpClientOptions::new(
+        details,
+        transport,
+        Quiet.to_mcp_client_handler(),
+    ));
+    client.clone().start().await.unwrap();
+
+    let st = status(&client).await;
+
+    assert_eq!(st["offline"], false, "{st}");
+    assert_eq!(st["online"]["enabled"], true);
+    assert_eq!(st["online"]["model"], "jev-1.13.0");
+    assert_eq!(st["online"]["endpoint_host"], "api.typesafe.ai");
+    assert!(!st.to_string().contains("tok-e2e-secret"));
+    let tools = client.request_tool_list(None).await.unwrap();
+    let task = tools
+        .tools
+        .iter()
+        .find(|t| t.name == "context_for_task")
+        .unwrap();
+    let schema = serde_json::to_value(&task.input_schema).unwrap();
+    assert_eq!(schema["properties"]["budget_tokens"]["minimum"], 512);
+    client.shut_down().await.unwrap();
+}

@@ -2,8 +2,10 @@
 //! the request's first item), can be held until the test adds permits, and counts calls,
 //! concurrency and requests dropped before they finished. Only Tokio time is used.
 use async_trait::async_trait;
+use ripwire_broker::online::SemanticStage;
 use ripwire_broker::online::classifier::{Classifier, ClassifyError};
-use ripwire_broker::online::request::JevRequest;
+use ripwire_broker::online::prompt;
+use ripwire_broker::online::request::{JevRequest, StateItem};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
@@ -20,7 +22,10 @@ pub struct Counters {
     pub dropped: AtomicUsize,
 }
 
+type Rule = Box<dyn Fn(SemanticStage, &StateItem) -> Option<f64> + Send + Sync>;
+
 pub struct FakeClassifier {
+    rule: Option<Rule>,
     probability: HashMap<String, f64>,
     default: f64,
     fail: HashMap<String, ClassifyError>,
@@ -33,6 +38,7 @@ pub struct FakeClassifier {
 impl FakeClassifier {
     pub fn new() -> Self {
         Self {
+            rule: None,
             probability: HashMap::new(),
             default: 0.9,
             fail: HashMap::new(),
@@ -47,6 +53,35 @@ impl FakeClassifier {
     pub fn answer(mut self, id: &str, p: f64) -> Self {
         self.probability.insert(id.into(), p);
         self
+    }
+
+    /// Answers every question by stage and item; `None` answers unknown. Overrides `answer`.
+    pub fn rule(
+        mut self,
+        f: impl Fn(SemanticStage, &StateItem) -> Option<f64> + Send + Sync + 'static,
+    ) -> Self {
+        self.rule = Some(Box::new(f));
+        self
+    }
+
+    /// The stage a request asks about, read from its first question.
+    pub fn stage(req: &JevRequest) -> SemanticStage {
+        let (q, item) = (&req.questions.0[0].1, &req.state.items[0]);
+        match q.instructions == prompt::instructions(SemanticStage::FileAdmission, &item.id) {
+            true => SemanticStage::FileAdmission,
+            false => SemanticStage::SourceSelection,
+        }
+    }
+
+    /// Paths asked about in each stage, in the order they were asked.
+    pub fn asked(&self, stage: SemanticStage) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| Self::stage(r) == stage)
+            .flat_map(|r| r.state.items.iter().map(|i| i.path.clone()))
+            .collect()
     }
 
     pub fn otherwise(mut self, p: f64) -> Self {
@@ -122,11 +157,15 @@ impl Classifier for FakeClassifier {
         }
         guard.1 = true;
         c.finished.fetch_add(1, SeqCst);
+        let stage = Self::stage(req);
         Ok(req
             .state
             .items
             .iter()
-            .map(|i| Some(*self.probability.get(&i.id).unwrap_or(&self.default)))
+            .map(|i| match &self.rule {
+                Some(rule) => rule(stage, i),
+                None => Some(*self.probability.get(&i.id).unwrap_or(&self.default)),
+            })
             .collect())
     }
 }

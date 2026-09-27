@@ -1324,6 +1324,10 @@ v0.1* são lacunas (§23.17), não requisitos.
 - Nenhuma tool MCP nova; nada de classificador em `context_after_edit` nem em
   `context_before_finish`.
 
+Estado: implementada ([plano](plan-fases-4-5.md), D-065 a D-072), atrás da feature Cargo
+`online`. A barra de merge da Fase 4 está verde. Num processo `--online`,
+`context_for_task` exige 512 tokens (D-072).
+
 ### Fase 5 — Completar `--online`
 
 - Lookahead de um nível (*sem fonte na v0.1*).
@@ -1460,7 +1464,7 @@ produto, mas não substituem a avaliação A/B específica do `ripwire-broker`.
 
 ## 23. Adaptador opcional `--online`
 
-**Estado:** especificado, não implementado. As fases são a 4 e a 5 do §19.
+**Estado:** Fase 4 implementada (barra de merge verde, [D-072](changelog.md#d-072--composição-em-context_for_task-e-ponto-de-parada-2)); Fase 5 pendente. As fases são a 4 e a 5 do §19. Plano em [plan-fases-4-5.md](plan-fases-4-5.md).
 
 **Fonte.** Este capítulo transporta o conteúdo normativo de
 [`spec/old/jev-integration-prd.md`](old/jev-integration-prd.md) na versão **0.1**, a única disponível. A fusão

@@ -29,14 +29,12 @@ fn settings(a: ServeArgs) -> Result<Settings, String> {
                 .into(),
         );
     }
+    // Checked before anything is published or started (CA-ONLINE-02).
     #[cfg(feature = "online")]
-    if a.online.is_some() {
-        // Checked before anything is published or started (CA-ONLINE-02).
-        let _key = ripwire_broker::online::credential::Credential::from_env()
-            .map_err(|e| e.to_string())?;
-        // Until the adapter is wired (S4.20..S4.31), refuse instead of running offline.
-        return Err("--online: the adapter is not wired into this build yet".into());
-    }
+    let online = match &a.online {
+        Some(o) => Some(online_config(o)?),
+        None => None,
+    };
     let workspace = a
         .workspace
         .canonicalize()
@@ -63,7 +61,28 @@ fn settings(a: ServeArgs) -> Result<Settings, String> {
             Err(e) => eprintln!("ripwire-broker: notes disabled: {e}"),
         }
     }
+    #[cfg(feature = "online")]
+    {
+        broker.online = online;
+    }
     Ok(Settings { upstream, broker })
+}
+
+/// The classifier behind `--online`: the credential from the environment, one shared HTTP
+/// client to the allowlisted endpoint, and the Phase 4 limits (PRD §23.6).
+#[cfg(feature = "online")]
+fn online_config(o: &cli::OnlineArgs) -> Result<ripwire_broker::online::OnlineConfig, String> {
+    use ripwire_broker::online::credential::Credential;
+    use ripwire_broker::online::jev::JevClient;
+    let key = Credential::from_env().map_err(|e| e.to_string())?;
+    let client = JevClient::new(key, &o.model, o.timeout)?;
+    let mut config = ripwire_broker::online::OnlineConfig::new(Arc::new(client));
+    config.provider = o.provider.clone();
+    config.max_in_flight = o.max_in_flight;
+    config.request_limit = o.request_limit;
+    config.max_candidates = o.max_candidates;
+    config.cache = !o.no_cache;
+    Ok(config)
 }
 
 #[tokio::main]

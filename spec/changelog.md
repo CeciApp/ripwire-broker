@@ -73,6 +73,7 @@
 | 2026-09-27 18:24 | S4.7–S4.11: validação da resposta, thresholds estritos, batcher com tamanho exato, `trait Classifier` e `JevClient` (reqwest/rustls atrás da feature) | [D-069](#d-069--protocolo-validação-e-cliente-http) |
 | 2026-09-27 18:28 | S4.12–S4.14: `WorkspaceReader` (elegibilidade, snapshot com sha256, preview) e unidades; ponto de parada 1, 152/159 verdes | [D-070](#d-070--leitura-do-workspace-e-ponto-de-parada-1) |
 | 2026-09-27 18:37 | S4.15–S4.19: scheduler com `JoinSet`, fila limitada, teto em voo, limite de requests, auth e cancelamento abortam irmãs; 158/165 verdes | [D-071](#d-071--scheduler-mínimo) |
+| 2026-09-27 18:54 | S4.20–S4.31: adaptador ligado ao `context_for_task` (gate por rota, admissão→seleção, merge aditivo, cache, status); piso online de 512 tokens; ponto de parada 2 (barra de merge da Fase 4), 182/191 verdes, p95 local 8,3 ms | [D-072](#d-072--composição-em-context_for_task-e-ponto-de-parada-2) |
 
 ---
 
@@ -1442,4 +1443,77 @@ Fatias S4.15 a S4.19 do plano, sem retry nem cooldown (Fase 5).
   `test-util` do tokio só para testes (relógio pausado).
 - Os testes do scheduler rodaram 30 vezes seguidas sem falha. Suítes: 158 verdes no build
   padrão e 165 com `online`, 1 ignorado; clippy e fmt limpos nas duas.
+
+## D-072 — Composição em `context_for_task` e ponto de parada 2
+
+Fatias S4.20 a S4.31 do plano.
+
+- **Fiação.** `BrokerConfig.online: Option<OnlineConfig>` (`None` em `BrokerConfig::new`)
+  vira um `OnlineEngine` no `connect`. O passo `semantic_step` fica entre a rota e
+  `finish_task`, portanto antes do budgeter, que conta os bytes de `provenance.online`.
+  - O `main` monta o `JevClient` real com a credencial do ambiente, e a recusa transitória de
+    D-068 saiu.
+  - O status degradado (sem Ripwire) agora publica o modo online e `offline: false`. Antes
+    dizia `offline: true` mesmo com `--online`.
+- **S4.20/S4.21, gate por rota (D-060).** O classificador roda se a rota chamou `explore`
+  (`orient`, `change` sem símbolo e fallback de símbolo inexistente). Nas outras rotas, e
+  sempre em `context_after_edit` e `context_before_finish`, nenhuma chamada. Rota pulada
+  traz `discovery: "skipped"` e a limitação `semantic_skipped`.
+- **S4.22, coordenador.** Até 16 paths do planner passam pelo `WorkspaceReader`; os
+  inelegíveis viram a limitação `semantic_not_sent` (contagem por motivo, sem path) e deixam a
+  descoberta `incomplete`. A admissão usa o preview; a seleção usa as unidades dos admitidos.
+  As duas etapas dividem o limite de 24 requests por chamada.
+- **S4.23–S4.25, merge.** Decisões desta fatia:
+  - item estrutural: mantém `source` (Ripwire) e ganha `semantic`. É a evidência do bloco que
+    começa na linha do símbolo, se houver; senão, a da admissão do arquivo. O estado vale
+    `admitted`, `rejected`, `selected_source`, `reading_lead` ou `excluded`. A rejeição
+    aparece, não some (risco "merge esconder discordância", §23.16);
+  - bloco selecionado de um símbolo do Ripwire: o item sobe para a faixa `CENTRAL`. Nada é
+    rebaixado nem removido;
+  - evidência sem símbolo correspondente: item `semantic_location`, com papel novo
+    `Role::Semantic` (`"semantic"`, só aparece com `--online`) e `source = {verb: "jev",
+    basis: "remote_classifier"}`. O estado fica em `semantic.state`; conteúdo só em
+    `selected_source`; nunca vem com caller, teste ou risco;
+  - `semantic.lines` traz o intervalo avaliado (one-based, inclusivo), e
+    `semantic.request_digest` o sha256 do request;
+  - `SemanticEvidence` fica num `Box` no `Item`, por causa do aviso de tamanho de variante do
+    clippy. A serialização não muda.
+- **S4.26, falha parcial.** Falhas viram `semantic_incomplete` e `discovery: "incomplete"`, e
+  a resposta estrutural sai igual à offline (CA-ONLINE-15).
+- **S4.27, orçamento.** Achado: o esqueleto do envelope, que nunca é cortado, já ocupa ~224
+  dos 256 tokens mínimos; com `provenance.online` e as limitações online, 256 é impossível de
+  garantir.
+  - Decisão: num processo `--online`, `context_for_task` exige **512** tokens
+    (`MIN_ONLINE_BUDGET_TOKENS`), e o schema publicado mostra esse mínimo. As outras duas
+    tools e o modo offline continuam com 256.
+  - Um teste confere o pior caso (todas as limitações online) em 512, e a varredura de 512 a
+    4.000 nunca passa do orçamento (CA-ONLINE-14).
+  - Desvio do plano: `the_package_leads_with_status_summary_and_limitations` foi retirado.
+    Reordenar os campos do envelope mudaria a saída offline byte a byte (princípio 2 do
+    plano). O `summary` já abre o envelope.
+- **S4.28, envelope.** Sem `--online`, nenhum campo novo aparece: nem `online`, nem
+  `semantic`, nem `semantic_location`, nem as limitações novas.
+- **S4.29, cache.** O valor guarda também o digest do request que trouxe a resposta
+  (metadado não sensível, §23.8). A chave muda com modelo, query, versão da fonte, range e
+  etapa. A inspeção não encontra query, path, fonte nem credencial (CA-ONLINE-13).
+- **S4.30, status.** Bloco `online` com provider, modelo, host do endpoint, tetos, requests,
+  cache hits, decisões em cache e a categoria do último erro, sem conteúdo.
+- **S4.31.** O broker de ponta a ponta com o `JevClient` real contra o fixture local: bearer
+  em todo request, e o root absoluto nunca aparece no body. Um e2e do binário com
+  `--online` confere o status e o piso de 512 no schema.
+- **Medição do ponto de parada 2.** Overhead local de batching e merge, sem Ripwire e sem
+  rede, em release: 16 arquivos de ~16 KiB e 24 requests por chamada, p50 7,9 ms e **p95
+  8,3 ms** (meta < 75 ms). Fica no teste ignorado `overhead_of_batching_and_merge`.
+- **Barra de merge da Fase 4 (§23.15): verde.** CA-10, CA-ONLINE-01 a 08, 10, 13, 14 e 15,
+  com `L = 4`.
+- **Pendências registradas:**
+  - `--jev-max-source-bytes` e `--jev-deadline-ms` são aceitos, mas ainda não têm efeito. O
+    prazo é o S5.5; o limite de fonte renderizada entra junto.
+  - O teste manual num host real com `--online` depende de o usuário autorizar o envio de
+    código do repositório.
+  - Uma execução da suíte padrão teve uma falha que não se repetiu em outras 21 execuções,
+    8 delas com as duas suítes em paralelo. O teste não foi identificado; se voltar, vira
+    investigação.
+- Suítes: 182 verdes no build padrão e 191 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
 

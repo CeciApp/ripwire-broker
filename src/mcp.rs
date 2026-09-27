@@ -2,8 +2,8 @@
 //! The only module that knows about the SDK's server types; the core stays SDK-agnostic.
 
 use crate::broker::{
-    Broker, BrokerConfig, BrokerError, EditRequest, FinishRequest, MIN_BUDGET_TOKENS, Mode,
-    TaskRequest,
+    Broker, BrokerConfig, BrokerError, EditRequest, FinishRequest, MIN_BUDGET_TOKENS,
+    MIN_ONLINE_BUDGET_TOKENS, Mode, TaskRequest,
 };
 use crate::model::SCHEMA_VERSION;
 use crate::upstream::{RipwireUpstream, UpstreamConfig};
@@ -193,7 +193,7 @@ impl BrokerServer {
                 json!({
                     "broker_version": env!("CARGO_PKG_VERSION"),
                     "schema_version": SCHEMA_VERSION,
-                    "offline": true,
+                    "offline": self.settings.broker.online.is_none(),
                     "telemetry": "none",
                     "workspace": if self.settings.broker.redact_workspace { "<redacted>".to_string() } else { self.settings.broker.workspace.display().to_string() },
                     "upstream": {
@@ -207,13 +207,29 @@ impl BrokerServer {
                 })
             }
         };
+        // Without a connected broker the online block has no totals yet, but the mode is
+        // still published (RF-ONLINE-15).
+        if let (Some(o), None) = (&self.settings.broker.online, status.get("online")) {
+            status["online"] = json!({
+                "enabled": true,
+                "provider": o.provider,
+                "model": o.classifier.model(),
+                "endpoint_host": o.endpoint_host,
+                "max_in_flight": o.max_in_flight,
+                "request_limit": o.request_limit,
+            });
+        }
         status["inflight"] = self.inflight.counts();
         status
     }
 }
 
 fn budget_schema(default: u32) -> Value {
-    json!({"type": "integer", "minimum": MIN_BUDGET_TOKENS, "maximum": 100000, "default": default,
+    budget_schema_from(default, MIN_BUDGET_TOKENS)
+}
+
+fn budget_schema_from(default: u32, minimum: u32) -> Value {
+    json!({"type": "integer", "minimum": minimum, "maximum": 100000, "default": default,
            "description": "Upper bound for the estimated tokens of the whole answer (4 bytes of JSON per token)."})
 }
 
@@ -238,7 +254,12 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
     .expect("static tool definition")
 }
 
-pub fn tools() -> Vec<Tool> {
+/// The public tools; `online` raises the `context_for_task` budget floor (D-072).
+pub fn tools(online: bool) -> Vec<Tool> {
+    let task_floor = match online {
+        true => MIN_ONLINE_BUDGET_TOKENS,
+        false => MIN_BUDGET_TOKENS,
+    };
     vec![
         tool(
             "context_for_task",
@@ -248,7 +269,7 @@ pub fn tools() -> Vec<Tool> {
              plain words, a symbol name, or a pasted stack trace.",
             json!({
                 "task": {"type": "string", "minLength": 1, "description": "The request in natural language, a symbol, or a raw stack trace."},
-                "budget_tokens": budget_schema(2500),
+                "budget_tokens": budget_schema_from(2500, task_floor),
                 "mode": {"type": "string", "enum": ["auto", "orient", "debug", "change", "review"], "default": "auto",
                          "description": "auto routes by content; set it to force a route."},
                 "include_docs": {"type": "boolean", "default": true, "description": "Allow related documentation."},
@@ -402,7 +423,7 @@ impl ServerHandler for BrokerServer {
         _context: &RequestContext,
         _runtime: Arc<dyn McpServer>,
     ) -> Result<ListToolsResult, RpcError> {
-        serde_json::from_value(json!({"tools": tools(), "cacheScope": "private", "ttlMs": 0, "resultType": "complete"}))
+        serde_json::from_value(json!({"tools": tools(self.settings.broker.online.is_some()), "cacheScope": "private", "ttlMs": 0, "resultType": "complete"}))
             .map_err(|e| RpcError::internal_error().with_message(e.to_string()))
     }
 

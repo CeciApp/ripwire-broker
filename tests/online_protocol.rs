@@ -295,3 +295,131 @@ fn the_production_client_accepts_only_the_allowlisted_https_endpoint() {
     assert_eq!(c.endpoint(), "https://api.typesafe.ai/v1/systemone");
     assert_eq!(c.model(), "jev-1.13.0");
 }
+
+// --- S4.31: the broker end to end through the real client ---
+
+mod common;
+
+/// A fixture that answers every question of every request with `p`, for `n` connections.
+async fn answering(n: usize, p: f64) -> Fixture {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(vec![]));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        for _ in 0..n {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![];
+            let mut chunk = [0u8; 8192];
+            let (head_end, length) = loop {
+                let got = sock.read(&mut chunk).await.unwrap_or(0);
+                if got == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..got]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    break (i + 4, len);
+                }
+            };
+            while buf.len() < head_end + length {
+                let got = sock.read(&mut chunk).await.unwrap_or(0);
+                if got == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..got]);
+            }
+            let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+            let body = buf[head_end..].to_vec();
+            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let answers: serde_json::Map<String, serde_json::Value> = req["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|k| (k.clone(), serde_json::json!({"type": "noul", "noul": p})))
+                .collect();
+            log.lock().unwrap().push(Captured { head, body });
+            let out = serde_json::json!({"model": req["model"], "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}})
+                .to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}",
+                out.len()
+            );
+            let _ = sock.write_all(reply.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    Fixture { port, seen }
+}
+
+#[tokio::test]
+async fn the_broker_enriches_a_task_through_the_real_client() {
+    use ripwire_broker::broker::{Broker, BrokerConfig, TaskRequest};
+    use ripwire_broker::online::OnlineConfig;
+
+    let ws = tempfile::tempdir().unwrap();
+    common::write(
+        ws.path(),
+        "src/auth.py",
+        "def validate_token(token):\n    return token == \"ok\"\n\n\ndef login(user, token):\n    return user\n\n\ndef export_report(user, token):\n    return \"report\"\n",
+    );
+    common::write(
+        ws.path(),
+        "src/routes.py",
+        "def export_route(req):\n    pass\n",
+    );
+    common::write(
+        ws.path(),
+        "tests/test_auth.py",
+        "def test_login():\n    pass\n",
+    );
+    let f = answering(20, 0.9).await;
+    let mut config = BrokerConfig::new(ws.path());
+    config.online = Some(OnlineConfig::new(Arc::new(client(
+        f.port,
+        Duration::from_secs(5),
+    ))));
+    let upstream =
+        Arc::new(common::fake::FakeUpstream::new().answer("explore", "explore_export_auth"));
+    let broker = Broker::connect(upstream, config).await.unwrap();
+
+    let out = serde_json::to_value(
+        broker
+            .context_for_task(TaskRequest::new("how are the routes authenticated?"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let online = &out["provenance"]["online"];
+    assert_eq!(online["discovery"], "complete", "{out:#}");
+    let sent = f.seen.lock().unwrap().clone();
+    assert_eq!(online["requests"].as_u64().unwrap() as usize, sent.len());
+    assert!(sent.len() >= 2, "admission, then selection");
+    assert!(
+        sent.iter()
+            .all(|c| c.header("authorization").as_deref() == Some("Bearer tok-123"))
+    );
+    let body = String::from_utf8(sent[0].body.clone()).unwrap();
+    assert!(
+        !body.contains(ws.path().to_str().unwrap()),
+        "never the absolute root (PRD §23.9)"
+    );
+    let login = out["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["symbol"] == "login")
+        .unwrap();
+    assert_eq!(login["semantic"]["state"], "selected_source");
+    assert_eq!(login["semantic"]["probability"], 0.9);
+}

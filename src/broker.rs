@@ -5,6 +5,7 @@ use crate::metrics::{Metrics, RequestRecord, UpstreamSpan};
 use crate::model::*;
 use crate::normalize::{self, Entry};
 use crate::notes::{self as note_engine, NoteEngine, SummarizerStatus};
+use crate::online::{self, OnlineConfig, OnlineEngine, merge as online_merge};
 use crate::router;
 use crate::session::{self, SessionMemory};
 use crate::summarizer::Summarizer;
@@ -97,11 +98,19 @@ pub fn check_version(version: &str) -> Result<(), BrokerError> {
     }
 }
 
+/// `context_for_task` floor in a process started with `--online`: the envelope skeleton,
+/// which is never cut, also carries `provenance.online` and the online limitations (D-072).
+pub const MIN_ONLINE_BUDGET_TOKENS: u32 = 512;
+
 fn check_budget(budget: u32) -> Result<(), BrokerError> {
-    if budget < MIN_BUDGET_TOKENS {
+    check_budget_at(budget, MIN_BUDGET_TOKENS)
+}
+
+fn check_budget_at(budget: u32, min: u32) -> Result<(), BrokerError> {
+    if budget < min {
         return Err(BrokerError {
             error: "invalid_input",
-            message: format!("budget_tokens must be at least {MIN_BUDGET_TOKENS}"),
+            message: format!("budget_tokens must be at least {min}"),
         });
     }
     Ok(())
@@ -138,6 +147,8 @@ pub struct BrokerConfig {
     pub summarizer: Option<Arc<dyn Summarizer>>,
     /// Longest a response waits for a note before moving on (D-036).
     pub summarizer_wait: Duration,
+    /// The remote classifier (PRD §23); `None` keeps the broker offline (RF-ONLINE-01).
+    pub online: Option<OnlineConfig>,
 }
 
 impl BrokerConfig {
@@ -151,6 +162,7 @@ impl BrokerConfig {
             incremental: false,
             summarizer: None,
             summarizer_wait: Duration::from_millis(1500),
+            online: None,
         }
     }
 }
@@ -267,6 +279,7 @@ pub struct Broker {
     incremental: bool,
     session: Mutex<SessionMemory>,
     notes: Option<NoteEngine>,
+    online: Option<OnlineEngine>,
     metrics: Mutex<Metrics>,
     last_error: Mutex<Option<&'static str>>,
     next_request: AtomicU64,
@@ -284,7 +297,26 @@ pub struct BrokerStatus {
     pub upstream: UpstreamStatus,
     pub budget_defaults: Value,
     pub summarizer: SummarizerStatus,
+    /// Only for a process started with `--online` (RF-ONLINE-15).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub online: Option<OnlineStatus>,
     pub metrics: Metrics,
+}
+
+/// The classifier's health for the status resource: no query, path, code or credential.
+#[derive(Debug, Serialize)]
+pub struct OnlineStatus {
+    pub enabled: bool,
+    pub provider: String,
+    pub model: String,
+    pub endpoint_host: String,
+    pub max_in_flight: usize,
+    pub request_limit: usize,
+    pub requests: u64,
+    pub cache_hits: u64,
+    pub cached_decisions: usize,
+    /// Error category only.
+    pub last_error: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,6 +356,14 @@ impl Broker {
             error: "workspace_violation",
             message,
         })?;
+        let online = config
+            .online
+            .map(|o| OnlineEngine::new(o, workspace.root()))
+            .transpose()
+            .map_err(|message| BrokerError {
+                error: "workspace_violation",
+                message,
+            })?;
         Ok(Self {
             upstream,
             workspace,
@@ -336,6 +376,7 @@ impl Broker {
             notes: config
                 .summarizer
                 .map(|m| NoteEngine::new(m, config.summarizer_wait)),
+            online,
             metrics: Mutex::new(Metrics::default()),
             last_error: Mutex::new(None),
             next_request: AtomicU64::new(1),
@@ -356,7 +397,7 @@ impl Broker {
             } else {
                 self.workspace.root().display().to_string()
             },
-            offline: true,
+            offline: self.online.is_none(),
             telemetry: "none",
             upstream: UpstreamStatus {
                 ripwire_version: self.ripwire_version.clone(),
@@ -382,6 +423,21 @@ impl Broker {
                     cached_notes: 0,
                 },
             },
+            online: self.online.as_ref().map(|engine| {
+                let (config, totals) = (engine.config(), engine.totals());
+                OnlineStatus {
+                    enabled: true,
+                    provider: config.provider.clone(),
+                    model: engine.model().into(),
+                    endpoint_host: config.endpoint_host.clone(),
+                    max_in_flight: config.max_in_flight,
+                    request_limit: config.request_limit,
+                    requests: totals.requests,
+                    cache_hits: totals.cache_hits,
+                    cached_decisions: engine.cached_decisions(),
+                    last_error: totals.last_error,
+                }
+            }),
             metrics: {
                 let mut m = self.metrics.lock().unwrap().clone();
                 m.session.remembered = self.session.lock().unwrap().len();
@@ -392,6 +448,14 @@ impl Broker {
 
     /// `path` (absolute, or relative to the root) as workspace-relative, or `None` if it
     /// resolves outside (CA-08).
+    /// The smallest `budget_tokens` `context_for_task` accepts in this process.
+    pub fn min_task_budget(&self) -> u32 {
+        match self.online {
+            Some(_) => MIN_ONLINE_BUDGET_TOKENS,
+            None => MIN_BUDGET_TOKENS,
+        }
+    }
+
     pub fn in_workspace(&self, path: &str) -> Option<String> {
         self.workspace.relative(path).ok()
     }
@@ -525,6 +589,7 @@ impl Broker {
                 verbs,
                 budget: req.budget_tokens,
                 suppress_seen: !req.include_seen,
+                online: None,
             },
             entries,
         );
@@ -662,6 +727,7 @@ impl Broker {
                 budget: req.budget_tokens,
                 // The gate's evidence must always show (CA-05).
                 suppress_seen: false,
+                online: None,
             },
             entries,
         );
@@ -675,7 +741,7 @@ impl Broker {
     }
 
     async fn context_for_task_inner(&self, req: TaskRequest) -> Result<Envelope, BrokerError> {
-        check_budget(req.budget_tokens)?;
+        check_budget_at(req.budget_tokens, self.min_task_budget())?;
         let route = router::route(&req.task, req.mode);
         let mut verbs = Vec::new();
         let entries = match (route.intent, route.symbol.as_deref()) {
@@ -769,13 +835,51 @@ impl Broker {
         verbs: Vec<&'static str>,
         entries: Vec<Entry>,
     ) -> Envelope {
-        let (mut env, included) = self.finish_task(req, intent, verbs, entries);
+        let (entries, online) = self.semantic_step(req, intent, &verbs, entries).await;
+        let (mut env, included) = self.finish_task(req, intent, verbs, entries, online);
         if let Some(engine) = &self.notes {
             self.attach_notes(engine, &mut env, &included, !req.include_seen)
                 .await;
         }
         self.remember(&env);
         env
+    }
+
+    /// The `--online` step (PRD §23.4, D-060, D-061): on routes that ended in `explore`, the
+    /// classifier rescores the planner's paths and the evidence is merged additively; on the
+    /// others it is skipped, and the envelope says so.
+    async fn semantic_step(
+        &self,
+        req: &TaskRequest,
+        intent: Intent,
+        verbs: &[&'static str],
+        mut entries: Vec<Entry>,
+    ) -> (Vec<Entry>, Option<OnlineProvenance>) {
+        let Some(engine) = &self.online else {
+            return (entries, None);
+        };
+        let provider = engine.config().provider.clone();
+        if !verbs.contains(&"explore") {
+            let route = serde_json::to_value(intent)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            entries.push(online_merge::skipped(&route));
+            return (
+                entries,
+                Some(online_merge::provenance(&provider, engine.model(), None)),
+            );
+        }
+        let ranked = online::ranked_paths(entries.iter().filter_map(|e| match e {
+            Entry::Item(p, i) => Some((*p, i)),
+            _ => None,
+        }));
+        let disc = engine.discover(&req.task, &ranked).await;
+        let online = online_merge::provenance(&provider, engine.model(), Some(&disc));
+        (
+            online_merge::merge(entries, &disc, engine.model()),
+            Some(online),
+        )
     }
 
     /// Records what `env` delivers in the session memory. The last step of every tool, on
@@ -854,6 +958,7 @@ impl Broker {
         intent: Intent,
         verbs: Vec<&'static str>,
         entries: Vec<Entry>,
+        online: Option<OnlineProvenance>,
     ) -> (Envelope, Vec<Item>) {
         let entries: Vec<Entry> = entries
             .into_iter()
@@ -878,6 +983,7 @@ impl Broker {
                 verbs,
                 budget: req.budget_tokens,
                 suppress_seen: !req.include_seen,
+                online,
             },
             entries,
         )
@@ -914,6 +1020,7 @@ impl Broker {
             verbs,
             budget,
             suppress_seen,
+            online,
         } = shape;
         let lead = match intent {
             Some(i) => serde_json::to_value(i)
@@ -942,6 +1049,7 @@ impl Broker {
                 workspace: self.workspace.root().display().to_string(),
                 ripwire_version: self.ripwire_version.clone(),
                 broker_version: env!("CARGO_PKG_VERSION"),
+                online,
             },
             budget: Budget {
                 requested_tokens: budget,
@@ -1025,6 +1133,8 @@ struct Shape {
     budget: u32,
     /// False for the finish gate, whose evidence must always show (CA-05).
     suppress_seen: bool,
+    /// `provenance.online`; set before the budget so its bytes are counted.
+    online: Option<OnlineProvenance>,
 }
 
 fn push_once(verbs: &mut Vec<&'static str>, verb: &'static str) {
