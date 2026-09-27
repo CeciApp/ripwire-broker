@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod reader;
 pub mod request;
 pub mod response;
+pub mod retry_after;
 pub mod scheduler;
 
 pub use coordinator::{OnlineConfig, OnlineEngine, OnlineTotals};

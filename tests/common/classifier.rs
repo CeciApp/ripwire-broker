@@ -37,6 +37,8 @@ pub struct FakeClassifier {
     hold: Option<Arc<Semaphore>>,
     pub counters: Arc<Counters>,
     pub seen: Mutex<Vec<JevRequest>>,
+    /// First item id and Tokio time of every call, in call order.
+    pub started: Mutex<Vec<(String, tokio::time::Instant)>>,
 }
 
 impl FakeClassifier {
@@ -52,6 +54,7 @@ impl FakeClassifier {
             hold: None,
             counters: Arc::default(),
             seen: Mutex::new(vec![]),
+            started: Mutex::new(vec![]),
         }
     }
 
@@ -156,6 +159,16 @@ impl Classifier for FakeClassifier {
         c.max_in_flight.fetch_max(now, SeqCst);
         let mut guard = Guard(c.clone(), false);
         self.seen.lock().unwrap().push(req.clone());
+        let head = req
+            .state
+            .items
+            .first()
+            .map(|i| i.id.clone())
+            .unwrap_or_default();
+        self.started
+            .lock()
+            .unwrap()
+            .push((head, tokio::time::Instant::now()));
         if let Some(hook) = &self.on_call {
             hook(Self::stage(req));
         }

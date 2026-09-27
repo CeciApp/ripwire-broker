@@ -432,3 +432,129 @@ async fn split_never_deadlocks() {
 
     assert_eq!(answered(&r).len(), 64);
 }
+
+// --- S5.3: 429 and the shared cooldown (CA-ONLINE-09) ---
+
+fn limited(secs: &str) -> ClassifyError {
+    ClassifyError::RateLimited {
+        retry_after: Some(secs.into()),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_429_sets_a_shared_cooldown_for_all_siblings() {
+    let t0 = tokio::time::Instant::now();
+    let fake = Arc::new(
+        FakeClassifier::new()
+            .fail_times("j0", limited("5"), 1)
+            .delay("j1", std::time::Duration::from_millis(10)),
+    );
+    let probe = fake.clone();
+    let watcher = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        probe.counters.in_flight.load(SeqCst)
+    });
+    let jobs = (0..6)
+        .map(|n| batch(n, SemanticStage::FileAdmission, &[n]))
+        .collect();
+
+    let r = run_jobs(fake.clone(), config(2, 1000), jobs).await;
+
+    assert_eq!(
+        watcher.await.unwrap(),
+        0,
+        "waiting for the cooldown holds no slot"
+    );
+    let started = fake.started.lock().unwrap().clone();
+    let late: Vec<&(String, tokio::time::Instant)> = started.iter().skip(2).collect();
+    assert!(
+        late.iter()
+            .all(|(_, at)| *at >= t0 + std::time::Duration::from_secs(5)),
+        "no request starts before the Retry-After: {started:?}"
+    );
+    assert_eq!(
+        started.iter().filter(|(id, _)| id == "j0").count(),
+        2,
+        "j0 gets a second attempt"
+    );
+    assert_eq!(answered(&r).len(), 6);
+    assert_eq!(r.rate_limited, 1);
+    assert_eq!(r.splits, 0, "a 429 is not the batch's fault");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_cooldown_keeps_the_longest_retry_after() {
+    let t0 = tokio::time::Instant::now();
+    let fake = Arc::new(
+        FakeClassifier::new()
+            .fail_times("j0", limited("3"), 1)
+            .fail_times("j1", limited("8"), 1),
+    );
+    let jobs = (0..4)
+        .map(|n| batch(n, SemanticStage::FileAdmission, &[n]))
+        .collect();
+
+    let r = run_jobs(fake.clone(), config(2, 1000), jobs).await;
+
+    let started = fake.started.lock().unwrap().clone();
+    assert!(
+        started
+            .iter()
+            .skip(2)
+            .all(|(_, at)| *at >= t0 + std::time::Duration::from_secs(8)),
+        "{started:?}"
+    );
+    assert_eq!(answered(&r).len(), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_works_during_cooldown() {
+    let t0 = tokio::time::Instant::now();
+    let fake = Arc::new(FakeClassifier::new().fail("j0", limited("20")));
+    let scheduler = Arc::new(Scheduler::new(fake.clone(), config(2, 1000)));
+    let (rx, _producer) = produce(&scheduler, 5);
+    let cancel = CancellationToken::new();
+    let run = tokio::spawn({
+        let (s, c) = (scheduler.clone(), cancel.clone());
+        async move { s.run(rx, c).await }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    cancel.cancel();
+    let r = run.await.unwrap();
+
+    assert!(
+        tokio::time::Instant::now() < t0 + std::time::Duration::from_secs(2),
+        "no waiting for the cooldown"
+    );
+    assert_eq!(r.stop, Some(Stop::Cancelled));
+    assert!(fake.calls() <= 2, "nothing starts during the cooldown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_429_or_an_excessive_retry_after_is_final() {
+    let fake = Arc::new(FakeClassifier::new().fail("j0", limited("1")));
+    let r = run_jobs(
+        fake.clone(),
+        config(2, 1000),
+        vec![batch(0, SemanticStage::FileAdmission, &[0])],
+    )
+    .await;
+    assert_eq!(fake.calls(), 2, "one retry after the cooldown, then final");
+    assert!(matches!(
+        r.results[0].result,
+        Err(ClassifyError::RateLimited { .. })
+    ));
+
+    let t0 = tokio::time::Instant::now();
+    let fake = Arc::new(FakeClassifier::new().fail("j0", limited("3600")));
+    let r = run_jobs(
+        fake.clone(),
+        config(2, 1000),
+        vec![batch(0, SemanticStage::FileAdmission, &[0])],
+    )
+    .await;
+    assert_eq!(fake.calls(), 1, "an hour is not worth waiting for");
+    assert!(tokio::time::Instant::now() < t0 + std::time::Duration::from_secs(1));
+    assert!(r.incomplete());
+}

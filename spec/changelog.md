@@ -76,6 +76,8 @@
 | 2026-09-27 18:54 | S4.20–S4.31: adaptador ligado ao `context_for_task` (gate por rota, admissão→seleção, merge aditivo, cache, status); piso online de 512 tokens; ponto de parada 2 (barra de merge da Fase 4), 182/191 verdes, p95 local 8,3 ms | [D-072](#d-072--composição-em-context_for_task-e-ponto-de-parada-2) |
 | 2026-09-27 18:58 | S5.1: frescor — lote com fonte alterada não é enviado; evidência de arquivo alterado é descartada antes da saída; p95 local 21,9 ms | [D-073](#d-073--frescor-das-fontes) |
 | 2026-09-27 19:02 | S5.2: retry por etapa e divisão ao meio no scheduler; cada tentativa conta no limite e revalida o frescor; 191/200 verdes | [D-074](#d-074--retry-e-divisão-de-lotes) |
+| 2026-09-27 19:07 | S5.3: `429` com cooldown compartilhado (`Retry-After` em segundos ou data HTTP), sem ocupar vaga e cancelável; 196/205 verdes | [D-075](#d-075--429-e-cooldown-compartilhado) |
+| 2026-09-27 19:07 | Teste manual autorizado com `--online` neste repositório: contrato, cache, gate por rota, status e credencial conferidos; rescore sem candidatos novos confirmado | [D-076](#d-076--teste-manual-com---online) |
 
 ---
 
@@ -1591,4 +1593,68 @@ Fatia S5.2 do plano (v0.1 §11.9, §23.5).
   dividem). Os 13 testes do scheduler rodaram 30 vezes seguidas sem falha.
 - Suítes: 191 verdes no build padrão e 200 com `online`, 2 ignorados; clippy e fmt limpos nas
   duas.
+
+## D-075 — `429` e cooldown compartilhado
+
+Fatia S5.3 do plano (v0.1 §11.8, CA-ONLINE-09).
+
+- **`online::retry_after::parse`** é puro e não usa crate de data. Lê segundos inteiros ou a
+  data HTTP no formato IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`); uma data passada vale
+  espera zero. Outros formatos, dia ou mês inválidos devolvem `None`. O cálculo de dias é o
+  `days_from_civil` de H. Hinnant, e os testes usam o exemplo da RFC 9110 e 29/02/2024.
+- **Cooldown.** Um prazo único no laço do scheduler, compartilhado por todos os lotes, que
+  guarda o maior valor observado. Enquanto ele não vence, nada sai: nem retry, nem metade de
+  lote, nem job novo. Como a espera acontece no laço e não nas tasks, ela não ocupa vaga de
+  envio; o teste confere zero requests em voo durante a espera. O cancelamento interrompe a
+  espera na hora.
+- **Política.**
+  - O lote que recebeu `429` ganha uma nova tentativa depois do cooldown, sem ser dividido,
+    porque a culpa não é do lote.
+  - Um segundo `429` do mesmo lote é final.
+  - Sem `Retry-After` legível, a espera é de 1 s (`DEFAULT_COOLDOWN`). Acima de 30 s
+    (`MAX_COOLDOWN`), o scheduler não espera: o lote fica com falha `rate_limited` e a
+    descoberta, incompleta. Isso impede que um provider prenda a resposta ao agente; o prazo
+    total entra no S5.5.
+  - `Report.rate_limited` conta os `429` para a métrica `jev_rate_limit_total` do S5.10.
+- **Testes.** Quatro novos no seam 3 e um no seam 2. Uma mutação que desliga o cooldown
+  derruba exatamente os três testes de espera. Os 17 testes do scheduler rodaram 30 vezes
+  seguidas sem falha.
+- Suítes: 196 verdes no build padrão e 205 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-076 — Teste manual com `--online`
+
+Pendência do ponto de parada 2 (D-072), autorizada pelo usuário: envio de trechos elegíveis
+deste repositório ao TypeSafe.
+
+- **Montagem.** Binário release com `--features online`, servidor MCP sobre este
+  repositório com o Ripwire 0.6.4 real e a chave lida de `~/.config/ripwire-broker/jev.key`
+  só para o ambiente do processo. Um cliente JSON-RPC cru no scratchpad, no formato do cliente
+  dos testes. Os envelopes ficaram só no scratchpad.
+- **Resultados.**
+
+  | Chamada | Tempo | Requests | Cache hits | Descoberta | Tokens |
+  | --- | --- | --- | --- | --- | --- |
+  | orientação ("como o broker mantém a resposta no orçamento?") | 2,38 s | 7 | 0 | complete | 2.386/2.500 |
+  | a mesma, repetida | 0,02 s | 0 | 28 | complete | 2.385/2.500 |
+  | mudança ("pular a injeção do hook com prompt vazio") | 0,64 s | 4 | 0 | complete | 2.499/2.500 |
+  | símbolo (`` `estimate_tokens` ``) | 0,00 s | 0 | 0 | skipped | 597/2.500 |
+
+  - `context_after_edit` não teve `provenance.online`.
+  - O status mostrou `offline: false`, 11 requests, 47 decisões em cache e nenhum erro.
+  - A chave não apareceu em nenhuma saída gravada.
+- **Qualidade observada.**
+  - **Mudança:** o classificador selecionou exatamente `hook.rs::handle` (p = 0,74), a função
+    que decide a injeção. Rejeitou ou excluiu os outros 10 itens do Ripwire, e todos
+    continuaram no envelope, com a discordância visível.
+  - **Orientação:** o `explore` não trouxe `src/budget.rs` entre os candidatos. Como o rescore
+    só avalia o que o Ripwire já achou, o classificador selecionou trechos de `hook.rs` e
+    `normalize.rs` (0,65 a 0,85), e os blocos do Ripwire ficaram como reading leads (0,44 a
+    0,50). É a limitação prevista da Fase 4. O lookahead de um nível (S5.7) teria incluído
+    `src/budget.rs`, vizinho em `src/`. Isso reforça que o ganho de recall depende do S5.7 e
+    precisa ser medido no A/B.
+  - Os trechos selecionados sem símbolo (`semantic_location`, prioridade `BODY`) ocuparam 4 dos
+    8 itens mostrados em 2.500 tokens, como manda a ordem do §23.4 (fonte selecionada antes de
+    caller estrutural). O A/B precisa conferir se essa ordem ajuda o agente.
+- Com isso o ponto de parada 2 fica completo.
 

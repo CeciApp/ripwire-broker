@@ -669,3 +669,48 @@ fn the_cache_holds_no_query_path_source_or_credential() {
     }
     assert!(dump.contains("0.83"));
 }
+
+// --- S5.3: Retry-After ---
+
+use ripwire_broker::online::retry_after;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[test]
+fn retry_after_parses_seconds_and_http_dates() {
+    // Sun, 06 Nov 1994 08:49:37 GMT is 784111777 seconds after the epoch (RFC 9110 example).
+    let date = UNIX_EPOCH + Duration::from_secs(784_111_777);
+    let now = date - Duration::from_secs(10);
+
+    assert_eq!(retry_after::parse("7", now), Some(Duration::from_secs(7)));
+    assert_eq!(retry_after::parse(" 0 ", now), Some(Duration::ZERO));
+    assert_eq!(
+        retry_after::parse("Sun, 06 Nov 1994 08:49:37 GMT", now),
+        Some(Duration::from_secs(10))
+    );
+    assert_eq!(
+        retry_after::parse(
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            date + Duration::from_secs(5)
+        ),
+        Some(Duration::ZERO),
+        "a date in the past means now"
+    );
+    assert_eq!(
+        retry_after::parse(
+            "Thu, 29 Feb 2024 00:00:00 GMT",
+            UNIX_EPOCH + Duration::from_secs(1_709_164_790)
+        ),
+        Some(Duration::from_secs(10))
+    );
+    for bad in [
+        "",
+        "soon",
+        "-3",
+        "1.5",
+        "Sun, 32 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Foo 1994 08:49:37 GMT",
+    ] {
+        assert_eq!(retry_after::parse(bad, now), None, "{bad:?}");
+    }
+    let _ = SystemTime::now();
+}

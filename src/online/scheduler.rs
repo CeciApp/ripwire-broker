@@ -10,8 +10,10 @@ use super::classifier::{Classifier, ClassifyError};
 use super::request::{JevRequest, build};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +78,8 @@ pub struct Report {
     pub requests: usize,
     pub retries: usize,
     pub splits: usize,
+    /// `429` answers received.
+    pub rate_limited: usize,
     pub stop: Option<Stop>,
 }
 
@@ -96,7 +100,14 @@ type Done = (Attempt, Result<Vec<Option<f64>>, ClassifyError>);
 struct Attempt {
     job: Job,
     number: u32,
+    /// `429`s this job already waited out; it gets one retry after the cooldown.
+    rate_limited: u32,
 }
+
+/// Wait after a `429` without a readable `Retry-After`.
+pub const DEFAULT_COOLDOWN: Duration = Duration::from_secs(1);
+/// A longer `Retry-After` is not waited for: the answer goes out incomplete instead.
+pub const MAX_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// Attempts a batch gets before it is split or given up (v0.1 §11.9): evidence batches and
 /// singletons two, multi-item admission batches one.
@@ -107,7 +118,7 @@ fn max_attempts(stage: SemanticStage, items: usize) -> u32 {
     }
 }
 
-/// Worth retrying or splitting. A `429` waits for the cooldown instead (S5.3).
+/// Worth retrying or splitting. A `429` waits for the shared cooldown instead.
 fn retryable(e: &ClassifyError) -> bool {
     e.is_transient() && !matches!(e, ClassifyError::RateLimited { .. })
 }
@@ -152,6 +163,9 @@ impl Scheduler {
         // Retries and split halves; they go before new jobs from the producer.
         let mut again: VecDeque<Attempt> = VecDeque::new();
         let mut admitting = true;
+        // Shared by every sibling: nothing starts before it (v0.1 §11.8). Waiting happens here,
+        // outside the tasks, so it holds no in-flight slot.
+        let mut cooldown: Option<Instant> = None;
         let max = self.config.max_in_flight.max(1);
         loop {
             if report.stop.is_some() && report.stop != Some(Stop::RequestLimit) {
@@ -161,7 +175,9 @@ impl Scheduler {
             if !admitting && tasks.is_empty() && again.is_empty() {
                 break;
             }
+            let cooling = cooldown.filter(|t| *t > Instant::now());
             if in_flight.len() < max
+                && cooling.is_none()
                 && let Some(next) = again.pop_front()
             {
                 self.launch(next, &mut tasks, &mut in_flight, &mut report, &mut again);
@@ -171,7 +187,7 @@ impl Scheduler {
                 }
                 continue;
             }
-            let room = in_flight.len() < max && again.is_empty();
+            let room = in_flight.len() < max && again.is_empty() && cooling.is_none();
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -183,12 +199,14 @@ impl Scheduler {
                     if let Some(i) = in_flight.iter().position(|i| *i == attempt.job.id) {
                         in_flight.swap_remove(i);
                     }
-                    self.settle(attempt, result, &mut report, &mut again);
+                    self.settle(attempt, result, &mut report, &mut again, &mut cooldown);
                 }
+                _ = tokio::time::sleep_until(cooling.unwrap_or_else(Instant::now)), if cooling.is_some() => {}
                 job = jobs.recv(), if admitting && room => match job {
                     None => admitting = false,
                     Some(job) => {
-                        self.launch(Attempt { job, number: 1 }, &mut tasks, &mut in_flight, &mut report, &mut again);
+                        let first = Attempt { job, number: 1, rate_limited: 0 };
+                        self.launch(first, &mut tasks, &mut in_flight, &mut report, &mut again);
                         if report.stop == Some(Stop::RequestLimit) {
                             admitting = false;
                             jobs.close();
@@ -251,15 +269,38 @@ impl Scheduler {
         result: Result<Vec<Option<f64>>, ClassifyError>,
         report: &mut Report,
         again: &mut VecDeque<Attempt>,
+        cooldown: &mut Option<Instant>,
     ) {
-        let Attempt { job, number } = attempt;
+        let Attempt {
+            job,
+            number,
+            rate_limited,
+        } = attempt;
         let items = job.request.state.items.len();
         match &result {
             Err(ClassifyError::Auth(_)) => report.stop = Some(Stop::Auth),
+            Err(ClassifyError::RateLimited { retry_after }) => {
+                report.rate_limited += 1;
+                let wait = retry_after
+                    .as_deref()
+                    .and_then(|v| super::retry_after::parse(v, SystemTime::now()))
+                    .unwrap_or(DEFAULT_COOLDOWN);
+                if rate_limited == 0 && wait <= MAX_COOLDOWN {
+                    let until = Instant::now() + wait;
+                    *cooldown = Some(cooldown.map_or(until, |c| c.max(until)));
+                    again.push_back(Attempt {
+                        job,
+                        number: number + 1,
+                        rate_limited: 1,
+                    });
+                    return;
+                }
+            }
             Err(e) if retryable(e) && number < max_attempts(job.stage, items) => {
                 again.push_back(Attempt {
                     job,
                     number: number + 1,
+                    rate_limited,
                 });
                 return;
             }
@@ -269,6 +310,7 @@ impl Scheduler {
                     again.push_back(Attempt {
                         job: half,
                         number: 1,
+                        rate_limited: 0,
                     });
                 }
                 return;
