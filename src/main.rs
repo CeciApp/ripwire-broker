@@ -21,6 +21,22 @@ use std::sync::Arc;
 
 /// Canonical workspace, ripwire version and the broker/upstream configuration for `serve`.
 fn settings(a: ServeArgs) -> Result<Settings, String> {
+    // Never a silent downgrade to offline (PRD §23.1, invariant 3).
+    if a.online.is_some() && !cfg!(feature = "online") {
+        return Err(
+            "--online: this binary was built without the online feature; \
+             rebuild it with `cargo build --release --features online`"
+                .into(),
+        );
+    }
+    #[cfg(feature = "online")]
+    if a.online.is_some() {
+        // Checked before anything is published or started (CA-ONLINE-02).
+        let _key = ripwire_broker::online::credential::Credential::from_env()
+            .map_err(|e| e.to_string())?;
+        // Until the adapter is wired (S4.20..S4.31), refuse instead of running offline.
+        return Err("--online: the adapter is not wired into this build yet".into());
+    }
     let workspace = a
         .workspace
         .canonicalize()

@@ -215,16 +215,24 @@ async fn without_ripwire_the_tools_fail_explicitly_and_status_says_why() {
 #[test]
 fn the_build_has_no_network_stack() {
     // CA-10: stdio only; no HTTP client or server crate may be linked in the default build.
-    let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).unwrap();
-    for net in [
-        "name = \"reqwest\"",
-        "name = \"hyper\"",
-        "name = \"axum\"",
-        "name = \"rustls\"",
-    ] {
+    // The resolved graph, not Cargo.lock, which also lists the optional crates behind the
+    // `online` feature (D-059).
+    let out = std::process::Command::new(std::env::var("CARGO").unwrap_or("cargo".into()))
+        .args(["tree", "-e", "normal", "--prefix", "none", "--offline"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree = String::from_utf8(out.stdout).unwrap();
+    assert!(tree.starts_with("ripwire-broker "), "{tree}");
+    for net in ["reqwest ", "hyper ", "axum ", "rustls ", "h2 ", "secrecy "] {
         assert!(
-            !lock.contains(net),
-            "network crate in dependency tree: {net}"
+            !tree.lines().any(|l| l.starts_with(net)),
+            "network crate in the default build: {net}"
         );
     }
 }

@@ -2,6 +2,8 @@
 //! enriches `context_for_task`. Everything here is off unless the process starts with
 //! `--online`; only the HTTP client needs the `online` Cargo feature (D-059).
 
+#[cfg(feature = "online")]
+pub mod credential;
 pub mod prompt;
 pub mod request;
 

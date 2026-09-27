@@ -69,6 +69,7 @@
 | 2026-09-27 18:01 | Usuário aprovou D-059 a D-064 e o início do Sprint 0 | [D-065](#d-065--aprovação-das-propostas-das-fases-4-e-5) |
 | 2026-09-27 18:01 | Sprint 0 parcial: S4.0a, S4.0c (golden provisório) e S4.0d feitos; S4.0b aguarda a credencial; 131 verdes | [D-066](#d-066--sprint-0-parcial) |
 | 2026-09-27 18:14 | S4.0b: gravação live contra `jev-1.13.0` confirma o contrato e `prompts/v1`; golden congelado; Sprint 0 concluído, 132 verdes | [D-067](#d-067--gravação-live-e-ponto-de-parada-0) |
+| 2026-09-27 18:19 | S4.1–S4.6: flags `--online`/`--jev-*`, recusa sem a feature, credencial redigida, teste de CA-10 sobre o grafo resolvido, consentimento, CI nas duas configurações | [D-068](#d-068--configuração-credencial-e-garantia-offline) |
 
 ---
 
@@ -1280,4 +1281,39 @@ aprovação do usuário**. As decisões D-059 a D-064 também são propostas at�
   servidor fixture com as formas da v0.1; o teste live S5.14 confere.
 - **Ponto de parada 0:** Sprint 0 concluído (S4.0a–S4.0d). D-061 e D-062 confirmados pela
   evidência. Suíte: 132 verdes, 1 ignorado; clippy e fmt limpos.
+
+## D-068 — Configuração, credencial e garantia offline
+
+Fatias S4.1 a S4.6 do plano, no branch `fase-4-online`.
+
+- **S4.1.** `cli::OnlineArgs` chega em `ServeArgs.online`. Os padrões são os de D-059 a D-063:
+  `typesafe`, `jev-1.13.0`, 4 em voo, 24 requests, 15.000 ms por tentativa, 16 candidatos e
+  prazo de 8.000 ms.
+  - Viram erro de uso: uma opção `--jev-*` sem `--online`, provider diferente de `typesafe`,
+    zero em teto, e qualquer tentativa de passar a chave pela linha de comando. Nenhum erro
+    ecoa valores.
+  - `hook`, `prompt` e `doctor` recusam `--online` com mensagem própria (D-064).
+- **S4.2.** Um binário sem a feature recusa `--online` com código 2 antes de consultar o
+  ripwire e de publicar o MCP, e explica como recompilar. Até aqui, o servidor subia offline em
+  silêncio, o que violava a invariante 3 do §23.1.
+- **S4.3 e S4.4.** A feature `online` traz `secrecy` como dependência opcional.
+  - `online::credential::Credential` só lê `RIPWIRE_BROKER_JEV_API_KEY`. Tira o whitespace
+    externo, recusa whitespace interno e conta vazio como ausente.
+  - O `Debug` é redigido; não há `Serialize` nem `Display`.
+  - Sem credencial válida, o `serve --online` falha com código 2 antes de publicar o MCP
+    (CA-ONLINE-02).
+  - Transitório: com credencial válida, o build `online` ainda **recusa** `--online`, porque o
+    adaptador só é ligado em S4.20–S4.31. Assim nenhum commit intermediário roda offline
+    fingindo estar online.
+- **S4.5.** `the_build_has_no_network_stack` agora lê o grafo resolvido do build padrão
+  (`cargo tree -e normal --offline`) em vez do `Cargo.lock`, como D-059 previa. A lista
+  proibida ganhou `h2` e `secrecy`.
+  - Desvio do plano: a outra metade do S4.5, `without_online_the_classifier_is_never_called`,
+    depende da `trait Classifier` e do `FakeClassifier`. Ela vai para S4.21, junto com o
+    teste-guarda das outras duas tools.
+- **S4.6.** O texto de consentimento do §23.6 foi para o `USAGE` já no S4.1. O teste nasceu
+  verde e guarda o texto literal.
+- **CI.** O workflow do GitHub Actions também compila e testa com `--features online`.
+- Suítes: 137 verdes no build padrão e 138 com `online`, 1 ignorado em cada; clippy e fmt
+  limpos nas duas.
 

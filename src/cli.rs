@@ -8,6 +8,9 @@ use std::time::Duration;
 pub const USAGE: &str = "\
 usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [--redact-workspace] [--incremental]
                       [--ripwire-max-rss-mb N]
+                      [--online [--jev-provider typesafe] [--jev-model MODEL] [--jev-max-in-flight N]
+                                [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
+                                [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
@@ -15,7 +18,11 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
        ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
-       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--write] [--codex-home DIR]";
+       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--write] [--codex-home DIR]
+
+--online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
+Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
+The credential comes only from RIPWIRE_BROKER_JEV_API_KEY in the server's environment.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
@@ -57,6 +64,30 @@ pub struct ServeArgs {
     pub summarizer: Option<SummarizerArgs>,
     /// Kill and restart ripwire above this resident memory (PRD 15.3); `None`: no limit.
     pub ripwire_max_rss_mb: Option<u64>,
+    /// The remote classifier (PRD §23); `None` keeps the process offline (RF-ONLINE-01).
+    pub online: Option<OnlineArgs>,
+}
+
+/// `--online` and its `--jev-*` companions (PRD §23.6, D-059). No credential here: it comes
+/// only from the server's environment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineArgs {
+    /// The only provider of the first increment.
+    pub provider: String,
+    /// Pinned by default; never a moving alias like `jev-latest`.
+    pub model: String,
+    pub max_in_flight: usize,
+    /// Requests one MCP call may send.
+    pub request_limit: usize,
+    /// Per attempt.
+    pub timeout: Duration,
+    pub no_cache: bool,
+    /// Caps rendered source, not what is evaluated; `None`: derived from the budget.
+    pub max_source_bytes: Option<u64>,
+    /// Planner paths the rescore evaluates (D-061).
+    pub max_candidates: usize,
+    /// Past it the semantic stage stops and reports `interrupted` (D-063).
+    pub deadline: Duration,
 }
 
 /// `--summarizer-cmd "ollama run phi4"` and its companions (D-034..D-036).
@@ -175,6 +206,7 @@ struct Flags {
     summarizer_wait: Option<Duration>,
     summarizer_timeout: Option<Duration>,
     max_rss_mb: Option<u64>,
+    jev: HashMap<&'static str, String>,
     switches: Vec<&'static str>,
     words: Vec<String>,
 }
@@ -202,6 +234,46 @@ impl Flags {
         }))
     }
 
+    fn online(&self) -> Result<Option<OnlineArgs>, String> {
+        if !self.on("--online") {
+            return match self.jev.is_empty() && !self.on("--jev-no-cache") {
+                true => Ok(None),
+                false => Err(usage("the --jev-* options need --online")),
+            };
+        }
+        let text = |k: &str, default: &str| self.jev.get(k).map_or(default.into(), String::clone);
+        let number = |k: &str, default: u64| -> Result<u64, String> {
+            match self.jev.get(k) {
+                None => Ok(default),
+                Some(v) => v
+                    .parse::<u64>()
+                    .map_err(|_| usage(format_args!("{k} needs a number"))),
+            }
+        };
+        let positive = |k: &str, default: u64| match number(k, default)? {
+            0 => Err(usage(format_args!("{k} must be at least 1"))),
+            n => Ok(n),
+        };
+        let provider = text("--jev-provider", "typesafe");
+        if provider != "typesafe" {
+            return Err(usage("--jev-provider: the only provider is typesafe"));
+        }
+        Ok(Some(OnlineArgs {
+            provider,
+            model: text("--jev-model", "jev-1.13.0"),
+            max_in_flight: positive("--jev-max-in-flight", 4)? as usize,
+            request_limit: positive("--jev-request-limit", 24)? as usize,
+            timeout: Duration::from_millis(positive("--jev-timeout-ms", 15_000)?),
+            no_cache: self.on("--jev-no-cache"),
+            max_source_bytes: match self.jev.contains_key("--jev-max-source-bytes") {
+                true => Some(positive("--jev-max-source-bytes", 0)?),
+                false => None,
+            },
+            max_candidates: positive("--jev-max-candidates", 16)? as usize,
+            deadline: Duration::from_millis(positive("--jev-deadline-ms", 8_000)?),
+        }))
+    }
+
     fn workspace(&self) -> Result<PathBuf, String> {
         self.workspace
             .clone()
@@ -218,6 +290,20 @@ const SWITCHES: &[&str] = &[
     "--json",
     "--hooks",
     "--write",
+    "--online",
+    "--jev-no-cache",
+];
+
+/// The valued `--jev-*` flags; kept as text until `Flags::online` checks them.
+const JEV: &[&str] = &[
+    "--jev-provider",
+    "--jev-model",
+    "--jev-max-in-flight",
+    "--jev-request-limit",
+    "--jev-timeout-ms",
+    "--jev-max-source-bytes",
+    "--jev-max-candidates",
+    "--jev-deadline-ms",
 ];
 
 /// `allowed` lists the switches and valued flags this command accepts.
@@ -230,6 +316,9 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             continue;
         }
         if !allowed.contains(&a.as_str()) {
+            if a == "--online" {
+                return Err(usage("--online is only available to serve (D-064)"));
+            }
             return Err(usage(format_args!("unknown argument '{a}'")));
         }
         if let Some(s) = SWITCHES.iter().find(|s| **s == a) {
@@ -259,6 +348,10 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             }
             "--summarizer-timeout-ms" => {
                 f.summarizer_timeout = Some(Duration::from_millis(number(&value)?))
+            }
+            jev if JEV.contains(&jev) => {
+                let key = JEV.iter().find(|k| **k == jev).unwrap();
+                f.jev.insert(key, value);
             }
             _ => return Err(usage(format_args!("unknown argument '{a}'"))),
         }
@@ -309,15 +402,22 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
         None | Some("serve") => {
             let f = flags(
                 it,
-                &with(&[
-                    "--redact-workspace",
-                    "--incremental",
-                    "--ripwire-max-rss-mb",
-                    SUMMARIZER[0],
-                    SUMMARIZER[1],
-                    SUMMARIZER[2],
-                    SUMMARIZER[3],
-                ]),
+                &with(
+                    &[
+                        "--redact-workspace",
+                        "--incremental",
+                        "--ripwire-max-rss-mb",
+                        SUMMARIZER[0],
+                        SUMMARIZER[1],
+                        SUMMARIZER[2],
+                        SUMMARIZER[3],
+                        "--online",
+                        "--jev-no-cache",
+                    ]
+                    .into_iter()
+                    .chain(JEV.iter().copied())
+                    .collect::<Vec<_>>(),
+                ),
             )?;
             no_words(&f)?;
             Ok(Command::Serve(ServeArgs {
@@ -328,6 +428,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 incremental: f.on("--incremental"),
                 summarizer: f.summarizer()?,
                 ripwire_max_rss_mb: f.max_rss_mb,
+                online: f.online()?,
             }))
         }
         Some("__supervise") => {

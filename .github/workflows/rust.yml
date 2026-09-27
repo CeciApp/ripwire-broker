@@ -20,3 +20,7 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+    - name: Build with the online feature
+      run: cargo build --verbose --features online
+    - name: Run tests with the online feature
+      run: cargo test --verbose --features online

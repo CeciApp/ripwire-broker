@@ -191,6 +191,102 @@ fn unknown_input_is_a_usage_error() {
     }
 }
 
+#[test]
+fn online_flags_parse_and_default_to_the_pinned_model() {
+    let Ok(Command::Serve(off)) = parse(&["--workspace", "/w"]) else {
+        panic!()
+    };
+    assert_eq!(off.online, None, "offline unless --online (RF-ONLINE-01)");
+
+    let Ok(Command::Serve(s)) = parse(&["--workspace", "/w", "--online"]) else {
+        panic!()
+    };
+    assert_eq!(
+        s.online,
+        Some(cli::OnlineArgs {
+            provider: "typesafe".into(),
+            model: "jev-1.13.0".into(),
+            max_in_flight: 4,
+            request_limit: 24,
+            timeout: Duration::from_millis(15_000),
+            no_cache: false,
+            max_source_bytes: None,
+            max_candidates: 16,
+            deadline: Duration::from_millis(8_000),
+        })
+    );
+
+    let Ok(Command::Serve(t)) = parse(&[
+        "serve",
+        "--workspace",
+        "/w",
+        "--online",
+        "--jev-provider",
+        "typesafe",
+        "--jev-model",
+        "jev-1.14.0",
+        "--jev-max-in-flight",
+        "2",
+        "--jev-request-limit",
+        "10",
+        "--jev-timeout-ms",
+        "900",
+        "--jev-no-cache",
+        "--jev-max-source-bytes",
+        "4096",
+        "--jev-max-candidates",
+        "5",
+        "--jev-deadline-ms",
+        "3000",
+    ]) else {
+        panic!()
+    };
+    let t = t.online.unwrap();
+    assert_eq!(t.model, "jev-1.14.0");
+    assert_eq!(
+        (t.max_in_flight, t.request_limit, t.max_candidates),
+        (2, 10, 5)
+    );
+    assert_eq!(t.timeout, Duration::from_millis(900));
+    assert_eq!(t.deadline, Duration::from_millis(3000));
+    assert!(t.no_cache);
+    assert_eq!(t.max_source_bytes, Some(4096));
+}
+
+#[test]
+fn bad_online_flags_are_usage_errors() {
+    for bad in [
+        &["--workspace", "/w", "--jev-model", "jev-1.13.0"][..],
+        &["--workspace", "/w", "--jev-no-cache"],
+        &["--workspace", "/w", "--online", "--jev-provider", "other"],
+        &["--workspace", "/w", "--online", "--jev-max-in-flight", "0"],
+        &["--workspace", "/w", "--online", "--jev-request-limit", "0"],
+        &["--workspace", "/w", "--online", "--jev-api-key", "secret"],
+    ] {
+        let err = parse(bad).expect_err(&format!("{bad:?}"));
+        assert!(err.contains("usage"), "{bad:?}: {err}");
+        assert!(
+            !err.contains("secret"),
+            "a token on the command line is never echoed"
+        );
+    }
+}
+
+#[test]
+fn hook_and_prompt_reject_online() {
+    for bad in [
+        &["hook", "codex", "stop", "--online"][..],
+        &["prompt", "--workspace", "/w", "--online", "task"],
+        &["doctor", "--workspace", "/w", "--online"],
+    ] {
+        let err = parse(bad).expect_err(&format!("{bad:?}"));
+        assert!(
+            err.contains("--online is only available to serve"),
+            "{bad:?}: {err}"
+        );
+    }
+}
+
 // --- e2e: the binary's commands against a real ripwire (skipped without it) ---
 
 mod common;
@@ -228,6 +324,91 @@ fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+#[cfg(not(feature = "online"))]
+#[test]
+fn a_build_without_the_online_feature_refuses_online_clearly() {
+    let ws = tempfile::tempdir().unwrap();
+    let ws = ws.path().to_str().unwrap();
+
+    let (code, out, err) = run(
+        &[
+            "--workspace",
+            ws,
+            "--ripwire",
+            "/nonexistent/ripwire",
+            "--online",
+        ],
+        "",
+    );
+
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "no MCP server is published: {out}");
+    assert!(err.contains("built without the online feature"), "{err}");
+    assert!(
+        err.contains("--features online"),
+        "says how to get it: {err}"
+    );
+}
+
+#[cfg(feature = "online")]
+#[test]
+fn online_without_a_credential_fails_before_publishing_mcp() {
+    let ws = tempfile::tempdir().unwrap();
+    let ws = ws.path().to_str().unwrap();
+    for key in [None, Some(""), Some("   \n"), Some("tok en-123")] {
+        let mut cmd = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"));
+        cmd.args([
+            "--workspace",
+            ws,
+            "--ripwire",
+            "/nonexistent/ripwire",
+            "--online",
+        ]);
+        match key {
+            Some(k) => cmd.env("RIPWIRE_BROKER_JEV_API_KEY", k),
+            None => cmd.env_remove("RIPWIRE_BROKER_JEV_API_KEY"),
+        };
+        let out = cmd.stdin(Stdio::null()).output().unwrap();
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+
+        assert_eq!(out.status.code(), Some(2), "{key:?}: {stderr}");
+        assert!(
+            stdout.is_empty(),
+            "{key:?}: no MCP server is published: {stdout}"
+        );
+        assert!(
+            stderr.contains("RIPWIRE_BROKER_JEV_API_KEY"),
+            "{key:?}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("en-123"),
+            "the credential is never echoed: {stderr}"
+        );
+    }
+}
+
+#[cfg(feature = "online")]
+#[test]
+fn the_credential_never_appears_in_errors_or_debug_output() {
+    use ripwire_broker::online::credential::Credential;
+
+    let key = Credential::from_env_value(Some("  tok-123\n")).unwrap();
+    assert_eq!(key.expose(), "tok-123", "outer whitespace is trimmed");
+    assert!(!format!("{key:?}").contains("tok-123"), "{key:?}");
+
+    let err = Credential::from_env_value(Some("tok 123")).unwrap_err();
+    assert!(!err.to_string().contains("123"), "{err}");
+    assert!(!format!("{err:?}").contains("123"), "{err:?}");
+    assert!(
+        Credential::from_env_value(Some("")).is_err(),
+        "empty counts as absent"
+    );
+    assert!(Credential::from_env_value(None).is_err());
 }
 
 fn prompt_event(ws: &std::path::Path, session: &str, prompt: &str) -> String {
@@ -1063,4 +1244,19 @@ fn parallel_hooks_of_one_session_take_turns() {
         vec!["1", "2"],
         "both injections logged, distinct ids: {log}"
     );
+}
+
+#[test]
+fn the_usage_text_carries_the_consent_notice() {
+    let Ok(Command::Info(help)) = parse(&["--help"]) else {
+        panic!()
+    };
+    // PRD §23.6: mandatory in the help of --online.
+    assert!(help.contains(
+        "O modo online envia previews e trechos elegíveis do workspace ao provider Jev."
+    ));
+    assert!(
+        help.contains("Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.")
+    );
+    assert!(help.contains("RIPWIRE_BROKER_JEV_API_KEY"));
 }
