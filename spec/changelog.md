@@ -2041,4 +2041,11 @@ Seção §5.4 do plano.
 
 - Suítes: 225 verdes no build padrão (2 ignorados) e 238 com `online` (4 ignorados); clippy e
   fmt limpos nas duas. Os testes live passaram com a chave e falharam sem ela.
+- **CI** no commit das correções (`3aaf8ed`): verde nas duas configurações.
+- **Validação do ETXTBSY** no mesmo container (`rust:1.98.1`, 2 CPUs, 16 threads de teste,
+  300 execuções de `tests/summarizer.rs`): 0 ETXTBSY e 0 outras falhas, contra 2 em 300 antes.
+  - Ressalva estatística: com uma taxa-base de ~0,7%, zerar em 300 execuções aconteceria por
+    acaso em ~13% das vezes mesmo sem correção. O número é coerente com a correção, mas o
+    argumento principal é o mecanismo: o processo de teste nunca mais segura o descritor de
+    escrita.
 
