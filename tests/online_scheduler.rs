@@ -510,7 +510,12 @@ async fn the_cooldown_keeps_the_longest_retry_after() {
 #[tokio::test(start_paused = true)]
 async fn cancellation_works_during_cooldown() {
     let t0 = tokio::time::Instant::now();
-    let fake = Arc::new(FakeClassifier::new().fail("j0", limited("20")));
+    // j1 answers after j0's 429, so the cooldown is already set when a slot frees up.
+    let fake = Arc::new(
+        FakeClassifier::new()
+            .fail("j0", limited("20"))
+            .delay("j1", std::time::Duration::from_millis(100)),
+    );
     let scheduler = Arc::new(Scheduler::new(fake.clone(), config(2, 1000)));
     let (rx, _producer) = produce(&scheduler, 5);
     let cancel = CancellationToken::new();
@@ -520,15 +525,22 @@ async fn cancellation_works_during_cooldown() {
     });
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let at_cancel = fake.calls();
     cancel.cancel();
     let r = run.await.unwrap();
+    let returned = tokio::time::Instant::now();
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
     assert!(
-        tokio::time::Instant::now() < t0 + std::time::Duration::from_secs(2),
+        returned < t0 + std::time::Duration::from_secs(2),
         "no waiting for the cooldown"
     );
     assert_eq!(r.stop, Some(Stop::Cancelled));
-    assert!(fake.calls() <= 2, "nothing starts during the cooldown");
+    assert_eq!(
+        at_cancel, 2,
+        "only j0 and j1: nothing starts during the cooldown"
+    );
+    assert_eq!(fake.calls(), at_cancel, "nor after it, once cancelled");
 }
 
 #[tokio::test(start_paused = true)]
@@ -563,8 +575,9 @@ async fn a_second_429_or_an_excessive_retry_after_is_final() {
 
 #[tokio::test(start_paused = true)]
 async fn dropping_the_run_aborts_requests_in_flight_and_queued_retries() {
-    // How an MCP cancel arrives: the tool call's future is dropped (RF-14).
-    let (fake, _gate) = FakeClassifier::new().held();
+    // How an MCP cancel arrives: the tool call's future is dropped (RF-14). j0 gets a 429, so
+    // its retry waits in the scheduler's queue for the cooldown; j1..j3 are held in flight.
+    let (fake, _gate) = FakeClassifier::new().fail("j0", limited("5")).held();
     let fake = Arc::new(fake);
     let scheduler = Arc::new(Scheduler::new(fake.clone(), config(4, 1000)));
     let (rx, producer) = produce(&scheduler, 50);
@@ -573,17 +586,22 @@ async fn dropping_the_run_aborts_requests_in_flight_and_queued_retries() {
         async move { s.run(rx, CancellationToken::new()).await }
     });
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(fake.calls(), 4);
 
     run.abort();
     let _ = run.await;
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
     assert_eq!(
         fake.counters.dropped.load(SeqCst),
-        4,
+        3,
         "every request in flight was dropped"
     );
-    assert_eq!(fake.calls(), 4, "nothing starts afterwards");
+    assert_eq!(
+        fake.calls(),
+        4,
+        "the queued retry never went out, even past the cooldown"
+    );
     assert!(
         producer.await.unwrap() < 50,
         "the queue closed with the run"

@@ -1,6 +1,10 @@
-//! A scripted `Classifier`: answers by item id, can fail or be delayed per request (keyed by
-//! the request's first item), can be held until the test adds permits, and counts calls,
-//! concurrency and requests dropped before they finished. Only Tokio time is used.
+//! A scripted `Classifier`: answers by stage and item, can fail or be delayed per request,
+//! can be held until the test adds permits, and counts calls, concurrency and requests dropped
+//! before they finished. Only Tokio time is used.
+//!
+//! Failures and delays are triggered by what a caller can observe: the stage asked, a path in
+//! the request, or, for scheduler tests that build their own requests, the first item's id.
+//! Like the real client, it only ever answers probabilities in [0, 1] or unknown.
 use async_trait::async_trait;
 use ripwire_broker::online::SemanticStage;
 use ripwire_broker::online::classifier::{Classifier, ClassifyError};
@@ -25,15 +29,40 @@ pub struct Counters {
 type Rule = Box<dyn Fn(SemanticStage, &StateItem) -> Option<f64> + Send + Sync>;
 type Hook = Box<dyn Fn(SemanticStage) + Send + Sync>;
 
+/// Which requests a scripted failure or delay applies to.
+enum Trigger {
+    /// The request's first item has this id (requests the test built itself).
+    FirstItem(String),
+    /// The request asks this stage's question.
+    Stage(SemanticStage),
+    /// Some item of the request has this path.
+    Path(String),
+}
+
+impl Trigger {
+    fn matches(&self, req: &JevRequest) -> bool {
+        match self {
+            Self::FirstItem(id) => req.state.items.first().is_some_and(|i| &i.id == id),
+            Self::Stage(s) => FakeClassifier::stage(req) == *s,
+            Self::Path(p) => req.state.items.iter().any(|i| &i.path == p),
+        }
+    }
+}
+
+/// A scripted failure; `left: None` fails every matching request.
+struct Failure {
+    when: Trigger,
+    error: ClassifyError,
+    left: Option<AtomicUsize>,
+}
+
 pub struct FakeClassifier {
     rule: Option<Rule>,
     on_call: Option<Hook>,
     probability: HashMap<String, f64>,
     default: f64,
-    fail: HashMap<String, ClassifyError>,
-    /// Fails the first `n` requests whose first item is the key, then answers.
-    fail_times: HashMap<String, (ClassifyError, AtomicUsize)>,
-    delay: HashMap<String, Duration>,
+    failures: Vec<Failure>,
+    delays: Vec<(Trigger, Duration)>,
     hold: Option<Arc<Semaphore>>,
     pub counters: Arc<Counters>,
     pub seen: Mutex<Vec<JevRequest>>,
@@ -48,9 +77,8 @@ impl FakeClassifier {
             on_call: None,
             probability: HashMap::new(),
             default: 0.9,
-            fail: HashMap::new(),
-            fail_times: HashMap::new(),
-            delay: HashMap::new(),
+            failures: vec![],
+            delays: vec![],
             hold: None,
             counters: Arc::default(),
             seen: Mutex::new(vec![]),
@@ -58,7 +86,7 @@ impl FakeClassifier {
         }
     }
 
-    /// The probability answered for every question about item `id`.
+    /// The probability answered for every question about item `id` (scheduler tests).
     pub fn answer(mut self, id: &str, p: f64) -> Self {
         self.probability.insert(id.into(), p);
         self
@@ -80,13 +108,14 @@ impl FakeClassifier {
         self
     }
 
-    /// The stage a request asks about, read from its first question.
+    /// The stage a request asks about, read from its first question. A question that is
+    /// neither stage's `prompts/v1` text is a bug the fake refuses to hide.
     pub fn stage(req: &JevRequest) -> SemanticStage {
         let (q, item) = (&req.questions.0[0].1, &req.state.items[0]);
-        match q.instructions == prompt::instructions(SemanticStage::FileAdmission, &item.id) {
-            true => SemanticStage::FileAdmission,
-            false => SemanticStage::SourceSelection,
-        }
+        [SemanticStage::FileAdmission, SemanticStage::SourceSelection]
+            .into_iter()
+            .find(|s| q.instructions == prompt::instructions(*s, &item.id))
+            .unwrap_or_else(|| panic!("not a prompts/v1 question: {}", q.instructions))
     }
 
     /// Paths asked about in each stage, in the order they were asked.
@@ -105,21 +134,49 @@ impl FakeClassifier {
         self
     }
 
-    /// Fails the request whose first item is `id`.
-    pub fn fail(mut self, id: &str, e: ClassifyError) -> Self {
-        self.fail.insert(id.into(), e);
+    fn failing(mut self, when: Trigger, error: ClassifyError, times: Option<usize>) -> Self {
+        self.failures.push(Failure {
+            when,
+            error,
+            left: times.map(AtomicUsize::new),
+        });
         self
     }
 
-    /// Fails the first `n` requests whose first item is `id`, then answers normally.
-    pub fn fail_times(mut self, id: &str, e: ClassifyError, n: usize) -> Self {
-        self.fail_times.insert(id.into(), (e, AtomicUsize::new(n)));
-        self
+    /// Fails every request whose first item is `id` (scheduler tests).
+    pub fn fail(self, id: &str, e: ClassifyError) -> Self {
+        self.failing(Trigger::FirstItem(id.into()), e, None)
     }
 
-    /// Delays the request whose first item is `id`.
+    /// Fails the first `n` requests whose first item is `id`, then answers (scheduler tests).
+    pub fn fail_times(self, id: &str, e: ClassifyError, n: usize) -> Self {
+        self.failing(Trigger::FirstItem(id.into()), e, Some(n))
+    }
+
+    /// Fails every request of `stage`.
+    pub fn fail_stage(self, stage: SemanticStage, e: ClassifyError) -> Self {
+        self.failing(Trigger::Stage(stage), e, None)
+    }
+
+    /// Fails the first `n` requests of `stage`, then answers.
+    pub fn fail_stage_times(self, stage: SemanticStage, e: ClassifyError, n: usize) -> Self {
+        self.failing(Trigger::Stage(stage), e, Some(n))
+    }
+
+    /// Fails the first `n` requests that ask about `path`, then answers.
+    pub fn fail_path_times(self, path: &str, e: ClassifyError, n: usize) -> Self {
+        self.failing(Trigger::Path(path.into()), e, Some(n))
+    }
+
+    /// Delays the request whose first item is `id` (scheduler tests).
     pub fn delay(mut self, id: &str, d: Duration) -> Self {
-        self.delay.insert(id.into(), d);
+        self.delays.push((Trigger::FirstItem(id.into()), d));
+        self
+    }
+
+    /// Delays every request of `stage`.
+    pub fn delay_stage(mut self, stage: SemanticStage, d: Duration) -> Self {
+        self.delays.push((Trigger::Stage(stage), d));
         self
     }
 
@@ -132,6 +189,21 @@ impl FakeClassifier {
 
     pub fn calls(&self) -> usize {
         self.counters.calls.load(SeqCst)
+    }
+
+    fn scripted_failure(&self, req: &JevRequest) -> Option<ClassifyError> {
+        self.failures.iter().find_map(|f| {
+            if !f.when.matches(req) {
+                return None;
+            }
+            match &f.left {
+                None => Some(f.error.clone()),
+                Some(left) => left
+                    .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                    .then(|| f.error.clone()),
+            }
+        })
     }
 }
 
@@ -169,27 +241,15 @@ impl Classifier for FakeClassifier {
             .lock()
             .unwrap()
             .push((head, tokio::time::Instant::now()));
+        let stage = Self::stage(req);
         if let Some(hook) = &self.on_call {
-            hook(Self::stage(req));
+            hook(stage);
         }
-        let first = req
-            .state
-            .items
-            .first()
-            .map(|i| i.id.clone())
-            .unwrap_or_default();
-        if let Some(d) = self.delay.get(&first) {
+        if let Some((_, d)) = self.delays.iter().find(|(t, _)| t.matches(req)) {
             tokio::time::sleep(*d).await;
         }
         // A scripted failure answers after its delay, without waiting for the gate.
-        let scripted = self.fail.get(&first).cloned().or_else(|| {
-            let (e, left) = self.fail_times.get(&first)?;
-            (left
-                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
-                .is_ok())
-            .then(|| e.clone())
-        });
-        if let Some(e) = scripted {
+        if let Some(e) = self.scripted_failure(req) {
             guard.1 = true;
             c.finished.fetch_add(1, SeqCst);
             return Err(e);
@@ -199,14 +259,21 @@ impl Classifier for FakeClassifier {
         }
         guard.1 = true;
         c.finished.fetch_add(1, SeqCst);
-        let stage = Self::stage(req);
         Ok(req
             .state
             .items
             .iter()
-            .map(|i| match &self.rule {
-                Some(rule) => rule(stage, i),
-                None => Some(*self.probability.get(&i.id).unwrap_or(&self.default)),
+            .map(|i| {
+                let p = match &self.rule {
+                    Some(rule) => rule(stage, i),
+                    None => Some(*self.probability.get(&i.id).unwrap_or(&self.default)),
+                };
+                // The real client never returns anything else (CA-ONLINE-10).
+                assert!(
+                    p.is_none_or(|p| (0.0..=1.0).contains(&p)),
+                    "a provider never answers {p:?}"
+                );
+                p
             })
             .collect())
     }

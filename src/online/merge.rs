@@ -312,6 +312,12 @@ fn limitations(disc: &Discovery) -> Vec<Limitation> {
                 disc.changed_files
             ));
         }
+        if disc.unknown_answers > 0 {
+            why.push(format!(
+                "{} answer(s) unknown: no valid probability",
+                disc.unknown_answers
+            ));
+        }
         if let Some(ms) = disc.interrupted {
             why.push(format!("discovery deadline of {ms} ms reached"));
         }

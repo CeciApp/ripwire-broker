@@ -469,6 +469,14 @@ impl Broker {
 
     /// `path` (absolute, or relative to the root) as workspace-relative, or `None` if it
     /// resolves outside (CA-08).
+    /// Every entry of the semantic cache as stored (CA-ONLINE-13): hex digest keys and
+    /// validated probabilities only. Empty without `--online`.
+    pub fn inspect_semantic_cache(&self) -> Vec<String> {
+        self.online
+            .as_ref()
+            .map_or_else(Vec::new, OnlineEngine::inspect_cache)
+    }
+
     /// The smallest `budget_tokens` `context_for_task` accepts in this process.
     pub fn min_task_budget(&self) -> u32 {
         match self.online {

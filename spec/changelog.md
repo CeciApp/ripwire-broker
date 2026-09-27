@@ -89,6 +89,7 @@
 | 2026-09-27 19:51 | S5.14: dois testes live ignorados (corpus sintético e caminho completo com Ripwire real); ao vivo verdes, digest idêntico ao S4.0b; 219/230 verdes, 4 ignorados no `online` | [D-085](#d-085--testes-live) |
 | 2026-09-27 19:53 | Documentação da Fase 5 (README, skill, AGENTS.md, PRD); ponto de parada 4: Fases 4 e 5 completas, exceto o A/B; falha intermitente identificada (`a_hung_model_is_killed_at_the_hard_limit`) e corrigida | [D-086](#d-086--documentação-e-ponto-de-parada-4) |
 | 2026-09-27 19:56 | Branch `fase-4-online` publicado e PR #1 aberto para o `master` | [D-087](#d-087--pr-das-fases-4-e-5) |
+| 2026-09-27 20:27 | CI do PR #1: 1ª execução falhou por ETXTBSY (corrida pré-existente, Linux), 2ª passou; merge bloqueado pelo classificador de permissões; revisão `/tdd` com 17 achados, todos tratados no PR, incluindo um defeito de produto (resposta desconhecida não marcava `incomplete`) | [D-088](#d-088--ci-revisão-tdd-e-correções) |
 
 ---
 
@@ -1999,4 +2000,45 @@ Seção §5.4 do plano.
 - O PR descreve o que revisar com atenção: o teste de CA-10 sobre o grafo resolvido (D-059), o
   piso de 512 tokens (D-072), a sintonia do lookahead (D-081) e a correção do teste
   intermitente (D-086). O item em aberto é o corpus A/B com a barra de produto (§23.15).
+
+## D-088 — CI, revisão `/tdd` e correções
+
+- **CI do PR #1.** A 1ª execução falhou em `the_command_summarizer_feeds_stdin_and_reads_stdout`
+  com `Text file busy` (ETXTBSY). A 2ª, no commit seguinte, passou nas duas configurações.
+  - Causa: corrida do Linux, anterior a este PR. Um teste grava um script executável enquanto
+    outra thread do mesmo processo faz `fork`; o filho herda o descritor de escrita até o seu
+    `exec`, e executar o script nesse intervalo falha.
+  - Reproduzida num container `rust:1.98.1` com 2 CPUs: 2 falhas em 300 execuções. No macOS
+    não acontece.
+- **Merge.** O `gh pr merge` foi bloqueado pelo classificador de permissões do modo automático
+  ("Merge Without Review"). Não houve tentativa de contornar, e a decisão ficou com o usuário,
+  que pediu para corrigir os achados da revisão no próprio PR.
+- **Revisão `/tdd`**, feita por um agente sobre os testes do PR, com os critérios da skill:
+  testes em seams públicos acordados, sem acoplamento à implementação, sem tautologia, com
+  asserções fortes e sem corridas. Os achados foram verificados no código antes de cada
+  correção.
+
+| # | Achado | Tratamento |
+| --- | --- | --- |
+| 1 | O teste de CA-ONLINE-13 não podia falhar: a chave do cache nem recebe path ou fonte | Substituído por um teste no seam 1 que enche o cache com uma chamada real e o inspeciona por `Broker::inspect_semantic_cache()` (a "inspeção" do CA). Uma mutação que grava a query no cache o derruba |
+| 2 | O dublê roteirizava falhas por ids internos (`f0`, `u0`, `p0`) e o layout dos lotes | O `FakeClassifier` ganhou gatilhos por etapa e por path; os ids ficaram só para o scheduler, cujos requests o teste monta. O teste de métricas passou a depender só do que o dublê devolveu |
+| 3 | CA-ONLINE-01 só era checado no grafo do build padrão | Novo e2e no build `online`: chave no ambiente, sem `--online`; as três tools respondem sem `provenance.online`, e o status diz `offline: true` |
+| 4 | Resposta desconhecida sem teste no broker | **Defeito de produto confirmado**: uma pergunta sem probabilidade válida, dentro de uma resposta HTTP válida, não marcava a descoberta como `incomplete`, e a ausência podia ser lida como irrelevância (§23.2). Agora conta em `unknown_answers`, torna a descoberta incompleta e aparece na limitação. Teste vermelho antes da correção |
+| 5 | O "informa omissões" do CA-ONLINE-14 podia nunca rodar | A varredura exige que ao menos um orçamento trunque e confere `next_step` |
+| 6 | O fixture HTTP/1.1 fecha a conexão a cada request | Novo fixture com keep-alive prova o reuso de uma conexão do pool. A lacuna do cancelamento sob HTTP/2 (reset de stream) ficou documentada no cabeçalho do arquivo |
+| 7 | O teste do endpoint só lia um getter | Passou a fixar a assinatura do único construtor público: um parâmetro de URL quebraria a compilação do teste |
+| 8 | O teste de cancelamento HTTP dependia de 250 ms reais e tirava a foto antes do `abort()` | Foto depois do `abort()` e prazo de 2 s. Os 250 ms da v0.1 continuam provados no seam 3, com tempo controlado |
+| 9 | A métrica de bytes enviados era conferida pela mesma fórmula da produção | No seam 1, limites independentes; o valor exato passou para o seam 4, contra os bytes que o fixture recebeu |
+| 10 | Nomes que prometiam mais do que o teste verificava | O teste de inelegíveis confere `incomplete`; o do `doctor` foi renomeado para `doctor_has_no_probe_check_unless_asked`; o do drop agora enfileira de fato um retry, que nunca sai |
+| 11 | O teste de cancelamento no cooldown dependia da ordem do `JoinSet` | `j1` responde depois do `429` de `j0`; a contagem no cancelamento não muda nem depois do cooldown. 20 repetições verdes |
+| 12 | Os testes live passavam sem a chave | Falham sem a chave (ou sem ripwire) quando pedidos com `--ignored` |
+| 13 | Um teste de `install --online` cobria cinco comportamentos | Dividido em seis testes, um por comportamento |
+| 14 | Linha morta `let _ = SystemTime::now();` | Removida |
+| 15 | `cargo tree --offline` poderia falhar num runner limpo (incerto) | Verificado: passou nas duas execuções do CI, num runner limpo, antes de o `reqwest` ser baixado. Sem mudança |
+| 16 | ETXTBSY | Correção nos sete lugares que gravam e executam scripts: `common::write_executable` grava por um `sh` filho, e o processo de teste nunca segura o descritor de escrita. Trocar o nome do arquivo, como o relatório sugeria, não resolveria, porque o descritor herdado aponta para o mesmo inode |
+| 17 | O teste do probe comparava com as constantes de produção | Compara com literais |
+| — | Fidelidade do dublê | O dublê entra em pânico se uma regra devolver probabilidade fora de [0, 1] ou se o prompt não for de nenhuma etapa do `prompts/v1` |
+
+- Suítes: 225 verdes no build padrão (2 ignorados) e 238 com `online` (4 ignorados); clippy e
+  fmt limpos nas duas. Os testes live passaram com a chave e falharam sem ela.
 

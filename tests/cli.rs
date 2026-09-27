@@ -672,9 +672,7 @@ fn doctor_fails_on_an_old_ripwire_and_warns_without_history() {
     let repo = common::sample_repo();
     let bin = tempfile::tempdir().unwrap();
     let old = bin.path().join("ripwire");
-    std::fs::write(&old, "#!/bin/sh\necho 'ripwire 0.5.0'\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_executable(&old, "#!/bin/sh\necho 'ripwire 0.5.0'\n");
 
     let (code, report, _) = doctor(repo.path(), &["--ripwire", old.to_str().unwrap()]);
     assert_eq!(code, 1);
@@ -903,11 +901,9 @@ fn install_codex_merges_hooks_json_and_prints_the_toml_snippet() {
 fn doctor_checks_the_configured_local_model_without_running_it() {
     let ws = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
-    use std::os::unix::fs::PermissionsExt;
     let make = |name: &str, body: &str| {
         let p = bin.path().join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_executable(&p, format!("#!/bin/sh\n{body}\n"));
         p.to_str().unwrap().to_string()
     };
     let ran = bin.path().join("model-ran");
@@ -1288,7 +1284,7 @@ fn doctor_takes_a_jev_probe_switch() {
 }
 
 #[test]
-fn doctor_without_probe_never_calls_the_network() {
+fn doctor_has_no_probe_check_unless_asked() {
     require_ripwire!();
     let ws = common::sample_repo();
 
@@ -1340,80 +1336,110 @@ fn run_with_key(args: &[&str]) -> (i32, String, String) {
     )
 }
 
-#[test]
-fn install_online_adds_the_flag_and_an_env_reference_never_the_key() {
+/// Runs `install` with the key in its environment, in a fresh canonical workspace.
+fn install_online(extra: &[&str]) -> (tempfile::TempDir, std::path::PathBuf, i32, String) {
     let ws = tempfile::tempdir().unwrap();
     let root = ws.path().canonicalize().unwrap();
-    let root_s = root.to_str().unwrap();
-
-    // Dry run: says what it would do, with the consent notice, and writes nothing.
-    let (code, dry, err) =
-        run_with_key(&["install", "claude-code", "--workspace", root_s, "--online"]);
-    assert_eq!(code, 0, "{err}");
-    assert!(dry.contains(
-        "O modo online envia previews e trechos elegíveis do workspace ao provider Jev."
-    ));
-    assert!(!root.join(".mcp.json").exists());
-
-    // Claude Code, written, with hooks.
-    let (code, out, err) = run_with_key(&[
+    let mut args = vec![
         "install",
         "claude-code",
         "--workspace",
-        root_s,
+        root.to_str().unwrap(),
         "--online",
-        "--hooks",
-        "--write",
-    ]);
+    ];
+    args.extend(extra);
+    let (code, out, err) = run_with_key(&args);
     assert_eq!(code, 0, "{err}");
-    let m = read_json(&root.join(".mcp.json"));
-    let server = &m["mcpServers"]["ripwire-broker"];
-    assert_eq!(server["args"], json!(["--workspace", root_s, "--online"]));
+    (ws, root, code, out)
+}
+
+#[test]
+fn install_online_dry_run_shows_the_consent_and_writes_nothing() {
+    let (_ws, root, _, out) = install_online(&[]);
+
+    assert!(out.contains(
+        "O modo online envia previews e trechos elegíveis do workspace ao provider Jev."
+    ));
+    assert!(
+        out.contains("Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.")
+    );
+    assert!(!root.join(".mcp.json").exists());
+}
+
+#[test]
+fn install_online_adds_the_flag_and_references_the_key_by_name() {
+    let (_ws, root, _, _) = install_online(&["--write"]);
+
+    let server = read_json(&root.join(".mcp.json"))["mcpServers"]["ripwire-broker"].clone();
+    assert_eq!(
+        server["args"],
+        json!(["--workspace", root.to_str().unwrap(), "--online"])
+    );
     assert_eq!(
         server["env"],
         json!({"RIPWIRE_BROKER_JEV_API_KEY": "${RIPWIRE_BROKER_JEV_API_KEY}"})
     );
+}
+
+#[test]
+fn install_online_keeps_hooks_offline() {
+    let (_ws, root, _, _) = install_online(&["--hooks", "--write"]);
+
     let settings = read_json(&root.join(".claude/settings.json"));
     for event in ["UserPromptSubmit", "PostToolUse", "Stop"] {
+        let hooks = commands(&settings, event);
+        assert!(!hooks.is_empty());
         assert!(
-            commands(&settings, event)
-                .iter()
-                .all(|c| !c.contains("--online")),
-            "hooks stay offline (D-064)"
+            hooks.iter().all(|c| !c.contains("--online")),
+            "D-064: {hooks:?}"
         );
     }
+}
 
-    // Codex: the TOML snippet forwards the variable by name.
+#[test]
+fn install_online_for_codex_forwards_the_key_by_name() {
+    let ws = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    let (code, codex, err) = run_with_key(&[
+    let (code, out, err) = run_with_key(&[
         "install",
         "codex",
         "--workspace",
-        root_s,
+        ws.path().to_str().unwrap(),
         "--online",
         "--codex-home",
         home.path().to_str().unwrap(),
     ]);
-    assert_eq!(code, 0, "{err}");
-    assert!(codex.contains("\"--online\""), "{codex}");
-    assert!(
-        codex.contains("env_vars = [\"RIPWIRE_BROKER_JEV_API_KEY\"]"),
-        "{codex}"
-    );
 
-    // The key itself appears nowhere.
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"--online\"]"), "{out}");
+    assert!(
+        out.contains("env_vars = [\"RIPWIRE_BROKER_JEV_API_KEY\"]"),
+        "{out}"
+    );
+}
+
+#[test]
+fn install_online_never_prints_or_writes_the_key() {
+    let (_ws, root, _, out) = install_online(&["--hooks", "--write"]);
+
     let written = std::fs::read_to_string(root.join(".mcp.json")).unwrap()
         + &std::fs::read_to_string(root.join(".claude/settings.json")).unwrap();
-    for text in [&dry, &out, &codex, &written] {
+    for text in [&out, &written] {
         assert!(
             !text.contains("tok-install-secret"),
             "the key leaked: {text}"
         );
     }
+}
 
-    // Installing again without --online turns it off.
+#[test]
+fn reinstalling_without_online_turns_it_off() {
+    let (_ws, root, _, _) = install_online(&["--write"]);
+    let root_s = root.to_str().unwrap();
+
     let (code, _, err) =
         run_with_key(&["install", "claude-code", "--workspace", root_s, "--write"]);
+
     assert_eq!(code, 0, "{err}");
     let server = read_json(&root.join(".mcp.json"))["mcpServers"]["ripwire-broker"].clone();
     assert_eq!(server["args"], json!(["--workspace", root_s]));

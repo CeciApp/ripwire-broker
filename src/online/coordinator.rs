@@ -131,6 +131,8 @@ pub struct Discovery {
     pub interrupted: Option<u128>,
     /// Lookahead files the classifier admitted: candidates ripwire did not rank.
     pub semantic_only: usize,
+    /// Questions answered without a valid probability (CA-ONLINE-10): never a score.
+    pub unknown_answers: usize,
     /// Files the classifier was asked about, planner and lookahead.
     pub candidates: usize,
     pub selected_ranges: usize,
@@ -152,6 +154,7 @@ impl Discovery {
             || self.stale_batches > 0
             || self.changed_files > 0
             || self.interrupted.is_some()
+            || self.unknown_answers > 0
     }
 }
 
@@ -218,6 +221,17 @@ impl OnlineEngine {
 
     pub fn cached_decisions(&self) -> usize {
         self.cache.lock().unwrap().len()
+    }
+
+    /// The cache entries, rendered as stored.
+    pub fn inspect_cache(&self) -> Vec<String> {
+        self.cache
+            .lock()
+            .unwrap()
+            .dump()
+            .into_iter()
+            .map(|(key, value)| format!("{key} {value:?}"))
+            .collect()
     }
 
     /// The §23.11 metrics for the status resource.
@@ -612,6 +626,7 @@ impl OnlineEngine {
             match done.result {
                 Ok(answers) => {
                     let request_digest = digest(req);
+                    disc.unknown_answers += answers.iter().filter(|p| p.is_none()).count();
                     for (item, p) in req.state.items.iter().zip(answers) {
                         if let (Some(p), true) = (p, self.config.cache) {
                             cache.insert(keys[&item.id], p, request_digest.clone());

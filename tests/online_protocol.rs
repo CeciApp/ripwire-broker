@@ -1,5 +1,9 @@
 //! Seam 4: the real `JevClient` against a local HTTP/1.1 fixture server (PRD §23.14). Needs
 //! `--features online`; the fixture only listens on 127.0.0.1.
+//!
+//! Known gap: production speaks HTTPS and may negotiate HTTP/2, where a cancel resets a stream
+//! instead of closing a TCP connection. Plain-HTTP fixtures cannot show that; the live tests
+//! (tests/online_live.rs) exercise TLS and ALPN, but not cancellation.
 #![cfg(feature = "online")]
 
 use ripwire_broker::online::SemanticStage;
@@ -289,9 +293,15 @@ async fn a_closed_connection_is_a_network_failure() {
 }
 
 #[test]
-fn the_production_client_accepts_only_the_allowlisted_https_endpoint() {
+fn the_production_client_cannot_be_pointed_anywhere_but_the_allowlisted_https_endpoint() {
+    // The only public constructor takes no URL: adding one fails to compile here. The client's
+    // `https_only` and no-redirect settings are defence in depth behind this; the refused
+    // redirect is exercised in `redirects_are_refused`.
+    let new: fn(Credential, &str, Duration) -> Result<JevClient, String> = JevClient::new;
     let key = Credential::from_env_value(Some("tok-123")).unwrap();
-    let c = JevClient::new(key, "jev-1.13.0", Duration::from_secs(15)).unwrap();
+
+    let c = new(key, "jev-1.13.0", Duration::from_secs(15)).unwrap();
+
     assert_eq!(c.endpoint(), "https://api.typesafe.ai/v1/systemone");
     assert_eq!(c.model(), "jev-1.13.0");
 }
@@ -423,6 +433,11 @@ async fn the_broker_enriches_a_task_through_the_real_client() {
     assert_eq!(login["semantic"]["state"], "selected_source");
     assert_eq!(login["semantic"]["probability"], 0.9);
     let status = serde_json::to_value(broker.status().await).unwrap();
+    let wire: usize = sent.iter().map(|c| c.body.len()).sum();
+    assert_eq!(
+        status["online"]["metrics"]["jev_request_bytes"]["total"], wire,
+        "request bytes match what the provider received"
+    );
     let received = &status["online"]["metrics"]["jev_response_bytes"]["total"];
     assert!(
         received.as_u64().unwrap() > 0,
@@ -504,11 +519,14 @@ async fn an_mcp_cancel_aborts_http_requests_in_flight() {
     while *seen.lock().unwrap() == 0 && tokio::time::Instant::now() < until {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let sent = *seen.lock().unwrap();
-    assert!(sent > 0, "a request reached the provider");
+    assert!(*seen.lock().unwrap() > 0, "a request reached the provider");
 
     call.abort(); // what the MCP handler does on notifications/cancelled (RF-14)
-    let until = tokio::time::Instant::now() + Duration::from_millis(250);
+    let _ = call.await;
+    let sent = *seen.lock().unwrap();
+    // Generous on purpose: the 250 ms bound of v0.1 §20.1 is proven with controlled time in
+    // tests/online_scheduler.rs; here the point is that the TCP connection is closed at all.
+    let until = tokio::time::Instant::now() + Duration::from_secs(2);
     while closed.load(SeqCst) < sent && tokio::time::Instant::now() < until {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -516,7 +534,7 @@ async fn an_mcp_cancel_aborts_http_requests_in_flight() {
     assert_eq!(
         closed.load(SeqCst),
         sent,
-        "every HTTP request in flight was aborted within 250 ms"
+        "every HTTP request in flight was aborted"
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
@@ -598,4 +616,91 @@ async fn the_jev_probe_goes_over_the_wire_once() {
     assert_eq!(sent.len(), 1);
     let body = String::from_utf8(sent[0].body.clone()).unwrap();
     assert!(body.contains(ripwire_broker::doctor::PROBE_PATH));
+}
+
+// --- review #6: pooled keep-alive connections ---
+
+/// A provider that keeps HTTP/1.1 connections alive, answers every question of every request
+/// with `p`, and counts the connections it accepted.
+async fn keep_alive(p: f64) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = connections.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf: Vec<u8> = vec![];
+                let mut chunk = [0u8; 8192];
+                loop {
+                    // One request: head, then its body.
+                    let head_end = loop {
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < head_end + length {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let req: serde_json::Value =
+                        serde_json::from_slice(&buf[head_end..head_end + length]).unwrap();
+                    buf.drain(..head_end + length);
+                    let answers: serde_json::Map<String, serde_json::Value> = req["questions"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(|k| (k.clone(), serde_json::json!({"type": "noul", "noul": p})))
+                        .collect();
+                    let out =
+                        serde_json::json!({"model": req["model"], "answers": answers}).to_string();
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{out}",
+                        out.len()
+                    );
+                    if sock.write_all(reply.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, connections)
+}
+
+#[tokio::test]
+async fn the_client_reuses_a_pooled_connection() {
+    let (port, connections) = keep_alive(0.7).await;
+    let c = client(port, Duration::from_secs(5));
+
+    for _ in 0..3 {
+        assert_eq!(
+            c.classify(&request()).await.unwrap(),
+            vec![Some(0.7), Some(0.7)]
+        );
+    }
+
+    assert_eq!(
+        connections.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one pooled connection serves sequential requests"
+    );
 }

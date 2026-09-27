@@ -1,13 +1,13 @@
 //! Seam 6: the command summarizer as a real subprocess, with `sh` scripts as the "model".
+mod common;
+
 use ripwire_broker::summarizer::{CommandSummarizer, Summarizer};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let p = dir.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_executable(&p, format!("#!/bin/sh\n{body}\n"));
     p
 }
 

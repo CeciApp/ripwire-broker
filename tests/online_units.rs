@@ -602,7 +602,7 @@ fn files_above_1_mb_are_location_only() {
 
 // --- S4.29: cache key and contents (CA-ONLINE-13) ---
 
-use ripwire_broker::online::cache::{KeyParts, SemanticCache, key};
+use ripwire_broker::online::cache::{KeyParts, key};
 
 fn parts<'a>(
     model: &'a str,
@@ -654,26 +654,10 @@ fn the_cache_key_changes_with_everything_that_decides_the_answer() {
     assert_ne!(base, key(&admission), "stage");
 }
 
-#[test]
-fn the_cache_holds_no_query_path_source_or_credential() {
-    let query = "how are login tokens validated?";
-    let source = "def validate_token(token): return token == SECRET";
-    let mut cache = SemanticCache::default();
-    let k = key(&parts("jev-1.13.0", query, "sha256:0123", 0..source.len()));
-    cache.insert(k, 0.83, "sha256:feed".into());
-
-    let dump = format!("{:?} {:?}", cache.dump(), cache);
-
-    for clear in [query, "src/auth.py", source, "validate_token", "tok-123"] {
-        assert!(!dump.contains(clear), "{clear} in the cache: {dump}");
-    }
-    assert!(dump.contains("0.83"));
-}
-
 // --- S5.3: Retry-After ---
 
 use ripwire_broker::online::retry_after;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 #[test]
 fn retry_after_parses_seconds_and_http_dates() {
@@ -712,7 +696,6 @@ fn retry_after_parses_seconds_and_http_dates() {
     ] {
         assert_eq!(retry_after::parse(bad, now), None, "{bad:?}");
     }
-    let _ = SystemTime::now();
 }
 
 // --- S5.6: remote text is sanitized, capped and redacted ---

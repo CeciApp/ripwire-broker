@@ -23,18 +23,18 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-fn live_client() -> Option<JevClient> {
-    let Ok(key) = Credential::from_env() else {
-        eprintln!("skipping: RIPWIRE_BROKER_JEV_API_KEY is not set");
-        return None;
-    };
-    Some(JevClient::new(key, "jev-1.13.0", Duration::from_secs(15)).unwrap())
+/// These tests only run when asked for with `--ignored`; asked for without a key, they fail
+/// instead of passing without checking anything.
+fn live_client() -> JevClient {
+    let key = Credential::from_env()
+        .expect("the live tests need RIPWIRE_BROKER_JEV_API_KEY in the environment");
+    JevClient::new(key, "jev-1.13.0", Duration::from_secs(15)).unwrap()
 }
 
 #[tokio::test]
 #[ignore = "calls the real provider; set RIPWIRE_BROKER_JEV_API_KEY"]
 async fn a_real_provider_classifies_the_synthetic_corpus() {
-    let Some(client) = live_client() else { return };
+    let client = live_client();
     let [admission, selection] = <[_; 2]>::try_from(jev_corpus::requests()).unwrap();
 
     for req in [&admission, &selection] {
@@ -65,11 +65,11 @@ async fn a_real_provider_classifies_the_synthetic_corpus() {
 #[tokio::test]
 #[ignore = "calls the real provider and ripwire; set RIPWIRE_BROKER_JEV_API_KEY"]
 async fn a_real_provider_enriches_a_synthetic_repository() {
-    if !common::ripwire_available() {
-        eprintln!("skipping: ripwire not on PATH");
-        return;
-    }
-    let Some(client) = live_client() else { return };
+    assert!(
+        common::ripwire_available(),
+        "the live tests need ripwire on PATH"
+    );
+    let client = live_client();
     let repo = common::sample_repo();
     let upstream = RipwireUpstream::spawn(UpstreamConfig::new(repo.path()))
         .await
