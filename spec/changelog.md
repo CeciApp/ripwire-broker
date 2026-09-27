@@ -55,6 +55,7 @@
 | 2026-09-27 15:36 | `request_id` contínuo nos hooks; `Shape` substitui os 7 parâmetros de `envelope()`; pendências de D-021 fechadas; 118 verdes | [D-051](#d-051--pendências-técnicas-fechadas) |
 | 2026-09-27 15:44 | Code review: 9 achados verificados (2 altos, 4 médios, 3 baixos); usuário decidiu corrigir todos por TDD | [D-052](#d-052--code-review-das-fases-2-e-3) |
 | 2026-09-27 15:53 | Os 9 achados do code review corrigidos por TDD; 127 verdes | [D-053](#d-053--correções-do-code-review) |
+| 2026-09-27 15:55 | Projeto publicado como repositório público `CeciApp/ripwire-broker` no GitHub | [D-054](#d-054--publicação-no-ceciapp) |
 
 ---
 
@@ -1048,4 +1049,18 @@ Cada achado de D-052 ganhou um teste vermelho, confirmado antes da correção.
   - o nº 8, que a princípio passou pelo motivo errado;
   - o nº 5, que esperava 30 s por nada e agora espera 2 s.
 - Suíte: 127 verdes, mais 1 opt-in, clippy sem avisos e fmt ok.
+
+## D-054 — Publicação no CeciApp
+
+- Pedido do usuário: criar o projeto no CeciApp, que pode ser público.
+- Criado https://github.com/CeciApp/ripwire-broker (público) com `gh repo create --source .
+  --push`. O branch padrão é `master`, com os commits `3d1b85a`, `a352a65` e `2755d57`, e
+  o remoto é `origin` (SSH).
+- Verificação antes de publicar:
+  - não há segredos, tokens nem caminhos pessoais nos arquivos versionados;
+  - os caminhos `/private/var/folders/...` nos fixtures do ripwire são diretórios
+    temporários aleatórios do macOS;
+  - o único dado pessoal público é o autor dos commits (nome e e-mail do git).
+- O repositório não tem arquivo de licença. Sem licença, o código fica visível, mas não
+  há permissão explícita de uso. A escolha da licença fica com o usuário.
 
