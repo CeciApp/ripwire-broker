@@ -112,6 +112,9 @@ pub(crate) fn merge(
         })
         .collect();
 
+    // Semantic-only items, ordered among themselves by probability before they join the
+    // entries; ripwire's items keep their order, and the scores never mix (D-081, §23.4).
+    let mut found: Vec<Entry> = vec![];
     for file in disc
         .files
         .iter()
@@ -141,6 +144,7 @@ pub(crate) fn merge(
             }
             let p = u.scored.probability.unwrap_or_default();
             let (start, end) = (u.unit.start_line, u.unit.end_line);
+            let beside = beside(file);
             let (prio, why, content) = match d {
                 SourceDecision::Selected
                     if max_source_bytes.is_some_and(|cap| rendered + u.text.len() > cap) =>
@@ -174,7 +178,7 @@ pub(crate) fn merge(
                     None,
                 ),
             };
-            out.push(Entry::Item(
+            found.push(Entry::Item(
                 prio,
                 Item {
                     kind: "semantic_location",
@@ -183,7 +187,7 @@ pub(crate) fn merge(
                     line: Some(start),
                     symbol: None,
                     signature: None,
-                    why_included: why,
+                    why_included: format!("{why}{beside}"),
                     source: JEV,
                     content,
                     semantic: evidence(
@@ -200,7 +204,7 @@ pub(crate) fn merge(
         }
         if !added && !has_structural {
             let p = file.admission.probability.unwrap_or_default();
-            out.push(Entry::Item(
+            found.push(Entry::Item(
                 priority::SEMANTIC_LOCATION,
                 Item {
                     kind: "semantic_location",
@@ -210,7 +214,8 @@ pub(crate) fn merge(
                     symbol: None,
                     signature: None,
                     why_included: format!(
-                        "classifier admitted the file (p={p:.2} > 0.25); no block selected"
+                        "classifier admitted the file (p={p:.2} > 0.25); no block selected{}",
+                        beside(file)
                     ),
                     source: JEV,
                     content: None,
@@ -226,6 +231,12 @@ pub(crate) fn merge(
             ));
         }
     }
+    let p = |e: &Entry| match e {
+        Entry::Item(_, i) => i.semantic.as_ref().map_or(0.0, |s| s.probability),
+        _ => 0.0,
+    };
+    found.sort_by(|a, b| p(b).total_cmp(&p(a)));
+    out.extend(found);
     out.extend(limitations(disc).into_iter().map(Entry::Limitation));
     if capped > 0 {
         out.push(Entry::Limitation(limitation(
@@ -236,6 +247,14 @@ pub(crate) fn merge(
         )));
     }
     out
+}
+
+/// Says where a lookahead file came from; ripwire never ranked it.
+fn beside(file: &FileEvidence) -> &'static str {
+    match file.lookahead {
+        true => "; found beside a ripwire candidate",
+        false => "",
+    }
 }
 
 fn limitation(kind: &'static str, detail: String) -> Limitation {

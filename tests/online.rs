@@ -710,6 +710,267 @@ async fn the_rendered_source_cap_turns_selected_blocks_into_locations() {
     assert!(limitation_kinds(&out).contains(&"semantic_source_capped".to_string()));
 }
 
+// --- S5.7–S5.9: one-level lookahead ---
+
+const BUDGET_PY: &str =
+    "def fit(envelope, budget):\n    while size(envelope) > budget:\n        envelope.pop()\n";
+
+/// Admits `src/auth.py` and the lookahead file `src/budget.py`, and selects `fit`.
+fn budget_is_evidence() -> FakeClassifier {
+    FakeClassifier::new().rule(|stage, item| match stage {
+        SemanticStage::FileAdmission => Some(
+            if item.path == "src/auth.py" || item.path == "src/budget.py" {
+                0.9
+            } else {
+                0.1
+            },
+        ),
+        SemanticStage::SourceSelection => Some(if item.text.starts_with("def fit") {
+            0.8
+        } else {
+            0.1
+        }),
+    })
+}
+
+fn with_siblings() -> tempfile::TempDir {
+    let ws = workspace();
+    common::write(ws.path(), "src/budget.py", BUDGET_PY);
+    common::write(ws.path(), "src/sub/deep.py", "def deep():\n    pass\n");
+    common::write(ws.path(), "src/.hidden.py", "x = 1\n");
+    common::write(ws.path(), "src/server.pem", "-----BEGIN CERTIFICATE-----\n");
+    ws
+}
+
+#[tokio::test]
+async fn lookahead_admits_eligible_siblings_of_admitted_planner_paths() {
+    let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    let admitted = s.classifier.asked(SemanticStage::FileAdmission);
+    assert!(
+        admitted.contains(&"src/budget.py".to_string()),
+        "a sibling of admitted src/auth.py: {admitted:?}"
+    );
+    assert!(
+        !admitted.contains(&"src/sub/deep.py".to_string()),
+        "one level only, no descent"
+    );
+    assert_eq!(
+        admitted.iter().filter(|p| *p == "src/routes.py").count(),
+        1,
+        "planner paths are not asked twice"
+    );
+    assert!(
+        !admitted
+            .iter()
+            .any(|p| p.starts_with("tests/") && p != "tests/test_auth.py"),
+        "tests/ was not admitted"
+    );
+    let found = items(&out)
+        .iter()
+        .find(|i| i["path"] == "src/budget.py")
+        .unwrap_or_else(|| panic!("{out:#}"));
+    assert_eq!(found["kind"], "semantic_location");
+    assert_eq!(found["semantic"]["state"], "selected_source");
+    assert!(
+        found["why_included"].as_str().unwrap().contains("beside"),
+        "{found}"
+    );
+    assert!(
+        found.get("symbol").is_none() && out["tests"].as_array().unwrap().is_empty(),
+        "no relation invented"
+    );
+}
+
+#[tokio::test]
+async fn lookahead_respects_eligibility_and_its_cap() {
+    let ws = with_siblings();
+    for n in 0..10 {
+        common::write(ws.path(), &format!("src/extra_{n:02}.py"), "x = 1\n");
+    }
+    let s = online_with(ws, budget_is_evidence(), |o| o.lookahead_max = 3).await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let admitted = s.classifier.asked(SemanticStage::FileAdmission);
+    for never in ["src/.hidden.py", "src/server.pem"] {
+        assert!(
+            !admitted.contains(&never.to_string()),
+            "{never} is never sent"
+        );
+    }
+    let lookahead: Vec<&String> = admitted
+        .iter()
+        .filter(|p| !["src/routes.py", "src/auth.py", "tests/test_auth.py"].contains(&p.as_str()))
+        .collect();
+    assert_eq!(
+        lookahead,
+        vec!["src/budget.py", "src/extra_00.py", "src/extra_01.py"],
+        "path order, capped at 3"
+    );
+}
+
+#[tokio::test]
+async fn lookahead_files_are_admitted_with_short_previews() {
+    let ws = with_siblings();
+    let big: String = (0..300)
+        .map(|n| format!("    step_{n} = shrink(envelope)  # keep it small\n"))
+        .collect();
+    common::write(ws.path(), "src/budget.py", &format!("{BUDGET_PY}{big}"));
+    common::write(ws.path(), "src/auth.py", &format!("{AUTH}{big}"));
+    let s = online_in(ws, explore(), budget_is_evidence()).await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let seen = s.classifier.seen.lock().unwrap().clone();
+    let sent = |path: &str| -> usize {
+        seen.iter()
+            .filter(|r| FakeClassifier::stage(r) == SemanticStage::FileAdmission)
+            .flat_map(|r| r.state.items.iter())
+            .find(|i| i.path == path)
+            .map(|i| i.text.len())
+            .unwrap()
+    };
+    assert!(
+        sent("src/budget.py") <= 4096,
+        "lookahead: {}",
+        sent("src/budget.py")
+    );
+    assert!(
+        sent("src/auth.py") > 4096,
+        "planner keeps the 16 KiB preview: {}",
+        sent("src/auth.py")
+    );
+}
+
+#[tokio::test]
+async fn selection_starts_with_the_most_likely_admitted_file() {
+    let classifier = FakeClassifier::new().rule(|stage, item| match stage {
+        SemanticStage::FileAdmission => Some(match item.path.as_str() {
+            "src/budget.py" => 0.95,
+            "src/auth.py" => 0.6,
+            _ => 0.1,
+        }),
+        SemanticStage::SourceSelection => Some(0.8),
+    });
+    let s = online_in(with_siblings(), explore(), classifier).await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let selection = s.classifier.asked(SemanticStage::SourceSelection);
+    assert_eq!(
+        selection.first().map(String::as_str),
+        Some("src/budget.py"),
+        "{selection:?}"
+    );
+}
+
+#[tokio::test]
+async fn semantic_locations_are_ordered_by_probability_within_their_band() {
+    // The planner's routes.py import block is selected at 0.6, the lookahead budget.py at 0.9.
+    let classifier = FakeClassifier::new().rule(|stage, item| match stage {
+        SemanticStage::FileAdmission => Some(if item.path == "tests/test_auth.py" {
+            0.1
+        } else {
+            0.9
+        }),
+        SemanticStage::SourceSelection => Some(if item.text.starts_with("def fit") {
+            0.9
+        } else if item.text.starts_with("from src.auth") {
+            0.6
+        } else {
+            0.1
+        }),
+    });
+    let s = online_in(with_siblings(), explore(), classifier).await;
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    let order: Vec<&str> = items(&out)
+        .iter()
+        .filter(|i| i["kind"] == "semantic_location")
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(order.first(), Some(&"src/budget.py"), "{order:?}");
+    let before = offline_items(explore()).await;
+    let structural: Vec<(Value, Value)> = items(&out)
+        .iter()
+        .filter(|i| i["kind"] != "semantic_location")
+        .map(|i| (i["path"].clone(), i["symbol"].clone()))
+        .collect();
+    assert_eq!(structural, before, "ripwire's items keep their order");
+}
+
+#[tokio::test]
+async fn a_semantic_only_candidate_is_reported_as_gain_beyond_ripwire() {
+    let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+    assert_eq!(
+        json(&s.broker.status().await)["online"]["semantic_only_candidates"],
+        1
+    );
+
+    let none = online_in(with_siblings(), explore(), login_is_evidence()).await;
+    none.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+    assert_eq!(
+        json(&none.broker.status().await)["online"]["semantic_only_candidates"],
+        0,
+        "a rejected sibling is no gain"
+    );
+}
+
+#[tokio::test]
+async fn without_ripwire_no_semantic_discovery_is_invented() {
+    let s = online(
+        FakeUpstream::new().fail("explore", UpstreamError::Unavailable("down".into())),
+        budget_is_evidence(),
+    )
+    .await;
+
+    let err = s
+        .broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.error, "upstream_unavailable",
+        "CA-07: a structured error, no fabricated context"
+    );
+    assert_eq!(
+        s.classifier.calls(),
+        0,
+        "no candidates without ripwire, so no lookahead either"
+    );
+}
+
 // --- S4.27: budget ---
 
 #[tokio::test]

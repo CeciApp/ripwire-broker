@@ -81,6 +81,8 @@
 | 2026-09-27 19:10 | S5.4: o cancelamento MCP chega ao request HTTP pelo drop estruturado (sem token extra); provado por teste e por mutação; 197/207 verdes | [D-077](#d-077--cancelamento-até-o-http) |
 | 2026-09-27 19:14 | S5.5: prazo de descoberta com `interrupted` e evidência preservada; `--jev-max-source-bytes` limita a fonte renderizada; 200/210 verdes | [D-078](#d-078--prazo-de-descoberta-e-limite-de-fonte) |
 | 2026-09-27 19:16 | S5.6: texto remoto sanitizado, limitado e com a credencial redigida; o `Retry-After` era o único vazamento possível; 201/212 verdes | [D-079](#d-079--redaction-de-texto-remoto) |
+| 2026-09-27 19:28 | S5.7–S5.9: lookahead de um nível, `--jev-lookahead-max`, ganho além do Ripwire no status; ao vivo acha `src/budget.rs` (p=0,90), mas os 24 requests padrão se esgotam na admissão em chamada fria (decisão pendente); 2ª falha intermitente não reproduzida | [D-080](#d-080--lookahead-de-um-nível) |
+| 2026-09-27 19:35 | Usuário escolheu previews de 4 KiB no lookahead e ordem por probabilidade; a frio com os padrões, `src/budget.rs` aparece (p=0,89) em 19 requests; 3ª falha intermitente | [D-081](#d-081--equilíbrio-do-lookahead) |
 
 ---
 
@@ -1747,4 +1749,86 @@ Fatia S5.6 do plano (PRD §23.9; v0.1 §13.3 e §17).
 - Suítes: 201 verdes no build padrão e 212 com `online`, 2 ignorados; clippy e fmt limpos nas
   duas.
 - **Ponto de parada 3:** CA-ONLINE-09 (D-075), 11 (D-073) e 12 (D-077) verdes.
+
+## D-080 — Lookahead de um nível
+
+Fatias S5.7 a S5.9 do plano (D-061).
+
+- **Mecânica.** Depois da admissão dos paths do planner, entram os arquivos regulares que
+  estão diretamente nos diretórios dos paths **admitidos**:
+  - sem descer em subdiretórios e sem seguir symlinks (`WorkspaceReader::files_in`, que também
+    respeita `.gitignore`);
+  - em ordem de path, sem repetir candidatos, até `--jev-lookahead-max` no total (padrão 32;
+    0 desliga);
+  - cada um passa pela política completa do `snapshot`. Irmãos inelegíveis são pulados em
+    silêncio: são exploração, não candidatos que o Ripwire nomeou, e não marcam a descoberta
+    como incompleta. O teto também não marca, como o de 16 candidatos (política de custo).
+  - Os admitidos seguem para a seleção, com os mesmos lotes, cache, frescor, prazo e limite de
+    requests. No merge viram `semantic_location`, e o `why_included` diz "found beside a
+    ripwire candidate". Nunca ganham caller, teste ou risco.
+- **S5.8.** `Discovery.semantic_only` conta os arquivos do lookahead admitidos, o ganho além
+  do Ripwire, e o status expõe o acumulado em `online.semantic_only_candidates`.
+- **S5.9 não se aplica como escrito.** Sem Ripwire não há candidatos do planner, e portanto
+  não há lookahead. A linha "Ripwire falha → preservar evidência semântica" do §23.4 pressupõe
+  a fronteira remota que D-056 removeu. No lugar dela, um teste-guarda: com o Ripwire fora,
+  erro estruturado `upstream_unavailable` e nenhuma chamada ao classificador (CA-07).
+- **Testes.** Quatro novos no seam 1: irmãos elegíveis admitidos e selecionados, sem descer em
+  subdiretórios; elegibilidade e teto (ordem de path, teto 3); ganho no status (1 com o irmão
+  admitido, 0 rejeitado); e a guarda sem Ripwire. O teste de flags da CLI ganhou
+  `--jev-lookahead-max`.
+- **Medições.** O overhead local, em release, ficou em p95 21,8 ms, sem mudança. Suítes: 201
+  verdes no build padrão e 216 com `online`, 2 ignorados; clippy e fmt limpos nas duas.
+- **Teste ao vivo** (autorizado em D-076), mesma tarefa de orientação do D-076:
+  - com 100.000 tokens, 55 itens; o lookahead encontrou e **selecionou `src/budget.rs`** (p =
+    0,90 e 0,82), o arquivo que faltara em D-076, além de `local.rs`, `online/request.rs` e
+    outros quatro admitidos sem trecho;
+  - **com os padrões (2.500 tokens, 24 requests), numa chamada fria, nenhum item do lookahead
+    aparece.** A admissão de até 16 + 32 arquivos, com previews de 16 KiB (2 por request),
+    consome sozinha os 24 requests. Com 8.000 tokens, a descoberta bateu no limite e saiu
+    `incomplete`. O `budget.rs` só apareceu quando o cache das chamadas anteriores liberou
+    requests para a seleção;
+  - `semantic_only_candidates` chegou a 28 em duas chamadas, e a chave não apareceu em nenhuma
+    saída.
+- **Decisão pendente com o usuário: equilibrar o lookahead dentro dos 24 requests.** As opções
+  estão na resposta desta sessão; nenhuma foi aplicada.
+- **Falha intermitente, 2ª ocorrência.** Um teste do build padrão falhou uma vez, de novo na
+  primeira execução depois de uma recompilação (a 1ª foi em D-072). Não reproduziu em 46
+  execuções, 3 delas sob carga (compilação release e a suíte `online` em paralelo). O nome do
+  teste não foi capturado. Próximo passo: rodar o CI com `--no-fail-fast` e guardar a saída.
+
+## D-081 — Equilíbrio do lookahead
+
+Decisão pendente de D-080. O usuário escolheu a opção recomendada: **preview menor no
+lookahead e seleção pela probabilidade de admissão**. O limite de 24 requests e o teto de 32
+vizinhos continuam.
+
+- **Preview do lookahead: 4 KiB** (`LOOKAHEAD_PREVIEW_BYTES`, `Snapshot::preview_at`). Cabem
+  ~8 arquivos por request, em vez de 2, e 32 vizinhos custam ~4 requests de admissão em vez
+  de 16. Os paths do planner mantêm os 16 KiB da norma v0.1 §6.3. Como a chave do cache inclui
+  o range do preview, as duas formas nunca se confundem.
+- **Seleção pela probabilidade de admissão.** As unidades dos arquivos admitidos são enviadas
+  do arquivo mais provável para o menos provável; empates mantêm a ordem do Ripwire. Com o
+  limite apertado, quem perde é o menos provável.
+- **Ordem dos `semantic_location` pela probabilidade**, dentro da própria faixa. No teste
+  frio anterior, o `src/budget.rs` (0,88) ficava atrás de trechos do planner com 0,60, só
+  porque vinha depois na lista de arquivos, e com 2.500 tokens era cortado. Agora os itens
+  só-semânticos se ordenam entre si pela probabilidade. Os itens do Ripwire não mudam de lugar
+  e os scores não se misturam com o ranking dele (§23.4). É a mesma regra da opção escolhida,
+  aplicada à renderização.
+- **Testes.** Quatro novos: o preview de 4 KiB no seam 2; no seam 1, a admissão com preview
+  curto só no lookahead, a seleção começando pelo arquivo mais provável e a ordem dos
+  `semantic_location` com os itens do Ripwire intactos.
+- **Ao vivo, a frio, com os padrões** (mesma tarefa de D-076 e D-080, processo novo): 19
+  requests (antes 24, no limite), descoberta `complete`, 2.394 de 2.500 tokens, e **o
+  `src/budget.rs` aparece** como o primeiro trecho semântico (p = 0,89), junto com
+  `online/request.rs` (0,85, também do lookahead).
+- Suítes: 209 verdes no build padrão e 220 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+- **Falha intermitente, 3ª ocorrência**, agora na suíte `online`, de novo na primeira execução
+  depois de uma recompilação. Não reproduziu em 8 execuções seguidas.
+  - Suspeito: `a_hung_upstream_times_out_and_is_restarted` (da Fase 0/1). O timeout global de
+    500 ms vale também para a segunda chamada, ao Ripwire real recém-reiniciado.
+  - Não se confirmou em 15 execuções sob carga de 24 processos em 12 CPUs.
+  - Mudança de procedimento: toda verificação passa a guardar a saída completa no
+    scratchpad, para registrar o nome do teste na próxima ocorrência.
 

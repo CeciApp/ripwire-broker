@@ -212,6 +212,7 @@ fn online_flags_parse_and_default_to_the_pinned_model() {
             no_cache: false,
             max_source_bytes: None,
             max_candidates: 16,
+            lookahead_max: 32,
             deadline: Duration::from_millis(8_000),
         })
     );
@@ -238,6 +239,8 @@ fn online_flags_parse_and_default_to_the_pinned_model() {
         "5",
         "--jev-deadline-ms",
         "3000",
+        "--jev-lookahead-max",
+        "7",
     ]) else {
         panic!()
     };
@@ -251,6 +254,7 @@ fn online_flags_parse_and_default_to_the_pinned_model() {
     assert_eq!(t.deadline, Duration::from_millis(3000));
     assert!(t.no_cache);
     assert_eq!(t.max_source_bytes, Some(4096));
+    assert_eq!(t.lookahead_max, 7);
 }
 
 #[test]

@@ -6,7 +6,7 @@
 use super::cache::{self, KeyParts, SemanticCache};
 use super::classifier::Classifier;
 use super::decision::{FileDecision, file_decision};
-use super::reader::{Snapshot, Unit, WorkspaceReader, units};
+use super::reader::{LOOKAHEAD_PREVIEW_BYTES, Snapshot, Unit, WorkspaceReader, units};
 use super::request::{self, JevRequest, StateItem};
 use super::scheduler::{Freshness, Job, Scheduler, SchedulerConfig};
 use super::{RankedPath, SemanticStage};
@@ -28,6 +28,8 @@ pub struct OnlineConfig {
     pub request_limit: usize,
     /// Planner paths the rescore evaluates (D-061).
     pub max_candidates: usize,
+    /// Siblings the one-level lookahead may add, in total (D-061).
+    pub lookahead_max: usize,
     pub cache: bool,
     /// Capacity of the queue in front of the scheduler.
     pub queue: usize,
@@ -48,6 +50,7 @@ impl OnlineConfig {
             max_in_flight: 4,
             request_limit: 24,
             max_candidates: 16,
+            lookahead_max: 32,
             cache: true,
             queue: 8,
             deadline: std::time::Duration::from_millis(8_000),
@@ -101,6 +104,8 @@ pub struct FileEvidence {
     pub decision: FileDecision,
     pub units: Vec<UnitEvidence>,
     pub location_only: bool,
+    /// Found by the lookahead beside a ripwire candidate, not by ripwire.
+    pub lookahead: bool,
 }
 
 /// What one discovery found, and what it could not do.
@@ -123,6 +128,8 @@ pub struct Discovery {
     pub changed_files: usize,
     /// The discovery deadline (in ms) cut the semantic stage short.
     pub interrupted: Option<u128>,
+    /// Lookahead files the classifier admitted: candidates ripwire did not rank.
+    pub semantic_only: usize,
 }
 
 impl Discovery {
@@ -145,6 +152,8 @@ pub struct OnlineTotals {
     pub requests: u64,
     pub cache_hits: u64,
     pub last_error: Option<&'static str>,
+    /// `semantic_only_candidates_total` (PRD §23.11): the gain beyond ripwire.
+    pub semantic_only: u64,
 }
 
 pub struct OnlineEngine {
@@ -216,40 +225,76 @@ impl OnlineEngine {
         let mut disc = Discovery::default();
         let mut left = self.config.request_limit;
         let deadline = tokio::time::Instant::now() + self.config.deadline;
-        let mut files: Vec<(&RankedPath, Arc<Snapshot>)> = vec![];
+        let mut files: Vec<(RankedPath, Arc<Snapshot>)> = vec![];
         for rp in ranked.iter().take(self.config.max_candidates) {
             match self.reader.snapshot(&rp.path) {
-                Ok(snap) => files.push((rp, Arc::new(snap))),
+                Ok(snap) => files.push((rp.clone(), Arc::new(snap))),
                 Err(why) => *disc.not_sent.entry(why.as_str()).or_default() += 1,
             }
         }
 
-        let admission: Vec<Pending> = files
-            .iter()
-            .enumerate()
-            .map(|(n, (_, snap))| {
-                let preview = snap.preview();
-                Pending {
-                    key: self.key(SemanticStage::FileAdmission, query, snap, 0..preview.len()),
-                    item: StateItem {
-                        id: format!("f{n}"),
-                        path: snap.path.clone(),
-                        text: preview.to_string(),
-                    },
-                    snapshot: snap.clone(),
-                }
-            })
-            .collect();
-        let admitted = self
+        let mut admitted = self
             .ask(
                 query,
                 SemanticStage::FileAdmission,
-                admission,
+                self.admission(query, &files, 0),
                 &mut left,
                 deadline,
                 &mut disc,
             )
             .await;
+
+        // One-level lookahead (D-061): siblings of the admitted planner paths.
+        let planner = files.len();
+        let dirs: std::collections::BTreeSet<String> = files
+            .iter()
+            .enumerate()
+            .filter(|(n, _)| {
+                let p = admitted.get(&format!("f{n}")).and_then(|s| s.probability);
+                file_decision(&[p]).0 == FileDecision::Admitted
+            })
+            .map(|(_, (rp, _))| match rp.path.rsplit_once('/') {
+                Some((dir, _)) => dir.to_string(),
+                None => String::new(),
+            })
+            .collect();
+        let known: std::collections::HashSet<String> =
+            ranked.iter().map(|rp| rp.path.clone()).collect();
+        'dirs: for dir in dirs {
+            for path in self.reader.files_in(&dir) {
+                if files.len() - planner == self.config.lookahead_max {
+                    break 'dirs;
+                }
+                if known.contains(&path) || files.iter().any(|(rp, _)| rp.path == path) {
+                    continue;
+                }
+                // Ineligible siblings are policy, not candidates ripwire named: skipped quietly.
+                if let Ok(snap) = self.reader.snapshot(&path) {
+                    let rank = ranked.len() + files.len();
+                    let rp = RankedPath {
+                        path,
+                        rank,
+                        priority: crate::normalize::priority::PERIPHERAL,
+                        origin: super::PathOrigin::Lookahead,
+                        lines: vec![],
+                    };
+                    files.push((rp, Arc::new(snap)));
+                }
+            }
+        }
+        if files.len() > planner {
+            let extra = self
+                .ask(
+                    query,
+                    SemanticStage::FileAdmission,
+                    self.admission(query, &files[planner..], planner),
+                    &mut left,
+                    deadline,
+                    &mut disc,
+                )
+                .await;
+            admitted.extend(extra);
+        }
 
         let mut selection: Vec<Pending> = vec![];
         let mut owner: HashMap<String, (usize, Unit)> = HashMap::new();
@@ -259,6 +304,10 @@ impl OnlineEngine {
                 .cloned()
                 .unwrap_or_else(Scored::unknown);
             let (decision, _) = file_decision(&[scored.probability]);
+            let lookahead = rp.origin == super::PathOrigin::Lookahead;
+            if lookahead && decision == FileDecision::Admitted {
+                disc.semantic_only += 1;
+            }
             disc.files.push(FileEvidence {
                 path: snap.path.clone(),
                 content_hash: snap.content_hash.clone(),
@@ -266,10 +315,20 @@ impl OnlineEngine {
                 decision,
                 units: vec![],
                 location_only: snap.location_only(),
+                lookahead,
             });
-            if decision != FileDecision::Admitted {
-                continue;
-            }
+        }
+        // The most likely files are asked about first, so a tight request limit cuts the
+        // least likely ones (D-081). The sort is stable: ties keep ripwire's order.
+        let mut order: Vec<usize> = (0..files.len())
+            .filter(|n| disc.files[*n].decision == FileDecision::Admitted)
+            .collect();
+        order.sort_by(|a, b| {
+            let p = |n: &usize| disc.files[*n].admission.probability.unwrap_or_default();
+            p(b).total_cmp(&p(a))
+        });
+        for n in order {
+            let (rp, snap) = &files[n];
             for unit in units(snap, &rp.lines) {
                 let id = format!("u{}", owner.len());
                 selection.push(Pending {
@@ -328,10 +387,39 @@ impl OnlineEngine {
         let mut totals = self.totals.lock().unwrap();
         totals.requests += disc.requests as u64;
         totals.cache_hits += disc.cache_hits as u64;
+        totals.semantic_only += disc.semantic_only as u64;
         if let Some((category, _)) = disc.failures.iter().next() {
             totals.last_error = Some(category);
         }
         disc
+    }
+
+    /// Admission questions about the previews of `files`, with ids `f{first}..`.
+    fn admission(
+        &self,
+        query: &str,
+        files: &[(RankedPath, Arc<Snapshot>)],
+        first: usize,
+    ) -> Vec<Pending> {
+        files
+            .iter()
+            .enumerate()
+            .map(|(k, (rp, snap))| {
+                let preview = match rp.origin {
+                    super::PathOrigin::Lookahead => snap.preview_at(LOOKAHEAD_PREVIEW_BYTES),
+                    super::PathOrigin::Planner => snap.preview(),
+                };
+                Pending {
+                    key: self.key(SemanticStage::FileAdmission, query, snap, 0..preview.len()),
+                    item: StateItem {
+                        id: format!("f{}", first + k),
+                        path: snap.path.clone(),
+                        text: preview.to_string(),
+                    },
+                    snapshot: snap.clone(),
+                }
+            })
+            .collect()
     }
 
     /// Answers each pending question from the cache or the classifier, by item id.

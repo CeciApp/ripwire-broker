@@ -10,6 +10,9 @@ use std::path::{Component, Path, PathBuf};
 
 /// Initial file preview for `file_admission` (v0.1 §6.3).
 pub const PREVIEW_BYTES: usize = 16 * 1024;
+/// Preview of a lookahead file: ripwire never ranked it, so a short look decides whether it
+/// deserves a unit-level one; about 8 fit in a request instead of 2 (D-081).
+pub const LOOKAHEAD_PREVIEW_BYTES: usize = 4 * 1024;
 /// Target size of a textual chunk when there is no structural unit (v0.1 §9.5).
 pub const CHUNK_BYTES: usize = 3 * 1024;
 /// A unit above this is split (v0.1 §9.5).
@@ -116,10 +119,15 @@ impl Snapshot {
     /// At most [`PREVIEW_BYTES`], ending on a line break when there is one, else on a
     /// character boundary.
     pub fn preview(&self) -> &str {
-        if self.text.len() <= PREVIEW_BYTES {
+        self.preview_at(PREVIEW_BYTES)
+    }
+
+    /// At most `max` bytes, cut like [`Self::preview`].
+    pub fn preview_at(&self, max: usize) -> &str {
+        if self.text.len() <= max {
             return &self.text;
         }
-        let head = &self.text[..floor_char(&self.text, PREVIEW_BYTES)];
+        let head = &self.text[..floor_char(&self.text, max)];
         match head.rfind('\n') {
             Some(i) => &head[..=i],
             None => head,
@@ -206,6 +214,34 @@ impl WorkspaceReader {
             content_hash,
             text,
         })
+    }
+
+    /// Regular files directly in `dir` (relative; `""` is the root), in path order, without
+    /// descending and without following symlinks. What is listed still has to pass
+    /// [`Self::snapshot`] before anything is read.
+    pub fn files_in(&self, dir: &str) -> Vec<String> {
+        let Some(parts) = relative_parts(dir) else {
+            return vec![];
+        };
+        let mut abs = self.root.clone();
+        abs.extend(&parts);
+        let mut out: Vec<String> = ignore::WalkBuilder::new(&abs)
+            .max_depth(Some(1))
+            .hidden(false)
+            .parents(true)
+            .require_git(false)
+            .follow_links(false)
+            .build()
+            .flatten()
+            .filter(|e| e.depth() == 1 && e.file_type().is_some_and(|t| t.is_file()))
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .map(|name| match parts.is_empty() {
+                true => name,
+                false => format!("{}/{name}", parts.join("/")),
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     /// Whether `snap` still matches the file: eligible and with the same hash.

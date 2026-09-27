@@ -317,6 +317,8 @@ pub struct OnlineStatus {
     pub cached_decisions: usize,
     /// Error category only.
     pub last_error: Option<&'static str>,
+    /// Lookahead files admitted: candidates beyond ripwire (`semantic_only_candidates_total`).
+    pub semantic_only_candidates: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -436,6 +438,7 @@ impl Broker {
                     cache_hits: totals.cache_hits,
                     cached_decisions: engine.cached_decisions(),
                     last_error: totals.last_error,
+                    semantic_only_candidates: totals.semantic_only,
                 }
             }),
             metrics: {

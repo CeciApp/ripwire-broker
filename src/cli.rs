@@ -10,7 +10,8 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--ripwire-max-rss-mb N]
                       [--online [--jev-provider typesafe] [--jev-model MODEL] [--jev-max-in-flight N]
                                 [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
-                                [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]]
+                                [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
+                                [--jev-lookahead-max N]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
@@ -86,6 +87,8 @@ pub struct OnlineArgs {
     pub max_source_bytes: Option<u64>,
     /// Planner paths the rescore evaluates (D-061).
     pub max_candidates: usize,
+    /// Siblings the one-level lookahead may add; 0 turns it off (D-061).
+    pub lookahead_max: usize,
     /// Past it the semantic stage stops and reports `interrupted` (D-063).
     pub deadline: Duration,
 }
@@ -270,6 +273,7 @@ impl Flags {
                 false => None,
             },
             max_candidates: positive("--jev-max-candidates", 16)? as usize,
+            lookahead_max: number("--jev-lookahead-max", 32)? as usize,
             deadline: Duration::from_millis(positive("--jev-deadline-ms", 8_000)?),
         }))
     }
@@ -304,6 +308,7 @@ const JEV: &[&str] = &[
     "--jev-max-source-bytes",
     "--jev-max-candidates",
     "--jev-deadline-ms",
+    "--jev-lookahead-max",
 ];
 
 /// `allowed` lists the switches and valued flags this command accepts.

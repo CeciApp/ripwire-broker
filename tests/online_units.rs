@@ -740,3 +740,28 @@ fn remote_text_is_sanitized_capped_and_redacts_the_secret() {
     // A secret split by a control character is still caught once the character is gone.
     assert!(!redact::remote_text("tok\u{7}-123", Some("tok-123"), 64).contains("tok-123"));
 }
+
+// --- D-081: shorter previews for lookahead admission ---
+
+#[test]
+fn lookahead_previews_are_capped_at_4_kib_on_a_line_boundary() {
+    use ripwire_broker::online::reader::LOOKAHEAD_PREVIEW_BYTES;
+    let ws = tempfile::tempdir().unwrap();
+    put(
+        ws.path(),
+        "src/big.py",
+        ("y".repeat(99) + "\n").repeat(200).as_bytes(),
+    );
+    let reader = WorkspaceReader::new(ws.path()).unwrap();
+    let snap = reader.snapshot("src/big.py").unwrap();
+
+    let short = snap.preview_at(LOOKAHEAD_PREVIEW_BYTES);
+
+    assert_eq!(LOOKAHEAD_PREVIEW_BYTES, 4 * 1024);
+    assert!(short.len() <= 4096 && short.len() > 4096 - 100 && short.ends_with('\n'));
+    assert_eq!(
+        snap.preview(),
+        snap.preview_at(PREVIEW_BYTES),
+        "planner previews keep 16 KiB"
+    );
+}
