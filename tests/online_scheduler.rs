@@ -20,6 +20,7 @@ fn job(n: usize) -> Job {
     Job {
         id: n,
         request: build("jev-1.13.0", "q", SemanticStage::FileAdmission, vec![item]),
+        fresh: None,
     }
 }
 
@@ -192,4 +193,28 @@ async fn cancellation_aborts_requests_in_flight_and_closes_the_queue() {
     assert_eq!(fake.counters.dropped.load(SeqCst), 4);
     assert_eq!(fake.calls(), 4);
     assert!(producer.await.unwrap() < 50);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_whose_source_changed_is_never_sent() {
+    use ripwire_broker::online::scheduler::Freshness;
+    let fake = Arc::new(FakeClassifier::new());
+    let scheduler = Scheduler::new(fake.clone(), config(4, 1000));
+    let (tx, rx) = scheduler.queue();
+    let mut stale = job(1);
+    stale.fresh = Some(Freshness(Arc::new(|| false)));
+    let mut fresh = job(2);
+    fresh.fresh = Some(Freshness(Arc::new(|| true)));
+    tokio::spawn(async move {
+        for j in [job(0), stale, fresh] {
+            tx.send(j).await.unwrap();
+        }
+    });
+
+    let report = scheduler.run(rx, CancellationToken::new()).await;
+
+    assert_eq!(report.stale, vec![1]);
+    assert_eq!(report.requests, 2, "a stale job is not a request");
+    assert_eq!(fake.calls(), 2);
+    assert!(report.incomplete());
 }

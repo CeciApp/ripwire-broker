@@ -251,6 +251,18 @@ fn limitations(disc: &Discovery) -> Vec<Limitation> {
         if disc.limit_reached {
             why.push("request limit reached".into());
         }
+        if disc.stale_batches > 0 {
+            why.push(format!(
+                "{} batch(es) not sent: their source changed after it was read",
+                disc.stale_batches
+            ));
+        }
+        if disc.changed_files > 0 {
+            why.push(format!(
+                "{} file(s) changed during discovery; their evidence was dropped",
+                disc.changed_files
+            ));
+        }
         if disc.unfinished > 0 {
             why.push(format!("{} request(s) not answered", disc.unfinished));
         }

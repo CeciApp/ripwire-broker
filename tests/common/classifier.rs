@@ -23,9 +23,11 @@ pub struct Counters {
 }
 
 type Rule = Box<dyn Fn(SemanticStage, &StateItem) -> Option<f64> + Send + Sync>;
+type Hook = Box<dyn Fn(SemanticStage) + Send + Sync>;
 
 pub struct FakeClassifier {
     rule: Option<Rule>,
+    on_call: Option<Hook>,
     probability: HashMap<String, f64>,
     default: f64,
     fail: HashMap<String, ClassifyError>,
@@ -39,6 +41,7 @@ impl FakeClassifier {
     pub fn new() -> Self {
         Self {
             rule: None,
+            on_call: None,
             probability: HashMap::new(),
             default: 0.9,
             fail: HashMap::new(),
@@ -61,6 +64,13 @@ impl FakeClassifier {
         f: impl Fn(SemanticStage, &StateItem) -> Option<f64> + Send + Sync + 'static,
     ) -> Self {
         self.rule = Some(Box::new(f));
+        self
+    }
+
+    /// Runs `f` on every call, after the request was sent: a side effect such as editing a
+    /// file while the provider is answering.
+    pub fn on_call(mut self, f: impl Fn(SemanticStage) + Send + Sync + 'static) -> Self {
+        self.on_call = Some(Box::new(f));
         self
     }
 
@@ -137,6 +147,9 @@ impl Classifier for FakeClassifier {
         c.max_in_flight.fetch_max(now, SeqCst);
         let mut guard = Guard(c.clone(), false);
         self.seen.lock().unwrap().push(req.clone());
+        if let Some(hook) = &self.on_call {
+            hook(Self::stage(req));
+        }
         let first = req
             .state
             .items

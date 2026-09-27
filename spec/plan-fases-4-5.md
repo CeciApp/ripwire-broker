@@ -1,7 +1,7 @@
 # Plano de implementação — Fases 4 e 5 (adaptador `--online`)
 
-Status: **aprovado (D-065); Fase 4 implementada — ponto de parada 2, barra de merge verde (D-066 a D-072); falta o teste manual num host real; próximo: S5.1** · 2026-09-27 · decisões em
-[D-058 a D-072](changelog.md#d-058--plano-das-fases-4-e-5)
+Status: **aprovado (D-065); Fase 4 implementada (D-066 a D-072); Fase 5: S5.1 feito (D-073); falta o teste manual num host real; próximo: S5.2** · 2026-09-27 · decisões em
+[D-058 a D-073](changelog.md#d-058--plano-das-fases-4-e-5)
 
 Fonte: PRD §19 (Fases 4 e 5), §23 inteiro, RF-15, §8.4, §9.1, §9.4 e §21.5. Onde o
 PRD marca um item como *sem fonte na v0.1*, este plano **propõe** uma resolução e a

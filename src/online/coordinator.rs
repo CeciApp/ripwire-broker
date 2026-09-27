@@ -8,7 +8,7 @@ use super::classifier::Classifier;
 use super::decision::{FileDecision, file_decision};
 use super::reader::{Snapshot, Unit, WorkspaceReader, units};
 use super::request::{self, JevRequest, StateItem};
-use super::scheduler::{Job, Scheduler, SchedulerConfig};
+use super::scheduler::{Freshness, Job, Scheduler, SchedulerConfig};
 use super::{RankedPath, SemanticStage};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -110,6 +110,10 @@ pub struct Discovery {
     pub failures: BTreeMap<&'static str, usize>,
     pub unfinished: usize,
     pub limit_reached: bool,
+    /// Batches never sent because a source changed after it was read.
+    pub stale_batches: usize,
+    /// Files that changed before the output; their evidence was dropped.
+    pub changed_files: usize,
 }
 
 impl Discovery {
@@ -120,6 +124,8 @@ impl Discovery {
             || !self.failures.is_empty()
             || self.unfinished > 0
             || self.limit_reached
+            || self.stale_batches > 0
+            || self.changed_files > 0
     }
 }
 
@@ -133,7 +139,7 @@ pub struct OnlineTotals {
 
 pub struct OnlineEngine {
     config: OnlineConfig,
-    reader: WorkspaceReader,
+    reader: Arc<WorkspaceReader>,
     cache: Mutex<SemanticCache>,
     totals: Mutex<OnlineTotals>,
 }
@@ -142,6 +148,8 @@ pub struct OnlineEngine {
 struct Pending {
     item: StateItem,
     key: cache::Key,
+    /// The version the item was cut from, rechecked before every attempt.
+    snapshot: Arc<Snapshot>,
 }
 
 fn digest(req: &JevRequest) -> String {
@@ -152,7 +160,7 @@ fn digest(req: &JevRequest) -> String {
 impl OnlineEngine {
     pub fn new(config: OnlineConfig, root: &Path) -> Result<Self, String> {
         Ok(Self {
-            reader: WorkspaceReader::new(root)?,
+            reader: Arc::new(WorkspaceReader::new(root)?),
             config,
             cache: Mutex::default(),
             totals: Mutex::default(),
@@ -197,10 +205,10 @@ impl OnlineEngine {
     pub async fn discover(&self, query: &str, ranked: &[RankedPath]) -> Discovery {
         let mut disc = Discovery::default();
         let mut left = self.config.request_limit;
-        let mut files: Vec<(&RankedPath, Snapshot)> = vec![];
+        let mut files: Vec<(&RankedPath, Arc<Snapshot>)> = vec![];
         for rp in ranked.iter().take(self.config.max_candidates) {
             match self.reader.snapshot(&rp.path) {
-                Ok(snap) => files.push((rp, snap)),
+                Ok(snap) => files.push((rp, Arc::new(snap))),
                 Err(why) => *disc.not_sent.entry(why.as_str()).or_default() += 1,
             }
         }
@@ -217,6 +225,7 @@ impl OnlineEngine {
                         path: snap.path.clone(),
                         text: preview.to_string(),
                     },
+                    snapshot: snap.clone(),
                 }
             })
             .collect();
@@ -263,6 +272,7 @@ impl OnlineEngine {
                         path: snap.path.clone(),
                         text: snap.text(&unit).to_string(),
                     },
+                    snapshot: snap.clone(),
                 });
                 owner.insert(id, (n, unit));
             }
@@ -291,6 +301,17 @@ impl OnlineEngine {
             });
         }
 
+        // Before the output: evidence about a version that no longer exists is dropped
+        // (RF-ONLINE-10, CA-ONLINE-11). The file's structural facts stay untouched.
+        let before = disc.files.len();
+        let fresh: Vec<bool> = files
+            .iter()
+            .map(|(_, snap)| self.reader.is_fresh(snap))
+            .collect();
+        let mut keep = fresh.iter();
+        disc.files.retain(|_| *keep.next().unwrap_or(&false));
+        disc.changed_files += before - disc.files.len();
+
         let mut totals = self.totals.lock().unwrap();
         totals.requests += disc.requests as u64;
         totals.cache_hits += disc.cache_hits as u64;
@@ -311,6 +332,7 @@ impl OnlineEngine {
     ) -> HashMap<String, Scored> {
         let mut out = HashMap::new();
         let mut keys = HashMap::new();
+        let mut snapshots: HashMap<String, Arc<Snapshot>> = HashMap::new();
         let mut send = vec![];
         {
             let cache = self.cache.lock().unwrap();
@@ -329,6 +351,7 @@ impl OnlineEngine {
                     }
                     None => {
                         keys.insert(p.item.id.clone(), p.key);
+                        snapshots.insert(p.item.id.clone(), p.snapshot);
                         send.push(p.item);
                     }
                 }
@@ -355,7 +378,21 @@ impl OnlineEngine {
         let (tx, rx) = scheduler.queue();
         let produce = async {
             for (id, request) in requests.iter().cloned().enumerate() {
-                if tx.send(Job { id, request }).await.is_err() {
+                let mut sources: Vec<Arc<Snapshot>> = vec![];
+                for item in &request.state.items {
+                    let snap = &snapshots[&item.id];
+                    if !sources.iter().any(|s| Arc::ptr_eq(s, snap)) {
+                        sources.push(snap.clone());
+                    }
+                }
+                let reader = self.reader.clone();
+                let fresh = Freshness(Arc::new(move || sources.iter().all(|s| reader.is_fresh(s))));
+                let job = Job {
+                    id,
+                    request,
+                    fresh: Some(fresh),
+                };
+                if tx.send(job).await.is_err() {
                     break;
                 }
             }
@@ -365,6 +402,7 @@ impl OnlineEngine {
         *left = left.saturating_sub(report.requests);
         disc.requests += report.requests;
         disc.unfinished += report.unfinished.len();
+        disc.stale_batches += report.stale.len();
         if report.stop == Some(super::scheduler::Stop::RequestLimit) {
             disc.limit_reached = true;
         }

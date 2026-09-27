@@ -484,6 +484,104 @@ async fn ineligible_candidates_are_never_sent_and_leave_the_answer_incomplete() 
     );
 }
 
+// --- S5.1: freshness (RF-ONLINE-10, CA-ONLINE-11) ---
+
+/// Edits `src/auth.py` the first time the classifier is asked about `stage`.
+fn editing_on(stage: SemanticStage, root: std::path::PathBuf) -> FakeClassifier {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    login_is_evidence().on_call(move |s| {
+        if s == stage && !done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            common::write(&root, "src/auth.py", &AUTH.replace("report", "summary"));
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_file_changed_before_sending_is_not_sent_and_marks_incomplete() {
+    let ws = workspace();
+    let root = ws.path().to_path_buf();
+    // The file changes while admission is answered: its selection batch is now stale.
+    let s = online_in(
+        ws,
+        explore(),
+        editing_on(SemanticStage::FileAdmission, root),
+    )
+    .await;
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    assert!(
+        s.classifier
+            .asked(SemanticStage::SourceSelection)
+            .is_empty(),
+        "a batch over changed source is never sent"
+    );
+    assert_eq!(out["provenance"]["online"]["discovery"], "incomplete");
+    let lim = out["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "semantic_incomplete")
+        .unwrap();
+    assert!(lim["detail"].as_str().unwrap().contains("changed"), "{lim}");
+    let login = items(&out).iter().find(|i| i["symbol"] == "login").unwrap();
+    assert!(
+        login.get("semantic").is_none(),
+        "no evidence about a version that no longer exists"
+    );
+}
+
+#[tokio::test]
+async fn evidence_stale_at_output_is_dropped_and_marked_incomplete() {
+    let ws = workspace();
+    let root = ws.path().to_path_buf();
+    // The file changes while selection is answered: the answer is about the old version.
+    let s = online_in(
+        ws,
+        explore(),
+        editing_on(SemanticStage::SourceSelection, root),
+    )
+    .await;
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    assert!(
+        !s.classifier
+            .asked(SemanticStage::SourceSelection)
+            .is_empty(),
+        "it was sent"
+    );
+    assert_eq!(out["provenance"]["online"]["incomplete"], true);
+    assert!(
+        items(&out)
+            .iter()
+            .all(|i| i["path"] != "src/auth.py" || i.get("semantic").is_none()),
+        "{out:#}"
+    );
+    assert!(
+        items(&out).iter().any(|i| i["symbol"] == "login"),
+        "the structural fact stays"
+    );
+    let routes = items(&out)
+        .iter()
+        .find(|i| i["path"] == "src/routes.py")
+        .unwrap();
+    assert!(
+        routes.get("semantic").is_some(),
+        "unchanged files keep their evidence"
+    );
+}
+
 // --- S4.27: budget ---
 
 #[tokio::test]

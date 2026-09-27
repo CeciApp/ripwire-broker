@@ -26,6 +26,19 @@ pub struct SchedulerConfig {
 pub struct Job {
     pub id: usize,
     pub request: JevRequest,
+    /// Checked right before every attempt; `false` means the source changed and the request
+    /// is never sent (RF-ONLINE-10).
+    pub fresh: Option<Freshness>,
+}
+
+/// Whether the sources behind a request are still the versions it was built from.
+#[derive(Clone)]
+pub struct Freshness(pub Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl std::fmt::Debug for Freshness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Freshness")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +62,8 @@ pub struct Report {
     pub results: Vec<JobResult>,
     /// Jobs admitted but never answered: aborted in flight, or queued and never sent. Sorted.
     pub unfinished: Vec<usize>,
+    /// Jobs never sent because their source changed first. Sorted.
+    pub stale: Vec<usize>,
     /// Requests sent (started).
     pub requests: usize,
     pub stop: Option<Stop>,
@@ -59,6 +74,7 @@ impl Report {
     pub fn incomplete(&self) -> bool {
         self.stop.is_some()
             || !self.unfinished.is_empty()
+            || !self.stale.is_empty()
             || self.results.iter().any(|r| r.result.is_err())
     }
 }
@@ -113,7 +129,8 @@ impl Scheduler {
                         admitting = false;
                         jobs.close();
                     }
-                    Some(Job { id, request }) => {
+                    Some(Job { id, fresh: Some(f), .. }) if !(f.0)() => report.stale.push(id),
+                    Some(Job { id, request, .. }) => {
                         report.requests += 1;
                         in_flight.push(id);
                         let classifier = self.classifier.clone();
@@ -133,6 +150,7 @@ impl Scheduler {
             report.unfinished.push(job.id);
         }
         report.unfinished.sort_unstable();
+        report.stale.sort_unstable();
         report
     }
 }

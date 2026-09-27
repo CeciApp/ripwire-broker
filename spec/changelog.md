@@ -74,6 +74,7 @@
 | 2026-09-27 18:28 | S4.12–S4.14: `WorkspaceReader` (elegibilidade, snapshot com sha256, preview) e unidades; ponto de parada 1, 152/159 verdes | [D-070](#d-070--leitura-do-workspace-e-ponto-de-parada-1) |
 | 2026-09-27 18:37 | S4.15–S4.19: scheduler com `JoinSet`, fila limitada, teto em voo, limite de requests, auth e cancelamento abortam irmãs; 158/165 verdes | [D-071](#d-071--scheduler-mínimo) |
 | 2026-09-27 18:54 | S4.20–S4.31: adaptador ligado ao `context_for_task` (gate por rota, admissão→seleção, merge aditivo, cache, status); piso online de 512 tokens; ponto de parada 2 (barra de merge da Fase 4), 182/191 verdes, p95 local 8,3 ms | [D-072](#d-072--composição-em-context_for_task-e-ponto-de-parada-2) |
+| 2026-09-27 18:58 | S5.1: frescor — lote com fonte alterada não é enviado; evidência de arquivo alterado é descartada antes da saída; p95 local 21,9 ms | [D-073](#d-073--frescor-das-fontes) |
 
 ---
 
@@ -1515,5 +1516,41 @@ Fatias S4.20 a S4.31 do plano.
     8 delas com as duas suítes em paralelo. O teste não foi identificado; se voltar, vira
     investigação.
 - Suítes: 182 verdes no build padrão e 191 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-073 — Frescor das fontes
+
+Fatia S5.1 do plano (RF-ONLINE-10, CA-ONLINE-11).
+
+- **Decisão.** O §23.10 permite "replanejar uma vez **ou** marcar incompleto". Fica a
+  segunda opção: sem replanejamento, a evidência afetada é descartada e a descoberta
+  marcada `incomplete`. Replanejar exigiria reler, recortar e reenviar dentro do mesmo
+  orçamento de requests, e o CA-ONLINE-11 só pede o descarte. Se a medição mostrar
+  descartes frequentes, a opção de replanejar volta a ser avaliada.
+- **Antes de cada tentativa.** `scheduler::Job` ganhou `fresh: Option<Freshness>`, uma
+  checagem avaliada imediatamente antes de disparar o request. O coordenador monta a de cada
+  lote com os snapshots de todos os seus itens: `WorkspaceReader::is_fresh` relê o arquivo
+  pela política de elegibilidade e compara o hash. Um lote com fonte alterada não é enviado,
+  não conta como request e vai para `Report::stale`. O S5.2 vai reavaliar a mesma checagem
+  antes de cada retry.
+- **Antes da saída.** Ao fim da descoberta, cada arquivo candidato é revalidado. A evidência
+  de um arquivo alterado sai inteira de `Discovery::files`, e os fatos estruturais desse
+  arquivo ficam sem anotação `semantic`.
+- A limitação `semantic_incomplete` diz quantos lotes não foram enviados e quantos arquivos
+  mudaram, sem paths.
+- **Testes.**
+  - O dublê ganhou `on_call`, que edita o arquivo enquanto o provider responde. Um teste muda
+    o arquivo durante a admissão, e o lote de seleção nunca sai; outro muda durante a
+    seleção, e a resposta chega mas é descartada. Um teste do scheduler cobre o job obsoleto.
+  - A primeira rodada falhou por um erro no próprio dublê: a chamada do gancho não tinha
+    entrado no `classify`, porque o script de edição procurava uma linha já reformatada pelo
+    fmt.
+  - Um teste de mutação (as duas revalidações desligadas) derrubou exatamente os dois testes
+    novos.
+- **Custo.** O overhead local de batching e merge subiu de p95 8,3 ms para **21,9 ms**
+  (meta < 75 ms), porque cada lote relê seus arquivos e refaz a checagem de ignore por
+  diretório. A leitura é síncrona dentro da task; se o custo crescer, ela vai para
+  `spawn_blocking` e o resultado de ignore por diretório passa a ser guardado na chamada.
+- Suítes: 185 verdes no build padrão e 194 com `online`, 2 ignorados; clippy e fmt limpos nas
   duas.
 
