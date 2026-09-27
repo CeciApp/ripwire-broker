@@ -3,7 +3,7 @@
 A local MCP server that turns [Ripwire](https://github.com/redhat-et/ripwire)'s wide surface
 (33 verbs) into three task-moment tools with a token budget, deduplication, provenance and
 preserved limitations. It is local, offline and read-only. Specification:
-[`spec/ripwire-broker-prd.md`](spec/ripwire-broker-prd.md). Decision log:
+[`spec/ripwire-broker-mcp.md`](spec/ripwire-broker-mcp.md). Decision log:
 [`spec/changelog.md`](spec/changelog.md).
 
 ```text

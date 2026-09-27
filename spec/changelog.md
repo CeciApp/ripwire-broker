@@ -57,6 +57,8 @@
 | 2026-09-27 15:53 | Os 9 achados do code review corrigidos por TDD; 127 verdes | [D-053](#d-053--correções-do-code-review) |
 | 2026-09-27 15:55 | Projeto publicado como repositório público `CeciApp/ripwire-broker` no GitHub | [D-054](#d-054--publicação-no-ceciapp) |
 | 2026-09-27 15:59 | Licença MIT adicionada (`LICENSE`, `Cargo.toml`, README) | [D-055](#d-055--licença-mit) |
+| 2026-09-27 17:35 | Adaptador `--online` fundido no PRD 0.3 (`ripwire-broker-mcp.md`) a partir da spec Jev v0.1; Fase 4→6 (Times e CI), novas Fases 4 e 5 | [D-056](#d-056--fusão-do-adaptador---online-no-prd) |
+| 2026-09-27 17:40 | Specs antigas movidas para `spec/old/`; `ripwire-broker-mcp.md` passa a ser o PRD vigente | [D-057](#d-057--reorganização-das-specs) |
 
 ---
 
@@ -1074,3 +1076,44 @@ Cada achado de D-052 ganhou um teste vermelho, confirmado antes da correção.
 - `Cargo.toml` ganhou `license = "MIT"` (SPDX), e o README ganhou uma seção "License".
 - Isso resolve a pendência de D-054.
 
+## D-056 — Fusão do adaptador `--online` no PRD
+
+- Pedido do usuário: fundir a spec do adaptador `--online` no PRD pai, em
+  `spec/ripwire-broker-mcp.md`, versão 0.3, sem apagar os arquivos Jev.
+- A fonte pinada era a spec Jev **v0.2.1**, mas `spec/jev-integration-prd.md` é a
+  **v0.1**, e a única outra cópia no disco é idêntica. Vários itens do roadmap pedido
+  não existem na v0.1 (`RankedPath`, `prompts/v1`, Sprint 0, `doctor --jev-probe`,
+  rescore, 24 requests). O trabalho parou e o usuário escolheu a opção (b): fundir com
+  a v0.1 e marcar esses itens como *sem fonte na v0.1*, como lacunas e decisões em
+  aberto, não requisitos.
+- Os blocos `### Fase 0` a `### Fase 3` ficaram byte a byte iguais ao pai. `Fase 4 —
+  Times e CI` virou `Fase 6 — Times e CI`, com o mesmo conteúdo, e o §21.4 passou a
+  apontar para a Fase 6. As novas Fases 4 e 5 anotam a fonte de cada item.
+- Fora do Roadmap mudaram só o cabeçalho, o sumário, §6.4–6.6 (sem a comparação
+  longa e sem números SWE-bench de terceiro), a caixa "somente --online" no §7.1, a
+  nota aditiva do envelope no §9.1, o RF-15 ponte, dois riscos, o §21.5 e as
+  referências (sai jevgrep, entra TypeSafe). "jevgrep" aparece uma vez, como
+  inspiração.
+- O §23 transporta invariantes, protocolo, tipos, prompt, composição, tetos, CLI,
+  envelope, cache, segurança, falhas, métricas, RF-ONLINE-01..15, RNF,
+  CA-ONLINE-01..15, testes, avaliação, riscos e decisões em aberto da v0.1.
+- Não transportados, por instrução da fusão: engenharia reversa, comparação longa,
+  SWE-bench de terceiro, pipeline de 8 estágios, 32 em voo, hard stop de 50.000,
+  papéis, passagem relacional e fronteira remota de diretórios. Com isso,
+  RF-ONLINE-03 foi substituído, RF-ONLINE-06 revogado e CA-ONLINE-04
+  parametrizado. O §23.18 lista cada item e onde aparecia.
+- Regras da fusão: nenhuma tool MCP nova; nada de classificador em
+  `context_after_edit` nem `context_before_finish`; CA-10 e offline padrão
+  inalterados; `jev-latest` nunca é padrão; probabilidade nunca vira caller, teste
+  ou impacto.
+- O avulso Jev já pode ser removido sem perder norma da v0.1. Se a v0.2.1 aparecer,
+  ela precisa ser reconciliada com o §23.17 antes da remoção.
+
+## D-057 — Reorganização das specs
+
+- O usuário moveu `ripwire-broker-prd.md` (v0.2), `jev-integration-prd.md` (v0.1) e
+  `merge.md` (o pedido de fusão de D-056) para `spec/old/`, sem alterar o conteúdo.
+- `spec/ripwire-broker-mcp.md` (v0.3) passa a ser o PRD vigente. O README aponta para
+  ele, e o §23 cita a fonte Jev em `spec/old/`.
+- O D-056 continua citando os caminhos da época.
+- `.DS_Store` entrou no `.gitignore`.
