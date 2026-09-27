@@ -1,6 +1,7 @@
 //! Command line (D-028): `serve` (the default, also without a subcommand), `hook`, `hook-log`,
 //! `prompt`, `doctor` and `install`. Parsing is pure; nothing here touches the disk.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -129,6 +130,13 @@ pub enum Command {
     Supervise {
         max_rss_mb: u64,
         argv: Vec<String>,
+    },
+    /// Internal: the supervisor's watcher process (D-052).
+    Watch {
+        parent: u32,
+        child: u32,
+        max_rss_mb: u64,
+        program: String,
     },
 }
 
@@ -335,6 +343,25 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     .max_rss_mb
                     .ok_or_else(|| usage("--max-rss-mb is required"))?,
                 argv: rest[split + 1..].to_vec(),
+            })
+        }
+        Some("__watch") => {
+            let mut values = HashMap::new();
+            let mut it = it;
+            while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                values.insert(k, v);
+            }
+            let num = |k: &str| {
+                values
+                    .get(k)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or_else(|| usage(format_args!("__watch needs {k}")))
+            };
+            Ok(Command::Watch {
+                parent: num("--parent")? as u32,
+                child: num("--child")? as u32,
+                max_rss_mb: num("--max-rss-mb")?,
+                program: values.get("--program").cloned().unwrap_or_default(),
             })
         }
         Some("hook") => {

@@ -31,6 +31,24 @@ impl StateStore {
         self.dir.join(format!("{name}.json"))
     }
 
+    /// An exclusive lock on this session until the returned file is dropped. Hooks of one
+    /// session hold it across load → handle → save, so parallel ones take turns instead of
+    /// reusing request ids and overwriting each other's memory (D-052).
+    pub fn lock(&self, session_id: &str) -> std::io::Result<fs::File> {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.dir)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(self.path(session_id).with_extension("lock"))?;
+        file.lock()?;
+        Ok(file)
+    }
+
     /// A missing or unreadable file is a fresh session.
     pub fn load(&self, session_id: &str) -> SessionState {
         fs::read_to_string(self.path(session_id))
@@ -42,6 +60,7 @@ impl StateStore {
     /// Forgets a session; missing files are fine.
     pub fn remove(&self, session_id: &str) {
         let _ = fs::remove_file(self.path(session_id));
+        let _ = fs::remove_file(self.path(session_id).with_extension("lock"));
     }
 
     /// Written to a private temporary file and renamed: readers never see half a state.

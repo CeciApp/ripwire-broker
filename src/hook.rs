@@ -259,7 +259,15 @@ pub async fn handle(
         Ok(out) => out,
         Err(e) => Some(failure(&e)),
     };
-    state.memory = broker.session_snapshot();
+    // The model sees an answer only when it is injected (or sent as a block reason). A
+    // user-facing notice (`systemMessage` alone) delivers nothing to it, so the session
+    // memory must not count its content as delivered (D-052).
+    let reached_model = out
+        .as_ref()
+        .is_some_and(|o| o.get("hookSpecificOutput").is_some() || o.get("decision").is_some());
+    if reached_model {
+        state.memory = broker.session_snapshot();
+    }
     state.next_request = broker.next_request_id();
     out
 }
@@ -360,6 +368,9 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         .unwrap_or("default")
         .to_string();
     let store = StateStore::new(args.state_dir.clone().or_else(StateStore::default_dir)?);
+    // Held until this function returns: parallel hooks of the session wait their turn.
+    // Without the lock (e.g. unwritable dir) the hook still runs; only turn-taking is lost.
+    let _turn = store.lock(&session_id).ok();
     let mut state = store.load(&session_id);
     let policy = Policy {
         every_prompt: args.every_prompt,

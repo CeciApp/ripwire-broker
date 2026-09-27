@@ -114,7 +114,9 @@ argument or a committed file.
 
 The resource `ripwire-broker://status` carries versions, upstream availability, restarts,
 default budgets and local metrics. It never includes prompts, code, symbols or responses.
-It answers within about a second even when ripwire is occupied (`upstream.busy: true`).
+It answers within about a second even when ripwire is occupied (`upstream.busy: true`) or
+a reconnect is hanging (`upstream.reconnecting: true`). `inflight` counts the tool calls the
+server is tracking for cancellation (counts only).
 
 A client's `notifications/cancelled` stops the tool call: it answers `cancelled`, makes no
 further ripwire calls, and shows up in `recent_requests`. The ripwire call already running
@@ -216,6 +218,7 @@ ripwire-broker install codex --workspace /repo --hooks --write
 - Codex: merges the hooks into `~/.codex/hooks.json` (`--codex-home` to change it). They are global, so they
   follow each session's `cwd` rather than a fixed workspace. It **prints** the `config.toml` lines to add
   (`[mcp_servers.ripwire-broker]`, and `[features] hooks = true`), and never edits TOML.
+- Hook commands quote every path for the host's shell, so a directory name cannot run as code.
 - Merges keep your other keys and hooks, are idempotent, and back up a changed file once as `<name>.bak`.
   JSON key order is normalized.
 
@@ -228,7 +231,8 @@ Manual setup, if you prefer:
   `integrations/codex/AGENTS.md` to the repository's `AGENTS.md`.
 - Hooks: examples in `integrations/claude-code/settings.json` and `integrations/codex/hooks.json`.
 - Other clients: `client "$(ripwire-broker prompt --workspace /repo "the task")"` sends the task
-  followed by its context inside `<ripwire-broker-context untrusted="true">`.
+  followed by its context inside `<ripwire-broker-context untrusted="true">`. `<` and `>` in the
+  payload are escaped (`\u003c`), so repository text cannot close that block.
 
 ## Tests
 

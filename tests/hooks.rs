@@ -619,3 +619,37 @@ async fn request_ids_keep_counting_across_hook_processes() {
     let ids: Vec<u64> = state.log.iter().map(|e| e.request_id).collect();
     assert_eq!(ids, vec![1, 2], "hook-log tells the injections apart");
 }
+
+// --- D-052 #6: a Stop that only notifies the user must not hide tests from the model ---
+
+#[tokio::test]
+async fn a_stop_notice_does_not_mark_tests_as_delivered() {
+    let (b, _fake, ws) = hook_broker(finish_fake()).await;
+    std::fs::write(ws.path().join("a.txt"), "x").unwrap();
+    let mut state = SessionState::default();
+
+    let notice = hook::handle(
+        Host::ClaudeCode,
+        Event::Stop,
+        &event("claude_code_stop", ws.path()),
+        &b,
+        &mut state,
+        &Policy::default(),
+    )
+    .await
+    .unwrap();
+    assert!(notice.get("decision").is_none(), "only a notice: {notice}");
+
+    let edit = hook::handle(
+        Host::ClaudeCode,
+        Event::PostToolUse,
+        &event("claude_code_post_tool_use", ws.path()),
+        &b,
+        &mut state,
+        &Policy::default(),
+    )
+    .await
+    .expect("the edit still has news for the model");
+    let env = injected(&edit);
+    assert_eq!(env["tests"][0]["path"], "tests/test_auth.py", "{env}");
+}

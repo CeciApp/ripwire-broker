@@ -45,7 +45,12 @@ pub async fn prompt(args: &PromptArgs) -> (String, Option<BrokerError>) {
             format!(
                 "{}\n\n{CONTEXT_OPEN}\n{}\n{CONTEXT_CLOSE}\n",
                 args.task,
-                serde_json::to_string(&env).unwrap_or_default()
+                // `<` and `>` only occur inside JSON strings; as \u escapes the payload can
+                // never contain the closing tag of its own block (prompt injection, D-052).
+                serde_json::to_string(&env)
+                    .unwrap_or_default()
+                    .replace('<', "\\u003c")
+                    .replace('>', "\\u003e")
             ),
             None,
         ),

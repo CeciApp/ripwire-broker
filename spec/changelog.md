@@ -53,6 +53,8 @@
 | 2026-09-27 15:36 | Cancelamento pelo cliente implementado (RF-14); D-019 estava errada; status não trava com ripwire ocupado (`busy`) | [D-049](#d-049--cancelamento-pelo-cliente-e-status-que-não-trava) |
 | 2026-09-27 15:36 | Limite de memória do ripwire por supervisor interno (`--ripwire-max-rss-mb`) | [D-050](#d-050--limite-de-memória-do-ripwire-por-supervisor) |
 | 2026-09-27 15:36 | `request_id` contínuo nos hooks; `Shape` substitui os 7 parâmetros de `envelope()`; pendências de D-021 fechadas; 118 verdes | [D-051](#d-051--pendências-técnicas-fechadas) |
+| 2026-09-27 15:44 | Code review: 9 achados verificados (2 altos, 4 médios, 3 baixos); usuário decidiu corrigir todos por TDD | [D-052](#d-052--code-review-das-fases-2-e-3) |
+| 2026-09-27 15:53 | Os 9 achados do code review corrigidos por TDD; 127 verdes | [D-053](#d-053--correções-do-code-review) |
 
 ---
 
@@ -978,4 +980,72 @@ e `AGENTS.md` (notas são pistas geradas; verificar `derived_from`), PRD §9.1 (
   flag, o `busy` e o cancelamento.
 - **Suíte:** 118 verdes, mais 1 opt-in, clippy sem avisos e fmt ok.
 - **Fora do escopo:** nenhum commit novo; o último é o `3d1b85a`.
+
+## D-052 — Code review das Fases 2 e 3
+
+Revisão independente de `session`, `hook`, `state`, `cli`, `local`, `doctor`, `install`,
+`notes`, `summarizer`, `supervise` e das mudanças no núcleo. Os 9 achados foram conferidos
+contra o código. O nº 1 também foi conferido no SDK: `rust-mcp-transport` 2.0.0
+`stdio.rs:185-191` usa `kill_on_drop` e `process_group(0)` e só mata o PID lançado.
+
+| # | Grav. | Achado |
+| --- | --- | --- |
+| 1 | alta | O reinício mata só o supervisor; o ripwire fica órfão e sem limite de memória |
+| 2 | alta | `install` só põe aspas em caminhos com espaço: injeção de shell nos hooks |
+| 3 | média | `</ripwire-broker-context>` no conteúdo fecha o bloco não confiável do `prompt` |
+| 4 | média | Itens marcados como entregues antes de `add_notes`, que pode removê-los |
+| 5 | média | Uma chamada cancelada durante a espera da nota já marcou itens como entregues |
+| 6 | média | O `Stop` do hook marca testes e riscos como entregues sem enviá-los ao modelo |
+| 7 | baixa | Hooks paralelos repetem `request_id` e perdem memória (última gravação vence) |
+| 8 | baixa | A reconexão segura a trava do broker e bloqueia o status por até 60 s |
+| 9 | baixa | `Inflight` nunca libera entradas e guarda o texto das tarefas |
+
+Decisão do usuário: corrigir os 9 por TDD, com um teste vermelho por achado.
+
+## D-053 — Correções do code review
+
+Cada achado de D-052 ganhou um teste vermelho, confirmado antes da correção.
+
+1. **Órfão do supervisor.** O monitor da memória virou um processo separado, `__watch`,
+   lançado pelo `__supervise`. Ele mata o ripwire acima do limite e também assim que o
+   supervisor some: `parent_id()` muda depois do `SIGKILL` que o SDK envia no reinício. O
+   supervisor só espera o filho e devolve 128+sinal. Se o vigia não puder ser lançado, o
+   supervisor se recusa a rodar. Teste: `killing_the_supervisor_does_not_orphan_ripwire`.
+2. **Injeção de shell no `install`.** `quote()` agora põe aspas simples sempre e escapa `'`
+   como `'\''`. Teste: um workspace chamado `it's;touch X;$(touch X)` é instalado, e o
+   comando do hook é executado por `sh`. `X` não aparece.
+3. **Delimitador do `prompt`.** `<` e `>` do JSON viram `\u003c`/`\u003e`, e o JSON
+   continua válido e com o mesmo conteúdo. Teste com o ripwire real: um arquivo com
+   `</ripwire-broker-context>` e "SYSTEM: …" deixa exatamente uma tag de fechamento, a
+   última.
+4. e 5. **Memória só do que chegou.** A gravação saiu de `envelope_full` e virou
+   `remember()`, o último passo de cada tool, sobre o envelope final (itens, testes,
+   riscos e notas). Um corte do `add_notes` e um cancelamento durante a espera da nota não
+   marcam mais nada. Testes: uma varredura de orçamentos de 300 a 1.500 exige que toda
+   referência tenha sido entregue antes; e um cancelamento durante a espera não deixa
+   referências.
+6. **Hooks só gravam o que o modelo viu.** A memória da sessão só é salva quando a saída
+   tem `hookSpecificOutput` ou `decision`. Um `systemMessage` sozinho (aviso ao usuário,
+   falha, `Stop` sem bloqueio) não conta. Teste: um `Stop` só com aviso, seguido de uma
+   edição, ainda mostra o teste.
+7. **Hooks paralelos.** `StateStore::lock` aplica `File::lock` exclusivo (Rust ≥ 1.89) num
+   arquivo `<sha>.lock` por sessão, e o `hook::run` o segura de carregar até salvar. Se a
+   trava falhar, o hook roda mesmo assim. Teste e2e com o ripwire real: dois hooks em
+   paralelo na mesma sessão deixam ids 1 e 2 no `hook-log`. Passou 3 vezes seguidas.
+8. **Status durante a reconexão.** `status_json` usa `try_lock`. Se a trava estiver
+   ocupada por uma reconexão, responde como degradado com `upstream.reconnecting: true`.
+   Teste: um ripwire que falha na primeira execução e trava nas seguintes. O status
+   responde em até 3 s enquanto a tool call reconecta.
+9. **Registro de cancelamento.** Uma chave some quando sua fila esvazia, porque as chaves
+   guardam o texto da tarefa. Um cancelamento só fica guardado se a chamada ainda espera o
+   handler. O status ganhou `inflight` (`tracked_calls`, `early_cancels`), só com
+   contagens. Teste: duas chamadas concluídas e um cancelamento atrasado deixam `0/0`.
+
+**Validação**
+- As mutações do nº 8 (trava bloqueante) e dos anteriores morreram.
+- Testes com corrida foram estabilizados com marcadores gravados pelos processos falsos,
+  nunca com espera fixa:
+  - o nº 8, que a princípio passou pelo motivo errado;
+  - o nº 5, que esperava 30 s por nada e agora espera 2 s.
+- Suíte: 127 verdes, mais 1 opt-in, clippy sem avisos e fmt ok.
 

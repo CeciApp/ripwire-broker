@@ -39,13 +39,9 @@ fn is_ours(hook: &Value) -> bool {
         .is_some_and(|c| c.contains("ripwire-broker") && c.contains(" hook "))
 }
 
+/// Hosts run hook commands through a shell: always single-quote, with `'` as `'\\''`.
 fn quote(p: &Path) -> String {
-    let s = p.display().to_string();
-    if s.contains(char::is_whitespace) {
-        format!("'{s}'")
-    } else {
-        s
-    }
+    format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
 }
 
 /// Replaces this broker's hooks in `settings` and keeps everything else.

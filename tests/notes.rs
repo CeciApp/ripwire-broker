@@ -593,3 +593,103 @@ async fn the_status_reports_the_summarizer_without_content() {
     }
     assert_eq!(off["summarizer"]["enabled"], false);
 }
+
+// --- D-052 #4/#5: only what the agent actually received is remembered ---
+
+fn delivered(out: &Value) -> Vec<String> {
+    out["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| {
+            !i["why_included"]
+                .as_str()
+                .unwrap()
+                .contains("already delivered")
+        })
+        .map(|i| {
+            format!(
+                "{}#{}",
+                i["path"].as_str().unwrap(),
+                i["symbol"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+fn references(out: &Value) -> Vec<String> {
+    out["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| {
+            i["why_included"]
+                .as_str()
+                .unwrap()
+                .contains("already delivered")
+        })
+        .map(|i| {
+            format!(
+                "{}#{}",
+                i["path"].as_str().unwrap(),
+                i["symbol"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_item_dropped_for_note_limitations_is_not_remembered() {
+    for budget in (300..=1500).step_by(20) {
+        let (model, _gate) = FakeSummarizer::replying("n").gated();
+        let ws = tempfile::tempdir().unwrap();
+        let mut config = BrokerConfig::new(ws.path());
+        config.incremental = true;
+        config.summarizer = Some(Arc::new(model));
+        config.summarizer_wait = Duration::ZERO; // every note is pending: limitations only
+        let fake = Arc::new(FakeUpstream::new().answer("explore", "explore_export_auth"));
+        let b = Broker::connect(fake, config).await.unwrap();
+
+        let first = to_json(&b.context_for_task(orient(budget)).await.unwrap());
+        let second = to_json(&b.context_for_task(orient(budget)).await.unwrap());
+
+        let got = delivered(&first);
+        for r in references(&second) {
+            assert!(
+                got.contains(&r),
+                "budget {budget}: {r} is 'already delivered' but never was: {first}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_call_cancelled_while_waiting_for_a_note_remembers_nothing() {
+    let (model, gate) = FakeSummarizer::replying("n").gated();
+    let model = Arc::new(model);
+    let ws = tempfile::tempdir().unwrap();
+    let mut config = BrokerConfig::new(ws.path());
+    config.incremental = true;
+    config.summarizer = Some(model.clone());
+    config.summarizer_wait = Duration::from_secs(2); // long enough to cancel inside it
+    let fake = Arc::new(FakeUpstream::new().answer("explore", "explore_export_auth"));
+    let b = Arc::new(Broker::connect(fake, config).await.unwrap());
+
+    let running = tokio::spawn({
+        let b = b.clone();
+        async move { b.context_for_task(orient(4000)).await }
+    });
+    while model.prompts().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    running.abort();
+    let _ = running.await;
+    gate.notify_one();
+    settle(&b).await;
+
+    let after = to_json(&b.context_for_task(orient(4000)).await.unwrap());
+    assert!(
+        references(&after).is_empty(),
+        "the cancelled answer never reached the agent: {after}"
+    );
+}

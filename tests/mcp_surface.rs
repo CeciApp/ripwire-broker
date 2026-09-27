@@ -456,3 +456,111 @@ fn a_client_cancellation_stops_the_tool_call() {
     assert_eq!(status["upstream"]["busy"], true, "{status}");
     assert_eq!(status["upstream"]["available"], false);
 }
+
+// --- D-052 #8: a hanging reconnect must not hold the status resource ---
+
+#[test]
+fn the_status_answers_while_a_reconnect_hangs() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let marker = bin.path().join("launched-once");
+    let hanging = bin.path().join("hanging");
+    let ripwire = bin.path().join("hanging-ripwire");
+    // First launch fails at once (degraded start); every later launch hangs.
+    std::fs::write(
+        &ripwire,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'ripwire 0.6.4'; exit 0; fi\n\
+             if [ ! -f '{m}' ]; then touch '{m}'; exit 3; fi\ntouch '{h}'\nexec sleep 60\n",
+            m = marker.display(),
+            h = hanging.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ripwire, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut broker = Raw::start(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--ripwire",
+        ripwire.to_str().unwrap(),
+        "--timeout-ms",
+        "20000",
+    ]);
+
+    broker.request(
+        1,
+        "tools/call",
+        json!({"name": "context_for_task", "arguments": {"task": "anything", "mode": "orient"}}),
+    );
+    // Ask only once the reconnect is really under way.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !hanging.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no reconnect was attempted"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    broker.request(
+        2,
+        "resources/read",
+        json!({"uri": "ripwire-broker://status"}),
+    );
+
+    let status = broker
+        .response(2, std::time::Duration::from_secs(3))
+        .expect("the status answers during a reconnect (RF-13)");
+    let text = status["result"]["contents"][0]["text"].as_str().unwrap();
+    let status: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(status["upstream"]["available"], false, "{status}");
+    assert_eq!(status["upstream"]["reconnecting"], true, "{status}");
+}
+
+// --- D-052 #9: the cancellation registry keeps nothing once calls are over ---
+
+#[test]
+fn finished_calls_and_late_cancels_leave_nothing_behind() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let ripwire = common::slow_ripwire(bin.path());
+    let mut broker = Raw::start(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--ripwire",
+        ripwire.to_str().unwrap(),
+    ]);
+    let second = std::time::Duration::from_secs(5);
+
+    for (id, task) in [(1, "first quick task"), (2, "second quick task")] {
+        broker.request(
+            id,
+            "tools/call",
+            json!({"name": "context_for_task", "arguments": {"task": task, "mode": "orient"}}),
+        );
+        broker.response(id, second).expect("a quick call answers");
+    }
+    // A cancel that arrives after its call finished (the common race).
+    broker.send(
+        json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1}}),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    broker.request(
+        3,
+        "resources/read",
+        json!({"uri": "ripwire-broker://status"}),
+    );
+
+    let status = broker.response(3, second).unwrap();
+    let status: Value =
+        serde_json::from_str(status["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        status["inflight"],
+        json!({"tracked_calls": 0, "early_cancels": 0}),
+        "{status}"
+    );
+    assert!(
+        !status.to_string().contains("quick task"),
+        "no task text in the status"
+    );
+}

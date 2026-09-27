@@ -1,9 +1,12 @@
-//! `__supervise` (D-050): runs ripwire as a child with the same stdio and kills it when its
-//! resident memory passes a limit (PRD 15.3). The broker's SDK sees the process end, and the
-//! upstream's controlled restart takes over. `ps` works the same on macOS and Linux, where
-//! `RLIMIT_AS` would not (macOS does not enforce it).
+//! `__supervise` (D-050, D-052): runs ripwire as a child with the same stdio under a memory
+//! limit (PRD 15.3). The SDK starts this process and, on a restart, SIGKILLs it alone, which
+//! cannot be caught. So the watching happens in a second process, `__watch`: it kills
+//! ripwire when its resident memory passes the limit, and also as soon as the supervisor is
+//! gone, so no ripwire is ever left running unwatched. `ps` and `kill` behave the same on
+//! macOS and Linux, where `RLIMIT_AS` would not (macOS does not enforce it).
 
-use std::process::{Command, ExitCode};
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 const POLL: Duration = Duration::from_millis(200);
@@ -18,6 +21,13 @@ fn rss_mb(pid: u32) -> Option<u64> {
     Some(kib / 1024)
 }
 
+fn kill(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status();
+}
+
 pub fn run(max_rss_mb: u64, argv: &[String]) -> ExitCode {
     let Some((program, args)) = argv.split_first() else {
         eprintln!("ripwire-broker: __supervise needs a command after --");
@@ -30,22 +40,59 @@ pub fn run(max_rss_mb: u64, argv: &[String]) -> ExitCode {
             return ExitCode::from(127);
         }
     };
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return ExitCode::from(status.code().unwrap_or(1) as u8),
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("ripwire-broker: waiting for {program}: {e}");
-                return ExitCode::FAILURE;
-            }
+    let watcher = std::env::current_exe().and_then(|me| {
+        Command::new(me)
+            .args([
+                "__watch",
+                "--parent",
+                &std::process::id().to_string(),
+                "--child",
+                &child.id().to_string(),
+                "--max-rss-mb",
+                &max_rss_mb.to_string(),
+                "--program",
+                program,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+    });
+    if let Err(e) = watcher {
+        // Without a watcher there is neither a limit nor orphan protection: refuse to run.
+        let _ = child.kill();
+        eprintln!("ripwire-broker: cannot start the memory watcher: {e}");
+        return ExitCode::FAILURE;
+    }
+    match child.wait() {
+        Ok(status) => ExitCode::from(
+            status
+                .code()
+                .or(status.signal().map(|s| 128 + s))
+                .unwrap_or(1) as u8,
+        ),
+        Err(e) => {
+            eprintln!("ripwire-broker: waiting for {program}: {e}");
+            ExitCode::FAILURE
         }
-        if let Some(rss) = rss_mb(child.id()).filter(|rss| *rss > max_rss_mb) {
-            let _ = child.kill();
-            let _ = child.wait();
+    }
+}
+
+/// `__watch`: kills `child` above the limit or once `parent` (the supervisor) is gone.
+pub fn watch(parent: u32, child: u32, max_rss_mb: u64, program: &str) -> ExitCode {
+    loop {
+        let Some(rss) = rss_mb(child) else {
+            return ExitCode::SUCCESS; // ripwire ended on its own
+        };
+        if std::os::unix::process::parent_id() != parent {
+            kill(child); // the supervisor was killed: never leave ripwire unwatched
+            return ExitCode::SUCCESS;
+        }
+        if rss > max_rss_mb {
+            kill(child);
             eprintln!(
                 "ripwire-broker: {program} passed the memory limit ({rss} MiB > {max_rss_mb} MiB) and was killed"
             );
-            return ExitCode::from(137);
+            return ExitCode::SUCCESS;
         }
         std::thread::sleep(POLL);
     }

@@ -83,7 +83,16 @@ impl Inflight {
             .map(Value::Object)
             .unwrap_or(Value::Null);
         let key = call_key(&params.name, &arguments);
-        let id = self.waiting.lock().unwrap().get_mut(&key)?.pop_front()?;
+        let id = {
+            let mut waiting = self.waiting.lock().unwrap();
+            let queue = waiting.get_mut(&key)?;
+            let id = queue.pop_front()?;
+            if queue.is_empty() {
+                // Keys hold task text: never keep one longer than its call (D-052).
+                waiting.remove(&key);
+            }
+            id
+        };
         let signal = Arc::new(Notify::new());
         if self.early.lock().unwrap().remove(&id) {
             signal.notify_one();
@@ -100,12 +109,24 @@ impl Inflight {
     }
 
     fn cancel(&self, id: String) {
-        match self.running.lock().unwrap().get(&id) {
-            Some(signal) => signal.notify_one(),
-            None => {
-                self.early.lock().unwrap().insert(id);
-            }
+        if let Some(signal) = self.running.lock().unwrap().get(&id) {
+            signal.notify_one();
+            return;
         }
+        // Keep an early cancel only for a call still waiting for its handler; a cancel for
+        // a call that already finished (the usual race) is dropped, not stored forever.
+        let waiting = self.waiting.lock().unwrap();
+        if waiting.values().any(|q| q.contains(&id)) {
+            self.early.lock().unwrap().insert(id);
+        }
+    }
+
+    /// Counts for the status resource; the keys themselves hold task text.
+    fn counts(&self) -> Value {
+        json!({
+            "tracked_calls": self.waiting.lock().unwrap().len() + self.running.lock().unwrap().len(),
+            "early_cancels": self.early.lock().unwrap().len(),
+        })
     }
 }
 
@@ -159,8 +180,13 @@ impl BrokerServer {
     }
 
     async fn status_json(&self) -> Value {
-        let connected = self.broker.lock().await.clone();
-        match connected {
+        // `broker()` holds this lock while it reconnects, up to the upstream timeout; the
+        // status never waits for that (RF-13, D-052).
+        let (connected, reconnecting) = match self.broker.try_lock() {
+            Ok(slot) => (slot.clone(), false),
+            Err(_) => (None, true),
+        };
+        let mut status = match connected {
             Some(b) => serde_json::to_value(b.status().await).unwrap_or(Value::Null),
             None => {
                 let err = self.last_connect_error.lock().await.clone();
@@ -174,12 +200,15 @@ impl BrokerServer {
                         "ripwire_version": self.settings.broker.ripwire_version,
                         "available": false,
                         "busy": false,
+                        "reconnecting": reconnecting,
                         "restarts": 0,
                         "last_error": err.map(|e| e.error),
                     },
                 })
             }
-        }
+        };
+        status["inflight"] = self.inflight.counts();
+        status
     }
 }
 

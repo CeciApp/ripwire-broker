@@ -694,6 +694,10 @@ Retorna somente dados operacionais não sensíveis:
 - último erro upstream, só o tipo (as mensagens podem citar símbolos e caminhos);
 - `upstream.busy`: o Ripwire não respondeu à sonda de disponibilidade em 1 s. O status
   nunca espera mais que isso (D-049);
+- `upstream.reconnecting`: uma reconexão está em andamento em modo degradado. O status
+  não espera por ela;
+- `inflight`: contagens das tool calls rastreadas para cancelamento, sem o texto delas
+  ([D-053](changelog.md#d-053--correções-do-code-review));
 - configuração de orçamento;
 - modo offline e política de telemetria;
 - métricas locais (§16.1) e as últimas 32 requisições (`recent_requests`), cada uma

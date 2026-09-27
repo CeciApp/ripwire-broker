@@ -517,7 +517,7 @@ impl Broker {
         } else {
             Status::Ready
         };
-        Ok(self.envelope(
+        let env = self.envelope(
             Shape {
                 tool: "context_after_edit",
                 intent: None,
@@ -527,7 +527,9 @@ impl Broker {
                 suppress_seen: !req.include_seen,
             },
             entries,
-        ))
+        );
+        self.remember(&env);
+        Ok(env)
     }
 
     async fn call(&self, verb: &'static str, args: Value) -> Result<String, BrokerError> {
@@ -651,7 +653,7 @@ impl Broker {
         } else {
             Status::Ready
         };
-        Ok(self.envelope(
+        let env = self.envelope(
             Shape {
                 tool: "context_before_finish",
                 intent: None,
@@ -662,7 +664,9 @@ impl Broker {
                 suppress_seen: false,
             },
             entries,
-        ))
+        );
+        self.remember(&env);
+        Ok(env)
     }
 
     pub async fn context_for_task(&self, req: TaskRequest) -> Result<Envelope, BrokerError> {
@@ -770,7 +774,34 @@ impl Broker {
             self.attach_notes(engine, &mut env, &included, !req.include_seen)
                 .await;
         }
+        self.remember(&env);
         env
+    }
+
+    /// Records what `env` delivers in the session memory. The last step of every tool, on
+    /// the final envelope: nothing a later budget cut removed, and nothing from a call that
+    /// was dropped (cancelled) before it finished, is ever marked as delivered (D-052).
+    fn remember(&self, env: &Envelope) {
+        if !self.incremental {
+            return;
+        }
+        let mut memory = self.session.lock().unwrap();
+        for i in env
+            .items
+            .iter()
+            .filter(|i| i.why_included != session::SEEN_REFERENCE)
+        {
+            memory.remember(session::item_fingerprint(i));
+        }
+        for t in &env.tests {
+            memory.remember(session::test_fingerprint(t));
+        }
+        for r in &env.risks {
+            memory.remember(session::risk_fingerprint(r));
+        }
+        for n in &env.notes {
+            memory.remember(session::note_fingerprint(n));
+        }
     }
 
     /// Notes from the items this envelope includes, in full even when the session sent
@@ -814,12 +845,6 @@ impl Broker {
             self.metrics.lock().unwrap().session_hits += repeated as u64;
         }
         budget::add_notes(env, fresh, limitations);
-        if self.incremental {
-            let mut memory = self.session.lock().unwrap();
-            for n in &env.notes {
-                memory.remember(session::note_fingerprint(n));
-            }
-        }
     }
 
     /// Applies the task's switches (docs, bodies) and shapes the envelope.
@@ -941,7 +966,7 @@ impl Broker {
                 _ => None,
             })
             .collect();
-        let mut memory = self.session.lock().unwrap();
+        let memory = self.session.lock().unwrap();
         let mut entries = entries;
         if suppress_seen {
             let before = entries.len();
@@ -971,20 +996,8 @@ impl Broker {
             self.metrics.lock().unwrap().session_hits +=
                 (env.budget.already_delivered + references) as u64;
         }
+        drop(memory);
         budget::fill(&mut env, entries);
-        for i in env
-            .items
-            .iter()
-            .filter(|i| i.why_included != session::SEEN_REFERENCE)
-        {
-            memory.remember(session::item_fingerprint(i));
-        }
-        for t in &env.tests {
-            memory.remember(session::test_fingerprint(t));
-        }
-        for r in &env.risks {
-            memory.remember(session::risk_fingerprint(r));
-        }
         let included = env
             .items
             .iter()

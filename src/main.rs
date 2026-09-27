@@ -57,6 +57,14 @@ async fn main() -> ExitCode {
         Ok(Command::Supervise { max_rss_mb, argv }) => {
             return ripwire_broker::supervise::run(max_rss_mb, &argv);
         }
+        Ok(Command::Watch {
+            parent,
+            child,
+            max_rss_mb,
+            program,
+        }) => {
+            return ripwire_broker::supervise::watch(parent, child, max_rss_mb, &program);
+        }
         Ok(Command::Info(text)) => {
             println!("{text}");
             return ExitCode::SUCCESS;
