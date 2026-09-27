@@ -245,3 +245,7 @@ cargo run --release --example spike -- /path/to/repo "task"   # Phase 0 measurem
 The e2e and upstream tests are skipped when `ripwire` is not on `PATH`. Fixtures in
 `tests/fixtures/ripwire/` were recorded from ripwire 0.6.4. Fixtures in `tests/fixtures/hooks/` are
 real hook payloads from Claude Code 2.1.283 and Codex 0.157.1.
+
+## License
+
+[MIT](LICENSE) © 2026 Antonio Quental

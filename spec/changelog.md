@@ -56,6 +56,7 @@
 | 2026-09-27 15:44 | Code review: 9 achados verificados (2 altos, 4 médios, 3 baixos); usuário decidiu corrigir todos por TDD | [D-052](#d-052--code-review-das-fases-2-e-3) |
 | 2026-09-27 15:53 | Os 9 achados do code review corrigidos por TDD; 127 verdes | [D-053](#d-053--correções-do-code-review) |
 | 2026-09-27 15:55 | Projeto publicado como repositório público `CeciApp/ripwire-broker` no GitHub | [D-054](#d-054--publicação-no-ceciapp) |
+| 2026-09-27 15:59 | Licença MIT adicionada (`LICENSE`, `Cargo.toml`, README) | [D-055](#d-055--licença-mit) |
 
 ---
 
@@ -1063,4 +1064,13 @@ Cada achado de D-052 ganhou um teste vermelho, confirmado antes da correção.
   - o único dado pessoal público é o autor dos commits (nome e e-mail do git).
 - O repositório não tem arquivo de licença. Sem licença, o código fica visível, mas não
   há permissão explícita de uso. A escolha da licença fica com o usuário.
+
+## D-055 — Licença MIT
+
+- Pedido do usuário: licenciar o projeto como MIT.
+- `LICENSE` com o texto MIT padrão e "Copyright (c) 2026 Antonio Quental", o autor dos
+  commits. O repositório fica na organização CeciApp, mas a titularidade segue o autor.
+  Se o titular dever ser a organização, basta trocar a linha de copyright.
+- `Cargo.toml` ganhou `license = "MIT"` (SPDX), e o README ganhou uma seção "License".
+- Isso resolve a pendência de D-054.
 
