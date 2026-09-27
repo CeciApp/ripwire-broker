@@ -65,7 +65,9 @@ async fn a_hung_model_is_killed_at_the_hard_limit() {
     );
     let started = Instant::now();
 
-    let err = model(hung.to_str().unwrap(), 300)
+    // The limit leaves the shell time to write its pid even on a loaded machine: at 300 ms a
+    // cold first run could kill it before its first line, and the pid file never appeared.
+    let err = model(hung.to_str().unwrap(), 2_000)
         .summarize("x")
         .await
         .unwrap_err();

@@ -87,6 +87,7 @@
 | 2026-09-27 19:45 | S5.12: `doctor --jev-probe` envia uma pergunta sintética embutida no binário; ao vivo, `jev-1.13.0` respondeu em 304 ms; 218/229 verdes | [D-083](#d-083--doctor---jev-probe) |
 | 2026-09-27 19:49 | S5.13: `install --online` acrescenta a flag e referencia a chave pelo nome (`${VAR}` no Claude Code, `env_vars` no Codex, validado pelo parser do Codex 0.157); hooks continuam offline; 219/230 verdes | [D-084](#d-084--install---online) |
 | 2026-09-27 19:51 | S5.14: dois testes live ignorados (corpus sintético e caminho completo com Ripwire real); ao vivo verdes, digest idêntico ao S4.0b; 219/230 verdes, 4 ignorados no `online` | [D-085](#d-085--testes-live) |
+| 2026-09-27 19:53 | Documentação da Fase 5 (README, skill, AGENTS.md, PRD); ponto de parada 4: Fases 4 e 5 completas, exceto o A/B; falha intermitente identificada (`a_hung_model_is_killed_at_the_hard_limit`) e corrigida | [D-086](#d-086--documentação-e-ponto-de-parada-4) |
 
 ---
 
@@ -1952,4 +1953,38 @@ Fatia S5.14 do plano (§23.14).
   - O caminho completo levou 620 ms com 2 requests.
 - Suítes: 219 verdes no build padrão (2 ignorados) e 230 com `online` (4 ignorados); clippy e
   fmt limpos nas duas.
+
+## D-086 — Documentação e ponto de parada 4
+
+Seção §5.4 do plano.
+
+- **README.**
+  - Nova seção "Online mode (optional)": como compilar e instalar, o texto de consentimento, o
+    que sai da máquina e o que nunca sai, o limite da proteção (a filtragem não garante
+    reconhecer todo segredo), quando o classificador roda, os campos que o envelope ganha, os
+    tetos e as flags, o status, e o aviso de modo experimental até o A/B.
+  - "Secrets" deixou de ser futuro: a chave vem só de `RIPWIRE_BROKER_JEV_API_KEY`.
+  - Também mudaram: comandos (`doctor --jev-probe`, `install --online`), requisitos, piso de
+    512 tokens e testes (`--features online` e os live).
+- **Skill e `AGENTS.md`.** Como ler `semantic`, `semantic_location` e `discovery`:
+  probabilidade não é fato, um item do Ripwire `rejected` continua sendo um fato, e uma
+  descoberta `incomplete` ou `interrupted` não prova ausência.
+- **PRD.** Estado das Fases 4 e 5 no §19 e no §23; a forma real do envelope (§9.1) e do status
+  (§9.4); as flags novas no §23.6; e, no fim do §23.17, uma tabela com a resolução e a decisão
+  de cada lacuna.
+- **Ponto de parada 4.** Todas as fatias de código das Fases 4 e 5 estão feitas, com a barra
+  de merge da Fase 4 verde e CA-ONLINE-01 a 15 cobertos. Falta o corpus A/B e a barra de
+  produto (§5.3 do plano, §23.15), que dependem de o usuário escolher três repositórios e
+  aceitar o custo remoto. Até lá, `--online` é experimental.
+- **Falha intermitente identificada e corrigida** (D-072, D-080, D-081). A saída guardada da
+  verificação final registrou o nome: `a_hung_model_is_killed_at_the_hard_limit`, em
+  `tests/summarizer.rs`, um teste da Fase 3. O suspeito de D-081 estava errado.
+  - Causa: o teste roda um script travado com limite de 300 ms, e a primeira linha do script
+    grava o próprio PID. Numa primeira execução depois de uma recompilação, com a máquina
+    carregada, o shell às vezes era morto antes dessa linha, e a leitura do arquivo de PID
+    falhava.
+  - O comportamento testado estava certo: o processo tinha sido morto no limite. A corrida
+    era do teste.
+  - Correção só no teste: o limite passou para 2 s. A checagem de término em menos de 5 s
+    continua. Rodou 20 vezes sem falha, 10 delas sob carga de 24 processos em 12 CPUs.
 

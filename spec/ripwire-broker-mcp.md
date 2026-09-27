@@ -607,7 +607,16 @@ Notas sobre o envelope implementado:
 - Somente com `--online` (§23.7): `provenance.online`, campos semânticos por item
   (probabilidade, estágio, threshold, hash da fonte e cache hit) e o tipo de item
   `semantic_location`. São aditivos ao v1 e omitidos sem a flag. Uma probabilidade
-  nunca vira `caller`, `test`, impacto ou contrato.
+  nunca vira `caller`, `test`, impacto ou contrato. Forma implementada
+  ([D-063](changelog.md#d-063--envelope-online-e-interrupted-proposta),
+  [D-072](changelog.md#d-072--composição-em-context_for_task-e-ponto-de-parada-2)):
+  - `provenance.online = {enabled, provider, model, requests, cache_hits, incomplete,
+    discovery}`, com `discovery` em `complete`, `incomplete`, `interrupted` ou `skipped`;
+  - `item.semantic = {stage, state, probability, threshold, model, request_digest,
+    content_hash, lines, cache_hit}`. O item do Ripwire mantém seu `source`;
+  - itens só-semânticos têm `kind: semantic_location`, `role: semantic` e `source.basis:
+    remote_classifier`.
+  Num processo `--online`, `context_for_task` exige 512 tokens.
 - `summary` é inferência determinística feita só com nomes, caminhos e contagens
   ([D-016](changelog.md#d-016--resumo-limite-por-item-e-orçamento-mínimo)).
 - A estimativa é `ceil(bytes do JSON serializado / 4)` sobre o envelope inteiro.
@@ -697,7 +706,12 @@ Retorna somente dados operacionais não sensíveis:
 - modo offline e política de telemetria;
 - métricas locais (§16.1) e as últimas 32 requisições (`recent_requests`), cada uma
   com `request_id`, tool, resultado, duração e chamadas upstream (verbo, duração e
-  resultado). O `request_id` é o mesmo de `provenance.request_id` (§14.2).
+  resultado). O `request_id` é o mesmo de `provenance.request_id` (§14.2);
+- somente com `--online` (§23.6, §23.11): o bloco `online`, com provider, modelo, host do
+  endpoint, tetos, a categoria do último erro e as métricas do §23.11 em `online.metrics`.
+  Nesse modo, cada requisição de `recent_requests` traz também `stages` (etapas online com
+  duração e número de requests). Tudo só com contagens e tempos
+  ([D-082](changelog.md#d-082--métricas-e-etapas-online)).
 
 ---
 
@@ -1342,6 +1356,19 @@ Estado: implementada ([plano](plan-fases-4-5.md), D-065 a D-072), atrás da feat
 - Corpus A/B e barra de produto (§23.15).
 - Sem fronteira remota de diretórios.
 
+Estado: implementada ([plano](plan-fases-4-5.md), D-073 a D-085), exceto o corpus A/B e a
+barra de produto, que dependem da escolha dos repositórios. Destaques:
+- revalidação por hash antes de cada tentativa e antes da saída;
+- retry e divisão por etapa, e `429` com cooldown compartilhado;
+- cancelamento até o HTTP pelo drop estruturado;
+- prazo de descoberta com `interrupted`;
+- redaction do texto remoto;
+- lookahead de um nível, com previews de 4 KiB e ordem pela probabilidade (decisão do
+  usuário, D-081);
+- as métricas e etapas do §23.11;
+- `doctor --jev-probe` e `install --online`, com a chave referenciada pelo nome;
+- testes live ignorados por padrão.
+
 ### Fase 6 — Times e CI
 
 - Streamable HTTP autenticado;
@@ -1464,7 +1491,11 @@ produto, mas não substituem a avaliação A/B específica do `ripwire-broker`.
 
 ## 23. Adaptador opcional `--online`
 
-**Estado:** Fase 4 implementada (barra de merge verde, [D-072](changelog.md#d-072--composição-em-context_for_task-e-ponto-de-parada-2)); Fase 5 pendente. As fases são a 4 e a 5 do §19. Plano em [plan-fases-4-5.md](plan-fases-4-5.md).
+**Estado:** Fases 4 e 5 implementadas atrás da feature Cargo `online`, e testadas ao vivo contra
+`jev-1.13.0` ([D-065](changelog.md#d-065--aprovação-das-propostas-das-fases-4-e-5) a
+[D-085](changelog.md#d-085--testes-live)). Pendente: o corpus A/B e a barra de produto do §23.15;
+até lá o modo é **experimental**. As lacunas do §23.17 foram resolvidas como diz o seu fim.
+Plano em [plan-fases-4-5.md](plan-fases-4-5.md).
 
 **Fonte.** Este capítulo transporta o conteúdo normativo de
 [`spec/old/jev-integration-prd.md`](old/jev-integration-prd.md) na versão **0.1**, a única disponível. A fusão
@@ -1893,6 +1924,9 @@ retornar `interrupted` quando ainda for possível responder. A relação com o
 | `--jev-request-limit N` | ver §23.5 | Limite operacional por chamada MCP |
 | `--jev-no-cache` | falso | Desabilita o cache semântico |
 | `--jev-max-source-bytes N` | derivado do budget | Limita fonte renderizada, não a avaliação |
+| `--jev-max-candidates N` | `16` | Paths do planner avaliados pelo rescore ([D-061](changelog.md#d-061--candidatos-e-unidades-proposta)) |
+| `--jev-lookahead-max N` | `32` | Vizinhos que o lookahead pode acrescentar; `0` desliga (D-061, D-081) |
+| `--jev-deadline-ms N` | `8000` | Prazo da descoberta; depois dele, `interrupted` ([D-063](changelog.md#d-063--envelope-online-e-interrupted-proposta), D-078) |
 
 **Startup** [v0.1 §7.1]: validar a raiz; carregar a credencial sem imprimi-la;
 validar provider, endpoint e modelo permitidos; criar um único cliente HTTP
@@ -2279,6 +2313,25 @@ Lacunas da fusão, ***sem fonte na v0.1***:
     o cancelamento do RF-14 ([D-049](changelog.md#d-049--cancelamento-pelo-cliente-e-status-que-não-trava)).
 16. **Origem da v0.2.1.** Se ela aparecer, cada item acima deve ser reconciliado com
     ela, e as marcas *sem fonte na v0.1* substituídas pela referência correta.
+
+**Estado das decisões** (propostas em D-059 a D-064, aprovadas em D-065):
+
+| # | Resolução | Decisão |
+| --- | --- | --- |
+| 1, 13 | 24 requests por chamada e 4 em voo, configuráveis | D-062 |
+| 2 | Máximo fixo; sem AIMD | D-058 |
+| 3 | Cache em memória, chave por pergunta; nada em disco | D-064 |
+| 4, 5 | Fora do escopo | D-058 |
+| 6 | O classificador roda só nas rotas que terminam em `explore`; as outras dizem `skipped` | D-060 |
+| 7 | Rescore dos paths do planner, até 16 | D-061 |
+| 8 | Lookahead de um nível, previews de 4 KiB, ordem pela probabilidade | D-061, D-080, D-081 |
+| 9 | `RankedPath` antes do budgeter | D-061, D-066 |
+| 10 | Texto de `prompts/v1` congelado depois da gravação live | D-062, D-067 |
+| 11 | Feature Cargo `online` com a flag `--online`; o `env` só carrega a credencial | D-059 |
+| 12 | `doctor --jev-probe` sintético; `install --online` com a chave pelo nome; hooks offline | D-064, D-083, D-084 |
+| 14 | `provenance.online.discovery`, `Basis::RemoteClassifier`, `item.semantic` | D-063 |
+| 15 | Cancelamento MCP = `cancelled`; `interrupted` só pelo prazo de descoberta | D-063, D-077, D-078 |
+| 16 | A v0.2.1 não apareceu; nada a reconciliar | — |
 
 ### 23.18 Rastreabilidade e itens não transportados
 
