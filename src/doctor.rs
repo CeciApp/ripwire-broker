@@ -2,6 +2,9 @@
 
 use crate::broker::{REQUIRED_VERBS, TaskRequest, check_version};
 use crate::cli::DoctorArgs;
+use crate::online::SemanticStage;
+use crate::online::classifier::Classifier;
+use crate::online::request::{StateItem, build};
 use crate::state::StateStore;
 use crate::upstream::ripwire_version;
 use serde::Serialize;
@@ -149,8 +152,87 @@ pub async fn run(args: &DoctorArgs) -> Report {
         }
         None => r.add("smoke_call", Outcome::Skip, ""),
     }
+    if args.jev_probe {
+        r.checks.push(probe_from_env(args).await);
+    }
     r.ok = r.checks.iter().all(|c| c.status != Outcome::Fail);
     r
+}
+
+/// The probe's only content: invented and embedded in the binary. No workspace byte is ever
+/// sent by `--jev-probe` (PRD §23.6, D-064).
+pub const PROBE_PATH: &str = "probe/example.py";
+pub const PROBE_SOURCE: &str = "def add(a, b):\n    return a + b\n";
+pub const PROBE_QUERY: &str = "where are two numbers added?";
+
+/// One synthetic `file_admission` question: does the provider answer, with this credential
+/// and this model? It takes no workspace, so it cannot read one.
+pub async fn jev_probe(classifier: &dyn Classifier) -> Check {
+    let model = classifier.model().to_string();
+    let item = StateItem {
+        id: "p0".into(),
+        path: PROBE_PATH.into(),
+        text: PROBE_SOURCE.into(),
+    };
+    let req = build(
+        &model,
+        PROBE_QUERY,
+        SemanticStage::FileAdmission,
+        vec![item],
+    );
+    let started = Instant::now();
+    let (status, detail) = match classifier.classify(&req).await {
+        Ok(answers) => match answers.first().copied().flatten() {
+            Some(p) => (
+                Outcome::Ok,
+                format!(
+                    "{model} answered 1 synthetic question in {} ms (p={p:.2})",
+                    started.elapsed().as_millis()
+                ),
+            ),
+            None => (
+                Outcome::Fail,
+                format!("{model} answered without a valid probability"),
+            ),
+        },
+        Err(e) => (Outcome::Fail, format!("{model}: {e}")),
+    };
+    Check {
+        name: "jev_probe",
+        status,
+        detail,
+    }
+}
+
+#[cfg(feature = "online")]
+async fn probe_from_env(args: &DoctorArgs) -> Check {
+    use crate::online::credential::Credential;
+    use crate::online::jev::JevClient;
+    let fail = |detail: String| Check {
+        name: "jev_probe",
+        status: Outcome::Fail,
+        detail,
+    };
+    let key = match Credential::from_env() {
+        Ok(k) => k,
+        Err(e) => return fail(e.to_string()),
+    };
+    let model = args.jev_model.as_deref().unwrap_or("jev-1.13.0");
+    match JevClient::new(key, model, std::time::Duration::from_secs(15)) {
+        Ok(client) => jev_probe(&client).await,
+        Err(e) => fail(e),
+    }
+}
+
+#[cfg(not(feature = "online"))]
+async fn probe_from_env(_: &DoctorArgs) -> Check {
+    Check {
+        name: "jev_probe",
+        status: Outcome::Fail,
+        detail: "this binary was built without the online feature; rebuild it with \
+                 `cargo build --release --features online`"
+            .into(),
+    }
 }
 
 /// Without a commit, `situational_awareness` refuses and the finish gate says `unknown` (D-019).

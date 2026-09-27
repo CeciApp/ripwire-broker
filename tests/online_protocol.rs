@@ -579,3 +579,23 @@ async fn remote_messages_are_sanitized_capped_and_redact_the_credential() {
         }
     }
 }
+
+// --- S5.12: the probe over the wire ---
+
+#[tokio::test]
+async fn the_jev_probe_goes_over_the_wire_once() {
+    let f = answering(5, 0.97).await;
+
+    let check = ripwire_broker::doctor::jev_probe(&client(f.port, Duration::from_secs(5))).await;
+
+    assert_eq!(
+        check.status,
+        ripwire_broker::doctor::Outcome::Ok,
+        "{}",
+        check.detail
+    );
+    let sent = f.seen.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    let body = String::from_utf8(sent[0].body.clone()).unwrap();
+    assert!(body.contains(ripwire_broker::doctor::PROBE_PATH));
+}

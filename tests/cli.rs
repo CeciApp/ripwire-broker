@@ -1264,3 +1264,62 @@ fn the_usage_text_carries_the_consent_notice() {
     );
     assert!(help.contains("RIPWIRE_BROKER_JEV_API_KEY"));
 }
+
+#[test]
+fn doctor_takes_a_jev_probe_switch() {
+    let Ok(Command::Doctor(d)) = parse(&["doctor", "--workspace", "/w"]) else {
+        panic!()
+    };
+    assert!(!d.jev_probe, "no probe, no network (D-064)");
+    let Ok(Command::Doctor(d)) = parse(&[
+        "doctor",
+        "--workspace",
+        "/w",
+        "--jev-probe",
+        "--jev-model",
+        "jev-1.14.0",
+    ]) else {
+        panic!()
+    };
+    assert!(d.jev_probe);
+    assert_eq!(d.jev_model.as_deref(), Some("jev-1.14.0"));
+    let err = parse(&["doctor", "--workspace", "/w", "--jev-model", "x"]).unwrap_err();
+    assert!(err.contains("--jev-probe"), "{err}");
+}
+
+#[test]
+fn doctor_without_probe_never_calls_the_network() {
+    require_ripwire!();
+    let ws = common::sample_repo();
+
+    let (_, report, _) = doctor(ws.path(), &[]);
+
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["name"] != "jev_probe"),
+        "{report:#}"
+    );
+}
+
+#[cfg(not(feature = "online"))]
+#[test]
+fn a_probe_without_the_online_feature_fails_clearly() {
+    require_ripwire!();
+    let ws = common::sample_repo();
+
+    let (code, report, _) = doctor(ws.path(), &["--jev-probe"]);
+
+    assert_eq!(code, 1);
+    let probe = check(&report, "jev_probe");
+    assert_eq!(probe["status"], "fail");
+    assert!(
+        probe["detail"]
+            .as_str()
+            .unwrap()
+            .contains("--features online"),
+        "{probe}"
+    );
+}

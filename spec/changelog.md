@@ -84,6 +84,7 @@
 | 2026-09-27 19:28 | S5.7–S5.9: lookahead de um nível, `--jev-lookahead-max`, ganho além do Ripwire no status; ao vivo acha `src/budget.rs` (p=0,90), mas os 24 requests padrão se esgotam na admissão em chamada fria (decisão pendente); 2ª falha intermitente não reproduzida | [D-080](#d-080--lookahead-de-um-nível) |
 | 2026-09-27 19:35 | Usuário escolheu previews de 4 KiB no lookahead e ordem por probabilidade; a frio com os padrões, `src/budget.rs` aparece (p=0,89) em 19 requests; 3ª falha intermitente | [D-081](#d-081--equilíbrio-do-lookahead) |
 | 2026-09-27 19:41 | S5.10–S5.11: as 15 métricas do §23.11 em `status.online.metrics` e as etapas online em `recent_requests[].stages`; só contagens e tempos; 213/224 verdes | [D-082](#d-082--métricas-e-etapas-online) |
+| 2026-09-27 19:45 | S5.12: `doctor --jev-probe` envia uma pergunta sintética embutida no binário; ao vivo, `jev-1.13.0` respondeu em 304 ms; 218/229 verdes | [D-083](#d-083--doctor---jev-probe) |
 
 ---
 
@@ -1868,4 +1869,31 @@ Fatias S5.10 e S5.11 do plano (PRD §23.11).
   nenhuma etapa no offline. O e2e com o cliente real passou a conferir `jev_response_bytes`.
 - Overhead local, em release: p95 21,5 ms, sem mudança. Suítes: 213 verdes no build padrão e
   224 com `online`, 2 ignorados; clippy e fmt limpos nas duas.
+
+## D-083 — `doctor --jev-probe`
+
+Fatia S5.12 do plano (§23.6, D-064).
+
+- **`doctor::jev_probe(&dyn Classifier)`**, no build padrão, envia **uma** pergunta de
+  `file_admission` pelo `prompts/v1`, com conteúdo inventado e embutido no binário
+  (`PROBE_PATH = probe/example.py`, uma função `add`). Ela não recebe o workspace, então não
+  tem como ler nada dele.
+  - A checagem `jev_probe` traz modelo, latência e probabilidade quando dá certo.
+  - Na falha, só a categoria e o status do erro (D-069, D-079).
+- **CLI.** `doctor --jev-probe [--jev-model M]`; `--jev-model` sem `--jev-probe` é erro de uso.
+  Com a feature `online`, o probe monta o `JevClient` com a credencial do ambiente, o endpoint
+  allowlisted e o modelo pinado por padrão. Sem a feature, a checagem falha e diz como
+  recompilar. Sem `--jev-probe`, o `doctor` não cria cliente HTTP.
+- **Testes.**
+  - Seam 1: um único request, conteúdo sintético, guidance do `prompts/v1` e nenhum path do
+    workspace; a falha mostra só a categoria.
+  - Seam 4: exatamente um request no fio.
+  - Seam 5: flags; sem o probe, nenhuma checagem `jev_probe`; sem a feature, falha clara.
+- **Ao vivo (autorizado em D-076):** `jev-1.13.0` respondeu à pergunta sintética em 304 ms
+  (p = 0,77), com as outras 8 checagens `ok` e a chave ausente da saída. Sem a credencial, a
+  checagem falha com a mensagem que nomeia a variável.
+  - Detalhe menor: essa mensagem é a mesma do `serve` e começa com "--online needs...". No
+    `doctor` ela continua clara, mas pode ganhar um texto próprio no S5.13.
+- Suítes: 218 verdes no build padrão e 229 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
 

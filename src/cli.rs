@@ -18,6 +18,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
        ripwire-broker hook-log --session ID [--state-dir DIR]
        ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
+                      [--jev-probe [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
        ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--write] [--codex-home DIR]
 
@@ -136,6 +137,11 @@ pub struct DoctorArgs {
     /// The local model the server would use; checked, never run.
     pub summarizer: Option<SummarizerArgs>,
     pub json: bool,
+    /// Send one synthetic request to the classifier (D-064); off, the doctor never uses the
+    /// network.
+    pub jev_probe: bool,
+    /// The model the probe asks; the pinned default otherwise.
+    pub jev_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,6 +302,7 @@ const SWITCHES: &[&str] = &[
     "--write",
     "--online",
     "--jev-no-cache",
+    "--jev-probe",
 ];
 
 /// The valued `--jev-*` flags; kept as text until `Flags::online` checks them.
@@ -511,15 +518,28 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
         Some("doctor") => {
             let f = flags(
                 it,
-                &with(&["--json", "--state-dir", SUMMARIZER[0], SUMMARIZER[1]]),
+                &with(&[
+                    "--json",
+                    "--state-dir",
+                    SUMMARIZER[0],
+                    SUMMARIZER[1],
+                    "--jev-probe",
+                    "--jev-model",
+                ]),
             )?;
             no_words(&f)?;
+            let jev_model = f.jev.get("--jev-model").cloned();
+            if jev_model.is_some() && !f.on("--jev-probe") {
+                return Err(usage("--jev-model needs --jev-probe here"));
+            }
             Ok(Command::Doctor(DoctorArgs {
                 workspace: f.workspace()?,
                 upstream: f.upstream.clone(),
                 state_dir: f.state_dir.clone(),
                 summarizer: f.summarizer()?,
                 json: f.on("--json"),
+                jev_probe: f.on("--jev-probe"),
+                jev_model,
             }))
         }
         Some("install") => {
