@@ -71,6 +71,7 @@
 | 2026-09-27 18:14 | S4.0b: gravação live contra `jev-1.13.0` confirma o contrato e `prompts/v1`; golden congelado; Sprint 0 concluído, 132 verdes | [D-067](#d-067--gravação-live-e-ponto-de-parada-0) |
 | 2026-09-27 18:19 | S4.1–S4.6: flags `--online`/`--jev-*`, recusa sem a feature, credencial redigida, teste de CA-10 sobre o grafo resolvido, consentimento, CI nas duas configurações | [D-068](#d-068--configuração-credencial-e-garantia-offline) |
 | 2026-09-27 18:24 | S4.7–S4.11: validação da resposta, thresholds estritos, batcher com tamanho exato, `trait Classifier` e `JevClient` (reqwest/rustls atrás da feature) | [D-069](#d-069--protocolo-validação-e-cliente-http) |
+| 2026-09-27 18:28 | S4.12–S4.14: `WorkspaceReader` (elegibilidade, snapshot com sha256, preview) e unidades; ponto de parada 1, 152/159 verdes | [D-070](#d-070--leitura-do-workspace-e-ponto-de-parada-1) |
 
 ---
 
@@ -1363,4 +1364,46 @@ Fatias S4.7 a S4.11 do plano.
   teste sobre o grafo resolvido continua verde no build padrão.
 - Suítes: 146 verdes no build padrão e 153 com `online`, 1 ignorado; clippy e fmt limpos nas
   duas.
+
+## D-070 — Leitura do workspace e ponto de parada 1
+
+Fatias S4.12 a S4.14 do plano.
+
+- **S4.12.** `online::reader::WorkspaceReader::snapshot` é o único caminho entre o workspace e o
+  classificador. Checa nesta ordem e devolve o motivo sem path nem conteúdo:
+  1. absoluto ou com `..` → `outside`;
+  2. nome sensível → `sensitive_name`. Vem antes de "oculto" para o `.env` ser classificado
+     como sensível. A lista cobre `.env*`, `.netrc`, `.npmrc`, `.pypirc`, `.pgpass`, chaves SSH,
+     `credentials*`, `secrets.*`, além de `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,
+     `*.keystore`, `*.kdbx` e `*.gpg`;
+  3. componente oculto (inclui `.git`) → `hidden`;
+  4. diretório de dependência ou build (`node_modules`, `target`, `vendor`, `dist`, `build`,
+     `__pycache__`, `bower_components`, `venv`) → `dependency_or_build`;
+  5. qualquer symlink abaixo da raiz → `symlink`, nunca seguido;
+  6. diretório, FIFO, socket ou device → `not_regular`, detectado pelos metadados sem abrir o
+     arquivo, o que evita travar num FIFO;
+  7. ignorado por `.gitignore`, `.ignore` ou os excludes do git → `ignored`;
+  8. NUL nos primeiros 8.000 bytes → `binary`; UTF-8 inválido → `not_utf8`; marcador
+     `-----BEGIN … PRIVATE KEY-----` → `private_key`.
+  - O ignore usa a crate `ignore` (mesma semântica do git, sem rede). É conferido componente a
+    componente, porque um diretório ignorado precisa esconder também o que está dentro dele.
+    Como no git, os excludes globais do usuário também valem; isso só exclui mais.
+  - Acréscimo ao plano: arquivos acima de 8 MiB nem são lidos (`too_large`). Antes disso,
+    hashear um arquivo gigante seria o único trabalho sem limite do leitor.
+- **S4.13.** `Snapshot { path relativo, content_hash "sha256:…", texto }`. O preview tem no
+  máximo 16 KiB e termina numa quebra de linha, ou numa fronteira de caractere se não houver
+  quebra. `is_fresh` relê o arquivo pela mesma política e compara o hash; a revalidação da
+  Fase 5 (S5.1) vai usá-lo.
+- **S4.14.** `units(snapshot, linhas_do_ripwire)`:
+  - uma unidade nova começa em cada linha de símbolo do Ripwire e fica ligada a ele
+    (`symbol_line`);
+  - fora disso, a unidade fecha ao chegar a ~3 KiB de linhas inteiras;
+  - nenhuma passa de 24 KiB, e uma linha maior que isso é cortada em pedaços;
+  - arquivo acima de 1 MiB não tem unidades (só localização), mas mantém o preview para a
+    admissão;
+  - as linhas são one-based e inclusivas por fora, e os bytes half-open por dentro (§23.2).
+- **Ponto de parada 1:** o build padrão tem 152 verdes e o `online` 159, 1 ignorado em cada.
+  Clippy e fmt limpos nas duas configurações.
+  - A crate `ignore` trouxe só dependências locais (`globset`, `walkdir`, `crossbeam`,
+    `regex-automata`, `bstr`), e a guarda de CA-10 continua verde.
 

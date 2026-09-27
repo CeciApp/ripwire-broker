@@ -407,3 +407,194 @@ fn the_batcher_size_estimate_is_the_exact_json_length() {
         );
     }
 }
+
+// --- S4.12–S4.14: workspace reader, snapshots and units ---
+
+use ripwire_broker::online::reader::{
+    Ineligible, LOCATION_ONLY_BYTES, PREVIEW_BYTES, WorkspaceReader, units,
+};
+
+fn put(root: &std::path::Path, rel: &str, body: &[u8]) {
+    let p = root.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, body).unwrap();
+}
+
+#[test]
+fn ineligible_files_are_never_read_for_sending() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path();
+    put(root, "src/auth.py", b"def ok(): pass\n");
+    put(root, ".hidden/a.py", b"x = 1\n");
+    put(root, ".git/config", b"[core]\n");
+    put(root, "node_modules/lib/index.js", b"module.exports = 1\n");
+    put(root, "target/debug/build.rs", b"fn main() {}\n");
+    put(root, "src/logo.png", b"\x89PNG\r\n\x1a\n\x00\x00");
+    put(root, "src/latin1.py", b"name = '\xe9'\n");
+    put(root, ".env", b"KEY=1\n");
+    put(root, "config/id_rsa", b"key\n");
+    put(root, "config/server.pem", b"cert\n");
+    put(
+        root,
+        "config/deploy.py",
+        b"KEY = '''\n-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n'''\n",
+    );
+    put(root, ".gitignore", b"generated/\n*.log\n");
+    put(root, "generated/api.py", b"x = 1\n");
+    put(root, "app.log", b"started\n");
+    put(root, "src/.ignore", b"scratch.py\n");
+    put(root, "src/scratch.py", b"x = 1\n");
+    let outside = tempfile::tempdir().unwrap();
+    put(outside.path(), "secret.py", b"TOKEN = 1\n");
+    std::os::unix::fs::symlink(outside.path().join("secret.py"), root.join("src/link.py")).unwrap();
+    std::os::unix::fs::symlink(root.join("src"), root.join("alias")).unwrap();
+    let fifo = root.join("src/pipe.py");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let reader = WorkspaceReader::new(root).unwrap();
+
+    assert!(reader.snapshot("src/auth.py").is_ok());
+    for (path, why) in [
+        (".hidden/a.py", Ineligible::Hidden),
+        (".git/config", Ineligible::Hidden),
+        ("node_modules/lib/index.js", Ineligible::DependencyOrBuild),
+        ("target/debug/build.rs", Ineligible::DependencyOrBuild),
+        ("src/logo.png", Ineligible::Binary),
+        ("src/latin1.py", Ineligible::NotUtf8),
+        (".env", Ineligible::SensitiveName),
+        ("config/id_rsa", Ineligible::SensitiveName),
+        ("config/server.pem", Ineligible::SensitiveName),
+        ("config/deploy.py", Ineligible::PrivateKey),
+        ("generated/api.py", Ineligible::Ignored),
+        ("app.log", Ineligible::Ignored),
+        ("src/scratch.py", Ineligible::Ignored),
+        ("src/link.py", Ineligible::Symlink),
+        ("alias/auth.py", Ineligible::Symlink),
+        ("src/pipe.py", Ineligible::NotRegular),
+        ("src", Ineligible::NotRegular),
+        ("../x.py", Ineligible::Outside),
+        ("/etc/hosts", Ineligible::Outside),
+        ("src/missing.py", Ineligible::Unreadable),
+    ] {
+        assert_eq!(reader.snapshot(path).map(|_| ()), Err(why), "{path}");
+    }
+}
+
+#[test]
+fn a_snapshot_binds_preview_and_ranges_to_its_hash() {
+    let ws = tempfile::tempdir().unwrap();
+    put(ws.path(), "src/a.py", b"abc");
+    let reader = WorkspaceReader::new(ws.path()).unwrap();
+
+    let snap = reader.snapshot("src/a.py").unwrap();
+
+    assert_eq!(snap.path, "src/a.py", "relative, never the absolute root");
+    assert_eq!(
+        snap.content_hash,
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert!(reader.is_fresh(&snap));
+    put(ws.path(), "src/a.py", b"abd");
+    assert!(
+        !reader.is_fresh(&snap),
+        "a changed file invalidates what was read from it"
+    );
+}
+
+#[test]
+fn previews_are_capped_at_16_kib_on_a_line_boundary() {
+    let ws = tempfile::tempdir().unwrap();
+    let line = "é".repeat(49) + "\n"; // 99 bytes, multi-byte characters
+    put(ws.path(), "src/big.py", line.repeat(400).as_bytes());
+    put(ws.path(), "src/one_line.py", "é".repeat(20_000).as_bytes());
+    let reader = WorkspaceReader::new(ws.path()).unwrap();
+
+    let preview = reader.snapshot("src/big.py").unwrap().preview().to_string();
+    assert!(preview.len() <= PREVIEW_BYTES);
+    assert!(
+        preview.ends_with('\n') && preview.len() > PREVIEW_BYTES - 100,
+        "{}",
+        preview.len()
+    );
+
+    let long = reader.snapshot("src/one_line.py").unwrap();
+    assert!(long.preview().len() <= PREVIEW_BYTES && long.preview().len() > PREVIEW_BYTES - 2);
+}
+
+#[test]
+fn units_are_line_aligned_chunks_split_above_24_kib() {
+    let ws = tempfile::tempdir().unwrap();
+    let line = "x".repeat(99) + "\n"; // 100 bytes
+    put(ws.path(), "src/a.py", line.repeat(70).as_bytes());
+    put(ws.path(), "src/min.js", "y".repeat(60 * 1024).as_bytes());
+    let reader = WorkspaceReader::new(ws.path()).unwrap();
+
+    let a = reader.snapshot("src/a.py").unwrap();
+    let chunks = units(&a, &[]);
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|u| (u.start_line, u.end_line))
+            .collect::<Vec<_>>(),
+        vec![(1, 31), (32, 62), (63, 70)],
+        "~3 KiB each, whole lines, one-based inclusive"
+    );
+    assert_eq!(a.text(&chunks[1]), line.repeat(31));
+
+    let min = reader.snapshot("src/min.js").unwrap();
+    let pieces = units(&min, &[]);
+    assert_eq!(pieces.len(), 3, "a 60 KiB line splits into 24 KiB pieces");
+    assert!(
+        pieces
+            .iter()
+            .all(|u| u.bytes.len() <= 24 * 1024 && (u.start_line, u.end_line) == (1, 1))
+    );
+}
+
+#[test]
+fn a_chunk_starts_at_each_ripwire_symbol_and_is_linked_to_it() {
+    let ws = tempfile::tempdir().unwrap();
+    let body: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+    put(ws.path(), "src/a.py", body.as_bytes());
+    let reader = WorkspaceReader::new(ws.path()).unwrap();
+
+    let chunks = units(&reader.snapshot("src/a.py").unwrap(), &[5, 9]);
+
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|u| (u.start_line, u.end_line, u.symbol_line))
+            .collect::<Vec<_>>(),
+        vec![(1, 4, None), (5, 8, Some(5)), (9, 12, Some(9))]
+    );
+}
+
+#[test]
+fn files_above_1_mb_are_location_only() {
+    let ws = tempfile::tempdir().unwrap();
+    let line = "z".repeat(99) + "\n";
+    put(
+        ws.path(),
+        "src/huge.py",
+        line.repeat(LOCATION_ONLY_BYTES / 100 + 1).as_bytes(),
+    );
+    let reader = WorkspaceReader::new(ws.path()).unwrap();
+
+    let snap = reader.snapshot("src/huge.py").unwrap();
+
+    assert!(snap.location_only());
+    assert!(
+        units(&snap, &[1]).is_empty(),
+        "no source selection above 1 MB"
+    );
+    assert!(
+        !snap.preview().is_empty(),
+        "admission may still judge the preview"
+    );
+}

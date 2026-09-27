@@ -9,6 +9,7 @@ pub mod decision;
 #[cfg(feature = "online")]
 pub mod jev;
 pub mod prompt;
+pub mod reader;
 pub mod request;
 pub mod response;
 
