@@ -1,11 +1,14 @@
 //! `JevScheduler` (PRD §23.5): runs classifier requests from a bounded queue with at most
 //! `max_in_flight` in flight and at most `request_limit` per MCP call. It owns every task in a
 //! `JoinSet`, so an auth failure or a cancellation aborts the siblings (dropping their HTTP
-//! requests) and closes the queue, which stops the producer. It never interprets
-//! probabilities, and it never restarts a search.
+//! requests) and closes the queue, which stops the producer. It retries and splits failed
+//! batches by stage (v0.1 §11.9), rechecks freshness before every attempt, never interprets
+//! probabilities, and never restarts a search.
 
+use super::SemanticStage;
 use super::classifier::{Classifier, ClassifyError};
-use super::request::JevRequest;
+use super::request::{JevRequest, build};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -15,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub struct SchedulerConfig {
     /// RF-ONLINE-08: never more requests in flight per query.
     pub max_in_flight: usize,
-    /// Requests one MCP call may send.
+    /// Requests one MCP call may send; every attempt counts.
     pub request_limit: usize,
     /// Capacity of the queue between the producer and the scheduler (RF-ONLINE-09).
     pub queue: usize,
@@ -25,6 +28,8 @@ pub struct SchedulerConfig {
 #[derive(Debug, Clone)]
 pub struct Job {
     pub id: usize,
+    /// Decides the retry policy and how a split half is rebuilt.
+    pub stage: SemanticStage,
     pub request: JevRequest,
     /// Checked right before every attempt; `false` means the source changed and the request
     /// is never sent (RF-ONLINE-10).
@@ -41,9 +46,12 @@ impl std::fmt::Debug for Freshness {
     }
 }
 
+/// The final outcome of a job or of one half of it: the request that was answered (a split
+/// half has its own items and question ids) and its answers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JobResult {
     pub id: usize,
+    pub request: JevRequest,
     pub result: Result<Vec<Option<f64>>, ClassifyError>,
 }
 
@@ -58,14 +66,16 @@ pub enum Stop {
 
 #[derive(Debug, Default)]
 pub struct Report {
-    /// In completion order; match them to jobs by `id`.
+    /// Final outcomes, in completion order; match them to jobs by `id`.
     pub results: Vec<JobResult>,
     /// Jobs admitted but never answered: aborted in flight, or queued and never sent. Sorted.
     pub unfinished: Vec<usize>,
     /// Jobs never sent because their source changed first. Sorted.
     pub stale: Vec<usize>,
-    /// Requests sent (started).
+    /// Requests sent (started), retries included.
     pub requests: usize,
+    pub retries: usize,
+    pub splits: usize,
     pub stop: Option<Stop>,
 }
 
@@ -77,6 +87,47 @@ impl Report {
             || !self.stale.is_empty()
             || self.results.iter().any(|r| r.result.is_err())
     }
+}
+
+/// A finished attempt and what it got.
+type Done = (Attempt, Result<Vec<Option<f64>>, ClassifyError>);
+
+/// A job and the attempt it is on.
+struct Attempt {
+    job: Job,
+    number: u32,
+}
+
+/// Attempts a batch gets before it is split or given up (v0.1 §11.9): evidence batches and
+/// singletons two, multi-item admission batches one.
+fn max_attempts(stage: SemanticStage, items: usize) -> u32 {
+    match (stage, items) {
+        (_, 1) | (SemanticStage::SourceSelection, _) => 2,
+        (SemanticStage::FileAdmission, _) => 1,
+    }
+}
+
+/// Worth retrying or splitting. A `429` waits for the cooldown instead (S5.3).
+fn retryable(e: &ClassifyError) -> bool {
+    e.is_transient() && !matches!(e, ClassifyError::RateLimited { .. })
+}
+
+/// `job` cut into two halves with the same id, stage and freshness check.
+fn halves(job: &Job) -> [Job; 2] {
+    let items = &job.request.state.items;
+    let (a, b) = items.split_at(items.len() / 2);
+    let half = |part: &[super::request::StateItem]| Job {
+        id: job.id,
+        stage: job.stage,
+        request: build(
+            &job.request.model,
+            &job.request.state.query,
+            job.stage,
+            part.to_vec(),
+        ),
+        fresh: job.fresh.clone(),
+    };
+    [half(a), half(b)]
 }
 
 pub struct Scheduler {
@@ -96,15 +147,31 @@ impl Scheduler {
 
     pub async fn run(&self, mut jobs: mpsc::Receiver<Job>, cancel: CancellationToken) -> Report {
         let mut report = Report::default();
-        let mut tasks: JoinSet<JobResult> = JoinSet::new();
+        let mut tasks: JoinSet<Done> = JoinSet::new();
         let mut in_flight: Vec<usize> = vec![];
+        // Retries and split halves; they go before new jobs from the producer.
+        let mut again: VecDeque<Attempt> = VecDeque::new();
         let mut admitting = true;
+        let max = self.config.max_in_flight.max(1);
         loop {
-            // The cancellation branch never goes idle, so the end is checked here.
-            if !admitting && tasks.is_empty() {
+            if report.stop.is_some() && report.stop != Some(Stop::RequestLimit) {
                 break;
             }
-            let room = in_flight.len() < self.config.max_in_flight.max(1);
+            // The cancellation branch never goes idle, so the end is checked here.
+            if !admitting && tasks.is_empty() && again.is_empty() {
+                break;
+            }
+            if in_flight.len() < max
+                && let Some(next) = again.pop_front()
+            {
+                self.launch(next, &mut tasks, &mut in_flight, &mut report, &mut again);
+                if report.stop == Some(Stop::RequestLimit) {
+                    admitting = false;
+                    jobs.close();
+                }
+                continue;
+            }
+            let room = in_flight.len() < max && again.is_empty();
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -112,32 +179,20 @@ impl Scheduler {
                     break;
                 }
                 Some(done) = tasks.join_next(), if !tasks.is_empty() => {
-                    let Ok(done) = done else { continue };
-                    in_flight.retain(|i| *i != done.id);
-                    let auth = matches!(done.result, Err(ClassifyError::Auth(_)));
-                    report.results.push(done);
-                    if auth {
-                        report.stop = Some(Stop::Auth);
-                        break;
+                    let Ok((attempt, result)) = done else { continue };
+                    if let Some(i) = in_flight.iter().position(|i| *i == attempt.job.id) {
+                        in_flight.swap_remove(i);
                     }
+                    self.settle(attempt, result, &mut report, &mut again);
                 }
                 job = jobs.recv(), if admitting && room => match job {
                     None => admitting = false,
-                    Some(job) if report.requests == self.config.request_limit => {
-                        report.unfinished.push(job.id);
-                        report.stop = Some(Stop::RequestLimit);
-                        admitting = false;
-                        jobs.close();
-                    }
-                    Some(Job { id, fresh: Some(f), .. }) if !(f.0)() => report.stale.push(id),
-                    Some(Job { id, request, .. }) => {
-                        report.requests += 1;
-                        in_flight.push(id);
-                        let classifier = self.classifier.clone();
-                        tasks.spawn(async move {
-                            let result = classifier.classify(&request).await;
-                            JobResult { id, result }
-                        });
+                    Some(job) => {
+                        self.launch(Attempt { job, number: 1 }, &mut tasks, &mut in_flight, &mut report, &mut again);
+                        if report.stop == Some(Stop::RequestLimit) {
+                            admitting = false;
+                            jobs.close();
+                        }
                     }
                 },
             }
@@ -145,12 +200,85 @@ impl Scheduler {
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         report.unfinished.extend(in_flight);
+        report.unfinished.extend(again.iter().map(|a| a.job.id));
         jobs.close();
         while let Ok(job) = jobs.try_recv() {
             report.unfinished.push(job.id);
         }
         report.unfinished.sort_unstable();
+        report.unfinished.dedup();
         report.stale.sort_unstable();
         report
+    }
+
+    /// Starts an attempt unless its source changed or the request limit is spent.
+    fn launch(
+        &self,
+        attempt: Attempt,
+        tasks: &mut JoinSet<Done>,
+        in_flight: &mut Vec<usize>,
+        report: &mut Report,
+        again: &mut VecDeque<Attempt>,
+    ) {
+        if let Some(fresh) = &attempt.job.fresh
+            && !(fresh.0)()
+        {
+            report.stale.push(attempt.job.id);
+            return;
+        }
+        if report.requests == self.config.request_limit {
+            report.unfinished.push(attempt.job.id);
+            report.stop = Some(Stop::RequestLimit);
+            report.unfinished.extend(again.drain(..).map(|a| a.job.id));
+            return;
+        }
+        report.requests += 1;
+        if attempt.number > 1 {
+            report.retries += 1;
+        }
+        in_flight.push(attempt.job.id);
+        let classifier = self.classifier.clone();
+        tasks.spawn(async move {
+            let result = classifier.classify(&attempt.job.request).await;
+            (attempt, result)
+        });
+    }
+
+    /// Records a finished attempt, or queues its retry or its two halves.
+    fn settle(
+        &self,
+        attempt: Attempt,
+        result: Result<Vec<Option<f64>>, ClassifyError>,
+        report: &mut Report,
+        again: &mut VecDeque<Attempt>,
+    ) {
+        let Attempt { job, number } = attempt;
+        let items = job.request.state.items.len();
+        match &result {
+            Err(ClassifyError::Auth(_)) => report.stop = Some(Stop::Auth),
+            Err(e) if retryable(e) && number < max_attempts(job.stage, items) => {
+                again.push_back(Attempt {
+                    job,
+                    number: number + 1,
+                });
+                return;
+            }
+            Err(e) if retryable(e) && items > 1 => {
+                report.splits += 1;
+                for half in halves(&job) {
+                    again.push_back(Attempt {
+                        job: half,
+                        number: 1,
+                    });
+                }
+                return;
+            }
+            _ => {}
+        }
+        report.results.push(JobResult {
+            id: job.id,
+            request: job.request,
+            result,
+        });
     }
 }

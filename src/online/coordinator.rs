@@ -389,6 +389,7 @@ impl OnlineEngine {
                 let fresh = Freshness(Arc::new(move || sources.iter().all(|s| reader.is_fresh(s))));
                 let job = Job {
                     id,
+                    stage,
                     request,
                     fresh: Some(fresh),
                 };
@@ -408,7 +409,7 @@ impl OnlineEngine {
         }
         let mut cache = self.cache.lock().unwrap();
         for done in report.results {
-            let req = &requests[done.id];
+            let req = &done.request;
             match done.result {
                 Ok(answers) => {
                     let request_digest = digest(req);

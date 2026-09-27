@@ -12,16 +12,53 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 fn job(n: usize) -> Job {
-    let item = StateItem {
-        id: format!("j{n}"),
-        path: format!("src/f{n}.py"),
-        text: "x".into(),
-    };
+    batch(n, SemanticStage::FileAdmission, &[n])
+}
+
+/// Job `id` asking `stage`'s question about items `j{k}` for each `k` in `items`.
+fn batch(id: usize, stage: SemanticStage, items: &[usize]) -> Job {
+    let items = items
+        .iter()
+        .map(|k| StateItem {
+            id: format!("j{k}"),
+            path: format!("src/f{k}.py"),
+            text: "x".into(),
+        })
+        .collect();
     Job {
-        id: n,
-        request: build("jev-1.13.0", "q", SemanticStage::FileAdmission, vec![item]),
+        id,
+        stage,
+        request: build("jev-1.13.0", "q", stage, items),
         fresh: None,
     }
+}
+
+/// Runs `jobs` to completion.
+async fn run_jobs(
+    fake: Arc<FakeClassifier>,
+    cfg: SchedulerConfig,
+    jobs: Vec<Job>,
+) -> ripwire_broker::online::scheduler::Report {
+    let scheduler = Scheduler::new(fake, cfg);
+    let (tx, rx) = scheduler.queue();
+    tokio::spawn(async move {
+        for j in jobs {
+            tx.send(j).await.unwrap();
+        }
+    });
+    scheduler.run(rx, CancellationToken::new()).await
+}
+
+/// Item ids answered, in id order.
+fn answered(report: &ripwire_broker::online::scheduler::Report) -> Vec<String> {
+    let mut ids: Vec<String> = report
+        .results
+        .iter()
+        .filter(|r| r.result.is_ok())
+        .flat_map(|r| r.request.state.items.iter().map(|i| i.id.clone()))
+        .collect();
+    ids.sort();
+    ids
 }
 
 fn config(max_in_flight: usize, request_limit: usize) -> SchedulerConfig {
@@ -217,4 +254,181 @@ async fn a_job_whose_source_changed_is_never_sent() {
     assert_eq!(report.requests, 2, "a stale job is not a request");
     assert_eq!(fake.calls(), 2);
     assert!(report.incomplete());
+}
+
+// --- S5.2: retry and split (v0.1 §11.9) ---
+
+const DOWN: ClassifyError = ClassifyError::Server(503);
+
+#[tokio::test(start_paused = true)]
+async fn retries_follow_the_stage_policy() {
+    // A source-selection batch is retried once as it is.
+    let fake = Arc::new(FakeClassifier::new().fail_times("j0", DOWN, 1));
+    let r = run_jobs(
+        fake.clone(),
+        config(4, 1000),
+        vec![batch(0, SemanticStage::SourceSelection, &[0, 1])],
+    )
+    .await;
+    assert_eq!((fake.calls(), r.retries, r.splits), (2, 1, 0));
+    assert_eq!(answered(&r), vec!["j0", "j1"]);
+
+    // A multi-item admission batch gets one attempt, then splits in half.
+    let fake = Arc::new(FakeClassifier::new().fail_times("j0", DOWN, 1));
+    let r = run_jobs(
+        fake.clone(),
+        config(4, 1000),
+        vec![batch(0, SemanticStage::FileAdmission, &[0, 1])],
+    )
+    .await;
+    assert_eq!((fake.calls(), r.retries, r.splits), (3, 0, 1));
+    assert_eq!(answered(&r), vec!["j0", "j1"]);
+
+    // A singleton is retried once.
+    let fake = Arc::new(FakeClassifier::new().fail_times("j0", DOWN, 1));
+    let r = run_jobs(
+        fake.clone(),
+        config(4, 1000),
+        vec![batch(0, SemanticStage::FileAdmission, &[0])],
+    )
+    .await;
+    assert_eq!((fake.calls(), r.retries), (2, 1));
+    assert_eq!(answered(&r), vec!["j0"]);
+
+    // ...and only once.
+    let fake = Arc::new(FakeClassifier::new().fail("j0", DOWN));
+    let r = run_jobs(
+        fake.clone(),
+        config(4, 1000),
+        vec![batch(0, SemanticStage::FileAdmission, &[0])],
+    )
+    .await;
+    assert_eq!(fake.calls(), 2);
+    assert_eq!(r.results.len(), 1);
+    assert_eq!(r.results[0].result, Err(DOWN));
+    assert!(r.incomplete());
+}
+
+#[tokio::test(start_paused = true)]
+async fn non_transient_errors_do_not_retry_or_split() {
+    for e in [
+        ClassifyError::Rejected(409),
+        ClassifyError::Invalid(ripwire_broker::online::response::InvalidResponse::Malformed),
+        ClassifyError::TooLarge,
+    ] {
+        let fake = Arc::new(FakeClassifier::new().fail("j0", e.clone()));
+        let r = run_jobs(
+            fake.clone(),
+            config(4, 1000),
+            vec![batch(0, SemanticStage::SourceSelection, &[0, 1, 2])],
+        )
+        .await;
+        assert_eq!((fake.calls(), r.retries, r.splits), (1, 0, 0), "{e:?}");
+        assert_eq!(r.results[0].result, Err(e));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_persistent_failure_is_bounded_and_never_restarts_the_search() {
+    // Every request of [j0, j1, j2] fails. Admission: the batch once (1), split into [j0] and
+    // [j1, j2]; [j0] twice (2); [j1, j2] once (1), split into [j1] and [j2], twice each (4).
+    let fake = Arc::new(
+        FakeClassifier::new()
+            .fail("j0", DOWN)
+            .fail("j1", DOWN)
+            .fail("j2", DOWN),
+    );
+    let r = run_jobs(
+        fake.clone(),
+        config(4, 1000),
+        vec![batch(0, SemanticStage::FileAdmission, &[0, 1, 2])],
+    )
+    .await;
+
+    assert_eq!(fake.calls(), 8);
+    assert_eq!((r.retries, r.splits), (3, 2));
+    assert_eq!(r.requests, 8);
+    assert!(answered(&r).is_empty());
+    let failed: Vec<usize> = r
+        .results
+        .iter()
+        .map(|x| x.request.state.items.len())
+        .collect();
+    assert_eq!(
+        failed,
+        vec![1, 1, 1],
+        "one final failure per item, each unknown"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn retries_count_against_the_request_limit() {
+    let fake = Arc::new(FakeClassifier::new().fail("j0", DOWN));
+    let r = run_jobs(
+        fake.clone(),
+        config(4, 1),
+        vec![batch(0, SemanticStage::FileAdmission, &[0])],
+    )
+    .await;
+
+    assert_eq!(fake.calls(), 1);
+    assert_eq!(r.stop, Some(Stop::RequestLimit));
+    assert_eq!(r.unfinished, vec![0], "the retry was never sent");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_is_not_sent_over_changed_source() {
+    use ripwire_broker::online::scheduler::Freshness;
+    use std::sync::atomic::AtomicBool;
+    let changed = Arc::new(AtomicBool::new(false));
+    let flag = changed.clone();
+    let fake = Arc::new(
+        FakeClassifier::new()
+            .fail("j0", DOWN)
+            .on_call(move |_| flag.store(true, SeqCst)),
+    );
+    let mut j = batch(0, SemanticStage::FileAdmission, &[0]);
+    let seen = changed.clone();
+    j.fresh = Some(Freshness(Arc::new(move || !seen.load(SeqCst))));
+
+    let r = run_jobs(fake.clone(), config(4, 1000), vec![j]).await;
+
+    assert_eq!(
+        fake.calls(),
+        1,
+        "the source changed during the first attempt"
+    );
+    assert_eq!(r.stale, vec![0]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn split_never_deadlocks() {
+    let mut fake = FakeClassifier::new();
+    for k in 0..64 {
+        fake = fake.fail_times(&format!("j{k}"), DOWN, 1);
+    }
+    let fake = Arc::new(fake);
+    let jobs = (0..8)
+        .map(|b| {
+            batch(
+                b,
+                SemanticStage::FileAdmission,
+                &(b * 8..b * 8 + 8).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let small = SchedulerConfig {
+        max_in_flight: 1,
+        request_limit: 1000,
+        queue: 1,
+    };
+
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        run_jobs(fake, small, jobs),
+    )
+    .await
+    .expect("no deadlock");
+
+    assert_eq!(answered(&r).len(), 64);
 }

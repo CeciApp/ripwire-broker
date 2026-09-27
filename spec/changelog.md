@@ -75,6 +75,7 @@
 | 2026-09-27 18:37 | S4.15–S4.19: scheduler com `JoinSet`, fila limitada, teto em voo, limite de requests, auth e cancelamento abortam irmãs; 158/165 verdes | [D-071](#d-071--scheduler-mínimo) |
 | 2026-09-27 18:54 | S4.20–S4.31: adaptador ligado ao `context_for_task` (gate por rota, admissão→seleção, merge aditivo, cache, status); piso online de 512 tokens; ponto de parada 2 (barra de merge da Fase 4), 182/191 verdes, p95 local 8,3 ms | [D-072](#d-072--composição-em-context_for_task-e-ponto-de-parada-2) |
 | 2026-09-27 18:58 | S5.1: frescor — lote com fonte alterada não é enviado; evidência de arquivo alterado é descartada antes da saída; p95 local 21,9 ms | [D-073](#d-073--frescor-das-fontes) |
+| 2026-09-27 19:02 | S5.2: retry por etapa e divisão ao meio no scheduler; cada tentativa conta no limite e revalida o frescor; 191/200 verdes | [D-074](#d-074--retry-e-divisão-de-lotes) |
 
 ---
 
@@ -1552,5 +1553,42 @@ Fatia S5.1 do plano (RF-ONLINE-10, CA-ONLINE-11).
   diretório. A leitura é síncrona dentro da task; se o custo crescer, ela vai para
   `spawn_blocking` e o resultado de ignore por diretório passa a ser guardado na chamada.
 - Suítes: 185 verdes no build padrão e 194 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-074 — Retry e divisão de lotes
+
+Fatia S5.2 do plano (v0.1 §11.9, §23.5).
+
+- **Política, no scheduler.** O cliente continua sem retry próprio.
+
+  | Lote | Falha transitória (timeout, 5xx, rede) | Não transitória |
+  | --- | --- | --- |
+  | seleção de fonte | até 2 tentativas; depois, se tiver mais de um item, divide ao meio | nem retry nem divisão |
+  | admissão com vários itens | 1 tentativa; depois divide ao meio | idem |
+  | lote com um item | até 2 tentativas | idem |
+
+  - "Não transitória" inclui `409`, resposta inválida e resposta grande demais. `401`/`403`
+    continuam parando tudo (D-071).
+  - O `429` fica fora do retry até o S5.3, que traz o cooldown compartilhado. Repetir sem
+    esperar o `Retry-After` só pioraria o rate limit.
+- **Mecânica.**
+  - `Job` ganhou `stage`, que decide a política e reconstrói as metades.
+  - Tentativas e metades vão para uma fila interna com prioridade sobre a fila do produtor.
+  - Cada tentativa conta no limite de requests e repete a checagem de frescor do S5.1; um
+    retry sobre fonte alterada nunca é enviado.
+  - As metades herdam o id e a checagem de frescor do lote original.
+  - `JobResult` agora traz o request que de fato respondeu: uma metade tem seus próprios itens
+    e ids de pergunta. O coordenador casa as respostas por ele, não mais por `requests[id]`.
+  - `Report` ganhou `retries` e `splits`, que o S5.10 vai expor como `jev_retry_total` e
+    `jev_split_total`.
+- **Limite da busca.** Nenhuma busca é reiniciada inteira. Com falha persistente, um lote de
+  admissão de 3 itens gera exatamente 8 requests: o lote (1); `[j0]` duas vezes (2);
+  `[j1, j2]` uma vez (1); `[j1]` e `[j2]` duas vezes cada (4). No fim, cada item fica com uma
+  falha final e resposta desconhecida.
+- **Testes.** Seis testes novos no seam 3: a política por etapa, erros não transitórios, o
+  limite com falha persistente, retries contando no limite de requests, retry sobre fonte
+  alterada e ausência de deadlock (1 em voo, fila 1, 8 lotes de 8 que falham uma vez e se
+  dividem). Os 13 testes do scheduler rodaram 30 vezes seguidas sem falha.
+- Suítes: 191 verdes no build padrão e 200 com `online`, 2 ignorados; clippy e fmt limpos nas
   duas.
 

@@ -31,6 +31,8 @@ pub struct FakeClassifier {
     probability: HashMap<String, f64>,
     default: f64,
     fail: HashMap<String, ClassifyError>,
+    /// Fails the first `n` requests whose first item is the key, then answers.
+    fail_times: HashMap<String, (ClassifyError, AtomicUsize)>,
     delay: HashMap<String, Duration>,
     hold: Option<Arc<Semaphore>>,
     pub counters: Arc<Counters>,
@@ -45,6 +47,7 @@ impl FakeClassifier {
             probability: HashMap::new(),
             default: 0.9,
             fail: HashMap::new(),
+            fail_times: HashMap::new(),
             delay: HashMap::new(),
             hold: None,
             counters: Arc::default(),
@@ -105,6 +108,12 @@ impl FakeClassifier {
         self
     }
 
+    /// Fails the first `n` requests whose first item is `id`, then answers normally.
+    pub fn fail_times(mut self, id: &str, e: ClassifyError, n: usize) -> Self {
+        self.fail_times.insert(id.into(), (e, AtomicUsize::new(n)));
+        self
+    }
+
     /// Delays the request whose first item is `id`.
     pub fn delay(mut self, id: &str, d: Duration) -> Self {
         self.delay.insert(id.into(), d);
@@ -160,10 +169,17 @@ impl Classifier for FakeClassifier {
             tokio::time::sleep(*d).await;
         }
         // A scripted failure answers after its delay, without waiting for the gate.
-        if let Some(e) = self.fail.get(&first) {
+        let scripted = self.fail.get(&first).cloned().or_else(|| {
+            let (e, left) = self.fail_times.get(&first)?;
+            (left
+                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_ok())
+            .then(|| e.clone())
+        });
+        if let Some(e) = scripted {
             guard.1 = true;
             c.finished.fetch_add(1, SeqCst);
-            return Err(e.clone());
+            return Err(e);
         }
         if let Some(gate) = &self.hold {
             gate.acquire().await.unwrap().forget();
