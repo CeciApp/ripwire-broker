@@ -210,7 +210,7 @@ ripwire-broker install claude-code --workspace /repo --online --write
 files the classifier admitted. Never the absolute root, the key in any log, or a file the
 policy excludes: hidden paths and `.git`, dependency and build directories, anything ignored
 by `.gitignore`/`.ignore`, symlinks, binaries, non-UTF-8 files, likely credential files
-(`.env*`, SSH keys, `*.pem`, `*.key`...) and text with a private-key marker. This filtering
+(`.env*`, `*.env`, SSH keys, `*.pem`, `*.key`...) and text with a private-key marker. This filtering
 reduces risk; it cannot guarantee that every secret is recognized. Choose the root knowingly.
 
 **When it runs:** only on routes that end in ripwire's `explore` (orientation, a change without

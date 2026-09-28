@@ -90,6 +90,7 @@
 | 2026-09-27 19:53 | Documentação da Fase 5 (README, skill, AGENTS.md, PRD); ponto de parada 4: Fases 4 e 5 completas, exceto o A/B; falha intermitente identificada (`a_hung_model_is_killed_at_the_hard_limit`) e corrigida | [D-086](#d-086--documentação-e-ponto-de-parada-4) |
 | 2026-09-27 19:56 | Branch `fase-4-online` publicado e PR #1 aberto para o `master` | [D-087](#d-087--pr-das-fases-4-e-5) |
 | 2026-09-27 20:27 | CI do PR #1: 1ª execução falhou por ETXTBSY (corrida pré-existente, Linux), 2ª passou; merge bloqueado pelo classificador de permissões; revisão `/tdd` com 17 achados, todos tratados no PR, incluindo um defeito de produto (resposta desconhecida não marcava `incomplete`) | [D-088](#d-088--ci-revisão-tdd-e-correções) |
+| 2026-09-27 23:38 | `/security-review` do PR #1: nenhuma vulnerabilidade acima do limiar; das duas observações, `*.env` sem ponto passou a ser nome sensível | [D-089](#d-089--revisão-de-segurança) |
 
 ---
 
@@ -2048,4 +2049,36 @@ Seção §5.4 do plano.
     acaso em ~13% das vezes mesmo sem correção. O número é coerente com a correção, mas o
     argumento principal é o mecanismo: o processo de teste nunca mais segura o descritor de
     escrita.
+
+## D-089 — Revisão de segurança
+
+- `/security-review` sobre o branch `fase-4-online` contra o `master`, pedido pelo usuário.
+  Foram duas etapas: um agente identificou candidatos, e a filtragem de falsos positivos
+  descartaria os abaixo de 8/10 de confiança. **Nenhum candidato passou do limiar de 80%**,
+  então não houve o que filtrar.
+- **Caminhos verificados e por que são seguros:**
+  - **Path traversal e raiz absoluta:** `relative_parts` só aceita componentes normais, e a
+    raiz é canonicalizada.
+  - **Symlinks:** recusados em todo componente, e o lookahead não os segue.
+  - **`.gitignore`/`.ignore`:** conferidos por componente, com nome exato.
+  - **Ocultos, credenciais e chaves privadas:** recusados; um marcador de chave privada recusa
+    o arquivo inteiro.
+  - **Entrada do agente:** só o texto da tarefa vai ao provider, por desenho.
+  - **Endpoint:** constante, só HTTPS, sem redirect e sem proxy, com a validação de
+    certificado padrão do rustls.
+  - **Ativação:** só a flag `serve --online`, que é confiável.
+  - **Chave:** `SecretString`, header marcado como sensível, erros só com categoria e status,
+    `Retry-After` redigido, e só a referência gravada pelo `install`.
+  - **Respostas do provider:** o modelo precisa ser o pinado, ids desconhecidos invalidam a
+    resposta, e as probabilidades precisam ser finitas em [0, 1]. Só a probabilidade entra no
+    envelope.
+- **Observações abaixo do limiar:**
+  - A corrida entre checar os componentes e ler o arquivo, em `snapshot()`, exige um atacante
+    local com escrita concorrente no workspace. É teórica e fica aberta.
+  - **Arquivos de ambiente sem ponto** (`prod.env`, `app.env`) não estavam na lista de nomes
+    sensíveis e podiam ser enviados se não estivessem no `.gitignore`. Corrigido em TDD: o
+    teste de elegibilidade ganhou os dois casos e falhou, com `config/prod.env` lido, antes de
+    `env` entrar em `SENSITIVE_EXTENSIONS`. O README lista `*.env`.
+- Suítes: 225 verdes no build padrão (2 ignorados) e 238 com `online` (4 ignorados); clippy e
+  fmt limpos nas duas.
 

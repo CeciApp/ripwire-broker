@@ -435,6 +435,8 @@ fn ineligible_files_are_never_read_for_sending() {
     put(root, ".env", b"KEY=1\n");
     put(root, "config/id_rsa", b"key\n");
     put(root, "config/server.pem", b"cert\n");
+    put(root, "config/prod.env", b"DB_PASSWORD=x\n");
+    put(root, "app.env", b"TOKEN=x\n");
     put(
         root,
         "config/deploy.py",
@@ -471,6 +473,8 @@ fn ineligible_files_are_never_read_for_sending() {
         (".env", Ineligible::SensitiveName),
         ("config/id_rsa", Ineligible::SensitiveName),
         ("config/server.pem", Ineligible::SensitiveName),
+        ("config/prod.env", Ineligible::SensitiveName),
+        ("app.env", Ineligible::SensitiveName),
         ("config/deploy.py", Ineligible::PrivateKey),
         ("generated/api.py", Ineligible::Ignored),
         ("app.log", Ineligible::Ignored),

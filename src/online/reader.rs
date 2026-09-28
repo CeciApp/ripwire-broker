@@ -92,8 +92,10 @@ const SENSITIVE_NAMES: &[&str] = &[
     "secrets.yml",
 ];
 
-const SENSITIVE_EXTENSIONS: &[&str] =
-    &["pem", "key", "p12", "pfx", "jks", "keystore", "kdbx", "gpg"];
+/// `env` covers environment files without the leading dot, such as `prod.env` (D-089).
+const SENSITIVE_EXTENSIONS: &[&str] = &[
+    "pem", "key", "p12", "pfx", "jks", "keystore", "kdbx", "gpg", "env",
+];
 
 fn sensitive_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
