@@ -47,40 +47,10 @@ pub struct BrokerServer {
 /// identical work.
 #[derive(Default)]
 struct Inflight {
-    /// Queued ids by call key, each tagged with the order it arrived in, so the oldest can
-    /// be identified when the registry has to be trimmed.
-    waiting: std::sync::Mutex<HashMap<String, VecDeque<(u64, String)>>>,
+    waiting: std::sync::Mutex<HashMap<String, VecDeque<String>>>,
     running: std::sync::Mutex<HashMap<String, Arc<Notify>>>,
     /// Cancelled before its handler registered.
     early: std::sync::Mutex<HashSet<String>>,
-    arrivals: std::sync::atomic::AtomicU64,
-}
-
-/// Most unclaimed `tools/call` ids the registry keeps. A handler claims its id in the same
-/// task that queued it, so real traffic never approaches this; it bounds the cost if a
-/// future SDK version answers some request shape before any handler runs (D-093).
-const MAX_WAITING: usize = 256;
-
-/// Drops the oldest queued ids until at most `MAX_WAITING` remain.
-fn trim(waiting: &mut HashMap<String, VecDeque<(u64, String)>>) {
-    let mut total: usize = waiting.values().map(VecDeque::len).sum();
-    while total > MAX_WAITING {
-        let oldest = waiting
-            .iter()
-            .min_by_key(|(_, q)| q.front().map_or(u64::MAX, |(seq, _)| *seq))
-            .map(|(key, _)| key.clone());
-        let Some(key) = oldest else { return };
-        let Some(queue) = waiting.get_mut(&key) else {
-            return;
-        };
-        if queue.pop_front().is_none() {
-            return;
-        }
-        if queue.is_empty() {
-            waiting.remove(&key);
-        }
-        total -= 1;
-    }
 }
 
 fn call_key(name: &str, arguments: &Value) -> String {
@@ -107,15 +77,12 @@ impl Inflight {
             return;
         }
         let key = call_key(name, arguments);
-        let seq = self
-            .arrivals
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut waiting = self.waiting.lock().unwrap();
-        waiting
+        self.waiting
+            .lock()
+            .unwrap()
             .entry(key)
             .or_default()
-            .push_back((seq, v["id"].to_string()));
-        trim(&mut waiting);
+            .push_back(v["id"].to_string());
     }
 
     /// Claims this call's id and a signal that fires if the client cancels it.
@@ -129,7 +96,7 @@ impl Inflight {
         let id = {
             let mut waiting = self.waiting.lock().unwrap();
             let queue = waiting.get_mut(&key)?;
-            let (_, id) = queue.pop_front()?;
+            let id = queue.pop_front()?;
             if queue.is_empty() {
                 // Keys hold task text: never keep one longer than its call (D-052).
                 waiting.remove(&key);
@@ -159,10 +126,7 @@ impl Inflight {
         // Keep an early cancel only for a call still waiting for its handler; a cancel for
         // a call that already finished (the usual race) is dropped, not stored forever.
         let waiting = self.waiting.lock().unwrap();
-        if waiting
-            .values()
-            .any(|q| q.iter().any(|(_, queued)| *queued == id))
-        {
+        if waiting.values().any(|q| q.contains(&id)) {
             self.early.lock().unwrap().insert(id);
         }
     }
@@ -543,73 +507,5 @@ impl ServerHandler for BrokerServer {
         }))
         .map_err(|e| RpcError::internal_error().with_message(e.to_string()))?;
         Ok(result.into())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tools_call(id: u64, task: &str) -> ClientMessage {
-        serde_json::from_value(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "tools/call",
-            "params": {"name": "context_for_task", "arguments": {"task": task}},
-        }))
-        .expect("a well-formed tools/call")
-    }
-
-    fn queued(inflight: &Inflight) -> usize {
-        inflight
-            .waiting
-            .lock()
-            .unwrap()
-            .values()
-            .map(VecDeque::len)
-            .sum()
-    }
-
-    /// Trimming drops the oldest, so the calls most likely to still be running keep their
-    /// place and stay cancellable.
-    #[test]
-    fn trimming_keeps_the_newest_ids() {
-        let inflight = Inflight::default();
-        let last = MAX_WAITING as u64 * 2 - 1;
-        for id in 0..=last {
-            inflight.received(&tools_call(id, &format!("task {id}")));
-        }
-
-        let Value::Object(arguments) = json!({"task": format!("task {last}")}) else {
-            unreachable!()
-        };
-        let params = CallToolRequestParams {
-            name: "context_for_task".into(),
-            arguments: Some(arguments),
-            input_responses: None,
-            meta: Default::default(),
-            request_state: None,
-        };
-        let claimed = inflight.start(&params).map(|(id, _)| id);
-
-        assert_eq!(claimed, Some(last.to_string()), "the newest call is kept");
-    }
-
-    /// A handler claims its id in the task that queued it, so nothing should pile up here.
-    /// Should a future SDK version answer some request shape before any handler runs, the
-    /// cost must stay bounded instead of growing for the life of the process.
-    #[test]
-    fn unclaimed_ids_never_grow_without_bound() {
-        let inflight = Inflight::default();
-
-        for id in 0..3_000u64 {
-            inflight.received(&tools_call(id, &format!("task {id}")));
-        }
-
-        assert!(
-            queued(&inflight) <= MAX_WAITING,
-            "{} ids queued",
-            queued(&inflight)
-        );
     }
 }
