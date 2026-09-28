@@ -93,6 +93,7 @@
 | 2026-09-27 23:38 | `/security-review` do PR #1: nenhuma vulnerabilidade acima do limiar; das duas observações, `*.env` sem ponto passou a ser nome sensível | [D-089](#d-089--revisão-de-segurança) |
 | 2026-09-28 00:12 | README: referências conferidas após o arquivamento em `spec/old/` (todas válidas); citações "PRD §x" viram links para as seções do PRD atual | [D-090](#d-090--links-do-readme-para-o-prd) |
 | 2026-09-28 16:15 | Revisão do repositório: cinco defeitos de robustez corrigidos em TDD — dois panics do leitor tolerante, `dedup` sobre vetor não ordenado, bloco de `memory_recall` descartado em silêncio, espera de nota por polling e caminho não-UTF-8 no `install` | [D-091](#d-091--revisão-do-repositório-e-correções-de-robustez) |
+| 2026-09-28 17:40 | As duas observações do D-091 corrigidas em TDD: o registro `Inflight` não guarda mais o id de um `tools/call` que o SDK rejeita antes do handler, e uma nota servida pela geração de outra chamada é marcada `cached` | [D-092](#d-092--vazamento-do-inflight-e-cache-hit-de-nota) |
 
 ---
 
@@ -2143,3 +2144,50 @@ Seção §5.4 do plano.
   `tools/call` sem `name` deixa `tracked_calls` em 1 para sempre, retendo o texto da tarefa em
   memória, contra o que o comentário de D-052 promete); e `NoteEngine::settled` devolve
   `cached: false` para um segundo waiter servido do cache.
+
+## D-092 — Vazamento do `Inflight` e cache hit de nota
+
+Pedido do usuário: corrigir as duas observações que o [D-091](#d-091--revisão-do-repositório-e-correções-de-robustez)
+deixou abertas. Ambas em TDD, com o teste vermelho observado antes da correção.
+
+### O registro `Inflight` guardava ids que ninguém reivindicava
+
+- O observer enfileira o id de todo `tools/call` que passa por `on_receive`, e o handler o
+  reivindica em `start()`. Quando o SDK responde **antes** de chegar ao handler, o id fica no
+  `waiting` para sempre — e a chave carrega o texto da tarefa, contra o que o D-052 promete.
+- **Primeira tentativa, descartada:** usar `McpObserver::on_send` para limpar o id quando a
+  resposta sai. O gancho existe, mas a leitura do SDK mostrou que ele **não** cobre respostas a
+  requests do cliente: `server_runtime.rs` devolve a resposta de `handle_message` e a escreve
+  com `transport.send_message` direto, e `on_send` só é chamado em `send()` (mensagens iniciadas
+  pelo servidor) e em `try_deliver_notification`. O teste continuou vermelho, então o gancho foi
+  removido em vez de ficar como código morto.
+- **Medição antes de decidir.** Uma sonda percorreu seis formas malformadas e mostrou que
+  vazam exatamente duas, as duas em que a conversão para `CallToolRequestParams` falha:
+  `name` ausente ou não-string, e `arguments` que não é objeto. As outras quatro
+  (`_meta` inválido, ferramenta desconhecida, tipo errado de argumento) **chegam** ao handler e
+  são reivindicadas normalmente.
+- **Correção:** o observer aplica o mesmo critério de admissão do SDK e só enfileira o que um
+  handler pode receber. Sem suposição de tempo e sem cache com teto — o `start()` continua a
+  única via de consumo.
+- **Risco residual declarado:** se uma versão futura do SDK passar a rejeitar outra forma antes
+  do handler, ela voltaria a vazar. Não há teto de tamanho no registro, porque nenhuma outra
+  forma foi reproduzível: escrever um teto sem um teste que falhe seria código sem prova.
+- Detalhe observado de passagem: `tracked_calls` conta **chaves**, não ids, então dois ids sob a
+  mesma chave apareciam como um. Ficou como está; o campo é de observabilidade.
+
+### Uma nota servida pela geração de outra chamada vinha como `cached: false`
+
+- Há no máximo uma geração em voo (D-036). Quando uma segunda chamada pede a mesma nota, ela
+  não gera nada: espera a geração da primeira e lê o resultado do cache. Ainda assim recebia
+  `cached: false`, e o `cache_hits` do status não subia.
+- O significado de `cached` está fixado pelo teste
+  `a_cached_note_is_reused_without_calling_the_model`: verdadeiro quando a chamada **não** pagou
+  uma execução do modelo, com `cache_hits` andando junto. Pelo critério, o waiter é um cache hit.
+- **Correção:** `note()` registra se foi ela que iniciou a geração, e `settled()` decide o
+  `cached` e conta o hit a partir disso. Quem paga o modelo continua com `cached: false`.
+- O teste é determinístico com `start_paused = true`: o `sleep` virtual só avança quando toda
+  task está parada, o que prova que a segunda chamada está esperando antes de a geração ser
+  liberada. Ele também fixa que o modelo é chamado uma única vez para as duas.
+
+- Suítes: 233 verdes no build padrão (2 ignorados) e 246 com `online` (4 ignorados) — dois
+  testes novos, nenhum teste pré-existente alterado. Clippy e fmt limpos nas duas features.

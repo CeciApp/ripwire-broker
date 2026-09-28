@@ -686,3 +686,47 @@ async fn an_online_server_says_so_in_its_status_without_the_credential() {
     assert_eq!(schema["properties"]["budget_tokens"]["minimum"], 512);
     client.shut_down().await.unwrap();
 }
+
+// --- D-052 #9: a tools/call the SDK rejects before the handler leaves nothing behind ---
+
+#[test]
+fn a_rejected_tools_call_is_not_tracked_forever() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let ripwire = common::slow_ripwire(bin.path());
+    let mut broker = Raw::start(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--ripwire",
+        ripwire.to_str().unwrap(),
+    ]);
+    let second = std::time::Duration::from_secs(5);
+
+    // Params the SDK cannot convert into CallToolRequestParams: it answers with an error
+    // before any handler runs, so nothing ever claims the id the observer queued.
+    let rejected = [
+        json!({"arguments": {"task": "a leaky task"}}),
+        json!({"name": "context_for_task", "arguments": 5}),
+    ];
+    for (n, params) in rejected.iter().enumerate() {
+        let id = n as i64 + 1;
+        broker.request(id, "tools/call", params.clone());
+        let answer = broker.response(id, second).expect("the call is answered");
+        assert!(answer.get("error").is_some(), "{params}: {answer}");
+    }
+
+    broker.request(
+        9,
+        "resources/read",
+        json!({"uri": "ripwire-broker://status"}),
+    );
+    let status = broker.response(9, second).unwrap();
+    let status: Value =
+        serde_json::from_str(status["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+
+    assert_eq!(
+        status["inflight"],
+        json!({"tracked_calls": 0, "early_cancels": 0}),
+        "{status}"
+    );
+}

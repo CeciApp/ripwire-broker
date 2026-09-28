@@ -721,3 +721,73 @@ async fn a_ready_note_does_not_wait_for_a_poll_tick() {
         "the model answered at once; the answer waited {took:?} on a timer"
     );
 }
+
+// --- a call that waits for another call's generation paid no model run: it is a cache hit ---
+
+#[tokio::test(start_paused = true)]
+async fn a_note_served_by_another_calls_generation_is_marked_cached() {
+    let (model, gate) = FakeSummarizer::replying("shared note").gated();
+    let model = Arc::new(model);
+    let ws = tempfile::tempdir().unwrap();
+    let mut config = BrokerConfig::new(ws.path());
+    config.summarizer = Some(model.clone());
+    config.summarizer_wait = Duration::from_secs(5);
+    let fake = Arc::new(FakeUpstream::new().answer("explore", "explore_export_auth"));
+    let b = Arc::new(Broker::connect(fake, config).await.unwrap());
+
+    // The first call owns the generation, held at the gate.
+    let owner = tokio::spawn({
+        let b = b.clone();
+        async move { b.context_for_task(orient(4000)).await }
+    });
+    while model.prompts().is_empty() {
+        tokio::task::yield_now().await;
+    }
+
+    // The second call asks the same thing. It must not start its own generation.
+    let waiter = tokio::spawn({
+        let b = b.clone();
+        async move { b.context_for_task(orient(4000)).await }
+    });
+    // Virtual time only advances once every task is parked, so this returning proves the
+    // second call is waiting on the first call's generation.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(model.prompts().len(), 1, "one generation for both calls");
+
+    // Let every generation through so both calls finish.
+    let releases = tokio::spawn(async move {
+        loop {
+            gate.notify_one();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    });
+    let owned = to_json(&owner.await.unwrap().unwrap());
+    let waited = to_json(&waiter.await.unwrap().unwrap());
+    releases.abort();
+
+    let shared = owned["notes"][0]["scope"].as_str().unwrap().to_string();
+    assert_eq!(
+        owned["notes"][0]["cached"], false,
+        "the owner paid: {owned}"
+    );
+    let same = waited["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["scope"] == shared.as_str())
+        .unwrap_or_else(|| panic!("the waiter got the note too: {waited}"));
+    assert_eq!(
+        same["text"]["untrusted_repository_data"], "shared note",
+        "{same}"
+    );
+    assert_eq!(
+        same["cached"], true,
+        "the waiter never called the model: {same}"
+    );
+    let status = to_json(&b.status().await);
+    assert!(
+        status["summarizer"]["cache_hits"].as_u64().unwrap() >= 1,
+        "the hit is counted: {}",
+        status["summarizer"]
+    );
+}
