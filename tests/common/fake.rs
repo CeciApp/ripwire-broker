@@ -60,6 +60,8 @@ pub struct FakeUpstream {
     sequences: Mutex<HashMap<String, Vec<String>>>,
     /// Calls to these tools wait until the test releases them.
     holds: Mutex<HashMap<String, Arc<Notify>>>,
+    /// Round-trip latency added to every call, to measure overlap.
+    latency: Option<std::time::Duration>,
     calls: Mutex<Vec<(String, Value)>>,
 }
 
@@ -97,6 +99,12 @@ impl FakeUpstream {
         let gate = Arc::new(Notify::new());
         self.holds.lock().unwrap().insert(tool.into(), gate.clone());
         gate
+    }
+
+    /// Every call takes `d`, as a stand-in for the upstream round trip.
+    pub fn latency(mut self, d: std::time::Duration) -> Self {
+        self.latency = Some(d);
+        self
     }
 
     pub fn fail(mut self, tool: &str, err: UpstreamError) -> Self {
@@ -138,6 +146,9 @@ impl Upstream for FakeUpstream {
         let hold = self.holds.lock().unwrap().get(tool).cloned();
         if let Some(gate) = hold {
             gate.notified().await;
+        }
+        if let Some(d) = self.latency {
+            tokio::time::sleep(d).await;
         }
         if let Some(next) = self
             .sequences
