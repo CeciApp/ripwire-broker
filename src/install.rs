@@ -142,13 +142,17 @@ starts from. The binary must be built with `--features online`; check it with
 `ripwire-broker doctor --workspace DIR --jev-probe`.";
 
 pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
+    // Both host configs are text (JSON, TOML). A path they cannot carry is refused for what
+    // it is, before the disk is touched, rather than panicking in `json!` or being written
+    // back mangled by a lossy conversion.
+    let binary_text = utf8(binary, "the broker binary")?;
+    utf8(&args.workspace, "the workspace")?;
     let workspace = args
         .workspace
         .canonicalize()
         .map_err(|e| format!("workspace {}: {e}", args.workspace.display()))?;
-    // Both host configs are text (JSON, TOML). A path they cannot carry is refused here,
-    // rather than panicking in `json!` or being written back mangled by a lossy conversion.
-    let binary_text = utf8(binary, "the broker binary")?;
+    // Resolving can still surface bytes the argument did not have, through a symlink into a
+    // directory whose name is not UTF-8.
     let workspace_text = utf8(&workspace, "the workspace")?;
     let mut plan = Plan {
         changes: vec![],

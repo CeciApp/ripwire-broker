@@ -94,6 +94,7 @@
 | 2026-09-28 00:12 | README: referências conferidas após o arquivamento em `spec/old/` (todas válidas); citações "PRD §x" viram links para as seções do PRD atual | [D-090](#d-090--links-do-readme-para-o-prd) |
 | 2026-09-28 16:15 | Revisão do repositório: cinco defeitos de robustez corrigidos em TDD — dois panics do leitor tolerante, `dedup` sobre vetor não ordenado, bloco de `memory_recall` descartado em silêncio, espera de nota por polling e caminho não-UTF-8 no `install` | [D-091](#d-091--revisão-do-repositório-e-correções-de-robustez) |
 | 2026-09-28 17:40 | As duas observações do D-091 corrigidas em TDD: o registro `Inflight` não guarda mais o id de um `tools/call` que o SDK rejeita antes do handler, e uma nota servida pela geração de outra chamada é marcada `cached` | [D-092](#d-092--vazamento-do-inflight-e-cache-hit-de-nota) |
+| 2026-09-28 18:25 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 
 ---
 
@@ -2191,3 +2192,46 @@ deixou abertas. Ambas em TDD, com o teste vermelho observado antes da correção
 
 - Suítes: 233 verdes no build padrão (2 ignorados) e 246 com `online` (4 ignorados) — dois
   testes novos, nenhum teste pré-existente alterado. Clippy e fmt limpos nas duas features.
+
+## D-093 — Fechamento das ressalvas do `install` e do `Inflight`
+
+Pedido do usuário: fechar as duas ressalvas declaradas no
+[D-092](#d-092--vazamento-do-inflight-e-cache-hit-de-nota).
+
+### `install`: o workspace passou a ser validado antes do disco
+
+- A ressalva era que o segundo ponto de chamada do guard de UTF-8 não tinha teste, porque o
+  APFS do macOS não permite criar um diretório com nome inválido.
+- **A saída não foi um teste só-Linux.** Um teste com `#[cfg(target_os = "linux")]` seria
+  compilado fora aqui, ou seja, eu não conseguiria vê-lo falhar — e o guard já existia, então
+  não haveria ciclo vermelho nenhum. Em vez disso, mudou a **ordem**: o UTF-8 do
+  `args.workspace` é conferido antes do `canonicalize`. Um caminho que uma config de host nunca
+  poderia carregar é recusado pelo que ele é, sem depender de o diretório existir.
+- Agora o teste roda em qualquer plataforma e foi observado vermelho: antes dizia
+  `workspace /tmp/rip\xffwire-workspace: No such file or directory`, não "UTF-8".
+- A conferência depois do `canonicalize` continua, porque resolver o caminho pode trazer bytes
+  que o argumento não tinha, por um symlink para um diretório com nome inválido. Esse ramo
+  segue inalcançável no macOS, mas agora é defesa em profundidade atrás de um guard testado, e
+  não o único guard.
+
+### `Inflight`: teto com remoção do mais antigo
+
+- A ressalva era a ausência de teto: o D-092 fechou as duas formas reproduzíveis, mas uma
+  versão futura do SDK que responda outra forma antes do handler voltaria a vazar.
+- **O teste exigiu um desvio de convenção, registrado aqui.** O repositório não tinha nenhum
+  teste inline em `src/`: tudo é testado pelas costuras públicas. O teto, porém, só dispara em
+  vazamentos que o guard do D-092 tornou irreproduzíveis, e `received()` é chamado no mesmo task
+  que reivindica o id, então nenhuma costura pública consegue encher o `waiting`. A escolha foi
+  entre um `#[cfg(test)] mod tests` em `src/mcp.rs` e código de produção sem prova; ficou o
+  teste inline. Se a convenção importa mais que a prova, é reverter o teto.
+- `MAX_WAITING = 256`, com `waiting` guardando `(ordem, id)` para saber qual é o mais antigo.
+- Dois testes: o limite (3.000 ids enfileirados ficam em 256 — observado vermelho em 3.000) e a
+  **ordem** da remoção. O segundo passou de primeira, o que não prova nada, então a
+  implementação foi temporariamente invertida para remover o mais novo: o teste falhou, e
+  voltou a passar com a remoção correta. Sem essa inversão ele seria um teste que nunca se
+  provou capaz de pegar o defeito.
+- Fica como está, já registrado no D-092: `tracked_calls` conta chaves, não ids. É campo de
+  observabilidade, e mudá-lo não faz parte destas ressalvas.
+
+- Suítes: 236 verdes no build padrão (2 ignorados) e 249 com `online` (4 ignorados) — três
+  testes novos, nenhum pré-existente alterado. Clippy e fmt limpos nas duas features.

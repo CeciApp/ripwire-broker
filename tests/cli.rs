@@ -1474,3 +1474,28 @@ fn install_refuses_a_binary_path_that_is_not_utf8() {
         assert!(err.contains("UTF-8"), "{host:?}: {err}");
     }
 }
+
+#[test]
+fn install_refuses_a_workspace_path_that_is_not_utf8() {
+    use ripwire_broker::cli::InstallArgs;
+    use std::os::unix::ffi::OsStrExt;
+
+    // A path a host config could never carry is refused for what it is, before the install
+    // even looks for the directory: the reason does not depend on the path existing.
+    let workspace = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/rip\xffwire-workspace"));
+    let args = InstallArgs {
+        host: Host::ClaudeCode,
+        workspace,
+        hooks: false,
+        write: false,
+        codex_home: None,
+        online: false,
+    };
+
+    let Err(err) = ripwire_broker::install::plan(&args, &PathBuf::from("/opt/ripwire-broker"))
+    else {
+        panic!("a workspace path the config cannot carry must be refused");
+    };
+
+    assert!(err.contains("UTF-8"), "{err}");
+}
