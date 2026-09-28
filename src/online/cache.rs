@@ -5,7 +5,7 @@
 
 use super::{SemanticStage, prompt};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 
 /// The version of the eligibility and unit policy; part of every key.
@@ -24,6 +24,11 @@ pub struct KeyParts<'a> {
 }
 
 pub type Key = [u8; 32];
+
+/// Measured at ~68 entries per MCP call and ~680 bytes each (D-097): this ceiling holds the
+/// semantic cache to about 2.7 MiB, roughly 59 calls of history. Past it, revisiting the same
+/// content with the same question can cost a fresh Jev request.
+pub const MAX_ENTRIES: usize = 4_000;
 
 pub fn key(p: &KeyParts) -> Key {
     let mut h = Sha256::new();
@@ -59,6 +64,10 @@ pub struct Cached {
 #[derive(Debug, Default)]
 pub struct SemanticCache {
     entries: HashMap<Key, Cached>,
+    /// Insertion order, oldest first, so eviction is deterministic. `stored_at` cannot serve:
+    /// one batched answer inserts dozens of entries within the clock's resolution, and ties
+    /// would make which entry gives way depend on the platform.
+    order: VecDeque<Key>,
 }
 
 impl SemanticCache {
@@ -66,16 +75,26 @@ impl SemanticCache {
         self.entries.get(key)
     }
 
-    /// Only validated probabilities are stored; an unknown answer is never cached.
+    /// Only validated probabilities are stored; an unknown answer is never cached. At
+    /// `MAX_ENTRIES` the oldest insertion gives way; updating a key already held is not a new
+    /// entry and evicts nothing.
     pub fn insert(&mut self, key: Key, probability: f64, request_digest: String) {
-        self.entries.insert(
-            key,
-            Cached {
-                probability,
-                request_digest,
-                stored_at: std::time::SystemTime::now(),
-            },
-        );
+        let cached = Cached {
+            probability,
+            request_digest,
+            stored_at: std::time::SystemTime::now(),
+        };
+        if self.entries.insert(key, cached).is_none() {
+            self.order.push_back(key);
+        }
+        while self.entries.len() > MAX_ENTRIES {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.entries.remove(&oldest);
+                }
+                None => break,
+            }
+        }
     }
 
     pub fn len(&self) -> usize {

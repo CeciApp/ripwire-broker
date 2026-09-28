@@ -1446,3 +1446,31 @@ async fn an_incomplete_recall_block_is_declared_not_dropped() {
         .unwrap_or_else(|| panic!("the dropped block is never silent: {out:#}"));
     assert_eq!(lim["kind"], "unparsed_upstream", "{lim}");
 }
+
+// --- D-097: the session memory has a ceiling ---
+
+#[tokio::test]
+async fn the_session_memory_stops_at_its_ceiling() {
+    use ripwire_broker::session::{MAX_REMEMBERED, SessionMemory};
+
+    let over = 10;
+    let seen: Vec<String> = (0..MAX_REMEMBERED + over)
+        .map(|i| format!("{i:064x}"))
+        .collect();
+    let oversized: SessionMemory = serde_json::from_value(json!({ "seen": seen })).unwrap();
+    assert_eq!(
+        oversized.len(),
+        MAX_REMEMBERED + over,
+        "deserializing keeps what the file had; trimming is the broker's job"
+    );
+
+    let (b, _fake, _ws) =
+        broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    // A state file written before the ceiling existed, or by a longer session.
+    b.restore_session(oversized);
+    assert_eq!(
+        b.session_snapshot().len(),
+        MAX_REMEMBERED,
+        "restoring an oversized memory trims it at the door"
+    );
+}

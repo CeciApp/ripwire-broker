@@ -791,3 +791,40 @@ async fn a_note_served_by_another_calls_generation_is_marked_cached() {
         status["summarizer"]
     );
 }
+
+// --- D-097: the note cache has a ceiling ---
+
+#[tokio::test]
+async fn the_note_cache_stops_at_its_ceiling_dropping_the_oldest_first() {
+    use ripwire_broker::notes::{MAX_CACHED_NOTES, NoteEngine};
+
+    let model = Arc::new(FakeSummarizer::replying("uma nota"));
+    let engine = NoteEngine::new(model, Duration::from_secs(5));
+    let over = 5;
+    for i in 0..MAX_CACHED_NOTES + over {
+        engine.note(format!("key-{i}"), format!("prompt {i}")).await;
+    }
+    assert_eq!(
+        engine.status().cached_notes,
+        MAX_CACHED_NOTES,
+        "the ceiling holds"
+    );
+    // The oldest keys gave way, so asking for one again is a miss that regenerates.
+    let before = engine.status().generated;
+    engine.note("key-0".into(), "prompt 0".into()).await;
+    assert_eq!(
+        engine.status().generated,
+        before + 1,
+        "the oldest note was evicted, so it is generated again"
+    );
+    let hits = engine.status().cache_hits;
+    let newest = MAX_CACHED_NOTES + over - 1;
+    engine
+        .note(format!("key-{newest}"), format!("prompt {newest}"))
+        .await;
+    assert_eq!(
+        engine.status().cache_hits,
+        hits + 1,
+        "the newest note is still cached"
+    );
+}
