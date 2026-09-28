@@ -1,0 +1,71 @@
+{
+  "recorded_at": "2026-09-27T21:12:37Z",
+  "endpoint": "POST /v1/systemone",
+  "model": "jev-1.13.0",
+  "note": "S4.0b live recording (D-067). Synthetic corpus from examples/jev_record.rs; only digests, status, shape and probabilities are kept.",
+  "exchanges": [
+    {
+      "stage": "file_admission",
+      "request_sha256": "d7d3e4c73e6ccba8cdfac9cfe31902f644359eef62792b0c5d348522df464e84",
+      "request_bytes": 1306,
+      "question_ids": [
+        "q0",
+        "q1",
+        "q2"
+      ],
+      "http_status": 200,
+      "content_type": "application/json",
+      "latency_ms": 347,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "q0": {
+            "type": "noul",
+            "noul": 0.81
+          },
+          "q1": {
+            "type": "noul",
+            "noul": 0.83
+          },
+          "q2": {
+            "type": "noul",
+            "noul": 0.03
+          }
+        },
+        "usage": {
+          "input_tokens": 593,
+          "output_tokens": 55
+        }
+      }
+    },
+    {
+      "stage": "source_selection",
+      "request_sha256": "435d846df6115bad7f67d7747ee69817f2bf62114361d0f7f727b1d2d07c3de7",
+      "request_bytes": 821,
+      "question_ids": [
+        "q0",
+        "q1"
+      ],
+      "http_status": 200,
+      "content_type": "application/json",
+      "latency_ms": 309,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "q0": {
+            "type": "noul",
+            "noul": 0.81
+          },
+          "q1": {
+            "type": "noul",
+            "noul": 0.64
+          }
+        },
+        "usage": {
+          "input_tokens": 469,
+          "output_tokens": 38
+        }
+      }
+    }
+  ]
+}

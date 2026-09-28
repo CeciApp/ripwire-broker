@@ -15,7 +15,17 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+ignore = "0.4"
+tokio-util = "0.7"
+secrecy = { version = "0.10", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util"] }
 
+[features]
+# The remote classifier's HTTP client (PRD §23, D-059). Off by default: the default build
+# has no network stack (CA-10).
+online = ["dep:secrecy", "dep:reqwest"]
+
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"

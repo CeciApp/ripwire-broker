@@ -59,6 +59,38 @@
 | 2026-09-27 15:59 | Licença MIT adicionada (`LICENSE`, `Cargo.toml`, README) | [D-055](#d-055--licença-mit) |
 | 2026-09-27 17:35 | Adaptador `--online` fundido no PRD 0.3 (`ripwire-broker-mcp.md`) a partir da spec Jev v0.1; Fase 4→6 (Times e CI), novas Fases 4 e 5 | [D-056](#d-056--fusão-do-adaptador---online-no-prd) |
 | 2026-09-27 17:40 | Specs antigas movidas para `spec/old/`; `ripwire-broker-mcp.md` passa a ser o PRD vigente | [D-057](#d-057--reorganização-das-specs) |
+| 2026-09-27 17:55 | Plano das Fases 4 e 5 (proposta): Sprint 0, 31 fatias na Fase 4 e 14 na Fase 5, cinco pontos de parada | [D-058](#d-058--plano-das-fases-4-e-5) |
+| 2026-09-27 17:55 | Proposta: feature Cargo `online` + flag `--online`; credencial só no `env`; teste de CA-10 sobre o grafo do build padrão | [D-059](#d-059--feature-online-e-ca-10-proposta) |
+| 2026-09-27 17:55 | Proposta: classificador só nas rotas que terminam em `explore`; demais rotas com `semantic_skipped` | [D-060](#d-060--gate-por-rota-proposta) |
+| 2026-09-27 17:55 | Proposta: `RankedPath`, rescore dos paths do planner, lookahead de um nível e unidades por chunk | [D-061](#d-061--candidatos-e-unidades-proposta) |
+| 2026-09-27 17:55 | Proposta: rascunho de `prompts/v1` e tetos 4 em voo / 24 requests | [D-062](#d-062--prompts-v1-e-tetos-proposta) |
+| 2026-09-27 17:55 | Proposta: `provenance.online.discovery`, `Basis::RemoteClassifier`, `Item.semantic`; `interrupted` só por prazo de descoberta | [D-063](#d-063--envelope-online-e-interrupted-proposta) |
+| 2026-09-27 17:55 | Proposta: cache por pergunta; `doctor --jev-probe` sintético; `install --online`; hooks e wrapper offline | [D-064](#d-064--cache-diagnóstico-e-integração-proposta) |
+| 2026-09-27 18:01 | Usuário aprovou D-059 a D-064 e o início do Sprint 0 | [D-065](#d-065--aprovação-das-propostas-das-fases-4-e-5) |
+| 2026-09-27 18:01 | Sprint 0 parcial: S4.0a, S4.0c (golden provisório) e S4.0d feitos; S4.0b aguarda a credencial; 131 verdes | [D-066](#d-066--sprint-0-parcial) |
+| 2026-09-27 18:14 | S4.0b: gravação live contra `jev-1.13.0` confirma o contrato e `prompts/v1`; golden congelado; Sprint 0 concluído, 132 verdes | [D-067](#d-067--gravação-live-e-ponto-de-parada-0) |
+| 2026-09-27 18:19 | S4.1–S4.6: flags `--online`/`--jev-*`, recusa sem a feature, credencial redigida, teste de CA-10 sobre o grafo resolvido, consentimento, CI nas duas configurações | [D-068](#d-068--configuração-credencial-e-garantia-offline) |
+| 2026-09-27 18:24 | S4.7–S4.11: validação da resposta, thresholds estritos, batcher com tamanho exato, `trait Classifier` e `JevClient` (reqwest/rustls atrás da feature) | [D-069](#d-069--protocolo-validação-e-cliente-http) |
+| 2026-09-27 18:28 | S4.12–S4.14: `WorkspaceReader` (elegibilidade, snapshot com sha256, preview) e unidades; ponto de parada 1, 152/159 verdes | [D-070](#d-070--leitura-do-workspace-e-ponto-de-parada-1) |
+| 2026-09-27 18:37 | S4.15–S4.19: scheduler com `JoinSet`, fila limitada, teto em voo, limite de requests, auth e cancelamento abortam irmãs; 158/165 verdes | [D-071](#d-071--scheduler-mínimo) |
+| 2026-09-27 18:54 | S4.20–S4.31: adaptador ligado ao `context_for_task` (gate por rota, admissão→seleção, merge aditivo, cache, status); piso online de 512 tokens; ponto de parada 2 (barra de merge da Fase 4), 182/191 verdes, p95 local 8,3 ms | [D-072](#d-072--composição-em-context_for_task-e-ponto-de-parada-2) |
+| 2026-09-27 18:58 | S5.1: frescor — lote com fonte alterada não é enviado; evidência de arquivo alterado é descartada antes da saída; p95 local 21,9 ms | [D-073](#d-073--frescor-das-fontes) |
+| 2026-09-27 19:02 | S5.2: retry por etapa e divisão ao meio no scheduler; cada tentativa conta no limite e revalida o frescor; 191/200 verdes | [D-074](#d-074--retry-e-divisão-de-lotes) |
+| 2026-09-27 19:07 | S5.3: `429` com cooldown compartilhado (`Retry-After` em segundos ou data HTTP), sem ocupar vaga e cancelável; 196/205 verdes | [D-075](#d-075--429-e-cooldown-compartilhado) |
+| 2026-09-27 19:07 | Teste manual autorizado com `--online` neste repositório: contrato, cache, gate por rota, status e credencial conferidos; rescore sem candidatos novos confirmado | [D-076](#d-076--teste-manual-com---online) |
+| 2026-09-27 19:10 | S5.4: o cancelamento MCP chega ao request HTTP pelo drop estruturado (sem token extra); provado por teste e por mutação; 197/207 verdes | [D-077](#d-077--cancelamento-até-o-http) |
+| 2026-09-27 19:14 | S5.5: prazo de descoberta com `interrupted` e evidência preservada; `--jev-max-source-bytes` limita a fonte renderizada; 200/210 verdes | [D-078](#d-078--prazo-de-descoberta-e-limite-de-fonte) |
+| 2026-09-27 19:16 | S5.6: texto remoto sanitizado, limitado e com a credencial redigida; o `Retry-After` era o único vazamento possível; 201/212 verdes | [D-079](#d-079--redaction-de-texto-remoto) |
+| 2026-09-27 19:28 | S5.7–S5.9: lookahead de um nível, `--jev-lookahead-max`, ganho além do Ripwire no status; ao vivo acha `src/budget.rs` (p=0,90), mas os 24 requests padrão se esgotam na admissão em chamada fria (decisão pendente); 2ª falha intermitente não reproduzida | [D-080](#d-080--lookahead-de-um-nível) |
+| 2026-09-27 19:35 | Usuário escolheu previews de 4 KiB no lookahead e ordem por probabilidade; a frio com os padrões, `src/budget.rs` aparece (p=0,89) em 19 requests; 3ª falha intermitente | [D-081](#d-081--equilíbrio-do-lookahead) |
+| 2026-09-27 19:41 | S5.10–S5.11: as 15 métricas do §23.11 em `status.online.metrics` e as etapas online em `recent_requests[].stages`; só contagens e tempos; 213/224 verdes | [D-082](#d-082--métricas-e-etapas-online) |
+| 2026-09-27 19:45 | S5.12: `doctor --jev-probe` envia uma pergunta sintética embutida no binário; ao vivo, `jev-1.13.0` respondeu em 304 ms; 218/229 verdes | [D-083](#d-083--doctor---jev-probe) |
+| 2026-09-27 19:49 | S5.13: `install --online` acrescenta a flag e referencia a chave pelo nome (`${VAR}` no Claude Code, `env_vars` no Codex, validado pelo parser do Codex 0.157); hooks continuam offline; 219/230 verdes | [D-084](#d-084--install---online) |
+| 2026-09-27 19:51 | S5.14: dois testes live ignorados (corpus sintético e caminho completo com Ripwire real); ao vivo verdes, digest idêntico ao S4.0b; 219/230 verdes, 4 ignorados no `online` | [D-085](#d-085--testes-live) |
+| 2026-09-27 19:53 | Documentação da Fase 5 (README, skill, AGENTS.md, PRD); ponto de parada 4: Fases 4 e 5 completas, exceto o A/B; falha intermitente identificada (`a_hung_model_is_killed_at_the_hard_limit`) e corrigida | [D-086](#d-086--documentação-e-ponto-de-parada-4) |
+| 2026-09-27 19:56 | Branch `fase-4-online` publicado e PR #1 aberto para o `master` | [D-087](#d-087--pr-das-fases-4-e-5) |
+| 2026-09-27 20:27 | CI do PR #1: 1ª execução falhou por ETXTBSY (corrida pré-existente, Linux), 2ª passou; merge bloqueado pelo classificador de permissões; revisão `/tdd` com 17 achados, todos tratados no PR, incluindo um defeito de produto (resposta desconhecida não marcava `incomplete`) | [D-088](#d-088--ci-revisão-tdd-e-correções) |
+| 2026-09-27 23:38 | `/security-review` do PR #1: nenhuma vulnerabilidade acima do limiar; das duas observações, `*.env` sem ponto passou a ser nome sensível | [D-089](#d-089--revisão-de-segurança) |
 
 ---
 
@@ -1117,3 +1149,936 @@ Cada achado de D-052 ganhou um teste vermelho, confirmado antes da correção.
   ele, e o §23 cita a fonte Jev em `spec/old/`.
 - O D-056 continua citando os caminhos da época.
 - `.DS_Store` entrou no `.gitignore`.
+
+## D-058 — Plano das Fases 4 e 5
+
+Plano completo em [plan-fases-4-5.md](plan-fases-4-5.md). Estado: **proposta, aguardando
+aprovação do usuário**. As decisões D-059 a D-064 também são propostas até essa aprovação.
+
+- Fonte: PRD §19 (Fases 4 e 5) e §23. Cada lacuna *sem fonte na v0.1* do §23.17 recebe
+  uma proposta explícita (tabela do §1 do plano).
+- Sprint 0 (S4.0a–S4.0d): `RankedPath` sem mudança de comportamento, registro live contra
+  `jev-1.13.0` com corpus sintético, golden de `prompts/v1` e spike das unidades do Ripwire.
+- Fase 4: S4.1–S4.31. Fase 5: S5.1–S5.14, mais a avaliação A/B como entregável de medição.
+- Sete seams: quatro novos (`tests/online.rs`, `online_units.rs`, `online_scheduler.rs`,
+  `online_protocol.rs`), a CLI e a superfície MCP existentes, e um teste live ignorado.
+- A lógica do adaptador roda no build padrão com `FakeClassifier`; só o `JevClient` exige
+  `--features online`.
+- Linha de base: 127 verdes, 1 ignorado. A única edição de teste existente é a do CA-10
+  (D-059).
+- Cinco pontos de parada; o 2 é a barra de merge da Fase 4 (§23.15).
+
+## D-059 — Feature `online` e CA-10 (proposta)
+
+- O cliente HTTP (`reqwest` com rustls, `secrecy`) só compila com a feature Cargo `online`,
+  desligada por padrão. A ativação continua pela flag `--online` no startup (v0.1 §3.1).
+- O `env` do servidor MCP carrega só `RIPWIRE_BROKER_JEV_API_KEY`. Não há variável que
+  ative o modo online, o que mantém D-022 (configuração por argumentos, `env` só para
+  segredos). Isso resolve a lacuna 11 do §23.17.
+- Um binário sem a feature recusa `--online` com erro de uso.
+- Achado: `the_build_has_no_network_stack` procura crates de rede no `Cargo.lock`, que
+  lista também dependências opcionais. Com a feature declarada, ele falharia mesmo no build
+  padrão. Proposta: verificar o grafo resolvido do build padrão (`cargo tree -e normal`),
+  que é o que o CA-10 afirma. É a única edição de teste existente do plano.
+
+## D-060 — Gate por rota (proposta)
+
+- O classificador roda só nas rotas que terminam em `explore`: `orient` (inclusive o caso
+  incerto), `change` sem símbolo e o fallback `symbol_not_found`.
+- Ficam de fora `debug`, `symbol`/`change` com símbolo encontrado, `review` e `docs`: os
+  casos de ganho pequeno da v0.1 §5.3.
+- A v0.1 §3.3 exige a etapa semântica em toda chamada. A proposta a contraria de forma
+  explícita: nas rotas puladas, `provenance.online.discovery = "skipped"` e a limitação
+  `semantic_skipped`. O broker nunca declara uso online sem avaliação, que é o objetivo
+  daquela regra.
+
+## D-061 — Candidatos e unidades (proposta)
+
+- `RankedPath { path, rank, priority, origin, lines }`, construído por função pura depois
+  da rota e antes de `complete_task`, portanto antes do budgeter (lacuna 9).
+- Rescore (Fase 4, lacuna 7): os paths distintos dos itens estruturais, exceto docs, na
+  ordem do Ripwire, até 16 (`--jev-max-candidates`). `file_admission` sobre preview de
+  16 KiB; `source_selection` sobre as unidades dos admitidos. O rescore só promove; nada
+  estrutural é rebaixado nem removido.
+- Lookahead de um nível (Fase 5, lacuna 8): arquivos elegíveis diretamente nos diretórios
+  dos paths admitidos, sem descer, até 32 no total (`--jev-lookahead-max`).
+- Unidades (RF-ONLINE-07): chunks de ~3 KiB alinhados a linhas, ligados ao símbolo do
+  Ripwire cuja linha contêm. O spike S4.0d decide se `analyze`/`for` entram como fonte de
+  ranges, como verbo opcional fora de `REQUIRED_VERBS`.
+
+## D-062 — `prompts/v1` e tetos (proposta)
+
+- Guidance literal da v0.1 §16.4. Rascunho das duas perguntas em inglês no §3.2 do plano,
+  com a regra "coincidência temática não basta". O texto só é congelado por golden depois
+  do registro live (S4.0b), que confirma como uma pergunta referencia um item.
+- Tetos da fusão aceitos como padrões configuráveis: 4 requests em voo e 24 por chamada
+  (lacuna 13).
+
+## D-063 — Envelope online e `interrupted` (proposta)
+
+- `provenance.online = {enabled, provider, model, requests, cache_hits, incomplete,
+  discovery}`, com `discovery ∈ complete | incomplete | interrupted | skipped`. O booleano
+  `incomplete` da v0.1 continua (lacuna 14).
+- Item só-semântico: `source = {verb: "jev", basis: "remote_classifier"}`. Item estrutural
+  confirmado mantém `source` e ganha `semantic` (estágio, probabilidade, threshold, modelo,
+  digest, hash da fonte, cache hit). Equivale à proveniência dupla do §23.7 sem mudar a
+  forma v1 de `source`.
+- Cancelamento do cliente MCP mantém o RF-14 (`cancelled`), agora propagado até as
+  requests HTTP. `interrupted` fica para o prazo de descoberta (`--jev-deadline-ms`, 8.000
+  por padrão, sem fonte): o estrutural sai com a evidência fresca já validada (lacuna 15).
+
+## D-064 — Cache, diagnóstico e integração (proposta)
+
+- Cache em memória com chave por pergunta (provider, endpoint, modelo, versões de prompt e
+  política, estágio, query, hash da fonte, range). A chave por request da v0.1 quase nunca
+  acertaria, porque os lotes mudam a cada chamada. O valor guarda só a probabilidade
+  validada e o timestamp.
+- `doctor --jev-probe`: uma request com texto sintético embutido no binário, nenhum byte do
+  workspace. `doctor` sem a opção nunca usa a rede.
+- `install --online`: acrescenta `--online` aos args e um bloco `env` que referencia a
+  variável, nunca o valor da credencial.
+- `hook` e `prompt` continuam offline nas duas fases e recusam `--online`: processo curto,
+  timeout do host e consentimento por processo não combinam com envio a cada prompt.
+
+## D-065 — Aprovação das propostas das Fases 4 e 5
+
+- O usuário aprovou D-059 a D-064 sem alterações e pediu o início do Sprint 0.
+- D-058 continua sendo o plano de referência. As propostas deixam de ser propostas.
+
+## D-066 — Sprint 0 parcial
+
+- **S4.0a:** `online::ranked_paths` foi implementado como função pura sobre `(prioridade, &Item)`,
+  porque `Entry` é privado e o seam 2 só usa API pública. A ordem é: melhor prioridade, depois
+  a primeira aparição na saída do Ripwire; docs ficam de fora e as linhas são ordenadas e
+  distintas.
+  - Desvio do plano: a chamada dentro de `context_for_task_inner` não entrou. Sem um motor
+    online ela seria código morto. Entra em S4.22, junto com `BrokerConfig.online`, e o teste
+    de guarda do envelope offline vai junto.
+- **S4.0c:** `online::prompt` (versão `v1`, guidance literal e as duas perguntas do rascunho de
+  D-062) e `online::request::build`, puro. O golden foi escrito à mão em
+  `tests/online_units.rs`. Ele é **provisório** até o S4.0b confirmar a forma real de
+  `state.items` e como uma pergunta referencia um item.
+  - Desvio do plano: sem `indexmap`. Um `Serialize` de mapa sobre `Vec` mantém `q0..qn` na
+    ordem de inserção, e um teste cobre mais de dez perguntas. Assim o build não ganha
+    dependência nova.
+- **S4.0d (spike, Ripwire 0.6.4):**
+  - `find_symbol` dá só a linha inicial.
+  - `analyze` exige um diretório e lista nomes sem linhas.
+  - `fetch_body` dá `line` e `total_lines`, isto é, o intervalo completo, mas custa uma chamada
+    por símbolo.
+  - Decisão (dentro de D-061): na Fase 4, as unidades são chunks ligados à linha do item. Só o
+    corpo que o broker já busca (o símbolo central) usa o intervalo de `fetch_body`. Nenhum
+    verbo entra na allowlist.
+- **S4.0b:** preparado, não executado. `examples/jev_record.rs` imprime os dois requests de um
+  corpus sintético, inventado para isso e sem ler o workspace, para que o `curl` os envie. Assim
+  o Sprint 0 não põe crate de rede no build. Falta a credencial
+  `RIPWIRE_BROKER_JEV_API_KEY`, que não está no ambiente.
+- Suíte: 131 verdes, 1 ignorado; clippy e fmt limpos.
+
+## D-067 — Gravação live e ponto de parada 0
+
+- **S4.0b.** Com a credencial em `~/.config/ripwire-broker/jev.key` (`0600`) e a autorização
+  do usuário, os dois requests de `examples/jev_record.rs` foram enviados por `curl` a
+  `https://api.typesafe.ai/v1/systemone`, com HTTPS obrigatório e sem redirect. A chave foi
+  lida do arquivo no próprio comando e nunca impressa.
+- **Contrato confirmado** (v0.1 §10):
+  - `200`, `Content-Type: application/json`, HTTP/2;
+  - a resposta é `{model, answers: {qN: {type: "noul", noul: p}}, usage: {input_tokens,
+    output_tokens}}`, com uma resposta por pergunta e os mesmos ids;
+  - latência de 300–350 ms para 2–3 perguntas;
+  - o header `x-typesafe-request-id` existe, mas não é gravado.
+- **`prompts/v1` validado.** Uma pergunta referencia seu item por id (`item i0`, `code block
+  i1`) dentro de `state.items = [{id, path, text}]`, e o modelo discrimina:
+  - admissão: `auth.py` 0,81, o teste 0,83 e um CSV sem relação 0,03;
+  - seleção: `validate_token` 0,81 e `login` 0,64.
+  O rascunho de D-062 fica como texto definitivo da `v1`, e o golden deixa de ser provisório.
+- **Fixture** `tests/fixtures/jev/live_v1.json`: só digest sha256 e tamanho de cada request,
+  ids das perguntas, status, content type, latência e a resposta (probabilidades e uso). Não
+  tem fonte, query, credencial nem id do provider.
+- O corpus sintético saiu do exemplo para `tests/common/jev_corpus.rs`, compartilhado com o
+  teste `the_live_recording_still_matches_prompts_v1`. Esse teste recalcula os digests; se
+  `prompts/v1` mudar, ele pede uma nova gravação.
+- Não registrado ainda: as formas de erro do provider (`401`, `429`, `5xx`). O S4.11 usa o
+  servidor fixture com as formas da v0.1; o teste live S5.14 confere.
+- **Ponto de parada 0:** Sprint 0 concluído (S4.0a–S4.0d). D-061 e D-062 confirmados pela
+  evidência. Suíte: 132 verdes, 1 ignorado; clippy e fmt limpos.
+
+## D-068 — Configuração, credencial e garantia offline
+
+Fatias S4.1 a S4.6 do plano, no branch `fase-4-online`.
+
+- **S4.1.** `cli::OnlineArgs` chega em `ServeArgs.online`. Os padrões são os de D-059 a D-063:
+  `typesafe`, `jev-1.13.0`, 4 em voo, 24 requests, 15.000 ms por tentativa, 16 candidatos e
+  prazo de 8.000 ms.
+  - Viram erro de uso: uma opção `--jev-*` sem `--online`, provider diferente de `typesafe`,
+    zero em teto, e qualquer tentativa de passar a chave pela linha de comando. Nenhum erro
+    ecoa valores.
+  - `hook`, `prompt` e `doctor` recusam `--online` com mensagem própria (D-064).
+- **S4.2.** Um binário sem a feature recusa `--online` com código 2 antes de consultar o
+  ripwire e de publicar o MCP, e explica como recompilar. Até aqui, o servidor subia offline em
+  silêncio, o que violava a invariante 3 do §23.1.
+- **S4.3 e S4.4.** A feature `online` traz `secrecy` como dependência opcional.
+  - `online::credential::Credential` só lê `RIPWIRE_BROKER_JEV_API_KEY`. Tira o whitespace
+    externo, recusa whitespace interno e conta vazio como ausente.
+  - O `Debug` é redigido; não há `Serialize` nem `Display`.
+  - Sem credencial válida, o `serve --online` falha com código 2 antes de publicar o MCP
+    (CA-ONLINE-02).
+  - Transitório: com credencial válida, o build `online` ainda **recusa** `--online`, porque o
+    adaptador só é ligado em S4.20–S4.31. Assim nenhum commit intermediário roda offline
+    fingindo estar online.
+- **S4.5.** `the_build_has_no_network_stack` agora lê o grafo resolvido do build padrão
+  (`cargo tree -e normal --offline`) em vez do `Cargo.lock`, como D-059 previa. A lista
+  proibida ganhou `h2` e `secrecy`.
+  - Desvio do plano: a outra metade do S4.5, `without_online_the_classifier_is_never_called`,
+    depende da `trait Classifier` e do `FakeClassifier`. Ela vai para S4.21, junto com o
+    teste-guarda das outras duas tools.
+- **S4.6.** O texto de consentimento do §23.6 foi para o `USAGE` já no S4.1. O teste nasceu
+  verde e guarda o texto literal.
+- **CI.** O workflow do GitHub Actions também compila e testa com `--features online`.
+- Suítes: 137 verdes no build padrão e 138 com `online`, 1 ignorado em cada; clippy e fmt
+  limpos nas duas.
+
+## D-069 — Protocolo, validação e cliente HTTP
+
+Fatias S4.7 a S4.11 do plano.
+
+- **S4.7.** Já estava coberto pelos testes do S4.0c: ordem `q0..qn` além de dez perguntas, tipo
+  `noul`, guidance literal e golden. Nenhum teste novo. A parte do wire veio em S4.11.
+- **S4.8.** `online::response::parse_answers` devolve uma probabilidade por pergunta, na ordem
+  do request e casada por id, não por posição (CA-ONLINE-10).
+  - Viram desconhecido (`None`) uma pergunta sem resposta, tipo diferente de `noul`, valor
+    ausente, que não seja número, negativo ou maior que 1. Os valores 0 e 1 são válidos.
+  - Rejeitam a resposta inteira: JSON inválido (inclusive `NaN`, que não é JSON), falta de
+    `model` ou `answers`, modelo diferente do pinado e resposta a pergunta não feita. Neste
+    último caso a correspondência por id está quebrada.
+- **S4.9.** `online::decision` aplica thresholds estritos: admissão `> 0,25`, seleção `> 0,50`,
+  lead em `(0,25; 0,50]` (CA-ONLINE-06). Um arquivo fica com o maior score entre os fragmentos.
+  - Interpretação: se algum fragmento ficou sem avaliação e o melhor conhecido não passa, o
+    arquivo é `Unknown`, não `Rejected`, porque o fragmento faltante pode conter a evidência.
+- **S4.10.** `online::request::batches` mantém a ordem e fecha o lote antes de 128 perguntas
+  ou 38.000 bytes. Lotes de evidência têm até 8 unidades e ~14 KiB; uma unidade sozinha pode
+  passar dos 14 KiB, desde que caiba em 38.000. O que não cabe nem sozinho volta à parte, para
+  a limitação `request_too_large`.
+  - O tamanho é calculado de forma incremental e exata (`request_bytes`), e um teste o confere
+    contra o JSON real. A primeira versão reserializava o lote a cada item e era quadrática, o
+    que ameaçava a meta de p95 < 75 ms.
+- **S4.11.** `online::classifier::Classifier` é a trait interna do provider e compila no build
+  padrão. `ClassifyError` só carrega categoria e status HTTP.
+  - Mapeamento: `401`/`403` → `auth`; `408` e timeout → `timeout`; `429` → `rate_limited`,
+    com `Retry-After` bruto limitado a 64 caracteres; `5xx` → `server`; demais status e
+    redirects → `rejected`; body malformado ou `Content-Type` diferente de JSON →
+    `invalid_response`; body acima de 256 KiB → `response_too_large`; falha de conexão →
+    `network`.
+  - `online::jev::JevClient`, só com a feature: `reqwest` 0.12 com `rustls-tls` (raízes webpki,
+    ring, sem compilar C) e `http2`. Um cliente por processo, HTTPS obrigatório, sem redirect,
+    sem proxy, timeout por tentativa, header de autorização marcado como sensível e nenhuma
+    retentativa própria.
+  - `JevClient::loopback` (`#[doc(hidden)]`) aceita só `http://127.0.0.1` e existe para os
+    testes; nenhuma opção da CLI chega a ele.
+  - O servidor fixture do seam 4 é um HTTP/1.1 mínimo sobre `TcpListener`, sem crate de
+    servidor. Os 6 testes cobrem body exato com bearer em `/v1/systemone`, os status da v0.1
+    §22, redirect recusado sem contatar o destino, ausência de retry, timeout, conexão fechada
+    e endpoint allowlisted. Nenhum erro mostra a credencial nem o texto remoto.
+- **D-059 confirmado:** com o `reqwest` no `Cargo.lock`, o teste antigo de CA-10 falharia. O
+  teste sobre o grafo resolvido continua verde no build padrão.
+- Suítes: 146 verdes no build padrão e 153 com `online`, 1 ignorado; clippy e fmt limpos nas
+  duas.
+
+## D-070 — Leitura do workspace e ponto de parada 1
+
+Fatias S4.12 a S4.14 do plano.
+
+- **S4.12.** `online::reader::WorkspaceReader::snapshot` é o único caminho entre o workspace e o
+  classificador. Checa nesta ordem e devolve o motivo sem path nem conteúdo:
+  1. absoluto ou com `..` → `outside`;
+  2. nome sensível → `sensitive_name`. Vem antes de "oculto" para o `.env` ser classificado
+     como sensível. A lista cobre `.env*`, `.netrc`, `.npmrc`, `.pypirc`, `.pgpass`, chaves SSH,
+     `credentials*`, `secrets.*`, além de `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,
+     `*.keystore`, `*.kdbx` e `*.gpg`;
+  3. componente oculto (inclui `.git`) → `hidden`;
+  4. diretório de dependência ou build (`node_modules`, `target`, `vendor`, `dist`, `build`,
+     `__pycache__`, `bower_components`, `venv`) → `dependency_or_build`;
+  5. qualquer symlink abaixo da raiz → `symlink`, nunca seguido;
+  6. diretório, FIFO, socket ou device → `not_regular`, detectado pelos metadados sem abrir o
+     arquivo, o que evita travar num FIFO;
+  7. ignorado por `.gitignore`, `.ignore` ou os excludes do git → `ignored`;
+  8. NUL nos primeiros 8.000 bytes → `binary`; UTF-8 inválido → `not_utf8`; marcador
+     `-----BEGIN … PRIVATE KEY-----` → `private_key`.
+  - O ignore usa a crate `ignore` (mesma semântica do git, sem rede). É conferido componente a
+    componente, porque um diretório ignorado precisa esconder também o que está dentro dele.
+    Como no git, os excludes globais do usuário também valem; isso só exclui mais.
+  - Acréscimo ao plano: arquivos acima de 8 MiB nem são lidos (`too_large`). Antes disso,
+    hashear um arquivo gigante seria o único trabalho sem limite do leitor.
+- **S4.13.** `Snapshot { path relativo, content_hash "sha256:…", texto }`. O preview tem no
+  máximo 16 KiB e termina numa quebra de linha, ou numa fronteira de caractere se não houver
+  quebra. `is_fresh` relê o arquivo pela mesma política e compara o hash; a revalidação da
+  Fase 5 (S5.1) vai usá-lo.
+- **S4.14.** `units(snapshot, linhas_do_ripwire)`:
+  - uma unidade nova começa em cada linha de símbolo do Ripwire e fica ligada a ele
+    (`symbol_line`);
+  - fora disso, a unidade fecha ao chegar a ~3 KiB de linhas inteiras;
+  - nenhuma passa de 24 KiB, e uma linha maior que isso é cortada em pedaços;
+  - arquivo acima de 1 MiB não tem unidades (só localização), mas mantém o preview para a
+    admissão;
+  - as linhas são one-based e inclusivas por fora, e os bytes half-open por dentro (§23.2).
+- **Ponto de parada 1:** o build padrão tem 152 verdes e o `online` 159, 1 ignorado em cada.
+  Clippy e fmt limpos nas duas configurações.
+  - A crate `ignore` trouxe só dependências locais (`globset`, `walkdir`, `crossbeam`,
+    `regex-automata`, `bstr`), e a guarda de CA-10 continua verde.
+
+## D-071 — Scheduler mínimo
+
+Fatias S4.15 a S4.19 do plano, sem retry nem cooldown (Fase 5).
+
+- `online::scheduler::Scheduler::run` recebe jobs de uma fila `mpsc` limitada
+  (`SchedulerConfig.queue`), cada um com o id do produtor. Cada request vira uma task num
+  `JoinSet` que pertence ao scheduler. O `Report` traz os resultados na ordem de término, os
+  jobs admitidos e não respondidos (`unfinished`), os requests enviados e o motivo da parada.
+- **Teto em voo.** No máximo `max_in_flight` tasks vivas. A contagem é feita pelas tasks do
+  próprio `JoinSet`, não por um `Semaphore`: o limite é o mesmo e fica determinístico. Na
+  Fase 5, a espera de cooldown acontece no laço do scheduler, fora das tasks, por isso nenhuma
+  vaga fica ocupada só esperando (v0.1 §11.8).
+- **Backpressure.** Com o provider lento, o produtor fica parado no `send` da fila cheia, e só
+  L requests começam (CA-ONLINE-05).
+- **Associação por id.** Respostas que terminam fora de ordem continuam ligadas ao job certo.
+- **Auth.** Um `401`/`403` aborta as irmãs em voo (o drop da future cancela o request HTTP),
+  nenhum request novo começa, e a fila é fechada, o que faz o produtor parar.
+- **Limite de requests.** No 25º job, com limite 24, a admissão para, a fila é fechada, e o
+  que estava na fila entra em `unfinished`. `Report::incomplete()` fica verdadeiro.
+- **Cancelamento.** Um `CancellationToken` aborta as tasks em voo e fecha a fila. O
+  cancelamento vindo do MCP e o aborto do request HTTP real são o S5.4.
+- **Achado:** a primeira versão travou. O ramo de cancelamento do `select!` nunca fica
+  inativo, então o `else => break` nunca disparava quando o trabalho acabava. A saída agora é
+  explícita no topo do laço (sem admissão e sem tasks).
+- **Correção de teste:** o teste de limite usava 30 jobs, e com uma fila de 8 todos cabiam
+  antes do fechamento. Passou a usar 100 e a conferir que todo job admitido foi respondido ou
+  reportado.
+- Dublê `tests/common/classifier.rs`: responde por id de item, pode falhar, atrasar ou segurar
+  requests, e conta chamadas, concorrência e requests abortados. Uma falha roteirizada
+  responde sem esperar o gate.
+- Dependências: `tokio-util` 0.7 no build padrão (`CancellationToken`, sem rede) e a feature
+  `test-util` do tokio só para testes (relógio pausado).
+- Os testes do scheduler rodaram 30 vezes seguidas sem falha. Suítes: 158 verdes no build
+  padrão e 165 com `online`, 1 ignorado; clippy e fmt limpos nas duas.
+
+## D-072 — Composição em `context_for_task` e ponto de parada 2
+
+Fatias S4.20 a S4.31 do plano.
+
+- **Fiação.** `BrokerConfig.online: Option<OnlineConfig>` (`None` em `BrokerConfig::new`)
+  vira um `OnlineEngine` no `connect`. O passo `semantic_step` fica entre a rota e
+  `finish_task`, portanto antes do budgeter, que conta os bytes de `provenance.online`.
+  - O `main` monta o `JevClient` real com a credencial do ambiente, e a recusa transitória de
+    D-068 saiu.
+  - O status degradado (sem Ripwire) agora publica o modo online e `offline: false`. Antes
+    dizia `offline: true` mesmo com `--online`.
+- **S4.20/S4.21, gate por rota (D-060).** O classificador roda se a rota chamou `explore`
+  (`orient`, `change` sem símbolo e fallback de símbolo inexistente). Nas outras rotas, e
+  sempre em `context_after_edit` e `context_before_finish`, nenhuma chamada. Rota pulada
+  traz `discovery: "skipped"` e a limitação `semantic_skipped`.
+- **S4.22, coordenador.** Até 16 paths do planner passam pelo `WorkspaceReader`; os
+  inelegíveis viram a limitação `semantic_not_sent` (contagem por motivo, sem path) e deixam a
+  descoberta `incomplete`. A admissão usa o preview; a seleção usa as unidades dos admitidos.
+  As duas etapas dividem o limite de 24 requests por chamada.
+- **S4.23–S4.25, merge.** Decisões desta fatia:
+  - item estrutural: mantém `source` (Ripwire) e ganha `semantic`. É a evidência do bloco que
+    começa na linha do símbolo, se houver; senão, a da admissão do arquivo. O estado vale
+    `admitted`, `rejected`, `selected_source`, `reading_lead` ou `excluded`. A rejeição
+    aparece, não some (risco "merge esconder discordância", §23.16);
+  - bloco selecionado de um símbolo do Ripwire: o item sobe para a faixa `CENTRAL`. Nada é
+    rebaixado nem removido;
+  - evidência sem símbolo correspondente: item `semantic_location`, com papel novo
+    `Role::Semantic` (`"semantic"`, só aparece com `--online`) e `source = {verb: "jev",
+    basis: "remote_classifier"}`. O estado fica em `semantic.state`; conteúdo só em
+    `selected_source`; nunca vem com caller, teste ou risco;
+  - `semantic.lines` traz o intervalo avaliado (one-based, inclusivo), e
+    `semantic.request_digest` o sha256 do request;
+  - `SemanticEvidence` fica num `Box` no `Item`, por causa do aviso de tamanho de variante do
+    clippy. A serialização não muda.
+- **S4.26, falha parcial.** Falhas viram `semantic_incomplete` e `discovery: "incomplete"`, e
+  a resposta estrutural sai igual à offline (CA-ONLINE-15).
+- **S4.27, orçamento.** Achado: o esqueleto do envelope, que nunca é cortado, já ocupa ~224
+  dos 256 tokens mínimos; com `provenance.online` e as limitações online, 256 é impossível de
+  garantir.
+  - Decisão: num processo `--online`, `context_for_task` exige **512** tokens
+    (`MIN_ONLINE_BUDGET_TOKENS`), e o schema publicado mostra esse mínimo. As outras duas
+    tools e o modo offline continuam com 256.
+  - Um teste confere o pior caso (todas as limitações online) em 512, e a varredura de 512 a
+    4.000 nunca passa do orçamento (CA-ONLINE-14).
+  - Desvio do plano: `the_package_leads_with_status_summary_and_limitations` foi retirado.
+    Reordenar os campos do envelope mudaria a saída offline byte a byte (princípio 2 do
+    plano). O `summary` já abre o envelope.
+- **S4.28, envelope.** Sem `--online`, nenhum campo novo aparece: nem `online`, nem
+  `semantic`, nem `semantic_location`, nem as limitações novas.
+- **S4.29, cache.** O valor guarda também o digest do request que trouxe a resposta
+  (metadado não sensível, §23.8). A chave muda com modelo, query, versão da fonte, range e
+  etapa. A inspeção não encontra query, path, fonte nem credencial (CA-ONLINE-13).
+- **S4.30, status.** Bloco `online` com provider, modelo, host do endpoint, tetos, requests,
+  cache hits, decisões em cache e a categoria do último erro, sem conteúdo.
+- **S4.31.** O broker de ponta a ponta com o `JevClient` real contra o fixture local: bearer
+  em todo request, e o root absoluto nunca aparece no body. Um e2e do binário com
+  `--online` confere o status e o piso de 512 no schema.
+- **Medição do ponto de parada 2.** Overhead local de batching e merge, sem Ripwire e sem
+  rede, em release: 16 arquivos de ~16 KiB e 24 requests por chamada, p50 7,9 ms e **p95
+  8,3 ms** (meta < 75 ms). Fica no teste ignorado `overhead_of_batching_and_merge`.
+- **Barra de merge da Fase 4 (§23.15): verde.** CA-10, CA-ONLINE-01 a 08, 10, 13, 14 e 15,
+  com `L = 4`.
+- **Pendências registradas:**
+  - `--jev-max-source-bytes` e `--jev-deadline-ms` são aceitos, mas ainda não têm efeito. O
+    prazo é o S5.5; o limite de fonte renderizada entra junto.
+  - O teste manual num host real com `--online` depende de o usuário autorizar o envio de
+    código do repositório.
+  - Uma execução da suíte padrão teve uma falha que não se repetiu em outras 21 execuções,
+    8 delas com as duas suítes em paralelo. O teste não foi identificado; se voltar, vira
+    investigação.
+- Suítes: 182 verdes no build padrão e 191 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-073 — Frescor das fontes
+
+Fatia S5.1 do plano (RF-ONLINE-10, CA-ONLINE-11).
+
+- **Decisão.** O §23.10 permite "replanejar uma vez **ou** marcar incompleto". Fica a
+  segunda opção: sem replanejamento, a evidência afetada é descartada e a descoberta
+  marcada `incomplete`. Replanejar exigiria reler, recortar e reenviar dentro do mesmo
+  orçamento de requests, e o CA-ONLINE-11 só pede o descarte. Se a medição mostrar
+  descartes frequentes, a opção de replanejar volta a ser avaliada.
+- **Antes de cada tentativa.** `scheduler::Job` ganhou `fresh: Option<Freshness>`, uma
+  checagem avaliada imediatamente antes de disparar o request. O coordenador monta a de cada
+  lote com os snapshots de todos os seus itens: `WorkspaceReader::is_fresh` relê o arquivo
+  pela política de elegibilidade e compara o hash. Um lote com fonte alterada não é enviado,
+  não conta como request e vai para `Report::stale`. O S5.2 vai reavaliar a mesma checagem
+  antes de cada retry.
+- **Antes da saída.** Ao fim da descoberta, cada arquivo candidato é revalidado. A evidência
+  de um arquivo alterado sai inteira de `Discovery::files`, e os fatos estruturais desse
+  arquivo ficam sem anotação `semantic`.
+- A limitação `semantic_incomplete` diz quantos lotes não foram enviados e quantos arquivos
+  mudaram, sem paths.
+- **Testes.**
+  - O dublê ganhou `on_call`, que edita o arquivo enquanto o provider responde. Um teste muda
+    o arquivo durante a admissão, e o lote de seleção nunca sai; outro muda durante a
+    seleção, e a resposta chega mas é descartada. Um teste do scheduler cobre o job obsoleto.
+  - A primeira rodada falhou por um erro no próprio dublê: a chamada do gancho não tinha
+    entrado no `classify`, porque o script de edição procurava uma linha já reformatada pelo
+    fmt.
+  - Um teste de mutação (as duas revalidações desligadas) derrubou exatamente os dois testes
+    novos.
+- **Custo.** O overhead local de batching e merge subiu de p95 8,3 ms para **21,9 ms**
+  (meta < 75 ms), porque cada lote relê seus arquivos e refaz a checagem de ignore por
+  diretório. A leitura é síncrona dentro da task; se o custo crescer, ela vai para
+  `spawn_blocking` e o resultado de ignore por diretório passa a ser guardado na chamada.
+- Suítes: 185 verdes no build padrão e 194 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-074 — Retry e divisão de lotes
+
+Fatia S5.2 do plano (v0.1 §11.9, §23.5).
+
+- **Política, no scheduler.** O cliente continua sem retry próprio.
+
+  | Lote | Falha transitória (timeout, 5xx, rede) | Não transitória |
+  | --- | --- | --- |
+  | seleção de fonte | até 2 tentativas; depois, se tiver mais de um item, divide ao meio | nem retry nem divisão |
+  | admissão com vários itens | 1 tentativa; depois divide ao meio | idem |
+  | lote com um item | até 2 tentativas | idem |
+
+  - "Não transitória" inclui `409`, resposta inválida e resposta grande demais. `401`/`403`
+    continuam parando tudo (D-071).
+  - O `429` fica fora do retry até o S5.3, que traz o cooldown compartilhado. Repetir sem
+    esperar o `Retry-After` só pioraria o rate limit.
+- **Mecânica.**
+  - `Job` ganhou `stage`, que decide a política e reconstrói as metades.
+  - Tentativas e metades vão para uma fila interna com prioridade sobre a fila do produtor.
+  - Cada tentativa conta no limite de requests e repete a checagem de frescor do S5.1; um
+    retry sobre fonte alterada nunca é enviado.
+  - As metades herdam o id e a checagem de frescor do lote original.
+  - `JobResult` agora traz o request que de fato respondeu: uma metade tem seus próprios itens
+    e ids de pergunta. O coordenador casa as respostas por ele, não mais por `requests[id]`.
+  - `Report` ganhou `retries` e `splits`, que o S5.10 vai expor como `jev_retry_total` e
+    `jev_split_total`.
+- **Limite da busca.** Nenhuma busca é reiniciada inteira. Com falha persistente, um lote de
+  admissão de 3 itens gera exatamente 8 requests: o lote (1); `[j0]` duas vezes (2);
+  `[j1, j2]` uma vez (1); `[j1]` e `[j2]` duas vezes cada (4). No fim, cada item fica com uma
+  falha final e resposta desconhecida.
+- **Testes.** Seis testes novos no seam 3: a política por etapa, erros não transitórios, o
+  limite com falha persistente, retries contando no limite de requests, retry sobre fonte
+  alterada e ausência de deadlock (1 em voo, fila 1, 8 lotes de 8 que falham uma vez e se
+  dividem). Os 13 testes do scheduler rodaram 30 vezes seguidas sem falha.
+- Suítes: 191 verdes no build padrão e 200 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-075 — `429` e cooldown compartilhado
+
+Fatia S5.3 do plano (v0.1 §11.8, CA-ONLINE-09).
+
+- **`online::retry_after::parse`** é puro e não usa crate de data. Lê segundos inteiros ou a
+  data HTTP no formato IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`); uma data passada vale
+  espera zero. Outros formatos, dia ou mês inválidos devolvem `None`. O cálculo de dias é o
+  `days_from_civil` de H. Hinnant, e os testes usam o exemplo da RFC 9110 e 29/02/2024.
+- **Cooldown.** Um prazo único no laço do scheduler, compartilhado por todos os lotes, que
+  guarda o maior valor observado. Enquanto ele não vence, nada sai: nem retry, nem metade de
+  lote, nem job novo. Como a espera acontece no laço e não nas tasks, ela não ocupa vaga de
+  envio; o teste confere zero requests em voo durante a espera. O cancelamento interrompe a
+  espera na hora.
+- **Política.**
+  - O lote que recebeu `429` ganha uma nova tentativa depois do cooldown, sem ser dividido,
+    porque a culpa não é do lote.
+  - Um segundo `429` do mesmo lote é final.
+  - Sem `Retry-After` legível, a espera é de 1 s (`DEFAULT_COOLDOWN`). Acima de 30 s
+    (`MAX_COOLDOWN`), o scheduler não espera: o lote fica com falha `rate_limited` e a
+    descoberta, incompleta. Isso impede que um provider prenda a resposta ao agente; o prazo
+    total entra no S5.5.
+  - `Report.rate_limited` conta os `429` para a métrica `jev_rate_limit_total` do S5.10.
+- **Testes.** Quatro novos no seam 3 e um no seam 2. Uma mutação que desliga o cooldown
+  derruba exatamente os três testes de espera. Os 17 testes do scheduler rodaram 30 vezes
+  seguidas sem falha.
+- Suítes: 196 verdes no build padrão e 205 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-076 — Teste manual com `--online`
+
+Pendência do ponto de parada 2 (D-072), autorizada pelo usuário: envio de trechos elegíveis
+deste repositório ao TypeSafe.
+
+- **Montagem.** Binário release com `--features online`, servidor MCP sobre este
+  repositório com o Ripwire 0.6.4 real e a chave lida de `~/.config/ripwire-broker/jev.key`
+  só para o ambiente do processo. Um cliente JSON-RPC cru no scratchpad, no formato do cliente
+  dos testes. Os envelopes ficaram só no scratchpad.
+- **Resultados.**
+
+  | Chamada | Tempo | Requests | Cache hits | Descoberta | Tokens |
+  | --- | --- | --- | --- | --- | --- |
+  | orientação ("como o broker mantém a resposta no orçamento?") | 2,38 s | 7 | 0 | complete | 2.386/2.500 |
+  | a mesma, repetida | 0,02 s | 0 | 28 | complete | 2.385/2.500 |
+  | mudança ("pular a injeção do hook com prompt vazio") | 0,64 s | 4 | 0 | complete | 2.499/2.500 |
+  | símbolo (`` `estimate_tokens` ``) | 0,00 s | 0 | 0 | skipped | 597/2.500 |
+
+  - `context_after_edit` não teve `provenance.online`.
+  - O status mostrou `offline: false`, 11 requests, 47 decisões em cache e nenhum erro.
+  - A chave não apareceu em nenhuma saída gravada.
+- **Qualidade observada.**
+  - **Mudança:** o classificador selecionou exatamente `hook.rs::handle` (p = 0,74), a função
+    que decide a injeção. Rejeitou ou excluiu os outros 10 itens do Ripwire, e todos
+    continuaram no envelope, com a discordância visível.
+  - **Orientação:** o `explore` não trouxe `src/budget.rs` entre os candidatos. Como o rescore
+    só avalia o que o Ripwire já achou, o classificador selecionou trechos de `hook.rs` e
+    `normalize.rs` (0,65 a 0,85), e os blocos do Ripwire ficaram como reading leads (0,44 a
+    0,50). É a limitação prevista da Fase 4. O lookahead de um nível (S5.7) teria incluído
+    `src/budget.rs`, vizinho em `src/`. Isso reforça que o ganho de recall depende do S5.7 e
+    precisa ser medido no A/B.
+  - Os trechos selecionados sem símbolo (`semantic_location`, prioridade `BODY`) ocuparam 4 dos
+    8 itens mostrados em 2.500 tokens, como manda a ordem do §23.4 (fonte selecionada antes de
+    caller estrutural). O A/B precisa conferir se essa ordem ajuda o agente.
+- Com isso o ponto de parada 2 fica completo.
+
+## D-077 — Cancelamento até o HTTP
+
+Fatia S5.4 do plano (RF-ONLINE-14, CA-ONLINE-12).
+
+- **Achado.** O caminho já existia por estrutura. No RF-14 (D-049), o `mcp.rs` descarta a
+  future da tool quando chega `notifications/cancelled`. O drop então desce a cadeia:
+  `context_for_task` → `OnlineEngine::discover` → `Scheduler::run` → `JoinSet`, cujo drop
+  aborta todas as tasks → future do `reqwest`, cujo drop fecha a conexão. Filas, retries
+  pendentes, esperas de cooldown e requests em voo terminam juntos, e a tool responde
+  `cancelled`, como hoje.
+- **Decisão.** Manter o cancelamento pelo drop estruturado, sem ligar o `CancellationToken` do
+  scheduler ao `Notify` do RF-14, como o plano previa. Um token duplicaria o que o drop já
+  garante, e o cancelamento MCP continua respondendo `cancelled` (D-063). O token do scheduler
+  fica para o prazo de descoberta (S5.5), que precisa devolver o envelope com `interrupted`.
+- **Regra de código.** Nada no caminho do request pode rodar em task destacada
+  (`tokio::spawn` sem dono): ela sobreviveria ao drop e manteria a conexão aberta.
+- **Testes.**
+  - Seam 3: descartar a future do `run` derruba os 4 requests em voo, nada começa depois, e o
+    produtor para.
+  - Seam 4: o broker com o `JevClient` real contra um provider local que nunca responde.
+    Abortar a chamada fecha todas as conexões em até 250 ms (v0.1 §20.1), e nenhum request
+    novo sai depois.
+  - Os dois nasceram verdes, como a análise previa. Uma mutação plausível (enviar o request
+    numa task destacada) derruba o teste do seam 4, o que prova que ele guarda a regra acima.
+    O teste do seam 4 rodou 10 vezes seguidas sem falha.
+- Suítes: 197 verdes no build padrão e 207 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-078 — Prazo de descoberta e limite de fonte
+
+Fatia S5.5 do plano; fecha as duas pendências de flags de D-072.
+
+- **Prazo (`--jev-deadline-ms`, padrão 8.000).** `OnlineConfig.deadline` vira um instante
+  absoluto no início da descoberta, que vale para as duas etapas.
+  - Ao vencer, o `CancellationToken` do scheduler é cancelado. O `run` não é descartado: ele
+    aborta os requests em voo e devolve o relatório parcial, então as respostas que já
+    voltaram continuam valendo (v0.1 §11.10).
+  - Se o prazo já venceu antes de uma etapa começar, ela nem envia e os lotes contam como não
+    respondidos.
+  - O envelope sai com o estrutural intacto, a evidência validada (inclusive a revalidação de
+    frescor do S5.1), `discovery: "interrupted"` e `incomplete: true`. A limitação
+    `semantic_incomplete` diz "discovery deadline of N ms reached".
+  - `interrupted` tem precedência sobre `incomplete` no campo `discovery`. O cancelamento pelo
+    cliente MCP continua respondendo `cancelled` (D-063, D-077).
+- **Limite de fonte (`--jev-max-source-bytes`, padrão: só o orçamento de tokens).**
+  `OnlineConfig.max_source_bytes` limita o total de fonte semântica **renderizada** nos itens
+  `semantic_location`, não a avaliação.
+  - Um bloco selecionado que passaria do limite continua `selected_source`, mas sai sem
+    `content`, com o motivo no `why_included`, e a limitação `semantic_source_capped` conta
+    quantos ficaram assim.
+  - O conteúdo dos itens do Ripwire não é afetado.
+- O `main` passa as duas flags para o `OnlineConfig`, e nenhuma opção `--jev-*` fica mais sem
+  efeito.
+- **Testes.** Três novos no seam 1: o prazo com relógio pausado (a admissão responde, o lote
+  de seleção demoraria 10 s e o prazo é de 200 ms), um prazo não atingido e o limite de fonte.
+  Uma mutação que desliga o timer do prazo derruba o teste. Os testes do núcleo online rodaram
+  20 vezes seguidas sem falha.
+- Suítes: 200 verdes no build padrão e 210 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-079 — Redaction de texto remoto
+
+Fatia S5.6 do plano (PRD §23.9; v0.1 §13.3 e §17).
+
+- **Mapeamento.** Por construção, nenhum erro carrega o corpo da resposta remota: o
+  `ClassifyError` só leva categoria e status HTTP, e os erros do `reqwest` viram categorias
+  (D-069). O caminho online não escreve em stderr. O único texto remoto que sobrevivia era o
+  `Retry-After` bruto do `429`, visível no `Debug` do erro.
+- **`online::redact::remote_text(texto, segredo, máx)`**, puro: mantém só ASCII visível e
+  espaço (o que remove controles, sequências ANSI, quebras de linha e não-ASCII), troca toda
+  ocorrência do segredo por `[redacted]`, apara e corta em `máx` bytes. A troca vem depois da
+  filtragem, então um segredo partido por um caractere de controle também é pego.
+- O `JevClient` passa o `Retry-After` por ela, com a própria credencial e o limite de 64
+  bytes. Um valor redigido não é lido como espera, e o scheduler usa o padrão de 1 s (D-075).
+- **Testes.**
+  - Seam 2: a função sobre ANSI, BEL, CR/LF, não-ASCII, tamanho e segredo partido.
+  - Seam 4: uma varredura com respostas `429` (duas), `401`, `403`, `500`, `409` e `200` com
+    corpo que ecoa a chave e mensagem remota. Nenhum `Display`, `Debug` ou categoria contém a
+    chave, a mensagem remota ou caracteres fora do ASCII visível.
+  - Achado no próprio teste: a primeira versão pôs um BEL no header, o hyper recusou a resposta
+    inteira (`network`), e o caso passou sem tocar o `Retry-After`. Com a chave ecoada em texto
+    limpo, o teste falhou como devia antes da implementação.
+- O status, os limites de status e os e2e já cobriam a ausência de credencial (D-072).
+- Suítes: 201 verdes no build padrão e 212 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+- **Ponto de parada 3:** CA-ONLINE-09 (D-075), 11 (D-073) e 12 (D-077) verdes.
+
+## D-080 — Lookahead de um nível
+
+Fatias S5.7 a S5.9 do plano (D-061).
+
+- **Mecânica.** Depois da admissão dos paths do planner, entram os arquivos regulares que
+  estão diretamente nos diretórios dos paths **admitidos**:
+  - sem descer em subdiretórios e sem seguir symlinks (`WorkspaceReader::files_in`, que também
+    respeita `.gitignore`);
+  - em ordem de path, sem repetir candidatos, até `--jev-lookahead-max` no total (padrão 32;
+    0 desliga);
+  - cada um passa pela política completa do `snapshot`. Irmãos inelegíveis são pulados em
+    silêncio: são exploração, não candidatos que o Ripwire nomeou, e não marcam a descoberta
+    como incompleta. O teto também não marca, como o de 16 candidatos (política de custo).
+  - Os admitidos seguem para a seleção, com os mesmos lotes, cache, frescor, prazo e limite de
+    requests. No merge viram `semantic_location`, e o `why_included` diz "found beside a
+    ripwire candidate". Nunca ganham caller, teste ou risco.
+- **S5.8.** `Discovery.semantic_only` conta os arquivos do lookahead admitidos, o ganho além
+  do Ripwire, e o status expõe o acumulado em `online.semantic_only_candidates`.
+- **S5.9 não se aplica como escrito.** Sem Ripwire não há candidatos do planner, e portanto
+  não há lookahead. A linha "Ripwire falha → preservar evidência semântica" do §23.4 pressupõe
+  a fronteira remota que D-056 removeu. No lugar dela, um teste-guarda: com o Ripwire fora,
+  erro estruturado `upstream_unavailable` e nenhuma chamada ao classificador (CA-07).
+- **Testes.** Quatro novos no seam 1: irmãos elegíveis admitidos e selecionados, sem descer em
+  subdiretórios; elegibilidade e teto (ordem de path, teto 3); ganho no status (1 com o irmão
+  admitido, 0 rejeitado); e a guarda sem Ripwire. O teste de flags da CLI ganhou
+  `--jev-lookahead-max`.
+- **Medições.** O overhead local, em release, ficou em p95 21,8 ms, sem mudança. Suítes: 201
+  verdes no build padrão e 216 com `online`, 2 ignorados; clippy e fmt limpos nas duas.
+- **Teste ao vivo** (autorizado em D-076), mesma tarefa de orientação do D-076:
+  - com 100.000 tokens, 55 itens; o lookahead encontrou e **selecionou `src/budget.rs`** (p =
+    0,90 e 0,82), o arquivo que faltara em D-076, além de `local.rs`, `online/request.rs` e
+    outros quatro admitidos sem trecho;
+  - **com os padrões (2.500 tokens, 24 requests), numa chamada fria, nenhum item do lookahead
+    aparece.** A admissão de até 16 + 32 arquivos, com previews de 16 KiB (2 por request),
+    consome sozinha os 24 requests. Com 8.000 tokens, a descoberta bateu no limite e saiu
+    `incomplete`. O `budget.rs` só apareceu quando o cache das chamadas anteriores liberou
+    requests para a seleção;
+  - `semantic_only_candidates` chegou a 28 em duas chamadas, e a chave não apareceu em nenhuma
+    saída.
+- **Decisão pendente com o usuário: equilibrar o lookahead dentro dos 24 requests.** As opções
+  estão na resposta desta sessão; nenhuma foi aplicada.
+- **Falha intermitente, 2ª ocorrência.** Um teste do build padrão falhou uma vez, de novo na
+  primeira execução depois de uma recompilação (a 1ª foi em D-072). Não reproduziu em 46
+  execuções, 3 delas sob carga (compilação release e a suíte `online` em paralelo). O nome do
+  teste não foi capturado. Próximo passo: rodar o CI com `--no-fail-fast` e guardar a saída.
+
+## D-081 — Equilíbrio do lookahead
+
+Decisão pendente de D-080. O usuário escolheu a opção recomendada: **preview menor no
+lookahead e seleção pela probabilidade de admissão**. O limite de 24 requests e o teto de 32
+vizinhos continuam.
+
+- **Preview do lookahead: 4 KiB** (`LOOKAHEAD_PREVIEW_BYTES`, `Snapshot::preview_at`). Cabem
+  ~8 arquivos por request, em vez de 2, e 32 vizinhos custam ~4 requests de admissão em vez
+  de 16. Os paths do planner mantêm os 16 KiB da norma v0.1 §6.3. Como a chave do cache inclui
+  o range do preview, as duas formas nunca se confundem.
+- **Seleção pela probabilidade de admissão.** As unidades dos arquivos admitidos são enviadas
+  do arquivo mais provável para o menos provável; empates mantêm a ordem do Ripwire. Com o
+  limite apertado, quem perde é o menos provável.
+- **Ordem dos `semantic_location` pela probabilidade**, dentro da própria faixa. No teste
+  frio anterior, o `src/budget.rs` (0,88) ficava atrás de trechos do planner com 0,60, só
+  porque vinha depois na lista de arquivos, e com 2.500 tokens era cortado. Agora os itens
+  só-semânticos se ordenam entre si pela probabilidade. Os itens do Ripwire não mudam de lugar
+  e os scores não se misturam com o ranking dele (§23.4). É a mesma regra da opção escolhida,
+  aplicada à renderização.
+- **Testes.** Quatro novos: o preview de 4 KiB no seam 2; no seam 1, a admissão com preview
+  curto só no lookahead, a seleção começando pelo arquivo mais provável e a ordem dos
+  `semantic_location` com os itens do Ripwire intactos.
+- **Ao vivo, a frio, com os padrões** (mesma tarefa de D-076 e D-080, processo novo): 19
+  requests (antes 24, no limite), descoberta `complete`, 2.394 de 2.500 tokens, e **o
+  `src/budget.rs` aparece** como o primeiro trecho semântico (p = 0,89), junto com
+  `online/request.rs` (0,85, também do lookahead).
+- Suítes: 209 verdes no build padrão e 220 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+- **Falha intermitente, 3ª ocorrência**, agora na suíte `online`, de novo na primeira execução
+  depois de uma recompilação. Não reproduziu em 8 execuções seguidas.
+  - Suspeito: `a_hung_upstream_times_out_and_is_restarted` (da Fase 0/1). O timeout global de
+    500 ms vale também para a segunda chamada, ao Ripwire real recém-reiniciado.
+  - Não se confirmou em 15 execuções sob carga de 24 processos em 12 CPUs.
+  - Mudança de procedimento: toda verificação passa a guardar a saída completa no
+    scratchpad, para registrar o nome do teste na próxima ocorrência.
+
+## D-082 — Métricas e etapas online
+
+Fatias S5.10 e S5.11 do plano (PRD §23.11).
+
+- **Métricas.** `status.online.metrics` traz as 15 métricas do §23.11, com os mesmos nomes.
+  - Por request, medidas pelo `online::metrics::Metered`, que embrulha o classificador
+    configurado; o scheduler só vê o embrulho:
+    - `jev_requests_total` e `jev_questions_total`;
+    - `jev_in_flight`, um medidor que também desce quando o request é abortado;
+    - `jev_batch_items` e `jev_request_bytes`, cada um como `{total, max}`;
+    - `jev_latency_ms` com p50/p95/p99 nas últimas 256 latências.
+  - `jev_response_bytes` vem do próprio `JevClient`, que conta o corpo lido; a trait
+    `Classifier` ganhou `response_bytes()`, que vale zero por padrão.
+  - Por descoberta, vindas do relatório do scheduler e do coordenador:
+    `jev_cache_hits_total`, `jev_rate_limit_total`, `jev_retry_total`, `jev_split_total`,
+    `semantic_candidates_total` (arquivos perguntados, do planner e do lookahead),
+    `semantic_selected_ranges_total` e `semantic_only_candidates_total`.
+  - `online_context_tokens_estimated` mede o envelope final: bytes dos itens
+    `semantic_location` e das anotações `semantic` que chegaram ao agente, divididos por 4
+    como no orçamento.
+  - Os campos já existentes do bloco `status.online` continuam, por compatibilidade.
+- **Etapas (spans).** Cada chamada de um processo `--online` ganha `stages` no seu registro de
+  `recent_requests`, com nome, duração e número de requests. Aparecem na ordem em que terminam:
+  `semantic.navigation.batch` (admissão, com lookahead), `semantic.selection.batch`,
+  `semantic.discovery` (a descoberta inteira), `context.merge` e `context.budget`.
+  - O registro compartilha o `request_id` de `provenance.request_id` e nunca traz query, path
+    ou código.
+  - Processos offline não têm o campo.
+  - Decisão do plano mantida: nada do crate `tracing`. As etapas são registros do status,
+    como as chamadas upstream.
+- **Testes.** Quatro novos no seam 1: todas as métricas conferidas contra o que o dublê
+  recebeu, sem path nem query; retry, split e `429` contados; as etapas sob o `request_id`;
+  nenhuma etapa no offline. O e2e com o cliente real passou a conferir `jev_response_bytes`.
+- Overhead local, em release: p95 21,5 ms, sem mudança. Suítes: 213 verdes no build padrão e
+  224 com `online`, 2 ignorados; clippy e fmt limpos nas duas.
+
+## D-083 — `doctor --jev-probe`
+
+Fatia S5.12 do plano (§23.6, D-064).
+
+- **`doctor::jev_probe(&dyn Classifier)`**, no build padrão, envia **uma** pergunta de
+  `file_admission` pelo `prompts/v1`, com conteúdo inventado e embutido no binário
+  (`PROBE_PATH = probe/example.py`, uma função `add`). Ela não recebe o workspace, então não
+  tem como ler nada dele.
+  - A checagem `jev_probe` traz modelo, latência e probabilidade quando dá certo.
+  - Na falha, só a categoria e o status do erro (D-069, D-079).
+- **CLI.** `doctor --jev-probe [--jev-model M]`; `--jev-model` sem `--jev-probe` é erro de uso.
+  Com a feature `online`, o probe monta o `JevClient` com a credencial do ambiente, o endpoint
+  allowlisted e o modelo pinado por padrão. Sem a feature, a checagem falha e diz como
+  recompilar. Sem `--jev-probe`, o `doctor` não cria cliente HTTP.
+- **Testes.**
+  - Seam 1: um único request, conteúdo sintético, guidance do `prompts/v1` e nenhum path do
+    workspace; a falha mostra só a categoria.
+  - Seam 4: exatamente um request no fio.
+  - Seam 5: flags; sem o probe, nenhuma checagem `jev_probe`; sem a feature, falha clara.
+- **Ao vivo (autorizado em D-076):** `jev-1.13.0` respondeu à pergunta sintética em 304 ms
+  (p = 0,77), com as outras 8 checagens `ok` e a chave ausente da saída. Sem a credencial, a
+  checagem falha com a mensagem que nomeia a variável.
+  - Detalhe menor: essa mensagem é a mesma do `serve` e começa com "--online needs...". No
+    `doctor` ela continua clara, mas pode ganhar um texto próprio no S5.13.
+- Suítes: 218 verdes no build padrão e 229 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-084 — `install --online`
+
+Fatia S5.13 do plano (§23.6, D-064).
+
+- **Claude Code.** No `.mcp.json`, o servidor ganha `--online` nos `args` e
+  `"env": {"RIPWIRE_BROKER_JEV_API_KEY": "${RIPWIRE_BROKER_JEV_API_KEY}"}`. É uma referência
+  que o Claude Code expande do próprio ambiente ao subir o servidor; o valor nunca é gravado.
+- **Codex.** O trecho de `config.toml` continua só impresso (D-033) e ganha `"--online"` nos
+  `args` e `env_vars = ["RIPWIRE_BROKER_JEV_API_KEY"]`, que repassa a variável pelo nome.
+  - Achado: `codex mcp add --env` só aceita `KEY=VALUE` literal, o que gravaria a chave. O
+    campo `env_vars` foi achado nos tipos do binário do Codex 0.157 (`RawMcpServerConfig`).
+  - Validado com o próprio Codex: com o trecho num `CODEX_HOME` temporário, `codex mcp list`
+    e `codex mcp get` leem a configuração e mostram `RIPWIRE_BROKER_JEV_API_KEY=*****`.
+- **Hooks continuam offline** (D-064): os comandos de hook nunca recebem `--online`.
+- O texto de consentimento do §23.6 sai com todo `install --online`. Ele lembra também que a
+  chave vem do ambiente do host, que o binário precisa da feature `online` e que
+  `doctor --jev-probe` confere a instalação.
+- Reinstalar sem `--online` desliga o modo: a entrada do servidor é substituída e perde a flag
+  e o `env`.
+- O `install` nunca lê a variável da chave. O teste roda o binário com a chave no ambiente e
+  confere que ela não aparece nem na saída nem nos arquivos gravados.
+- **Mensagem da credencial ausente** (D-083): agora diz "RIPWIRE_BROKER_JEV_API_KEY is not set
+  in the environment (--online and --jev-probe need it)", o que serve ao `serve` e ao `doctor`.
+- **Teste.** Um e2e do binário no seam 5 cobre dry-run, `--write` com hooks, Codex, ausência
+  da chave em tudo e reinstalação sem `--online`.
+- Suítes: 219 verdes no build padrão e 230 com `online`, 2 ignorados; clippy e fmt limpos nas
+  duas.
+
+## D-085 — Testes live
+
+Fatia S5.14 do plano (§23.14).
+
+- `tests/online_live.rs` só compila com a feature `online`, e seus testes são `#[ignore]`: a
+  suíte padrão continua offline (CA-10). Para rodar:
+  `RIPWIRE_BROKER_JEV_API_KEY=... cargo test --features online --test online_live -- --ignored`.
+  Sem a chave, cada teste avisa e sai.
+- Só envia conteúdo inventado (o corpus do S4.0b e o `common::sample_repo`) e só imprime
+  digests, probabilidades e tempos.
+  - `a_real_provider_classifies_the_synthetic_corpus`: respostas válidas, uma por pergunta; o
+    modelo admite `auth.py` e o teste e rejeita o CSV sem relação; `validate_token` é selecionado;
+    o cliente conta os bytes recebidos.
+  - `a_real_provider_enriches_a_synthetic_repository`: o caminho completo, com broker, Ripwire
+    real e `JevClient`. A descoberta sai `complete`, algum item tem evidência `semantic` e o
+    orçamento é respeitado.
+- **Rodada ao vivo** (autorizada em D-076): os dois verdes em 1,1 s.
+  - O digest do request de admissão (`d7d3e4…`) é idêntico ao gravado no S4.0b: o
+    `prompts/v1` não mudou.
+  - As probabilidades variaram pouco em relação à gravação (0,79 contra 0,81; 0,65 contra
+    0,64). O provider não é determinístico, e por isso os testes live conferem decisões
+    (admitido, rejeitado, selecionado), não valores exatos.
+  - O caminho completo levou 620 ms com 2 requests.
+- Suítes: 219 verdes no build padrão (2 ignorados) e 230 com `online` (4 ignorados); clippy e
+  fmt limpos nas duas.
+
+## D-086 — Documentação e ponto de parada 4
+
+Seção §5.4 do plano.
+
+- **README.**
+  - Nova seção "Online mode (optional)": como compilar e instalar, o texto de consentimento, o
+    que sai da máquina e o que nunca sai, o limite da proteção (a filtragem não garante
+    reconhecer todo segredo), quando o classificador roda, os campos que o envelope ganha, os
+    tetos e as flags, o status, e o aviso de modo experimental até o A/B.
+  - "Secrets" deixou de ser futuro: a chave vem só de `RIPWIRE_BROKER_JEV_API_KEY`.
+  - Também mudaram: comandos (`doctor --jev-probe`, `install --online`), requisitos, piso de
+    512 tokens e testes (`--features online` e os live).
+- **Skill e `AGENTS.md`.** Como ler `semantic`, `semantic_location` e `discovery`:
+  probabilidade não é fato, um item do Ripwire `rejected` continua sendo um fato, e uma
+  descoberta `incomplete` ou `interrupted` não prova ausência.
+- **PRD.** Estado das Fases 4 e 5 no §19 e no §23; a forma real do envelope (§9.1) e do status
+  (§9.4); as flags novas no §23.6; e, no fim do §23.17, uma tabela com a resolução e a decisão
+  de cada lacuna.
+- **Ponto de parada 4.** Todas as fatias de código das Fases 4 e 5 estão feitas, com a barra
+  de merge da Fase 4 verde e CA-ONLINE-01 a 15 cobertos. Falta o corpus A/B e a barra de
+  produto (§5.3 do plano, §23.15), que dependem de o usuário escolher três repositórios e
+  aceitar o custo remoto. Até lá, `--online` é experimental.
+- **Falha intermitente identificada e corrigida** (D-072, D-080, D-081). A saída guardada da
+  verificação final registrou o nome: `a_hung_model_is_killed_at_the_hard_limit`, em
+  `tests/summarizer.rs`, um teste da Fase 3. O suspeito de D-081 estava errado.
+  - Causa: o teste roda um script travado com limite de 300 ms, e a primeira linha do script
+    grava o próprio PID. Numa primeira execução depois de uma recompilação, com a máquina
+    carregada, o shell às vezes era morto antes dessa linha, e a leitura do arquivo de PID
+    falhava.
+  - O comportamento testado estava certo: o processo tinha sido morto no limite. A corrida
+    era do teste.
+  - Correção só no teste: o limite passou para 2 s. A checagem de término em menos de 5 s
+    continua. Rodou 20 vezes sem falha, 10 delas sob carga de 24 processos em 12 CPUs.
+
+## D-087 — PR das Fases 4 e 5
+
+- O branch `fase-4-online` foi publicado no `CeciApp/ripwire-broker`, e o
+  [PR #1](https://github.com/CeciApp/ripwire-broker/pull/1) foi aberto para o `master`. São 18
+  commits, do plano (D-058) à documentação (D-086), e 49 arquivos.
+- Antes da publicação, o diff inteiro foi varrido atrás da chave do provider: nenhuma
+  ocorrência. O `master` local estava igual ao `origin/master`.
+- O PR descreve o que revisar com atenção: o teste de CA-10 sobre o grafo resolvido (D-059), o
+  piso de 512 tokens (D-072), a sintonia do lookahead (D-081) e a correção do teste
+  intermitente (D-086). O item em aberto é o corpus A/B com a barra de produto (§23.15).
+
+## D-088 — CI, revisão `/tdd` e correções
+
+- **CI do PR #1.** A 1ª execução falhou em `the_command_summarizer_feeds_stdin_and_reads_stdout`
+  com `Text file busy` (ETXTBSY). A 2ª, no commit seguinte, passou nas duas configurações.
+  - Causa: corrida do Linux, anterior a este PR. Um teste grava um script executável enquanto
+    outra thread do mesmo processo faz `fork`; o filho herda o descritor de escrita até o seu
+    `exec`, e executar o script nesse intervalo falha.
+  - Reproduzida num container `rust:1.98.1` com 2 CPUs: 2 falhas em 300 execuções. No macOS
+    não acontece.
+- **Merge.** O `gh pr merge` foi bloqueado pelo classificador de permissões do modo automático
+  ("Merge Without Review"). Não houve tentativa de contornar, e a decisão ficou com o usuário,
+  que pediu para corrigir os achados da revisão no próprio PR.
+- **Revisão `/tdd`**, feita por um agente sobre os testes do PR, com os critérios da skill:
+  testes em seams públicos acordados, sem acoplamento à implementação, sem tautologia, com
+  asserções fortes e sem corridas. Os achados foram verificados no código antes de cada
+  correção.
+
+| # | Achado | Tratamento |
+| --- | --- | --- |
+| 1 | O teste de CA-ONLINE-13 não podia falhar: a chave do cache nem recebe path ou fonte | Substituído por um teste no seam 1 que enche o cache com uma chamada real e o inspeciona por `Broker::inspect_semantic_cache()` (a "inspeção" do CA). Uma mutação que grava a query no cache o derruba |
+| 2 | O dublê roteirizava falhas por ids internos (`f0`, `u0`, `p0`) e o layout dos lotes | O `FakeClassifier` ganhou gatilhos por etapa e por path; os ids ficaram só para o scheduler, cujos requests o teste monta. O teste de métricas passou a depender só do que o dublê devolveu |
+| 3 | CA-ONLINE-01 só era checado no grafo do build padrão | Novo e2e no build `online`: chave no ambiente, sem `--online`; as três tools respondem sem `provenance.online`, e o status diz `offline: true` |
+| 4 | Resposta desconhecida sem teste no broker | **Defeito de produto confirmado**: uma pergunta sem probabilidade válida, dentro de uma resposta HTTP válida, não marcava a descoberta como `incomplete`, e a ausência podia ser lida como irrelevância (§23.2). Agora conta em `unknown_answers`, torna a descoberta incompleta e aparece na limitação. Teste vermelho antes da correção |
+| 5 | O "informa omissões" do CA-ONLINE-14 podia nunca rodar | A varredura exige que ao menos um orçamento trunque e confere `next_step` |
+| 6 | O fixture HTTP/1.1 fecha a conexão a cada request | Novo fixture com keep-alive prova o reuso de uma conexão do pool. A lacuna do cancelamento sob HTTP/2 (reset de stream) ficou documentada no cabeçalho do arquivo |
+| 7 | O teste do endpoint só lia um getter | Passou a fixar a assinatura do único construtor público: um parâmetro de URL quebraria a compilação do teste |
+| 8 | O teste de cancelamento HTTP dependia de 250 ms reais e tirava a foto antes do `abort()` | Foto depois do `abort()` e prazo de 2 s. Os 250 ms da v0.1 continuam provados no seam 3, com tempo controlado |
+| 9 | A métrica de bytes enviados era conferida pela mesma fórmula da produção | No seam 1, limites independentes; o valor exato passou para o seam 4, contra os bytes que o fixture recebeu |
+| 10 | Nomes que prometiam mais do que o teste verificava | O teste de inelegíveis confere `incomplete`; o do `doctor` foi renomeado para `doctor_has_no_probe_check_unless_asked`; o do drop agora enfileira de fato um retry, que nunca sai |
+| 11 | O teste de cancelamento no cooldown dependia da ordem do `JoinSet` | `j1` responde depois do `429` de `j0`; a contagem no cancelamento não muda nem depois do cooldown. 20 repetições verdes |
+| 12 | Os testes live passavam sem a chave | Falham sem a chave (ou sem ripwire) quando pedidos com `--ignored` |
+| 13 | Um teste de `install --online` cobria cinco comportamentos | Dividido em seis testes, um por comportamento |
+| 14 | Linha morta `let _ = SystemTime::now();` | Removida |
+| 15 | `cargo tree --offline` poderia falhar num runner limpo (incerto) | Verificado: passou nas duas execuções do CI, num runner limpo, antes de o `reqwest` ser baixado. Sem mudança |
+| 16 | ETXTBSY | Correção nos sete lugares que gravam e executam scripts: `common::write_executable` grava por um `sh` filho, e o processo de teste nunca segura o descritor de escrita. Trocar o nome do arquivo, como o relatório sugeria, não resolveria, porque o descritor herdado aponta para o mesmo inode |
+| 17 | O teste do probe comparava com as constantes de produção | Compara com literais |
+| — | Fidelidade do dublê | O dublê entra em pânico se uma regra devolver probabilidade fora de [0, 1] ou se o prompt não for de nenhuma etapa do `prompts/v1` |
+
+- Suítes: 225 verdes no build padrão (2 ignorados) e 238 com `online` (4 ignorados); clippy e
+  fmt limpos nas duas. Os testes live passaram com a chave e falharam sem ela.
+- **CI** no commit das correções (`3aaf8ed`): verde nas duas configurações.
+- **Validação do ETXTBSY** no mesmo container (`rust:1.98.1`, 2 CPUs, 16 threads de teste,
+  300 execuções de `tests/summarizer.rs`): 0 ETXTBSY e 0 outras falhas, contra 2 em 300 antes.
+  - Ressalva estatística: com uma taxa-base de ~0,7%, zerar em 300 execuções aconteceria por
+    acaso em ~13% das vezes mesmo sem correção. O número é coerente com a correção, mas o
+    argumento principal é o mecanismo: o processo de teste nunca mais segura o descritor de
+    escrita.
+
+## D-089 — Revisão de segurança
+
+- `/security-review` sobre o branch `fase-4-online` contra o `master`, pedido pelo usuário.
+  Foram duas etapas: um agente identificou candidatos, e a filtragem de falsos positivos
+  descartaria os abaixo de 8/10 de confiança. **Nenhum candidato passou do limiar de 80%**,
+  então não houve o que filtrar.
+- **Caminhos verificados e por que são seguros:**
+  - **Path traversal e raiz absoluta:** `relative_parts` só aceita componentes normais, e a
+    raiz é canonicalizada.
+  - **Symlinks:** recusados em todo componente, e o lookahead não os segue.
+  - **`.gitignore`/`.ignore`:** conferidos por componente, com nome exato.
+  - **Ocultos, credenciais e chaves privadas:** recusados; um marcador de chave privada recusa
+    o arquivo inteiro.
+  - **Entrada do agente:** só o texto da tarefa vai ao provider, por desenho.
+  - **Endpoint:** constante, só HTTPS, sem redirect e sem proxy, com a validação de
+    certificado padrão do rustls.
+  - **Ativação:** só a flag `serve --online`, que é confiável.
+  - **Chave:** `SecretString`, header marcado como sensível, erros só com categoria e status,
+    `Retry-After` redigido, e só a referência gravada pelo `install`.
+  - **Respostas do provider:** o modelo precisa ser o pinado, ids desconhecidos invalidam a
+    resposta, e as probabilidades precisam ser finitas em [0, 1]. Só a probabilidade entra no
+    envelope.
+- **Observações abaixo do limiar:**
+  - A corrida entre checar os componentes e ler o arquivo, em `snapshot()`, exige um atacante
+    local com escrita concorrente no workspace. É teórica e fica aberta.
+  - **Arquivos de ambiente sem ponto** (`prod.env`, `app.env`) não estavam na lista de nomes
+    sensíveis e podiam ser enviados se não estivessem no `.gitignore`. Corrigido em TDD: o
+    teste de elegibilidade ganhou os dois casos e falhou, com `config/prod.env` lido, antes de
+    `env` entrar em `SENSITIVE_EXTENSIONS`. O README lista `*.env`.
+- Suítes: 225 verdes no build padrão (2 ignorados) e 238 com `online` (4 ignorados); clippy e
+  fmt limpos nas duas.
+

@@ -2,7 +2,9 @@
 
 A local MCP server that turns [Ripwire](https://github.com/redhat-et/ripwire)'s wide surface
 (33 verbs) into three task-moment tools with a token budget, deduplication, provenance and
-preserved limitations. It is local, offline and read-only. Specification:
+preserved limitations. It is local, offline and read-only by default. An optional
+[online mode](#online-mode-optional) adds a remote semantic classifier to `context_for_task`,
+only when the process is started with `--online`. Specification:
 [`spec/ripwire-broker-mcp.md`](spec/ripwire-broker-mcp.md). Decision log:
 [`spec/changelog.md`](spec/changelog.md).
 
@@ -14,6 +16,7 @@ agent ⇄ stdio ⇄ ripwire-broker ⇄ stdio ⇄ ripwire <workspace> --mcp
 
 - Rust 1.98.1 (pinned in `rust-toolchain.toml`)
 - `ripwire` ≥ 0.6.4 on `PATH` (or pass `--ripwire BIN`)
+- Online mode only: a build with `--features online` and a TypeSafe API key
 
 ## Build and run
 
@@ -31,8 +34,8 @@ commands; `ripwire-broker --help` lists them all:
 | `hook <claude-code\|codex> <event>` | Automatic context from a host hook ([below](#automatic-mode-hooks)) |
 | `hook-log --session ID` | What the hooks injected in a session (counts only) |
 | `prompt --workspace DIR TASK...` | Prints the task followed by its context, for clients without hooks |
-| `doctor --workspace DIR` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call |
-| `install <claude-code\|codex> --workspace DIR [--hooks] [--write]` | Wires the broker into a host (dry run unless `--write`) |
+| `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
+| `install <claude-code\|codex> --workspace DIR [--hooks] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`) |
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
 return a structured error (`upstream_unavailable` / `incompatible_upstream`), and the next
@@ -40,8 +43,9 @@ call tries to reconnect.
 
 ## Configuration
 
-There is **no `.env` file** and none is needed: the broker is local and offline and uses no
-secrets. All configuration comes from command-line arguments:
+There is **no `.env` file** and none is needed. All configuration comes from command-line
+arguments; the only secret, the online mode's API key, comes from the environment
+([below](#secrets)):
 
 | Argument | Default | Purpose |
 | --- | --- | --- |
@@ -55,6 +59,7 @@ secrets. All configuration comes from command-line arguments:
 | `--summarizer-version-cmd CMD` | none | Prints the model's version; its hash invalidates cached notes |
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
+| `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
 
 ### How an MCP host passes configuration
 
@@ -98,11 +103,15 @@ Other hosts, such as Grok-based CLIs, generally use the same `command`/`args`/`e
 check your host's documentation. Hosted APIs that only accept **remote** MCP servers (by
 URL) cannot use the broker today: the MVP is stdio only.
 
-### Secrets (future)
+### Secrets
 
-When Streamable HTTP is added (roadmap phase 4), its bearer token must come from an
-environment variable set in the host entry (PRD §7.3). It must never come from an
-argument or a committed file.
+The online mode reads its key only from `RIPWIRE_BROKER_JEV_API_KEY` in the server's
+environment. It is never accepted as an argument, never written by `install` (which
+references the variable by name), and never shown in errors, the status or logs. Set it in the
+environment the host starts from, not in a committed file.
+
+When Streamable HTTP is added (roadmap phase 6), its bearer token must also come from an
+environment variable (PRD §7.3).
 
 ## MCP surface
 
@@ -128,7 +137,7 @@ Every answer uses the `ripwire-broker.context/v1` envelope: `status`, `intent`, 
 `content.untrusted_repository_data`.
 
 **Token estimate:** `ceil(bytes of the serialized JSON envelope / 4)`, applied to the
-whole answer. The minimum budget is 256.
+whole answer. The minimum budget is 256; with `--online`, `context_for_task` needs 512.
 
 When `context_for_task` reads a word as a symbol that the repository doesn't have (for
 example a host's tool name in the prompt), it explores the task instead and adds the
@@ -178,6 +187,66 @@ ripwire-broker --workspace /repo \
   pipe, which garbles notes. `doctor --summarizer-cmd ...` warns about this and checks the version command;
   it never runs the model (a cold start took 19 s here, and 1 s warm).
 
+## Online mode (optional)
+
+Off unless the server process starts with `--online` (PRD §23). A remote semantic classifier
+(TypeSafe `jev-1.13.0`) then rates, in `context_for_task`, the files ripwire ranked and their
+direct siblings, and the broker merges its probabilities with ripwire's facts. Nothing else
+changes: no new tool, and `context_after_edit`, `context_before_finish`, hooks and `prompt`
+stay offline.
+
+> O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
+> Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
+
+```sh
+cargo build --release --features online      # the default build has no HTTP client (CA-10)
+export RIPWIRE_BROKER_JEV_API_KEY=...          # in the host's environment, never in a file
+ripwire-broker doctor --workspace /repo --jev-probe   # one synthetic question, no workspace bytes
+ripwire-broker install claude-code --workspace /repo --online --write
+```
+
+**What leaves the machine:** the task text, paths relative to the workspace, file previews
+(16 KiB for files ripwire ranked, 4 KiB for their siblings) and blocks of up to 24 KiB of the
+files the classifier admitted. Never the absolute root, the key in any log, or a file the
+policy excludes: hidden paths and `.git`, dependency and build directories, anything ignored
+by `.gitignore`/`.ignore`, symlinks, binaries, non-UTF-8 files, likely credential files
+(`.env*`, `*.env`, SSH keys, `*.pem`, `*.key`...) and text with a private-key marker. This filtering
+reduces risk; it cannot guarantee that every secret is recognized. Choose the root knowingly.
+
+**When it runs:** only on routes that end in ripwire's `explore` (orientation, a change without
+a symbol, a symbol the repository lacks). Traces, known symbols, reviews and docs skip it and
+say so (`semantic_skipped`).
+
+**What the answer gains** (additive to the v1 envelope, absent without `--online`):
+
+- `provenance.online`: `provider`, `model`, `requests`, `cache_hits`, `incomplete` and
+  `discovery` (`complete`, `incomplete`, `interrupted` or `skipped`).
+- `semantic` on an item: the classifier's `stage`, `state` (`admitted`, `rejected`,
+  `selected_source`, `reading_lead`, `excluded`), `probability`, `threshold`, `model`, `lines`,
+  `content_hash`, `request_digest` and `cache_hit`. The item keeps its ripwire `source`; a
+  rejection is shown, never used to drop a fact.
+- `semantic_location` items (`role: semantic`, `source.basis: remote_classifier`) for evidence
+  no ripwire symbol matches, including files found beside ripwire's candidates. They never
+  carry callers, tests or risks. Only `selected_source` ones carry source.
+- Limitations: `semantic_skipped`, `semantic_not_sent`, `semantic_incomplete`,
+  `request_too_large`, `semantic_source_capped`. An incomplete discovery means an absence is
+  not evidence of irrelevance.
+
+**Limits:** `--jev-max-in-flight 4`, `--jev-request-limit 24` requests per call,
+`--jev-timeout-ms 15000` per attempt, `--jev-deadline-ms 8000` for the whole discovery
+(`interrupted` after it), `--jev-max-candidates 16`, `--jev-lookahead-max 32` (0 turns the
+lookahead off), `--jev-max-source-bytes` (source rendered, not evaluated), `--jev-no-cache`,
+`--jev-model` (pinned; `jev-latest` is never a default). Transient failures are retried by
+stage, a 429 waits for its `Retry-After`, and a client cancel aborts the HTTP requests.
+Decisions are cached in memory, keyed by digests only.
+
+**Status:** `online` in `ripwire-broker://status` carries the §23.11 metrics (requests,
+latency percentiles, bytes, retries, 429s, candidates, gain beyond ripwire...), and each call
+in `recent_requests` lists its online stages. Counts and times only.
+
+The mode is **experimental** until the A/B evaluation of PRD §23.15 shows it keeps or improves
+correctness.
+
 ## Automatic mode (hooks)
 
 MCP alone only offers tools; the agent still has to call them. Hooks make it automatic
@@ -218,6 +287,8 @@ ripwire-broker install codex --workspace /repo --hooks --write
 - Codex: merges the hooks into `~/.codex/hooks.json` (`--codex-home` to change it). They are global, so they
   follow each session's `cwd` rather than a fixed workspace. It **prints** the `config.toml` lines to add
   (`[mcp_servers.ripwire-broker]`, and `[features] hooks = true`), and never edits TOML.
+- `--online` adds the flag to the server and references the key by name: `${RIPWIRE_BROKER_JEV_API_KEY}` in
+  `.mcp.json`, `env_vars = ["RIPWIRE_BROKER_JEV_API_KEY"]` in the Codex snippet. Hooks stay offline.
 - Hook commands quote every path for the host's shell, so a directory name cannot run as code.
 - Merges keep your other keys and hooks, are idempotent, and back up a changed file once as `<name>.bak`.
   JSON key order is normalized.
@@ -238,13 +309,16 @@ Manual setup, if you prefer:
 
 ```sh
 cargo test                 # core, hooks, notes and CLI (fixtures), MCP e2e and upstream against the real ripwire
+cargo test --features online   # also the HTTP client against a local fixture server
 RIPWIRE_BROKER_TEST_MODEL="ollama run --nowordwrap phi4" cargo test -- --ignored   # a real local model
+RIPWIRE_BROKER_JEV_API_KEY=... cargo test --features online --test online_live -- --ignored   # the real classifier, synthetic content only
 cargo run --release --example spike -- /path/to/repo "task"   # Phase 0 measurements
 ```
 
 The e2e and upstream tests are skipped when `ripwire` is not on `PATH`. Fixtures in
 `tests/fixtures/ripwire/` were recorded from ripwire 0.6.4. Fixtures in `tests/fixtures/hooks/` are
-real hook payloads from Claude Code 2.1.283 and Codex 0.157.1.
+real hook payloads from Claude Code 2.1.283 and Codex 0.157.1. `tests/fixtures/jev/` keeps the digests and
+probabilities of a live exchange with `jev-1.13.0`, never source.
 
 ## License
 

@@ -122,6 +122,17 @@ fn change(path: PathBuf, edit: impl FnOnce(Value) -> Value) -> Result<Change, St
     })
 }
 
+/// The variable the server reads its credential from (PRD §23.6).
+const KEY_VAR: &str = "RIPWIRE_BROKER_JEV_API_KEY";
+
+/// Shown with every `--online` install (PRD §23.6: mandatory in the documentation of the flag).
+const CONSENT: &str =
+    "--online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
+Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
+The key is never written here: export RIPWIRE_BROKER_JEV_API_KEY in the environment the host
+starts from. The binary must be built with `--features online`; check it with
+`ripwire-broker doctor --workspace DIR --jev-probe`.";
+
 pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
     let workspace = args
         .workspace
@@ -146,10 +157,20 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                     if !servers.is_object() {
                         *servers = json!({});
                     }
-                    servers.as_object_mut().unwrap().insert(
-                        "ripwire-broker".into(),
-                        json!({"command": binary, "args": ["--workspace", workspace]}),
-                    );
+                    let mut server = json!({"command": binary, "args": ["--workspace", workspace]});
+                    if args.online {
+                        server["args"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push("--online".into());
+                        // Expanded by Claude Code from its own environment: a reference, never
+                        // the value.
+                        server["env"] = json!({ KEY_VAR: format!("${{{KEY_VAR}}}") });
+                    }
+                    servers
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("ripwire-broker".into(), server);
                     v
                 })?);
             if args.hooks {
@@ -165,8 +186,13 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 .clone()
                 .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
                 .ok_or("no HOME: pass --codex-home")?;
+            let online = match args.online {
+                // Forwarded by name from Codex's environment, never the value.
+                true => format!(", \"--online\"]\nenv_vars = [\"{KEY_VAR}\"]"),
+                false => "]".into(),
+            };
             let mut toml = format!(
-                "# Add to {}:\n[mcp_servers.ripwire-broker]\ncommand = {:?}\nargs = [\"--workspace\", {:?}]\n",
+                "# Add to {}:\n[mcp_servers.ripwire-broker]\ncommand = {:?}\nargs = [\"--workspace\", {:?}{online}\n",
                 home.join("config.toml").display(),
                 binary.display().to_string(),
                 workspace.display().to_string()
@@ -180,6 +206,9 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
             }
             plan.notes.push(toml);
         }
+    }
+    if args.online {
+        plan.notes.push(CONSENT.into());
     }
     Ok(plan)
 }

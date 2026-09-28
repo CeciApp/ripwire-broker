@@ -55,6 +55,15 @@ pub struct UpstreamSpan {
     pub outcome: &'static str,
 }
 
+/// One stage of the `--online` path of a tool call (PRD §23.11 spans): name, duration and
+/// how many requests it sent; never query, path or code.
+#[derive(Debug, Clone, Serialize)]
+pub struct StageSpan {
+    pub stage: &'static str,
+    pub us: u64,
+    pub batches: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RequestRecord {
     pub request_id: u64,
@@ -63,6 +72,9 @@ pub struct RequestRecord {
     pub outcome: &'static str,
     pub total_us: u64,
     pub upstream: Vec<UpstreamSpan>,
+    /// Only for calls of a process started with `--online`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<StageSpan>,
 }
 
 impl Metrics {

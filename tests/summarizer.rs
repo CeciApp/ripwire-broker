@@ -1,13 +1,13 @@
 //! Seam 6: the command summarizer as a real subprocess, with `sh` scripts as the "model".
+mod common;
+
 use ripwire_broker::summarizer::{CommandSummarizer, Summarizer};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let p = dir.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_executable(&p, format!("#!/bin/sh\n{body}\n"));
     p
 }
 
@@ -65,7 +65,9 @@ async fn a_hung_model_is_killed_at_the_hard_limit() {
     );
     let started = Instant::now();
 
-    let err = model(hung.to_str().unwrap(), 300)
+    // The limit leaves the shell time to write its pid even on a loaded machine: at 300 ms a
+    // cold first run could kill it before its first line, and the pid file never appeared.
+    let err = model(hung.to_str().unwrap(), 2_000)
         .summarize("x")
         .await
         .unwrap_err();

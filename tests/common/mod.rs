@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod classifier;
 pub mod fake;
 pub mod summarizer;
 use std::path::Path;
@@ -59,15 +60,13 @@ fn git(root: &Path, args: &[&str]) {
 /// An executable stand-in for ripwire: the first launch runs `first_launch`
 /// (a shell snippet), every later launch execs the real ripwire.
 pub fn flaky_ripwire(dir: &Path, first_launch: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let marker = dir.join("launched-once");
     let script = dir.join("flaky-ripwire");
     let body = format!(
         "#!/bin/sh\nif [ ! -f '{m}' ]; then touch '{m}'; {first_launch}; fi\nexec ripwire \"$@\"\n",
         m = marker.display()
     );
-    std::fs::write(&script, body).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&script, body);
     script
 }
 
@@ -81,7 +80,7 @@ pub fn slow_ripwire(dir: &Path) -> std::path::PathBuf {
         .collect::<Vec<_>>()
         .join(",");
     let script = dir.join("slow-ripwire");
-    std::fs::write(
+    write_executable(
         &script,
         format!(
             r#"#!/usr/bin/env python3
@@ -105,9 +104,32 @@ for line in sys.stdin:
 "#,
             busy = dir.join("busy").display()
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
+}
+
+/// Writes an executable script without this process ever holding it open for writing. On
+/// Linux, when another test thread forks while a write descriptor is open, the child inherits
+/// it until its own `exec`, and executing the script meanwhile fails with ETXTBSY ("Text file
+/// busy"). A short-lived `sh` writes the file instead, so no writer can leak into a fork.
+pub fn write_executable(path: &Path, body: impl AsRef<str>) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_ref().as_bytes())
+        .unwrap();
+    assert!(
+        child.wait().unwrap().success(),
+        "could not write {}",
+        path.display()
+    );
 }

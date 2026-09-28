@@ -34,7 +34,7 @@ async fn main() {
         ms(t),
         names.len()
     );
-    let ours = serde_json::to_string(&tools()).unwrap().len();
+    let ours = serde_json::to_string(&tools(false)).unwrap().len();
     println!(
         "broker tool schemas           {:>8} bytes (~{} tokens) for 3 tools",
         ours,

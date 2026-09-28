@@ -21,6 +21,10 @@ pub mod priority {
     pub const COCHANGE: u8 = 7;
     pub const DOC: u8 = 8;
     pub const PERIPHERAL: u8 = 9;
+    /// `--online` (PRD §23.4 bands 5 and 6): an admitted file without an excerpt, then a
+    /// reading lead. A selected block uses `BODY`, a confirmed symbol `CENTRAL`.
+    pub const SEMANTIC_LOCATION: u8 = 7;
+    pub const READING_LEAD: u8 = 8;
 }
 
 fn is_doc(path: &str) -> bool {
@@ -57,6 +61,7 @@ fn symbol_item(
         why_included: why,
         source: Source::fact(verb),
         content: None,
+        semantic: None,
     }
 }
 
@@ -420,6 +425,7 @@ pub fn impact(payload: &str) -> Vec<Entry> {
                 why_included: format!("imports {of} ({})", f.attr("via").unwrap_or("import")),
                 source: Source::fact(verb),
                 content: None,
+                semantic: None,
             },
         ));
     }
@@ -485,6 +491,7 @@ pub fn recall(payload: &str) -> Vec<Entry> {
                 content: Some(Untrusted {
                     untrusted_repository_data: content.trim_end().to_string(),
                 }),
+                semantic: None,
             },
         ));
     }
@@ -583,6 +590,7 @@ pub fn situation(payload: &str) -> Vec<Entry> {
                 ),
                 source: Source::fact(verb),
                 content: None,
+                semantic: None,
             },
         ));
     }

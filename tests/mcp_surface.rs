@@ -215,16 +215,24 @@ async fn without_ripwire_the_tools_fail_explicitly_and_status_says_why() {
 #[test]
 fn the_build_has_no_network_stack() {
     // CA-10: stdio only; no HTTP client or server crate may be linked in the default build.
-    let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).unwrap();
-    for net in [
-        "name = \"reqwest\"",
-        "name = \"hyper\"",
-        "name = \"axum\"",
-        "name = \"rustls\"",
-    ] {
+    // The resolved graph, not Cargo.lock, which also lists the optional crates behind the
+    // `online` feature (D-059).
+    let out = std::process::Command::new(std::env::var("CARGO").unwrap_or("cargo".into()))
+        .args(["tree", "-e", "normal", "--prefix", "none", "--offline"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree = String::from_utf8(out.stdout).unwrap();
+    assert!(tree.starts_with("ripwire-broker "), "{tree}");
+    for net in ["reqwest ", "hyper ", "axum ", "rustls ", "h2 ", "secrecy "] {
         assert!(
-            !lock.contains(net),
-            "network crate in dependency tree: {net}"
+            !tree.lines().any(|l| l.starts_with(net)),
+            "network crate in the default build: {net}"
         );
     }
 }
@@ -286,16 +294,13 @@ async fn the_server_is_stateless_by_default_and_incremental_on_request() {
 #[tokio::test]
 async fn the_server_adds_notes_with_a_command_summarizer() {
     require_ripwire!();
-    use std::os::unix::fs::PermissionsExt;
     let repo = common::sample_repo();
     let bin = tempfile::tempdir().unwrap();
     let script = bin.path().join("fake-llm");
-    std::fs::write(
+    common::write_executable(
         &script,
         "#!/bin/sh\ncat >/dev/null\necho 'Authentication helpers and their callers.'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let client = start_broker(
         repo.path(),
         &[
@@ -461,14 +466,13 @@ fn a_client_cancellation_stops_the_tool_call() {
 
 #[test]
 fn the_status_answers_while_a_reconnect_hangs() {
-    use std::os::unix::fs::PermissionsExt;
     let ws = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
     let marker = bin.path().join("launched-once");
     let hanging = bin.path().join("hanging");
     let ripwire = bin.path().join("hanging-ripwire");
     // First launch fails at once (degraded start); every later launch hangs.
-    std::fs::write(
+    common::write_executable(
         &ripwire,
         format!(
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'ripwire 0.6.4'; exit 0; fi\n\
@@ -476,9 +480,7 @@ fn the_status_answers_while_a_reconnect_hangs() {
             m = marker.display(),
             h = hanging.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&ripwire, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let mut broker = Raw::start(&[
         "--workspace",
         ws.path().to_str().unwrap(),
@@ -563,4 +565,124 @@ fn finished_calls_and_late_cancels_leave_nothing_behind() {
         !status.to_string().contains("quick task"),
         "no task text in the status"
     );
+}
+
+/// Starts the binary with extra environment variables.
+#[cfg(feature = "online")]
+async fn start_broker_with_env(args: Vec<String>, env: &[(&str, &str)]) -> Arc<ClientRuntime> {
+    let env = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let transport = StdioTransport::create_with_server_launch(
+        env!("CARGO_BIN_EXE_ripwire-broker"),
+        args,
+        Some(env),
+        TransportOptions::default(),
+    )
+    .unwrap();
+    let details = ClientDetails {
+        client_info: Implementation {
+            name: "e2e".into(),
+            version: "0".into(),
+            title: None,
+            description: None,
+            icons: vec![],
+            website_url: None,
+        },
+        capabilities: ClientCapabilities::default(),
+    };
+    let client = client_runtime::create_client(McpClientOptions::new(
+        details,
+        transport,
+        Quiet.to_mcp_client_handler(),
+    ));
+    client.clone().start().await.unwrap();
+    client
+}
+
+/// CA-ONLINE-01 in a build that has the HTTP client: a key in the environment is not consent.
+#[cfg(feature = "online")]
+#[tokio::test]
+async fn a_key_in_the_environment_without_online_changes_nothing() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    let args = vec!["--workspace".to_string(), repo.path().display().to_string()];
+    let client =
+        start_broker_with_env(args, &[("RIPWIRE_BROKER_JEV_API_KEY", "tok-e2e-unused")]).await;
+
+    for (tool, args) in [
+        (
+            "context_for_task",
+            json!({"task": "how does login validate the token?"}),
+        ),
+        ("context_after_edit", json!({"files": ["src/auth.py"]})),
+        ("context_before_finish", json!({})),
+    ] {
+        let (is_error, out) = call(&client, tool, args).await;
+        assert!(!is_error, "{tool}: {out}");
+        assert!(out["provenance"].get("online").is_none(), "{tool}: {out}");
+    }
+    let st = status(&client).await;
+    assert_eq!(st["offline"], true, "{st}");
+    assert!(st.get("online").is_none(), "{st}");
+    client.shut_down().await.unwrap();
+}
+
+#[cfg(feature = "online")]
+#[tokio::test]
+async fn an_online_server_says_so_in_its_status_without_the_credential() {
+    let repo = tempfile::tempdir().unwrap();
+    let args = vec![
+        "--workspace".to_string(),
+        repo.path().display().to_string(),
+        "--ripwire".into(),
+        "/nonexistent/ripwire".into(),
+        "--online".into(),
+    ];
+    let env = std::collections::HashMap::from([(
+        "RIPWIRE_BROKER_JEV_API_KEY".to_string(),
+        "tok-e2e-secret".to_string(),
+    )]);
+    let transport = StdioTransport::create_with_server_launch(
+        env!("CARGO_BIN_EXE_ripwire-broker"),
+        args,
+        Some(env),
+        TransportOptions::default(),
+    )
+    .unwrap();
+    let details = ClientDetails {
+        client_info: Implementation {
+            name: "e2e".into(),
+            version: "0".into(),
+            title: None,
+            description: None,
+            icons: vec![],
+            website_url: None,
+        },
+        capabilities: ClientCapabilities::default(),
+    };
+    let client = client_runtime::create_client(McpClientOptions::new(
+        details,
+        transport,
+        Quiet.to_mcp_client_handler(),
+    ));
+    client.clone().start().await.unwrap();
+
+    let st = status(&client).await;
+
+    assert_eq!(st["offline"], false, "{st}");
+    assert_eq!(st["online"]["enabled"], true);
+    assert_eq!(st["online"]["model"], "jev-1.13.0");
+    assert_eq!(st["online"]["endpoint_host"], "api.typesafe.ai");
+    assert!(!st.to_string().contains("tok-e2e-secret"));
+    let tools = client.request_tool_list(None).await.unwrap();
+    let task = tools
+        .tools
+        .iter()
+        .find(|t| t.name == "context_for_task")
+        .unwrap();
+    let schema = serde_json::to_value(&task.input_schema).unwrap();
+    assert_eq!(schema["properties"]["budget_tokens"]["minimum"], 512);
+    client.shut_down().await.unwrap();
 }
