@@ -273,11 +273,17 @@ impl NoteEngine {
         }
     }
 
-    fn settled(&self, key: &str) -> Option<Outcome> {
+    /// The settled outcome for `key`, if there is one. `mine` means this call started the
+    /// generation and so paid the model run; a call that only waited for someone else's is
+    /// served from the cache, exactly like a later call, and counts as a hit (D-092).
+    fn settled(&self, key: &str, mine: bool) -> Option<Outcome> {
         if let Some(text) = self.cache.lock().unwrap().get(key) {
+            if !mine {
+                self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+            }
             return Some(Outcome::Ready {
                 text: text.clone(),
-                cached: false,
+                cached: !mine,
             });
         }
         // A failure is reported once; the next request tries again.
@@ -292,14 +298,17 @@ impl NoteEngine {
                 cached: true,
             };
         }
-        {
+        // Whether this call started the generation it is about to wait for.
+        let mine = {
             let mut running = self.running.lock().unwrap();
             match running.as_ref() {
                 Some((k, h)) if !h.is_finished() && *k != key => {
                     self.stats.pending.fetch_add(1, Ordering::Relaxed);
                     return Outcome::Pending;
                 }
-                Some((k, h)) if !h.is_finished() && *k == key => {}
+                // Another call is already generating this very note: wait for it rather
+                // than pay for a second run.
+                Some((k, h)) if !h.is_finished() && *k == key => false,
                 _ => {
                     let (model, cache, failed, stats, signal) = (
                         self.summarizer.clone(),
@@ -323,9 +332,10 @@ impl NoteEngine {
                         signal.notify_waiters();
                     });
                     *running = Some((key.clone(), task));
+                    true
                 }
             }
-        }
+        };
         let deadline = tokio::time::Instant::now() + self.wait;
         let waiting = self.settled_signal.notified();
         tokio::pin!(waiting);
@@ -333,7 +343,7 @@ impl NoteEngine {
             // Registers this waiter before the state is read, so a generation that settles
             // in between wakes it instead of being missed.
             waiting.as_mut().enable();
-            if let Some(done) = self.settled(&key) {
+            if let Some(done) = self.settled(&key, mine) {
                 return done;
             }
             if tokio::time::timeout_at(deadline, waiting.as_mut())

@@ -65,8 +65,18 @@ impl Inflight {
         if v["method"] != "tools/call" {
             return;
         }
-        let name = v["params"]["name"].as_str().unwrap_or_default();
-        let key = call_key(name, &v["params"]["arguments"]);
+        // Only what a handler can actually receive. The SDK answers a call whose params do
+        // not convert into `CallToolRequestParams` — a missing or non-string `name`, a
+        // non-object `arguments` — before any handler runs, so queuing its id would leave
+        // an entry, and the task text in its key, that no `start()` can ever claim (D-092).
+        let arguments = &v["params"]["arguments"];
+        let Some(name) = v["params"]["name"].as_str() else {
+            return;
+        };
+        if !(arguments.is_null() || arguments.is_object()) {
+            return;
+        }
+        let key = call_key(name, arguments);
         self.waiting
             .lock()
             .unwrap()
