@@ -95,6 +95,7 @@
 | 2026-09-28 16:15 | Revisão do repositório: cinco defeitos de robustez corrigidos em TDD — dois panics do leitor tolerante, `dedup` sobre vetor não ordenado, bloco de `memory_recall` descartado em silêncio, espera de nota por polling e caminho não-UTF-8 no `install` | [D-091](#d-091--revisão-do-repositório-e-correções-de-robustez) |
 | 2026-09-28 17:40 | As duas observações do D-091 corrigidas em TDD: o registro `Inflight` não guarda mais o id de um `tools/call` que o SDK rejeita antes do handler, e uma nota servida pela geração de outra chamada é marcada `cached` | [D-092](#d-092--vazamento-do-inflight-e-cache-hit-de-nota) |
 | 2026-09-28 18:25 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
+| 2026-09-28 18:55 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 
 ---
 
@@ -2235,3 +2236,30 @@ Pedido do usuário: fechar as duas ressalvas declaradas no
 
 - Suítes: 236 verdes no build padrão (2 ignorados) e 249 com `online` (4 ignorados) — três
   testes novos, nenhum pré-existente alterado. Clippy e fmt limpos nas duas features.
+
+## D-094 — Reversão do teto do `Inflight`
+
+- Decisão do usuário, depois de o [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight)
+  apresentar a escolha: **manter a convenção** de testar só pelas costuras públicas e reverter o
+  teto. O primeiro (e único) `#[cfg(test)] mod tests` de `src/` saiu junto com ele.
+- Revertido: `MAX_WAITING`, a função `trim`, o contador `arrivals` e o par `(ordem, id)` nas
+  filas. O `waiting` volta a ser `HashMap<String, VecDeque<String>>`, e `start` e `cancel`
+  voltam à forma anterior. O `src/mcp.rs` ficou byte a byte igual ao estado do
+  [D-092](#d-092--vazamento-do-inflight-e-cache-hit-de-nota): 111 linhas fora, as 7 originais de
+  volta.
+- **Não revertido:** o guard de admissão do D-092 e a reordenação do `install` (a outra metade
+  do D-093). Ambos conferidos no lugar depois da reversão. Os testes deles continuam:
+  `a_rejected_tools_call_is_not_tracked_forever` e
+  `install_refuses_a_workspace_path_that_is_not_utf8`.
+- **Risco residual, de novo aberto e registrado aqui para não se perder:** o registro não tem
+  teto. As duas formas que vazavam estão fechadas pelo guard do D-092, e um teste de regressão
+  as cobre; mas se uma versão futura do `rust-mcp-sdk` passar a responder outra forma de request
+  antes de chegar ao handler, os ids voltam a acumular pela vida do processo, com o texto da
+  tarefa nas chaves. O sinal de alarme é o `tracked_calls` do recurso de status crescer e não
+  voltar a zero.
+- A razão de não haver teto não é técnica, é de processo: ele só dispara em vazamentos que o
+  guard tornou irreproduzíveis, e `received()` roda no mesmo task que reivindica o id, então
+  nenhuma costura pública consegue encher o `waiting`. Sem teste possível pelas costuras
+  públicas, a escolha ficou entre quebrar a convenção e não ter o teto — e a convenção venceu.
+- Suítes: 234 verdes no build padrão (2 ignorados) e 247 com `online` (4 ignorados) — os dois
+  testes inline saíram, nenhum outro teste alterado. Clippy e fmt limpos nas duas features.
