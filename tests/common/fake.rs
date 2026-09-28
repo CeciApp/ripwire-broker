@@ -63,6 +63,8 @@ pub struct FakeUpstream {
     /// Round-trip latency added to every call, to measure overlap.
     latency: Option<std::time::Duration>,
     calls: Mutex<Vec<(String, Value)>>,
+    /// `list_tools` calls, which the availability probe of the status resource makes.
+    probes: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeUpstream {
@@ -130,11 +132,21 @@ impl FakeUpstream {
     pub fn called(&self) -> Vec<String> {
         self.calls().into_iter().map(|(t, _)| t).collect()
     }
+
+    /// How many `list_tools` round trips this upstream has served.
+    pub fn probes(&self) -> usize {
+        self.probes.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[async_trait]
 impl Upstream for FakeUpstream {
     async fn list_tools(&self) -> Result<Vec<String>, UpstreamError> {
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(d) = self.latency {
+            tokio::time::sleep(d).await;
+        }
         Ok(self.tools.clone())
     }
 
