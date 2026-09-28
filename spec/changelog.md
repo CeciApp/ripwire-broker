@@ -63,7 +63,7 @@
 | 2026-09-27 17:55 | Proposta: feature Cargo `online` + flag `--online`; credencial só no `env`; teste de CA-10 sobre o grafo do build padrão | [D-059](#d-059--feature-online-e-ca-10-proposta) |
 | 2026-09-27 17:55 | Proposta: classificador só nas rotas que terminam em `explore`; demais rotas com `semantic_skipped` | [D-060](#d-060--gate-por-rota-proposta) |
 | 2026-09-27 17:55 | Proposta: `RankedPath`, rescore dos paths do planner, lookahead de um nível e unidades por chunk | [D-061](#d-061--candidatos-e-unidades-proposta) |
-| 2026-09-27 17:55 | Proposta: rascunho de `prompts/v1` e tetos 4 em voo / 24 requests | [D-062](#d-062--prompts-v1-e-tetos-proposta) |
+| 2026-09-27 17:55 | Proposta: rascunho de `prompts/v1` e tetos 4 em voo / 24 requests | [D-062](#d-062--promptsv1-e-tetos-proposta) |
 | 2026-09-27 17:55 | Proposta: `provenance.online.discovery`, `Basis::RemoteClassifier`, `Item.semantic`; `interrupted` só por prazo de descoberta | [D-063](#d-063--envelope-online-e-interrupted-proposta) |
 | 2026-09-27 17:55 | Proposta: cache por pergunta; `doctor --jev-probe` sintético; `install --online`; hooks e wrapper offline | [D-064](#d-064--cache-diagnóstico-e-integração-proposta) |
 | 2026-09-27 18:01 | Usuário aprovou D-059 a D-064 e o início do Sprint 0 | [D-065](#d-065--aprovação-das-propostas-das-fases-4-e-5) |
@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 19:47 | Teto nos três caches sem limite, dimensionado por medição: `SemanticCache` em 4.000, `SessionMemory` em 5.000, notas em 500, despejo do mais antigo | [D-097](#d-097--teto-nos-três-caches-medido-antes-de-escolher-os-números) |
 | 2026-09-28 18:20 | Revisão de arquitetura: 10 gargalos medidos e ordenados; `snapshot` fica 2–4x mais rápido, o gate paga 2 idas e voltas em vez de 3, e o fan-out dos `edit_check` foi revertido por colidir com RF-14 | [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos) |
 
 ---
@@ -2456,3 +2457,107 @@ tokens ele fique em menos de 1 ms.
 
 234 verdes no build padrão (2 ignorados) e 247 com `online` (4 ignorados), os mesmos de antes: as
 três asserções novas entraram num teste existente. Clippy e fmt limpos nas duas features.
+
+---
+
+## D-097 — Teto nos três caches, medido antes de escolher os números
+
+O [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos) listou "três
+caches sem teto" como item 8. O usuário pediu para medir o crescimento antes de escolher os
+valores, e a medição mudou três coisas do plano.
+
+### O que foi medido
+
+Sonda temporária dirigindo 290 chamadas de `context_for_task` com payloads variados por
+iteração — um cache que só repete a mesma chave não cresce, e medir isso não diria nada. Base de
+RSS tomada na 10ª chamada, depois do aquecimento do alocador. A sonda foi removida.
+
+| | entradas por chamada | após 300 chamadas |
+| --- | --- | --- |
+| `SemanticCache` | **68** | 20.400 |
+| `SessionMemory.seen` | ~6 | 1.809 |
+| `NoteEngine.cache` | 1 | 302 |
+
+| configuração | delta de RSS em 290 chamadas | por chamada |
+| --- | --- | --- |
+| sem `--online` | 1,3 MB | 4,5 KiB |
+| com `--online` | 14,4 MB | ~50 KiB |
+
+**O cache semântico é ~90% de todo o crescimento**: 13 MB dos 14,4. Linear, sem patamar.
+
+### O que a medição corrigiu no plano
+
+- **68 entradas por chamada, não 7.** Só 7 requisições ao Jev acontecem por chamada; as
+  requisições são em lote, então uma resposta popula dezenas de entradas. O `request_limit: 24`
+  por chamada dava falsa segurança: o cache cresce ~10x mais rápido que as requisições.
+- **~680 bytes por entrada, não ~200.** A aritmética da struct (`[u8; 32]` + `f64` + digest +
+  `SystemTime`) dá ~200 B; o medido é 3,4x isso, por capacidade do `HashMap` dobrando, alocação
+  do `request_digest` e arredondamento do alocador. Um teto dimensionado pelo cálculo erraria
+  por 3x.
+- **Os três não têm peso parecido.** Um domina e dois são ruído: as notas a 1 entrada por
+  chamada levam ~500 chamadas para chegar ao teto, e a memória de sessão ~800.
+- **Não há guarda nenhum sobre o broker.** `--ripwire-max-rss-mb`
+  ([`src/supervise.rs`](../src/supervise.rs)) vigia o **ripwire**, processo filho. O broker, que
+  hospeda os três caches e vive o tempo todo da sessão, não tem teto nem vigia.
+
+### Os tetos
+
+| cache | teto | custo no pior caso | histórico que cabe |
+| --- | --- | --- | --- |
+| `SemanticCache` | 4.000 | ~2,7 MB | ~59 chamadas |
+| `SessionMemory.seen` | 5.000 | ~640 KB | ~800 chamadas |
+| `NoteEngine.cache` (e `failed`) | 500 | ~350 KB | ~500 chamadas |
+
+**Despejo pelo mais antigo inserido, por fila explícita de ordem, não por `stored_at`.** O
+`Cached` já carrega `stored_at` e era o caminho óbvio, mas uma resposta em lote insere dezenas de
+entradas dentro da resolução do relógio: os empates fariam o despejo depender de plataforma. A
+fila torna "mais antigo" exato e o teste independente de clock. Atualizar uma chave já presente
+não é inserção nova e não despeja nada — afirmado em teste.
+
+### A troca que o teto do cache semântico embute
+
+Passadas ~59 chamadas, revisitar o mesmo conteúdo com a mesma pergunta pode virar requisição nova
+ao Jev: **custo em dinheiro e um envio a mais de conteúdo do workspace**. Isso toca consentimento
+(§23.6), não só memória — teto mais alto protege menos a memória e mais a privacidade. Decisão do
+usuário, tomada com os números à vista, não escolhida pelo implementador.
+
+### A consequência que a memória de sessão embute
+
+`seen` é um `BTreeSet<String>` de sha256: **não havia informação de ordem de inserção**. A fila de
+ordem entrou como `#[serde(skip)]`, então **o formato do estado que os hooks persistem não muda**.
+Uma memória restaurada do disco chega sem ordem, e nessa condição o despejo cai em ordem de
+fingerprint até o processo repovoar a fila — documentado no campo. `PartialEq` passou a ser
+implementado à mão sobre `seen` apenas, porque a ordem é escrituração de despejo e não identidade.
+
+Esquecer um fingerprint custa uma entrega repetida daquele item, nunca uma resposta errada. E
+`restore_session` apara na porta, porque o arquivo pode ter sido escrito por uma sessão mais longa
+ou antes de o teto existir.
+
+### O que os testes provam, e o que não provam
+
+Quatro testes novos, cada um vermelho antes da correção (os três tetos não existiam como
+constante, então o vermelho foi de compilação):
+
+- `the_semantic_cache_stops_at_its_ceiling_dropping_the_oldest_first`
+- `updating_a_cached_decision_evicts_nothing`
+- `the_note_cache_stops_at_its_ceiling_dropping_the_oldest_first` — verifica também que a nota
+  despejada é **regerada** e que a mais recente segue servindo do cache
+- `the_session_memory_stops_at_its_ceiling` — aparo na restauração
+
+Reconfirmado com a sonda de RSS: `cached_decisions` fica **fixo em 4.000** a partir da ~59ª
+chamada, contra 20.400 e subindo antes. **O RSS em si não prova patamar** — subiu a 8,7 MB no meio
+da corrida e caiu a 2,5 MB no fim, que é comportamento do alocador sob o rodízio de 68
+inserções/despejos por chamada. A prova do teto é a contagem de entradas, não o RSS, e não vale
+apresentar o segundo como se fosse o primeiro.
+
+### Verificação
+
+238 verdes no build padrão e 251 com `online` (eram 234 e 247; +4 testes). Clippy e fmt limpos nas
+duas features. Os testes ficaram no suíte externo, não inline, como
+[D-094](#d-094--reversão-do-teto-do-inflight) estabeleceu.
+
+### Aberto
+
+O `failed` do `NoteEngine` ficou com o mesmo teto de 500 das notas, por consistência dentro do
+item; ele não foi dimensionado por medição própria, porque suas entradas são removidas na leitura
+e só acumulam a falha que ninguém leu. Se isso merecer número próprio, é um ajuste de uma linha.

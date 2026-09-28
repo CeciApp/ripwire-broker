@@ -512,8 +512,10 @@ impl Broker {
         self.session.lock().unwrap().clone()
     }
 
-    /// Continues a session saved by `session_snapshot`.
-    pub fn restore_session(&self, memory: SessionMemory) {
+    /// Continues a session saved by `session_snapshot`. Trimmed at the door, because the file
+    /// may have been written by a longer session or before the ceiling existed (D-097).
+    pub fn restore_session(&self, mut memory: SessionMemory) {
+        memory.trim();
         *self.session.lock().unwrap() = memory;
     }
 

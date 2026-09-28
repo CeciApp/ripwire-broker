@@ -6,7 +6,7 @@ use crate::model::{Basis, Item, Limitation, Note, Source, Untrusted};
 use crate::summarizer::Summarizer;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,6 +17,10 @@ pub const PROMPT_VERSION: &str = "notes/v1";
 pub const MAX_GROUPS: usize = 3;
 pub const MAX_EVIDENCE_CHARS: usize = 2_000;
 pub const MAX_NOTE_CHARS: usize = 600;
+/// Measured at ~1 entry per MCP call and up to `MAX_NOTE_CHARS` of text each (D-097): about
+/// 350 KiB, roughly 500 calls of history. The same ceiling bounds the failures, whose entries
+/// are removed when read and so only accumulate when nobody reads them.
+pub const MAX_CACHED_NOTES: usize = 500;
 
 fn source() -> Source {
     Source {
@@ -200,6 +204,46 @@ pub fn omitted(n: usize) -> Limitation {
     )
 }
 
+/// A `String -> String` map with a ceiling: at `MAX_CACHED_NOTES` the oldest insertion gives
+/// way (D-097). Insertion order is kept explicitly so eviction is deterministic.
+#[derive(Debug, Default)]
+struct Bounded {
+    entries: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+impl Bounded {
+    fn get(&self, key: &str) -> Option<&String> {
+        self.entries.get(key)
+    }
+
+    fn insert(&mut self, key: String, value: String) {
+        if self.entries.insert(key.clone(), value).is_none() {
+            self.order.push_back(key);
+        }
+        while self.entries.len() > MAX_CACHED_NOTES {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.entries.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &str) -> Option<String> {
+        let gone = self.entries.remove(key);
+        if gone.is_some() {
+            self.order.retain(|k| k != key);
+        }
+        gone
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// Counts for the status resource; never note text or prompts.
 #[derive(Debug, Default)]
 pub struct NoteStats {
@@ -234,8 +278,8 @@ type Running = Option<(String, JoinHandle<()>)>;
 pub struct NoteEngine {
     summarizer: Arc<dyn Summarizer>,
     wait: Duration,
-    cache: Arc<Mutex<HashMap<String, String>>>,
-    failed: Arc<Mutex<HashMap<String, String>>>,
+    cache: Arc<Mutex<Bounded>>,
+    failed: Arc<Mutex<Bounded>>,
     running: Mutex<Running>,
     /// Woken every time a generation settles, so a waiter is handed its note at once
     /// instead of discovering it on the next tick of a poll loop.

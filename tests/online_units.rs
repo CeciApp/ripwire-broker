@@ -764,3 +764,46 @@ fn lookahead_previews_are_capped_at_4_kib_on_a_line_boundary() {
         "planner previews keep 16 KiB"
     );
 }
+
+// --- D-097: the semantic cache has a ceiling ---
+
+use ripwire_broker::online::cache::{MAX_ENTRIES, SemanticCache};
+
+/// `MAX_ENTRIES` distinct keys, in insertion order.
+fn filled(n: usize) -> (SemanticCache, Vec<ripwire_broker::online::cache::Key>) {
+    let queries: Vec<String> = (0..n).map(|i| format!("q{i}")).collect();
+    let keys: Vec<_> = queries
+        .iter()
+        .map(|q| key(&parts("jev-1.13.0", q, "sha256:aa", 0..10)))
+        .collect();
+    let mut cache = SemanticCache::default();
+    for (i, k) in keys.iter().enumerate() {
+        cache.insert(*k, 0.9, format!("sha256:req{i}"));
+    }
+    (cache, keys)
+}
+
+#[test]
+fn the_semantic_cache_stops_at_its_ceiling_dropping_the_oldest_first() {
+    let over = 10;
+    let (cache, keys) = filled(MAX_ENTRIES + over);
+    assert_eq!(cache.len(), MAX_ENTRIES, "the ceiling holds");
+    for k in &keys[..over] {
+        assert!(cache.get(k).is_none(), "the oldest entries gave way");
+    }
+    for k in &keys[over..] {
+        assert!(cache.get(k).is_some(), "the newest entries stayed");
+    }
+}
+
+#[test]
+fn updating_a_cached_decision_evicts_nothing() {
+    let (mut cache, keys) = filled(MAX_ENTRIES);
+    cache.insert(keys[MAX_ENTRIES / 2], 0.5, "sha256:again".into());
+    assert_eq!(cache.len(), MAX_ENTRIES, "an update is not a new entry");
+    assert!(
+        cache.get(&keys[0]).is_some(),
+        "an update must not evict the oldest entry"
+    );
+    assert_eq!(cache.get(&keys[MAX_ENTRIES / 2]).unwrap().probability, 0.5);
+}
