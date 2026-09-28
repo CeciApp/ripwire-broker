@@ -1371,3 +1371,78 @@ async fn a_cancelled_call_stops_its_upstream_work_and_is_recorded() {
     let next = b.context_after_edit(EditRequest::default()).await;
     assert!(next.is_ok(), "the broker still serves: {next:?}");
 }
+
+// --- the lenient reader must stay lenient: bad bytes from ripwire never take the broker down ---
+
+#[tokio::test]
+async fn a_malformed_ripwire_answer_never_panics() {
+    let broken = [
+        "<ctx a=",         // an attribute cut off right after '='
+        "<ctx a=é></ctx>", // an unquoted, non-ASCII attribute value
+        "<ctx",            // a tag that never closes
+        "<ctx a=\"1",      // an attribute value that never closes
+    ];
+    for payload in broken {
+        let (b, _fake, _ws) = broker(FakeUpstream::new().answer_text("explore", payload)).await;
+
+        let out = to_json(
+            &b.context_for_task(TaskRequest::new("orient me in this repository"))
+                .await
+                .unwrap_or_else(|e| panic!("{payload:?}: {e}")),
+        );
+
+        assert_eq!(out["status"], "unknown", "{payload:?}: {out}");
+        assert_eq!(out["items"], json!([]), "{payload:?}: {out}");
+    }
+}
+
+#[tokio::test]
+async fn an_unquoted_attribute_does_not_swallow_the_rest_of_the_answer() {
+    let payload = "<ctx a=é><sigs><d n=\"login\" p=\"src/auth.py\" l=\"5\" r=\"1\">def login()</d></sigs></ctx>";
+    let (b, _fake, _ws) = broker(FakeUpstream::new().answer_text("explore", payload)).await;
+
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new("orient me in this repository"))
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(out["status"], "ready", "{out}");
+    assert_eq!(out["items"][0]["symbol"], "login", "{out}");
+    assert_eq!(out["items"][0]["path"], "src/auth.py", "{out}");
+}
+
+// --- a truncated memory_recall answer must declare what it could not read ---
+
+#[tokio::test]
+async fn an_incomplete_recall_block_is_declared_not_dropped() {
+    // The second block's head arrives without its body: the answer was cut short.
+    let truncated = "ripwire recall — \"auth\" — 2 relevant of 2 document files — total=2 shown=2 capped=0\n\n\
+         ━━ docs/a.md  (relevance 1.350) ━━  [lines=\"1-2\"]\n# A\nfirst doc body\n\n\
+         ━━ docs/b.md  (relevance 0.900) \n";
+    let (b, _fake, _ws) = broker(FakeUpstream::new().answer_text("memory_recall", truncated)).await;
+
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new(
+            "qual foi a decisão de arquitetura sobre autenticação?",
+        ))
+        .await
+        .unwrap(),
+    );
+
+    assert_eq!(out["intent"], "docs");
+    let items = out["items"].as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "only the complete block becomes an item: {out}"
+    );
+    assert_eq!(items[0]["path"], "docs/a.md");
+    let lim = out["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["source"]["verb"] == "memory_recall")
+        .unwrap_or_else(|| panic!("the dropped block is never silent: {out:#}"));
+    assert_eq!(lim["kind"], "unparsed_upstream", "{lim}");
+}

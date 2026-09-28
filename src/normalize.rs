@@ -495,6 +495,18 @@ pub fn recall(payload: &str) -> Vec<Entry> {
             },
         ));
     }
+    // A block head without its body: the answer was cut short. Never dropped in silence,
+    // and never completed by guessing (RF-12).
+    let unread = rest.iter().filter(|b| !b.trim().is_empty()).count();
+    if unread > 0 {
+        out.push(limitation(
+            verb,
+            "unparsed_upstream",
+            format!(
+                "memory_recall: {unread} document block(s) arrived incomplete and were not read"
+            ),
+        ));
+    }
     if header.contains("capped=1") {
         out.push(limitation(
             verb,

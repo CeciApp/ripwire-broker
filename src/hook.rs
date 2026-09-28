@@ -223,6 +223,11 @@ fn has_news(env: &Envelope, before: &SessionMemory) -> bool {
 /// The finish gate in one line: status, the risk kinds behind it and the tests to run.
 fn gate_notice(env: &Envelope) -> String {
     let mut kinds: Vec<&str> = env.risks.iter().map(|r| r.kind).collect();
+    // `dedup` only drops adjacent duplicates, and risks arrive in priority order, not by
+    // kind: sort first, or the same kind is listed twice.
+    if !kinds.is_sorted() {
+        kinds.sort_unstable();
+    }
     kinds.dedup();
     format!(
         "ripwire-broker: finish gate {} · risks: {} · {} tests to run",

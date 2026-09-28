@@ -1445,3 +1445,32 @@ fn reinstalling_without_online_turns_it_off() {
     assert_eq!(server["args"], json!(["--workspace", root_s]));
     assert!(server.get("env").is_none());
 }
+
+// --- install must reject a binary path it cannot write into a host config ---
+
+#[test]
+fn install_refuses_a_binary_path_that_is_not_utf8() {
+    use ripwire_broker::cli::InstallArgs;
+    use std::os::unix::ffi::OsStrExt;
+
+    let ws = tempfile::tempdir().unwrap();
+    let codex_home = tempfile::tempdir().unwrap();
+    let binary = PathBuf::from(std::ffi::OsStr::from_bytes(b"/opt/rip\xffwire"));
+
+    for host in [Host::ClaudeCode, Host::Codex] {
+        let args = InstallArgs {
+            host,
+            workspace: ws.path().to_path_buf(),
+            hooks: false,
+            write: false,
+            codex_home: Some(codex_home.path().to_path_buf()),
+            online: false,
+        };
+
+        let Err(err) = ripwire_broker::install::plan(&args, &binary) else {
+            panic!("{host:?}: a path the config cannot carry must be refused");
+        };
+
+        assert!(err.contains("UTF-8"), "{host:?}: {err}");
+    }
+}

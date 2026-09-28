@@ -693,3 +693,31 @@ async fn a_call_cancelled_while_waiting_for_a_note_remembers_nothing() {
         "the cancelled answer never reached the agent: {after}"
     );
 }
+
+// --- D-036: a note that is ready is handed over at once, never at the next poll tick ---
+
+#[tokio::test(start_paused = true)]
+async fn a_ready_note_does_not_wait_for_a_poll_tick() {
+    let model = Arc::new(FakeSummarizer::replying("an architectural note"));
+    let ws = tempfile::tempdir().unwrap();
+    let mut config = BrokerConfig::new(ws.path());
+    config.summarizer = Some(model.clone());
+    config.summarizer_wait = Duration::from_secs(5);
+    let fake = Arc::new(FakeUpstream::new().answer("explore", "explore_export_auth"));
+    let b = Broker::connect(fake, config).await.unwrap();
+
+    // Virtual time: it only moves when something actually waits on a timer.
+    let started = tokio::time::Instant::now();
+    let out = to_json(&b.context_for_task(orient(4000)).await.unwrap());
+    let took = started.elapsed();
+
+    assert_eq!(
+        out["notes"][0]["text"]["untrusted_repository_data"], "an architectural note",
+        "{out}"
+    );
+    assert_eq!(
+        took,
+        Duration::ZERO,
+        "the model answered at once; the answer waited {took:?} on a timer"
+    );
+}
