@@ -2,6 +2,7 @@
 
 use crate::model::{Envelope, Item, Limitation, Note};
 use crate::normalize::Entry;
+use serde::Serialize;
 
 pub fn estimate_tokens(env: &Envelope) -> u32 {
     serde_json::to_string(env)
@@ -11,6 +12,33 @@ pub fn estimate_tokens(env: &Envelope) -> u32 {
 
 fn over(env: &Envelope) -> bool {
     estimate_tokens(env) > env.budget.requested_tokens
+}
+
+/// The envelope's compact JSON length. `usize::MAX` when it cannot be serialized, so an
+/// unserializable envelope is over any budget, as `estimate_tokens` already had it by
+/// answering `u32::MAX`.
+fn json_len(env: &Envelope) -> usize {
+    serde_json::to_string(env)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// Bytes that appending `value` to an array already holding `count` elements adds to the
+/// envelope's JSON: the element, plus the comma when it is not the first. Exact for serde_json's
+/// compact form, where an empty array is `[]` and `n` elements cost `sum + n - 1` inside the
+/// brackets, and `items`, `tests`, `risks` and `limitations` are never skipped when empty.
+/// `None` when the value cannot be serialized — a non-finite float — which the caller treats as
+/// not fitting, the same answer the whole-envelope estimate gave.
+fn added<T: Serialize>(value: &T, count: usize) -> Option<usize> {
+    let body = serde_json::to_string(value).ok()?.len();
+    Some(body + usize::from(count > 0))
+}
+
+/// `len` grown by `value`, or `None` when that would pass `budget`. Checking the sum is the same
+/// decision `over()` made after pushing, without serializing the envelope again (D-099).
+fn fits<T: Serialize>(value: &T, count: usize, len: usize, budget: u32) -> Option<usize> {
+    let next = len.checked_add(added(value, count)?)?;
+    (next.div_ceil(4) <= budget as usize).then_some(next)
 }
 
 enum Added {
@@ -31,27 +59,37 @@ pub fn fill(env: &mut Envelope, mut entries: Vec<Entry>) {
         .filter(|e| !matches!(e, Entry::Limitation(_)))
         .count();
     let mut order: Vec<Added> = Vec::new();
+    // The envelope's JSON length, carried along and grown by each entry that goes in, instead
+    // of re-serialized whole for every candidate. Only the four arrays below change while this
+    // loop runs, and each change is accounted for exactly, so the fit decisions are the ones
+    // the whole-envelope estimate made (D-099). `finish` recomputes from scratch afterwards.
+    let mut len = json_len(env);
+    let budget = env.budget.requested_tokens;
     for entry in entries {
         match entry {
-            Entry::Limitation(l) => env.limitations.push(l),
+            // Always kept (PRD 10.2 #1), so this one is not a fit decision: it is accounted
+            // for and pushed.
+            Entry::Limitation(l) => {
+                len =
+                    added(&l, env.limitations.len()).map_or(usize::MAX, |d| len.saturating_add(d));
+                env.limitations.push(l);
+            }
             Entry::Item(_, item) => {
-                if try_item(env, item) {
+                if try_item(env, item, &mut len, budget) {
                     order.push(Added::Item);
                 }
             }
             Entry::Test(_, t) => {
-                env.tests.push(t);
-                if over(env) {
-                    env.tests.pop();
-                } else {
+                if let Some(next) = fits(&t, env.tests.len(), len, budget) {
+                    len = next;
+                    env.tests.push(t);
                     order.push(Added::Test);
                 }
             }
             Entry::Risk(_, r) => {
-                env.risks.push(r);
-                if over(env) {
-                    env.risks.pop();
-                } else {
+                if let Some(next) = fits(&r, env.risks.len(), len, budget) {
+                    len = next;
+                    env.risks.push(r);
                     order.push(Added::Risk);
                 }
             }
@@ -61,22 +99,24 @@ pub fn fill(env: &mut Envelope, mut entries: Vec<Entry>) {
 }
 
 /// Whole item first; if it does not fit, the same item without its body (bodies on demand).
-fn try_item(env: &mut Envelope, item: Item) -> bool {
-    let slim = item.content.is_some().then(|| Item {
-        content: None,
-        ..item.clone()
-    });
-    env.items.push(item);
-    if !over(env) {
+/// Nothing is pushed speculatively any more, so the item no longer has to be cloned to keep a
+/// slim copy of it around.
+fn try_item(env: &mut Envelope, item: Item, len: &mut usize, budget: u32) -> bool {
+    if let Some(next) = fits(&item, env.items.len(), *len, budget) {
+        *len = next;
+        env.items.push(item);
         return true;
     }
-    env.items.pop();
-    if let Some(slim) = slim {
-        env.items.push(slim);
-        if !over(env) {
+    if item.content.is_some() {
+        let slim = Item {
+            content: None,
+            ..item
+        };
+        if let Some(next) = fits(&slim, env.items.len(), *len, budget) {
+            *len = next;
+            env.items.push(slim);
             return true;
         }
-        env.items.pop();
     }
     false
 }

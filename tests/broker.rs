@@ -1511,3 +1511,136 @@ async fn the_availability_probe_is_taken_again_after_its_window() {
         "past the window the status asks the upstream again"
     );
 }
+
+// --- D-099: budget_tokens has an enforced ceiling ---
+
+#[tokio::test]
+async fn a_budget_beyond_the_declared_maximum_is_refused() {
+    use ripwire_broker::broker::MAX_BUDGET_TOKENS;
+
+    let (b, fake, _ws) = broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    let mut req = TaskRequest::new("how are the routes authenticated?");
+    req.budget_tokens = MAX_BUDGET_TOKENS + 1;
+    let Err(err) = b.context_for_task(req).await else {
+        panic!("a budget past the declared maximum must be refused");
+    };
+    assert_eq!(err.error, "invalid_input");
+    assert!(
+        err.message.contains(&MAX_BUDGET_TOKENS.to_string()),
+        "the refusal names the ceiling: {}",
+        err.message
+    );
+    assert!(
+        fake.called().is_empty(),
+        "refused before any upstream work, like the minimum is"
+    );
+
+    // The ceiling itself is accepted: it is the declared maximum, not one past it.
+    let mut ok = TaskRequest::new("how are the routes authenticated?");
+    ok.budget_tokens = MAX_BUDGET_TOKENS;
+    assert!(b.context_for_task(ok).await.is_ok());
+}
+
+#[tokio::test]
+async fn every_tool_enforces_the_budget_ceiling() {
+    let (b, _fake, _ws) = broker(
+        FakeUpstream::new()
+            .answer("explore", "explore_export_auth")
+            .answer("situational_awareness", "situational_awareness_edit")
+            .answer("edit_check", "edit_check_login"),
+    )
+    .await;
+    let over = ripwire_broker::broker::MAX_BUDGET_TOKENS + 1;
+
+    let edit = EditRequest {
+        budget_tokens: over,
+        ..Default::default()
+    };
+    assert!(
+        b.context_after_edit(edit).await.is_err(),
+        "context_after_edit"
+    );
+
+    let finish = FinishRequest {
+        budget_tokens: over,
+        ..Default::default()
+    };
+    assert!(
+        b.context_before_finish(finish).await.is_err(),
+        "context_before_finish"
+    );
+}
+
+// --- D-099: shaping stays exact under any budget ---
+
+/// A synthetic pack-task with `n` symbols and their bodies, so the budget sweep below has
+/// enough entries to cut at many different places.
+fn many_symbols(n: usize) -> String {
+    let mut sigs = String::new();
+    let mut bodies = String::new();
+    for i in 0..n {
+        sigs.push_str(&format!(
+            "<d l=\"{}\" n=\"sym{i}\" p=\"src/mod{}/f{i}.py\" cx=\"1\" ccx=\"0\" in=\"0\" r=\"{}\">def sym{i}(a, b):</d>",
+            i + 1,
+            i % 3,
+            i + 1
+        ));
+        bodies.push_str(&format!(
+            "<b t=\"fn\" l=\"{}\" p=\"src/mod{}/f{i}.py\" n=\"sym{i}\"><![CDATA[def sym{i}(a, b):\n    return a + b + {i}]]></b>",
+            i + 1,
+            i % 3
+        ));
+    }
+    format!(
+        "<ctx schema=\"ripwire.pack-task/v1\" task=\"t\" route=\"subtoken+body\" root=\"/tmp/x\" est_tokens=\"1\" budget_tokens=\"1\"><sigs>{sigs}</sigs><bodies shown=\"{n}\" total=\"{n}\">{bodies}</bodies></ctx>"
+    )
+}
+
+#[tokio::test]
+async fn the_shaped_envelope_never_exceeds_its_budget_and_grows_with_it() {
+    let (b, _fake, _ws) =
+        broker(FakeUpstream::new().answer_text("explore", &many_symbols(24))).await;
+
+    // Recorded from the implementation this test was written against, before the incremental
+    // accounting replaced it: if the byte arithmetic drifts by even one byte, a boundary moves
+    // and one of these changes.
+    let goldens = [
+        (400u32, 3usize),
+        (600, 5),
+        (800, 8),
+        (1000, 11),
+        (1200, 13),
+        (1400, 16),
+    ];
+
+    let mut last_shown = 0usize;
+    for budget in (256u32..=1400).step_by(4) {
+        let mut req = TaskRequest::new("uma tarefa");
+        req.mode = Mode::Orient;
+        req.budget_tokens = budget;
+        let env = b.context_for_task(req).await.unwrap();
+
+        assert!(
+            env.budget.estimated_tokens <= budget,
+            "budget {budget}: the envelope reports {} tokens, over what was asked",
+            env.budget.estimated_tokens
+        );
+        assert!(
+            env.budget.shown >= last_shown,
+            "budget {budget}: shown fell from {last_shown} to {} as the budget grew",
+            env.budget.shown
+        );
+        assert_eq!(
+            env.budget.shown + env.budget.omitted,
+            24,
+            "budget {budget}: every entry is either shown or counted as omitted"
+        );
+        last_shown = env.budget.shown;
+        if let Some((_, want)) = goldens.iter().find(|(at, _)| *at == budget) {
+            assert_eq!(
+                env.budget.shown, *want,
+                "budget {budget}: shown moved, so the fit decisions are not what they were"
+            );
+        }
+    }
+}

@@ -2,8 +2,8 @@
 //! The only module that knows about the SDK's server types; the core stays SDK-agnostic.
 
 use crate::broker::{
-    Broker, BrokerConfig, BrokerError, EditRequest, FinishRequest, MIN_BUDGET_TOKENS,
-    MIN_ONLINE_BUDGET_TOKENS, Mode, TaskRequest,
+    Broker, BrokerConfig, BrokerError, EditRequest, FinishRequest, MAX_BUDGET_TOKENS,
+    MIN_BUDGET_TOKENS, MIN_ONLINE_BUDGET_TOKENS, Mode, TaskRequest,
 };
 use crate::model::SCHEMA_VERSION;
 use crate::upstream::{RipwireUpstream, UpstreamConfig};
@@ -239,7 +239,7 @@ fn budget_schema(default: u32) -> Value {
 }
 
 fn budget_schema_from(default: u32, minimum: u32) -> Value {
-    json!({"type": "integer", "minimum": minimum, "maximum": 100000, "default": default,
+    json!({"type": "integer", "minimum": minimum, "maximum": MAX_BUDGET_TOKENS, "default": default,
            "description": "Upper bound for the estimated tokens of the whole answer (4 bytes of JSON per token)."})
 }
 

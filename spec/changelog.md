@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 20:18 | O `budget_tokens` passa a ter teto aplicado (100.000, o que o schema MCP já declarava sem impor) e o shaping do envelope deixa de re-serializar o envelope por candidato: 16x no orçamento padrão e 48x no teto | [D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear) |
 | 2026-09-28 20:05 | `status()` deixa de pagar uma ida e volta upstream por leitura: a sonda de disponibilidade vale por `STATUS_PROBE`; 10 leituras caem de 220 para 22 ms a 20 ms de RTT, e um ripwire ocupado de 3 s para 1 s | [D-098](#d-098--a-sonda-de-disponibilidade-do-status-reaproveitada-por-uma-janela) |
 | 2026-09-28 19:47 | Teto nos três caches sem limite, dimensionado por medição: `SemanticCache` em 4.000, `SessionMemory` em 5.000, notas em 500, despejo do mais antigo | [D-097](#d-097--teto-nos-três-caches-medido-antes-de-escolher-os-números) |
 | 2026-09-28 18:20 | Revisão de arquitetura: 10 gargalos medidos e ordenados; `snapshot` fica 2–4x mais rápido, o gate paga 2 idas e voltas em vez de 3, e o fan-out dos `edit_check` foi revertido por colidir com RF-14 | [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos) |
@@ -2636,3 +2637,113 @@ de propósito: mexer nele mudaria o comportamento de testes que usam `.down()` e
 
 240 verdes no build padrão e 253 com `online` (eram 238 e 251). Clippy e fmt limpos nas duas
 features.
+
+---
+
+## D-099 — Teto aplicado no `budget_tokens`, e shaping do envelope em tempo linear
+
+Item 3 do [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos).
+
+### Primeiro: o D-096 errou o tamanho deste item
+
+O D-096 escreveu que o custo super-linear do shaping "fica em menos de 1 ms com o orçamento padrão
+de 2500 tokens". **Isso foi medido com o fixture de ~11 entradas**, e a conclusão não vale fora
+dele. Medido com um pack-task sintético de entradas variáveis:
+
+| entradas | orçamento | antes |
+| --- | --- | --- |
+| 128 | 2.500 | 61,05 ms |
+| 512 | 2.500 | **295,41 ms** |
+| 256 | 100.000 | 276,66 ms |
+| 512 | 100.000 | **1,10 s** |
+
+295 ms **no orçamento padrão**, não em orçamento grande. O item estava mal dimensionado na lista,
+e por um erro meu de generalizar de um fixture pequeno.
+
+### O diagnóstico, instrumentado
+
+Contador temporário de serializações e de bytes serializados dentro de `estimate_tokens`:
+
+| entradas | orçamento | serializações | bytes serializados |
+| --- | --- | --- | --- |
+| 512 | 2.500 | 996 | 10,1 MB |
+| 512 | 100.000 | 514 | **41,5 MB** |
+
+O custo **são os bytes**, não o número de chamadas: cada uma das ~n serializações cobre um
+envelope cada vez maior. O tempo acompanha os bytes exatamente.
+
+E o número de entradas não é limitado pelo broker — `normalize` não tem teto — e o broker pede ao
+ripwire com o `budget_tokens` do cliente. Ou seja: **as entradas seguem o orçamento**, e o custo
+é quadrático no orçamento.
+
+### O teto: 100.000, que já estava declarado e não era imposto
+
+`check_budget` só validava o mínimo. O número do teto não foi inventado: o schema MCP declara
+`"maximum": 100000` desde que os schemas foram escritos ([`src/mcp.rs`](../src/mcp.rs)) — só não
+havia nada que o aplicasse. O literal aparecia **em um único lugar do código e em nenhum teste ou
+spec**. Um cliente chamando fora do schema, ou a CLI e os hooks, que nunca o veem, podiam pedir
+qualquer `u32`.
+
+Agora `check_budget_at` recusa acima de `MAX_BUDGET_TOKENS`, com `invalid_input`, antes de
+qualquer trabalho upstream, do mesmo jeito que o mínimo já era recusado. O `src/mcp.rs` publica a
+constante em vez de repetir o literal, então o schema e a validação não podem divergir.
+
+### A contagem incremental
+
+`over(env)` serializava o **envelope inteiro** a cada `push` de candidato. O laço do `fill` passou
+a carregar o comprimento em bytes e a somar só o que cada entrada acrescenta.
+
+**Por que é exato, e não estimativa:** `items`, `tests`, `risks` e `limitations` nunca têm
+`skip_serializing_if`, então a forma é estável — um array vazio é `[]`, e `n` elementos custam
+`soma + n - 1` entre os colchetes. Acrescentar um elemento custa o próprio elemento mais a vírgula
+quando não é o primeiro. Nenhum outro campo muda durante o laço, e o `finish` recalcula do zero
+depois. As decisões de corte são as mesmas, byte a byte.
+
+**O que ficou intocado de propósito:** o `finish` e o `add_notes` continuam com a serialização
+cheia. Lá o número de serializações já é pequeno no caso comum, e a escrituração dos campos de
+`budget` — `next_step` é uma string que carrega números — mudaria o comprimento de formas que não
+vale a pena rastrear à mão. Otimizar onde não havia problema só acrescentaria risco.
+
+**Um efeito colateral bom:** nada é mais empurrado especulativamente, então o item não precisa mais
+ser clonado para guardar uma versão sem corpo. O clone por item saiu junto.
+
+**Um caso de borda preservado:** um valor que não serializa (um `f64` não-finito em
+`SemanticEvidence.probability`) é tratado como "não cabe" e o item é descartado — exatamente o que
+o `estimate_tokens` já fazia respondendo `u32::MAX`.
+
+### Depois
+
+| entradas | orçamento | antes | depois | fator |
+| --- | --- | --- | --- | --- |
+| 128 | 2.500 | 61,05 ms | 5,84 ms | 10,5x |
+| 512 | 2.500 | 295,41 ms | 18,52 ms | **16x** |
+| 128 | 100.000 | 72,02 ms | 4,72 ms | 15,3x |
+| 256 | 100.000 | 276,66 ms | 10,08 ms | 27,5x |
+| 512 | 100.000 | 1,10 s | 22,81 ms | **48x** |
+
+O escalonamento virou quase linear: dobrar de 256 para 512 entradas no teto custa 2,26x, contra
+3,97x antes.
+
+### Os testes
+
+**Vermelho de verdade, para o teto:**
+
+- `a_budget_beyond_the_declared_maximum_is_refused` — recusa com `invalid_input`, a mensagem nomeia
+  o teto, nenhuma chamada upstream acontece, e o teto **em si** é aceito (é o máximo declarado, não
+  um acima dele)
+- `every_tool_enforces_the_budget_ceiling` — `context_after_edit` e `context_before_finish` também
+
+**Caracterização, para o refactor** — e vale dizer que é isso, não TDD:
+
+- `the_shaped_envelope_never_exceeds_its_budget_and_grows_with_it` varre 288 orçamentos de 256 a
+  1400 sobre 24 entradas e afirma, para cada um, que o envelope não passa do orçamento pedido, que
+  `shown` nunca cai quando o orçamento cresce, e que toda entrada está ou mostrada ou contada como
+  omitida. Mais **seis valores-ouro** de `shown` colhidos da implementação antiga: se a aritmética
+  de bytes desviar um único byte, uma fronteira se move e um deles muda.
+- Confirmado **verde no código antigo** antes do refactor. De quebra, o próprio teste caiu de
+  1,02 s para 0,26 s, que é o ganho aparecendo no suíte.
+
+### Verificação
+
+243 verdes no build padrão e 256 com `online` (eram 240 e 253; +3 testes). Clippy e fmt limpos nas
+duas features.

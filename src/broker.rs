@@ -86,6 +86,14 @@ pub const STATUS_CACHE: Duration = STATUS_PROBE;
 /// Smallest budget that still fits the envelope skeleton plus a few limitations.
 pub const MIN_BUDGET_TOKENS: u32 = 256;
 
+/// Largest budget the tools accept. The number is not new: the MCP input schema has declared
+/// `"maximum": 100000` since the schemas were written, but nothing enforced it, so a client
+/// calling outside the schema — or the CLI and the hooks, which never see it — could ask for
+/// any `u32`. Shaping an envelope costs bytes proportional to the entries times the envelope,
+/// and the entries follow the budget, so an unenforced ceiling made that cost caller-controlled
+/// (D-099). `src/mcp.rs` now publishes this constant instead of repeating the literal.
+pub const MAX_BUDGET_TOKENS: u32 = 100_000;
+
 /// Oldest ripwire whose verbs and payload formats the fixtures were recorded from (PRD 15.3).
 pub const MIN_RIPWIRE_VERSION: (u64, u64, u64) = (0, 6, 4);
 
@@ -130,6 +138,12 @@ fn check_budget_at(budget: u32, min: u32) -> Result<(), BrokerError> {
         return Err(BrokerError {
             error: "invalid_input",
             message: format!("budget_tokens must be at least {min}"),
+        });
+    }
+    if budget > MAX_BUDGET_TOKENS {
+        return Err(BrokerError {
+            error: "invalid_input",
+            message: format!("budget_tokens must be at most {MAX_BUDGET_TOKENS}"),
         });
     }
     Ok(())
