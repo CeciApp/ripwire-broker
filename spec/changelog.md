@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 20:05 | `status()` deixa de pagar uma ida e volta upstream por leitura: a sonda de disponibilidade vale por `STATUS_PROBE`; 10 leituras caem de 220 para 22 ms a 20 ms de RTT, e um ripwire ocupado de 3 s para 1 s | [D-098](#d-098--a-sonda-de-disponibilidade-do-status-reaproveitada-por-uma-janela) |
 | 2026-09-28 19:47 | Teto nos três caches sem limite, dimensionado por medição: `SemanticCache` em 4.000, `SessionMemory` em 5.000, notas em 500, despejo do mais antigo | [D-097](#d-097--teto-nos-três-caches-medido-antes-de-escolher-os-números) |
 | 2026-09-28 18:20 | Revisão de arquitetura: 10 gargalos medidos e ordenados; `snapshot` fica 2–4x mais rápido, o gate paga 2 idas e voltas em vez de 3, e o fan-out dos `edit_check` foi revertido por colidir com RF-14 | [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos) |
 
@@ -2561,3 +2562,77 @@ duas features. Os testes ficaram no suíte externo, não inline, como
 O `failed` do `NoteEngine` ficou com o mesmo teto de 500 das notas, por consistência dentro do
 item; ele não foi dimensionado por medição própria, porque suas entradas são removidas na leitura
 e só acumulam a falha que ninguém leu. Se isso merecer número próprio, é um ajuste de uma linha.
+
+---
+
+## D-098 — A sonda de disponibilidade do status, reaproveitada por uma janela
+
+Item 9 do [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos).
+`status()` fazia um `list_tools()` no upstream **a cada leitura** do recurso de status.
+
+### Medido
+
+Sondas temporárias, removidas depois. Dez leituras seguidas de `status()`:
+
+| RTT do upstream | antes | depois | sondas upstream |
+| --- | --- | --- | --- |
+| 1 ms | 23,0 ms | 2,3 ms | 10 → 1 |
+| 5 ms | 64,8 ms | 7,0 ms | 10 → 1 |
+| 20 ms | 220,5 ms | 21,8 ms | 10 → 1 |
+
+**O caso caro não é esse.** Um ripwire ocupado não responde à sonda e a leitura só decide `busy`
+quando o `STATUS_PROBE` inteiro expira — 1 segundo por leitura:
+
+| | antes | depois | sondas |
+| --- | --- | --- | --- |
+| upstream ocupado, 3 leituras | 3,01 s | 1,00 s | 3 → 1 |
+
+`busy` é justamente a resposta que custa um segundo para aprender e que menos vale a pena
+perguntar duas vezes.
+
+### A janela: `STATUS_CACHE = STATUS_PROBE`
+
+O valor não é arbitrário nem medido — é amarrado a uma constante que já existia. Uma sonda pode
+legitimamente levar até `STATUS_PROBE` (1 s) para responder, então **uma resposta da janela nunca
+fica mais obsoleta do que uma sonda já tinha permissão de ficar**. A janela não acrescenta
+incerteza que o `STATUS_PROBE` não carregasse.
+
+O que isso custa: `available` e `busy` podem estar até 1 s atrasados sobre a realidade. Um ripwire
+que morreu há 300 ms ainda é relatado como disponível.
+
+O que **não** fica obsoleto: `restarts` e `last_error` continuam lidos na hora, a cada leitura. Um
+reinício aparece no status na mesma hora, mesmo que a disponibilidade esteja na janela.
+
+### Marcado no relógio de quando a resposta ficou conhecida, não de quando foi pedida
+
+A janela conta do fim da sonda. Contando do início, uma sonda que levasse o `STATUS_PROBE` inteiro
+entregaria um cache **já expirado**, e o caso ocupado — o mais caro — seria o único a não se
+beneficiar.
+
+### O lock nunca é mantido através da sonda
+
+O cache é um `Mutex` travado só para ler e para escrever, nunca durante o `list_tools()`. Um
+leitor esperando a ida e volta de outro leitor seria exatamente a paralisação que o recurso de
+status não pode ter (RF-13, [D-052](#d-052--code-review-das-fases-2-e-3)). O preço aceito é que
+duas leituras simultâneas podem sondar as duas — desperdício limitado a uma sonda, em troca de
+nunca bloquear.
+
+### Testes
+
+Dois testes novos, **vermelhos antes por asserção**, não só por compilação: com a constante no
+lugar e sem a lógica, as duas leituras custavam 3 sondas onde deviam custar 2.
+
+- `back_to_back_status_reads_share_one_availability_probe` — a segunda leitura reaproveita a
+  sonda e relata o mesmo
+- `the_availability_probe_is_taken_again_after_its_window` — com `start_paused`, passada a janela
+  o status pergunta de novo
+
+O `FakeUpstream` ganhou o contador `probes()` e passou a aplicar `latency` também ao `list_tools`,
+que antes não era observável nem atrasável. O `down` do fake foi deixado de fora do `list_tools`
+de propósito: mexer nele mudaria o comportamento de testes que usam `.down()` esperando que o
+`connect` funcione.
+
+### Verificação
+
+240 verdes no build padrão e 253 com `online` (eram 238 e 251). Clippy e fmt limpos nas duas
+features.

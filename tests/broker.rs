@@ -1474,3 +1474,40 @@ async fn the_session_memory_stops_at_its_ceiling() {
         "restoring an oversized memory trims it at the door"
     );
 }
+
+// --- D-098: the availability probe is shared between back-to-back status reads ---
+
+#[tokio::test]
+async fn back_to_back_status_reads_share_one_availability_probe() {
+    let (b, fake, _ws) = broker(FakeUpstream::new()).await;
+    let base = fake.probes();
+    let first = to_json(&b.status().await);
+    let second = to_json(&b.status().await);
+    assert_eq!(
+        fake.probes(),
+        base + 1,
+        "the second read reuses the first probe instead of paying a round trip"
+    );
+    assert_eq!(
+        first["upstream"]["available"], second["upstream"]["available"],
+        "and reports the same thing"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_availability_probe_is_taken_again_after_its_window() {
+    use ripwire_broker::broker::STATUS_CACHE;
+
+    let (b, fake, _ws) = broker(FakeUpstream::new()).await;
+    let base = fake.probes();
+    b.status().await;
+    b.status().await;
+    assert_eq!(fake.probes(), base + 1, "inside the window, one probe");
+    tokio::time::advance(STATUS_CACHE + std::time::Duration::from_millis(1)).await;
+    b.status().await;
+    assert_eq!(
+        fake.probes(),
+        base + 2,
+        "past the window the status asks the upstream again"
+    );
+}

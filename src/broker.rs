@@ -78,6 +78,10 @@ const GATE_RISKS: &[&str] = &["cochange_missing", "contract_change"];
 
 /// Longest the status resource waits for ripwire to answer its availability probe.
 pub const STATUS_PROBE: Duration = Duration::from_secs(1);
+/// How long the availability probe answers later reads of the status resource (D-098). Tied to
+/// `STATUS_PROBE` on purpose: the answer can never be staler than the time one probe is already
+/// allowed to take, so the cache adds no uncertainty the probe did not already carry.
+pub const STATUS_CACHE: Duration = STATUS_PROBE;
 
 /// Smallest budget that still fits the envelope skeleton plus a few limitations.
 pub const MIN_BUDGET_TOKENS: u32 = 256;
@@ -297,6 +301,10 @@ pub struct Broker {
     online: Option<OnlineEngine>,
     metrics: Mutex<Metrics>,
     last_error: Mutex<Option<&'static str>>,
+    /// The last availability probe and when it finished, so back-to-back reads of the status
+    /// resource do not each pay an upstream round trip. `busy` costs a whole `STATUS_PROBE` to
+    /// learn, which is exactly the answer worth not asking twice.
+    probe: Mutex<Option<(tokio::time::Instant, bool, bool)>>,
     next_request: AtomicU64,
 }
 
@@ -398,15 +406,34 @@ impl Broker {
             online,
             metrics: Mutex::new(Metrics::default()),
             last_error: Mutex::new(None),
+            probe: Mutex::new(None),
             next_request: AtomicU64::new(1),
         })
     }
 
-    pub async fn status(&self) -> BrokerStatus {
+    /// Whether the upstream answers, reusing the last probe while it is inside `STATUS_CACHE`.
+    /// The lock is never held across the probe: one reader waiting on another reader's round
+    /// trip would be the very stall the status resource must not have (RF-13, D-052).
+    async fn availability(&self) -> (bool, bool) {
+        let cached = *self.probe.lock().unwrap();
+        if let Some((taken, available, busy)) = cached
+            && tokio::time::Instant::now().saturating_duration_since(taken) < STATUS_CACHE
+        {
+            return (available, busy);
+        }
         // Never let a busy ripwire hang the status resource (RF-13).
         let probe = tokio::time::timeout(STATUS_PROBE, self.upstream.list_tools()).await;
         let busy = probe.is_err();
         let available = matches!(probe, Ok(Ok(_)));
+        // Timed from when the answer was known, not from when it was asked: a probe that took
+        // the whole `STATUS_PROBE` would otherwise land already expired, and the expensive
+        // case is the one that most needs not to be repeated.
+        *self.probe.lock().unwrap() = Some((tokio::time::Instant::now(), available, busy));
+        (available, busy)
+    }
+
+    pub async fn status(&self) -> BrokerStatus {
+        let (available, busy) = self.availability().await;
         BrokerStatus {
             broker_version: env!("CARGO_PKG_VERSION"),
             schema_version: SCHEMA_VERSION,
