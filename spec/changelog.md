@@ -93,9 +93,10 @@
 | 2026-09-27 23:38 | `/security-review` do PR #1: nenhuma vulnerabilidade acima do limiar; das duas observações, `*.env` sem ponto passou a ser nome sensível | [D-089](#d-089--revisão-de-segurança) |
 | 2026-09-28 00:12 | README: referências conferidas após o arquivamento em `spec/old/` (todas válidas); citações "PRD §x" viram links para as seções do PRD atual | [D-090](#d-090--links-do-readme-para-o-prd) |
 | 2026-09-28 16:15 | Revisão do repositório: cinco defeitos de robustez corrigidos em TDD — dois panics do leitor tolerante, `dedup` sobre vetor não ordenado, bloco de `memory_recall` descartado em silêncio, espera de nota por polling e caminho não-UTF-8 no `install` | [D-091](#d-091--revisão-do-repositório-e-correções-de-robustez) |
-| 2026-09-28 17:40 | As duas observações do D-091 corrigidas em TDD: o registro `Inflight` não guarda mais o id de um `tools/call` que o SDK rejeita antes do handler, e uma nota servida pela geração de outra chamada é marcada `cached` | [D-092](#d-092--vazamento-do-inflight-e-cache-hit-de-nota) |
-| 2026-09-28 18:25 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
-| 2026-09-28 18:55 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
+| 2026-09-28 16:34 | As duas observações do D-091 corrigidas em TDD: o registro `Inflight` não guarda mais o id de um `tools/call` que o SDK rejeita antes do handler, e uma nota servida pela geração de outra chamada é marcada `cached` | [D-092](#d-092--vazamento-do-inflight-e-cache-hit-de-nota) |
+| 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
+| 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
+| 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
 
 ---
 
@@ -2263,3 +2264,111 @@ Pedido do usuário: fechar as duas ressalvas declaradas no
   públicas, a escolha ficou entre quebrar a convenção e não ter o teto — e a convenção venceu.
 - Suítes: 234 verdes no build padrão (2 ignorados) e 247 com `online` (4 ignorados) — os dois
   testes inline saíram, nenhum outro teste alterado. Clippy e fmt limpos nas duas features.
+
+## D-095 — Prompt de testes de propriedade e CI/CD
+
+Pedido do usuário, em duas partes: ler o código para preencher as lacunas de
+`spec/prompt/ci-cd.md` e traduzi-lo; depois auditar o prompt quanto a segurança e práticas de
+DevOps.
+
+### Procedência do arquivo
+
+- `spec/prompt/` **nunca foi versionado** — `git log` desse caminho é vazio. O prompt original,
+  em inglês, 57 linhas, foi escrito sem acesso ao `src/` e marcava suas lacunas como `inferred`,
+  `UNKNOWN` e `SPECULATING`. Ele foi sobrescrito, e por decisão do usuário o backup foi apagado,
+  então **não é recuperável**. O que ele afirmava está resumido abaixo para o registro não se
+  perder.
+- O original supunha: papel do sistema inferido das dependências; `Targets: bin and/or lib —
+  UNKNOWN`; "não invente MSRV, proponha um `rust-toolchain.toml`"; uma tabela P0/P1 marcada
+  `SPECULATING` com cinco candidatos; e uma forma de CI exigida como se de zero.
+
+### Lacunas preenchidas
+
+- **Alvos:** `lib` + `bin` + 2 examples + 12 alvos de teste, via `cargo metadata`.
+- **MSRV:** já existe. `rust-toolchain.toml` fixa o canal `1.98.1` com `clippy` e `rustfmt`; não
+  havia o que propor.
+- **Papel:** três ferramentas, o recurso de status, e o caminho
+  `mcp → broker → router → upstream → normalize → dedup → budget`.
+- **Invariantes com os números do código**, não do PRD: pisos de orçamento 256/512, limiares
+  estritos 0,25/0,50, os quatro limites de requisição, os seis do `reader`, as 12 variantes de
+  `Ineligible`, `GATE_RISKS`, `RECENT_REQUESTS`.
+- **Cobertura atual**, para o PBT somar em vez de repetir: 234 verdes no default (2 ignorados) e
+  247 com `online` (4 ignorados), com a tabela por alvo fechando exatamente com o `cargo`, os três
+  motivos de `#[ignore]` e os auxiliares já disponíveis em `tests/common/`.
+
+### As duas correções que mudam o plano
+
+1. **Os melhores alvos de PBT são privados.** `normalize`, `router`, `markup`, `budget` e `dedup`
+   são `mod`, não `pub mod`. Isso invalida o item P0 #3 do original ("idempotence of
+   `normalize()`") como estava escrito, e atinge justamente `markup::parse`, que lê entrada de fora
+   do processo e já teve dois panics ([D-091](#d-091--revisão-do-repositório-e-correções-de-robustez)).
+   As três saídas ficaram documentadas com o custo de cada uma, inclusive o aviso de que o teste
+   inline quebra a convenção que o [D-094](#d-094--reversão-do-teto-do-inflight) acabou de preservar.
+2. **O original pôs o `online` como "P1 IF online code exists", atrás da feature. Está invertido.**
+   Só `credential` e `jev` são `#[cfg(feature = "online")]`; `decision`, `response`, `request`,
+   `reader`, `cache`, `redact`, `retry_after`, `prompt`, `scheduler` e `metrics` compilam no build
+   **default**, são `pub` e são puros. É a superfície mais rica do crate, roda no job default e não
+   fere o CA-10. Sete dos doze P0 vêm dela.
+
+### Método de verificação
+
+Nada foi afirmado por leitura casual. As constantes foram conferidas por `grep` contra `src/`;
+cada caminho que o prompt chama de "alcançável" passou por uma sonda temporária que compila
+`use`/referência de fora do crate; e as afirmações de privacidade passaram pela sonda inversa,
+que tem de falhar a compilação. As sondas foram removidas.
+
+### Auditoria de segurança
+
+- Quatro P0 foram reclassificados como **controles de segurança**, não higiene: P0.1/P0.2 fuzzam
+  uma fronteira (traversal e elegibilidade, RF-02/CA-08); P0.12/P0.5 são **disponibilidade**, já
+  que panic com entrada de fora do processo é negação de serviço num servidor de vida longa — o que
+  reenquadra "não entra em panic", que o original listava como asserção proibida por ser fraca; e
+  P0.7 é confidencialidade.
+- **P0.13, novo:** texto de repositório não pode fechar o bloco que o embrulha (injeção de prompt,
+  D-052). A viabilidade foi provada antes de propor: um `Envelope` hostil, com
+  `</ripwire-broker-context>` dentro do `untrusted_repository_data`, é construível de fora do crate,
+  e o escape `\u003c` o contém.
+- **A segurança do próprio suíte** entrou no prompt, e não estava lá: propriedades que geram
+  caminhos fuzzam um guarda de traversal, então raiz sempre em tempdir, nenhuma remoção com caminho
+  gerado, nada de executar conteúdo gerado, tamanhos limitados (com `MAX_READ_BYTES` de 8 MiB,
+  estratégia sem teto estoura o runner) e revisão de `.proptest-regressions/`, que é entrada
+  versionada.
+- **Fixtures:** 21 arquivos, incluindo a gravação real `jev/live_v1.json`, que já se limita a
+  digests, status, forma e probabilidades, a partir de corpus sintético. Nenhuma contém hoje string
+  com cara de credencial — conferido. Uma gravação futura caindo direto do provider é o caminho
+  mais provável de um segredo entrar no repositório, daí a guarda de CI proposta.
+
+### Auditoria de DevOps
+
+O workflow não tem **nenhum** controle básico. Tudo conferido, não suposto: `permissions:` ausente
+(herda o padrão, que pode ser `write-all`); `actions/checkout@v4` em tag mutável;
+`persist-credentials: false` ausente; **`--locked` ausente apesar de o `Cargo.lock` estar
+versionado**, ou seja, o CI pode resolver versões diferentes das testadas; `timeout-minutes`
+ausente, num suíte que inicia subprocessos e tem um ripwire falso que dorme 30 s; `concurrency`
+ausente; `deny.toml` e `.github/dependabot.yml` inexistentes; e `.env`/`.envrc` fora do
+`.gitignore`, embora o produto trate `*.env` como nome sensível ([D-089](#d-089--revisão-de-segurança)).
+
+### Quatro controles gratuitos, verificados empiricamente
+
+1. `#![forbid(unsafe_code)]` — o crate tem **zero** `unsafe`.
+2. `#![deny(clippy::print_stdout, clippy::dbg_macro)]` em `src/lib.rs`. Em `serve` o stdout carrega
+   o protocolo MCP, então um `println!` na biblioteca corrompe a sessão; fora do `main.rs` só
+   existe `eprintln!`, e como `main.rs` é outro crate root os `println!` legítimos dos comandos de
+   um disparo não são afetados. `clippy --all-targets --features online` passa com os dois ligados.
+3. **CA-10 como porta de CI:** `cargo tree -e normal` traz 0 ocorrências de
+   `reqwest`/`secrecy`/`rustls`/`hyper` no default e 2 com `--features online`.
+4. Guarda de CI para manter as fixtures sintéticas.
+
+### Recomendações fora do workflow
+
+Proteção de branch: os dois jobs como checks obrigatórios e revisão exigida antes do merge. O
+histórico recente tem PR mesclado sem revisão, inclusive os quatro desta sessão. Se a intenção é
+manter assim, a decisão deve ser registrada em vez de ficar implícita.
+
+### Correção de registro
+
+As horas de D-092, D-093 e D-094 na tabela de índice tinham sido **aproximadas** em vez de lidas do
+relógio, e ficaram no futuro (17:40, 18:25, 18:55). Foram corrigidas para as horas reais dos
+commits correspondentes (16:34, 16:45, 16:52), o que restaura a ordem monotônica da tabela.
+
+Nenhum código foi alterado: 247 testes verdes com `online`, `fmt` limpo.
