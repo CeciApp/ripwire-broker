@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 18:20 | Revisão de arquitetura: 10 gargalos medidos e ordenados; `snapshot` fica 2–4x mais rápido, o gate paga 2 idas e voltas em vez de 3, e o fan-out dos `edit_check` foi revertido por colidir com RF-14 | [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos) |
 
 ---
 
@@ -2372,3 +2373,86 @@ relógio, e ficaram no futuro (17:40, 18:25, 18:55). Foram corrigidas para as ho
 commits correspondentes (16:34, 16:45, 16:52), o que restaura a ordem monotônica da tabela.
 
 Nenhum código foi alterado: 247 testes verdes com `online`, `fmt` limpo.
+
+## D-096 — Gargalos de arquitetura medidos, e os dois primeiros corrigidos
+
+Pedido do usuário: revisar a arquitetura, achar gargalos, propor mitigação e ordenar por
+impacto; depois atacar os itens 1, 2 e 5 da lista.
+
+### Como a lista foi feita
+
+Cada item do topo foi **medido**, não suposto, com sondas temporárias removidas depois. Os dez
+itens, em ordem de impacto: (1) o walk do `ignore` por componente em `snapshot`; (2) `is_fresh`
+relendo e re-hasheando o arquivo inteiro; (3) custo super-linear do shaping do envelope;
+(4) um processo ripwire novo por evento de hook; (5) chamadas upstream independentes em série;
+(6) `ps` a 5 Hz no watcher; (7) `dedup` copiando o corpo de cada item; (8) três caches sem teto;
+(9) `status()` sondando o upstream a cada leitura; (10) varreduras O(n·m) no merge.
+
+Medições que orientaram as escolhas: construir um `ignore::Walk` custa ~109 µs contra 19 µs de um
+`read_dir`, e o número de irmãos no diretório quase não influi — ou seja, o custo era
+`profundidade × 109 µs`, não leitura de diretório. E dobrar as entradas do envelope custava
+2,4–2,97x o tempo, confirmando o item 3 como super-linear, embora com o orçamento padrão de 2500
+tokens ele fique em menos de 1 ms.
+
+### Item 1 — uma travessia do `ignore` por `snapshot`, não uma por componente
+
+- `listed(dir, name)` construía um `WalkBuilder` por componente do caminho. Virou
+  `admitted_prefixes(root, parts)`: **uma** travessia a partir da raiz, podada por `filter_entry`
+  para descer só ao longo do caminho alvo, devolvendo o conjunto de prefixos admitidos. O laço por
+  componente consulta esse conjunto, então **a ordem de precedência dos motivos de
+  inelegibilidade não muda** — o que importa, porque o teste de contrato afirma a variante exata.
+- Semântica preservada por construção: quem decide continua sendo o `ignore::Walk`, com
+  `parents(true)` e o empilhamento de `.gitignore`/`.ignore`; nada foi reimplementado à mão.
+- Medido: `snapshot` de 332 → 170 µs na profundidade 1, de 609 → 241 µs na 3 e de 1170 → 340 µs na
+  5 (**3,4x**). O escalonamento com profundidade ficou quase plano. Por discovery isso roda até 48
+  vezes (`max_candidates` 16 + `lookahead_max` 32).
+- Rede de segurança: antes de mexer, o teste
+  `ineligible_files_are_never_read_for_sending` ganhou três casos de **profundidade 3** —
+  `.gitignore` dois níveis abaixo, um segundo `.gitignore` três níveis abaixo, e um diretório
+  ignorado no meio do caminho. Ele cobria só profundidade 2, que é justamente a dimensão que a
+  mudança mexe. Os casos foram confirmados **verdes no código antigo** antes da otimização: é
+  caracterização de refactor, não ciclo vermelho-verde, e vale dizer isso em vez de fingir TDD.
+
+### Item 2 — ficou pela metade, e a outra metade é decisão do usuário
+
+- `is_fresh` caiu de 313 para 182 µs em arquivo pequeno, **de graça**, porque ele chama `snapshot`
+  e herdou o ganho do item 1. Para arquivo de 384 KiB o custo é ~993 µs, quase todo leitura e
+  sha256.
+- O único lever restante é pré-checar `(mtime, size)` e só re-hashear se mudarem — um `stat` custa
+  1,3 µs, 240x menos. **Não foi implementado**, porque enfraquece um guarda de segurança em duas
+  frentes: perderia uma alteração que preserve tamanho e mtime, e perderia uma mudança de
+  elegibilidade (regra de ignore alterada sem tocar o arquivo). O guarda existe para RF-ONLINE-10 /
+  CA-ONLINE-11, e a corrida TOCTOU vizinha já ficou registrada como aberta no
+  [D-089](#d-089--revisão-de-segurança). Trocar exatidão por 240x de velocidade num controle de
+  segurança é decisão do dono do repositório, não do implementador.
+
+### Item 5 — metade entregue, metade revertida por colidir com RF-14
+
+- **Entregue:** em `context_before_finish`, `situational_awareness` e `quality_delta` são
+  independentes e agora saem juntas com `tokio::join!`; o `affected` continua depois, porque
+  depende dos arquivos alterados. De 66 para 46 ms com RTT de 20 ms. Nenhum teste quebrou.
+- **Revertido:** o fan-out dos `edit_check` em `context_after_edit`. Ele levava a chamada de 241
+  para 45 ms (**5,3x**), o maior ganho de toda a revisão — e quebrou
+  `a_cancelled_call_stops_its_upstream_work_and_is_recorded`, que codifica RF-14
+  ([D-049](#d-049--cancelamento-pelo-cliente-e-status-que-não-trava)): depois de um cancelamento,
+  nenhuma chamada upstream a mais. Com `join_all`, até `max_edit_checks` chamadas são emitidas de
+  uma vez, então mais trabalho já está em voo quando o cancelamento chega.
+  - O invariante "cancelar interrompe o trabalho" continua valendo: as chamadas são largadas
+    junto com o future. O que muda é **quanto trabalho é desperdiçado ao cancelar** — de no máximo
+    1 chamada para até 5.
+  - Reescrever o teste para a otimização passar seria trocar um requisito documentado por
+    velocidade sem que ninguém decidisse isso. O `impact_needed` sequencial foi mantido pelo mesmo
+    motivo, com um comentário no código dizendo **por que** é sequencial, para que ninguém o
+    "otimize" sem ver o requisito.
+  - Fica em aberto para decisão: aceitar o desperdício em troca de 5,3x, limitar a concorrência a
+    2 ou 3 em voo (ganho menor, desperdício menor), ou manter sequencial.
+- **Não medido, e por isso não prometido:** se o ripwire real atende requisições concorrentes. O
+  binário não está no PATH desta máquina, e o `slow_ripwire` do suíte é serial por construção. O
+  que ficou provado é que **o lado do broker sobrepõe** — o ganho de 66→46 ms é real no fake. Contra
+  o ripwire real o ganho pode ser menor se ele serializar internamente; medir isso exige o binário.
+- `FakeUpstream::latency()` foi adicionado ao suíte para essas medições e fica versionado.
+
+### Nada de correção mudou
+
+234 verdes no build padrão (2 ignorados) e 247 com `online` (4 ignorados), os mesmos de antes: as
+três asserções novas entraram num teste existente. Clippy e fmt limpos nas duas features.

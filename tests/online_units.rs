@@ -447,6 +447,13 @@ fn ineligible_files_are_never_read_for_sending() {
     put(root, "app.log", b"started\n");
     put(root, "src/.ignore", b"scratch.py\n");
     put(root, "src/scratch.py", b"x = 1\n");
+    // depth 3: a .gitignore two levels down, and a directory ignored two levels down
+    put(root, "deep/a/.gitignore", b"b/keep.py\nvendored/\n");
+    put(root, "deep/a/b/keep.py", b"x = 1\n");
+    put(root, "deep/a/b/c/.gitignore", b"nested.py\n");
+    put(root, "deep/a/b/c/nested.py", b"x = 1\n");
+    put(root, "deep/a/vendored/a/b/c.py", b"x = 1\n");
+    put(root, "deep/a/b/c/kept.py", b"x = 1\n");
     let outside = tempfile::tempdir().unwrap();
     put(outside.path(), "secret.py", b"TOKEN = 1\n");
     std::os::unix::fs::symlink(outside.path().join("secret.py"), root.join("src/link.py")).unwrap();
@@ -479,6 +486,11 @@ fn ineligible_files_are_never_read_for_sending() {
         ("generated/api.py", Ineligible::Ignored),
         ("app.log", Ineligible::Ignored),
         ("src/scratch.py", Ineligible::Ignored),
+        // Ignore files below the root, and an ignored directory above the target: the
+        // decision has to hold at every depth, not only next to the root.
+        ("deep/a/b/keep.py", Ineligible::Ignored),
+        ("deep/a/b/c/nested.py", Ineligible::Ignored),
+        ("deep/a/vendored/a/b/c.py", Ineligible::Ignored),
         ("src/link.py", Ineligible::Symlink),
         ("alias/auth.py", Ineligible::Symlink),
         ("src/pipe.py", Ineligible::NotRegular),

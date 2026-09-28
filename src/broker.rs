@@ -588,6 +588,9 @@ impl Broker {
         } else {
             json!({"files": files.join(",")})
         };
+        // Sequencial de propósito: RF-14 (D-049) exige que um cancelamento não deixe
+        // trabalho upstream a mais em voo, e um fan-out dos `edit_check` emitiria até
+        // `max_edit_checks` chamadas antes de o cancelamento poder chegar (D-096).
         let mut entries = normalize::situation(&self.call("situational_awareness", args).await?);
         let mut impact_needed = Vec::new();
         for symbol in req.symbols.iter().take(self.max_edit_checks) {
@@ -694,7 +697,12 @@ impl Broker {
         let mut entries = Vec::new();
         let mut unknown = false;
         let mut changed = Vec::new();
-        match self.evidence("situational_awareness", json!({})).await? {
+        // Independentes entre si; o `affected` abaixo é que depende da situação (D-096).
+        let (situation, quality) = tokio::join!(
+            self.evidence("situational_awareness", json!({})),
+            self.evidence("quality_delta", json!({}))
+        );
+        match situation? {
             Ok(p) => {
                 changed = normalize::changed_files(&p);
                 entries.extend(normalize::situation(&p));
@@ -705,7 +713,7 @@ impl Broker {
             }
         }
         let (mut regressions, mut minor) = (0, 0);
-        match self.evidence("quality_delta", json!({})).await? {
+        match quality? {
             Ok(p) => match normalize::quality_delta(&p) {
                 Some(q) => {
                     (regressions, minor) = (q.regressions, q.minor);

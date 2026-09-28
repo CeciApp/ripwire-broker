@@ -4,6 +4,7 @@
 //! the same version of the source.
 
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -181,6 +182,10 @@ impl WorkspaceReader {
         {
             return Err(Ineligible::DependencyOrBuild);
         }
+        // Uma travessia para todo o caminho, consultada por componente abaixo. Construir um
+        // `ignore::Walk` custa cerca de 100 µs, e fazê-lo por componente dominava o custo de
+        // `snapshot` (D-096); a ordem de precedência dos motivos não muda.
+        let admitted = admitted_prefixes(&self.root, &parts);
         let mut path = self.root.clone();
         for (i, part) in parts.iter().enumerate() {
             path.push(part);
@@ -195,7 +200,7 @@ impl WorkspaceReader {
             if last && meta.len() > MAX_READ_BYTES as u64 {
                 return Err(Ineligible::TooLarge);
             }
-            if !listed(path.parent().unwrap_or(&self.root), part) {
+            if !admitted.contains(Path::new(&parts[..=i].join("/"))) {
                 return Err(Ineligible::Ignored);
             }
         }
@@ -266,18 +271,36 @@ fn relative_parts(rel: &str) -> Option<Vec<String>> {
     Some(parts)
 }
 
-/// Whether a walk of `dir` that honours the ignore files of `dir` and its ancestors lists
-/// `name`. Checked for every component, so an ignored directory hides what it contains.
-fn listed(dir: &Path, name: &str) -> bool {
-    ignore::WalkBuilder::new(dir)
-        .max_depth(Some(1))
+/// Every prefix of `parts` that a walk from `root` honouring the ignore files on the way
+/// lists, as paths relative to `root`. An ignored directory is absent, and so is everything
+/// under it, because the walk never descends into it. The walk is pruned to the target path,
+/// so it visits one directory per component instead of the subtree.
+fn admitted_prefixes(root: &Path, parts: &[String]) -> HashSet<PathBuf> {
+    let target: PathBuf = parts.iter().collect();
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .max_depth(Some(parts.len()))
         .hidden(false)
         .parents(true)
         .require_git(false)
-        .follow_links(false)
+        .follow_links(false);
+    let (pruned_root, pruned_target) = (root.to_path_buf(), target.clone());
+    builder.filter_entry(move |e| match e.path().strip_prefix(&pruned_root) {
+        Ok(rel) => rel.as_os_str().is_empty() || pruned_target.starts_with(rel),
+        // Not below the root: leave the decision to the rest of the policy.
+        Err(_) => true,
+    });
+    builder
         .build()
         .flatten()
-        .any(|e| e.depth() == 1 && e.file_name() == name)
+        .filter_map(|e| {
+            e.path()
+                .strip_prefix(root)
+                .ok()
+                .filter(|rel| !rel.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+        })
+        .collect()
 }
 
 /// A unit of evidence for `source_selection`: whole lines of one snapshot.
