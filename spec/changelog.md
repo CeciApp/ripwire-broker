@@ -91,6 +91,7 @@
 | 2026-09-27 19:56 | Branch `fase-4-online` publicado e PR #1 aberto para o `master` | [D-087](#d-087--pr-das-fases-4-e-5) |
 | 2026-09-27 20:27 | CI do PR #1: 1ª execução falhou por ETXTBSY (corrida pré-existente, Linux), 2ª passou; merge bloqueado pelo classificador de permissões; revisão `/tdd` com 17 achados, todos tratados no PR, incluindo um defeito de produto (resposta desconhecida não marcava `incomplete`) | [D-088](#d-088--ci-revisão-tdd-e-correções) |
 | 2026-09-27 23:38 | `/security-review` do PR #1: nenhuma vulnerabilidade acima do limiar; das duas observações, `*.env` sem ponto passou a ser nome sensível | [D-089](#d-089--revisão-de-segurança) |
+| 2026-09-28 00:12 | README: referências conferidas após o arquivamento em `spec/old/` (todas válidas); citações "PRD §x" viram links para as seções do PRD atual | [D-090](#d-090--links-do-readme-para-o-prd) |
 
 ---
 
@@ -2082,3 +2083,15 @@ Seção §5.4 do plano.
 - Suítes: 225 verdes no build padrão (2 ignorados) e 238 com `online` (4 ignorados); clippy e
   fmt limpos nas duas.
 
+## D-090 — Links do README para o PRD
+
+- Pedido do usuário: revisar o `README.md` depois que o PRD anterior, a spec do Jev e o
+  `merge.md` foram para `spec/old/` (D-057).
+- **Conferência:** nenhuma referência apontava para `spec/old/`. Os arquivos citados existem,
+  as âncoras internas batem com os títulos, e cada "PRD §x" corresponde à seção de mesmo número
+  e assunto no PRD atual (`spec/ripwire-broker-mcp.md`, v0.3). Fora de `spec/`, o repositório
+  também não cita caminhos antigos.
+- **Mudança:** as sete citações viraram links para as seções do PRD: §7.3, §8.4, §10.3, §23,
+  §23.11, §23.15 e a Fase 6 do roadmap. As âncoras seguem a regra de slug do GitHub, com
+  acentos mantidos, no mesmo estilo dos links internos do próprio PRD. Um script conferiu cada
+  âncora contra os títulos do PRD.

@@ -110,8 +110,9 @@ environment. It is never accepted as an argument, never written by `install` (wh
 references the variable by name), and never shown in errors, the status or logs. Set it in the
 environment the host starts from, not in a committed file.
 
-When Streamable HTTP is added (roadmap phase 6), its bearer token must also come from an
-environment variable (PRD §7.3).
+When Streamable HTTP is added
+([roadmap phase 6](spec/ripwire-broker-mcp.md#fase-6--times-e-ci)), its bearer token must also
+come from an environment variable ([PRD §7.3](spec/ripwire-broker-mcp.md#73-transporte)).
 
 ## MCP surface
 
@@ -159,8 +160,10 @@ keyed by the host's `session_id`.
 
 ### Architectural notes (local model)
 
-Optional and off by default (PRD §10.3). With a local model CLI, `context_for_task` adds up to
-three `notes`, one per module of the items it returns:
+Optional and off by default
+([PRD §10.3](spec/ripwire-broker-mcp.md#103-enriquecimento-semântico-opcional-futuro)). With a
+local model CLI, `context_for_task` adds up to three `notes`, one per module of the items it
+returns:
 
 ```sh
 ripwire-broker --workspace /repo \
@@ -189,7 +192,8 @@ ripwire-broker --workspace /repo \
 
 ## Online mode (optional)
 
-Off unless the server process starts with `--online` (PRD §23). A remote semantic classifier
+Off unless the server process starts with `--online`
+([PRD §23](spec/ripwire-broker-mcp.md#23-adaptador-opcional---online)). A remote semantic classifier
 (TypeSafe `jev-1.13.0`) then rates, in `context_for_task`, the files ripwire ranked and their
 direct siblings, and the broker merges its probabilities with ripwire's facts. Nothing else
 changes: no new tool, and `context_after_edit`, `context_before_finish`, hooks and `prompt`
@@ -240,17 +244,20 @@ lookahead off), `--jev-max-source-bytes` (source rendered, not evaluated), `--je
 stage, a 429 waits for its `Retry-After`, and a client cancel aborts the HTTP requests.
 Decisions are cached in memory, keyed by digests only.
 
-**Status:** `online` in `ripwire-broker://status` carries the §23.11 metrics (requests,
-latency percentiles, bytes, retries, 429s, candidates, gain beyond ripwire...), and each call
-in `recent_requests` lists its online stages. Counts and times only.
+**Status:** `online` in `ripwire-broker://status` carries the
+[§23.11](spec/ripwire-broker-mcp.md#2311-observabilidade) metrics (requests, latency
+percentiles, bytes, retries, 429s, candidates, gain beyond ripwire...), and each call in
+`recent_requests` lists its online stages. Counts and times only.
 
-The mode is **experimental** until the A/B evaluation of PRD §23.15 shows it keeps or improves
-correctness.
+The mode is **experimental** until the A/B evaluation of
+[PRD §23.15](spec/ripwire-broker-mcp.md#2315-avaliação-e-barras-de-merge) shows it keeps or
+improves correctness.
 
 ## Automatic mode (hooks)
 
 MCP alone only offers tools; the agent still has to call them. Hooks make it automatic
-(PRD §8.4). Claude Code and Codex share the hook contract, so the same command serves both:
+([PRD §8.4](spec/ripwire-broker-mcp.md#84-automação-no-host)). Claude Code and Codex share the
+hook contract, so the same command serves both:
 
 | Host event | What the broker does |
 | --- | --- |
