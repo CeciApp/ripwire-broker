@@ -653,3 +653,30 @@ async fn a_stop_notice_does_not_mark_tests_as_delivered() {
     let env = injected(&edit);
     assert_eq!(env["tests"][0]["path"], "tests/test_auth.py", "{env}");
 }
+
+// --- the gate notice names each risk kind once, whatever order the risks arrive in ---
+
+#[tokio::test]
+async fn the_gate_notice_never_repeats_a_risk_kind() {
+    // Two regressions around one minor finding: the same kind arrives non-adjacently.
+    let interleaved = r#"{"regressions":2,"r":[
+        {"kind":"complexity","sym":"login","sev":"major","was":3,"now":11,"p":"src/auth.py:5"},
+        {"kind":"docs","sym":"helper","sev":"minor","was":1,"now":0,"p":"src/util.py:2"},
+        {"kind":"complexity","sym":"logout","sev":"major","was":2,"now":9,"p":"src/auth.py:20"}]}"#;
+    let fake = FakeUpstream::new()
+        .answer("situational_awareness", "situational_awareness_clean")
+        .answer_text("quality_delta", interleaved);
+    let (b, _fake, ws) = hook_broker(fake).await;
+    let input = event("claude_code_stop", ws.path());
+
+    let out = stop(Host::ClaudeCode, &input, &b, false).await.unwrap();
+
+    let note = out["systemMessage"].as_str().unwrap();
+    assert!(note.contains("attention_required"), "{note}");
+    assert_eq!(
+        note.matches("quality_regression").count(),
+        1,
+        "each kind once: {note}"
+    );
+    assert_eq!(note.matches("quality_minor").count(), 1, "{note}");
+}

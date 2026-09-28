@@ -66,6 +66,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// An attribute value written without quotes: up to the next whitespace, `/` or `>`.
+    fn unquoted(&mut self) -> &'a str {
+        let rest = self.rest();
+        let n = rest
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .unwrap_or(rest.len());
+        self.i += n;
+        &rest[..n]
+    }
+
     /// Reads children and text into `node` until its closing tag (or EOF).
     fn content(&mut self, node: &mut Node) {
         while self.i < self.s.len() {
@@ -116,10 +126,20 @@ impl<'a> Parser<'a> {
             };
             let key = rest[..eq].trim().to_string();
             self.i += eq + 1;
-            let rest = self.rest();
-            let quote = rest.chars().next().unwrap_or('"');
-            self.i += 1;
-            let value = self.skip_past(&quote.to_string());
+            // Nothing after '=': the input was cut off mid-attribute.
+            let Some(quote) = self.rest().chars().next() else {
+                self.i = self.s.len();
+                return node;
+            };
+            let value = match quote {
+                '"' | '\'' => {
+                    self.i += quote.len_utf8();
+                    self.skip_past(quote.encode_utf8(&mut [0u8; 4]))
+                }
+                // Unquoted: up to the next whitespace or tag end, so the rest of the
+                // document is still read instead of being swallowed as one value.
+                _ => self.unquoted(),
+            };
             node.attrs.push((key, unescape(value)));
         }
         self.content(&mut node);

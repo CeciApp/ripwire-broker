@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 pub const PROMPT_VERSION: &str = "notes/v1";
@@ -236,6 +237,9 @@ pub struct NoteEngine {
     cache: Arc<Mutex<HashMap<String, String>>>,
     failed: Arc<Mutex<HashMap<String, String>>>,
     running: Mutex<Running>,
+    /// Woken every time a generation settles, so a waiter is handed its note at once
+    /// instead of discovering it on the next tick of a poll loop.
+    settled_signal: Arc<Notify>,
     pub stats: Arc<NoteStats>,
 }
 
@@ -247,6 +251,7 @@ impl NoteEngine {
             cache: Default::default(),
             failed: Default::default(),
             running: Mutex::new(None),
+            settled_signal: Default::default(),
             stats: Default::default(),
         }
     }
@@ -296,11 +301,12 @@ impl NoteEngine {
                 }
                 Some((k, h)) if !h.is_finished() && *k == key => {}
                 _ => {
-                    let (model, cache, failed, stats) = (
+                    let (model, cache, failed, stats, signal) = (
                         self.summarizer.clone(),
                         self.cache.clone(),
                         self.failed.clone(),
                         self.stats.clone(),
+                        self.settled_signal.clone(),
                     );
                     let k = key.clone();
                     let task = tokio::spawn(async move {
@@ -314,21 +320,31 @@ impl NoteEngine {
                                 stats.failures.fetch_add(1, Ordering::Relaxed);
                             }
                         }
+                        signal.notify_waiters();
                     });
                     *running = Some((key.clone(), task));
                 }
             }
         }
-        let started = Instant::now();
+        let deadline = tokio::time::Instant::now() + self.wait;
+        let waiting = self.settled_signal.notified();
+        tokio::pin!(waiting);
         loop {
+            // Registers this waiter before the state is read, so a generation that settles
+            // in between wakes it instead of being missed.
+            waiting.as_mut().enable();
             if let Some(done) = self.settled(&key) {
                 return done;
             }
-            if started.elapsed() >= self.wait {
+            if tokio::time::timeout_at(deadline, waiting.as_mut())
+                .await
+                .is_err()
+            {
                 self.stats.pending.fetch_add(1, Ordering::Relaxed);
                 return Outcome::Pending;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            // Woken by another key's generation: wait again for this one.
+            waiting.set(self.settled_signal.notified());
         }
     }
 

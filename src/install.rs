@@ -39,6 +39,14 @@ fn is_ours(hook: &Value) -> bool {
         .is_some_and(|c| c.contains("ripwire-broker") && c.contains(" hook "))
 }
 
+/// A path a host config file can carry. Refused rather than mangled: `install` writes the
+/// path a host will later execute.
+fn utf8(path: &Path, what: &str) -> Result<String, String> {
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("{what} ({}) is not valid UTF-8", path.display()))
+}
+
 /// Hosts run hook commands through a shell: always single-quote, with `'` as `'\\''`.
 fn quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
@@ -138,6 +146,10 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
         .workspace
         .canonicalize()
         .map_err(|e| format!("workspace {}: {e}", args.workspace.display()))?;
+    // Both host configs are text (JSON, TOML). A path they cannot carry is refused here,
+    // rather than panicking in `json!` or being written back mangled by a lossy conversion.
+    let binary_text = utf8(binary, "the broker binary")?;
+    let workspace_text = utf8(&workspace, "the workspace")?;
     let mut plan = Plan {
         changes: vec![],
         notes: vec![],
@@ -157,7 +169,8 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                     if !servers.is_object() {
                         *servers = json!({});
                     }
-                    let mut server = json!({"command": binary, "args": ["--workspace", workspace]});
+                    let mut server =
+                        json!({"command": binary_text, "args": ["--workspace", workspace_text]});
                     if args.online {
                         server["args"]
                             .as_array_mut()
@@ -194,8 +207,8 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
             let mut toml = format!(
                 "# Add to {}:\n[mcp_servers.ripwire-broker]\ncommand = {:?}\nargs = [\"--workspace\", {:?}{online}\n",
                 home.join("config.toml").display(),
-                binary.display().to_string(),
-                workspace.display().to_string()
+                binary_text,
+                workspace_text
             );
             if args.hooks {
                 toml.push_str("\n[features]\nhooks = true\n");

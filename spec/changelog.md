@@ -92,6 +92,7 @@
 | 2026-09-27 20:27 | CI do PR #1: 1ª execução falhou por ETXTBSY (corrida pré-existente, Linux), 2ª passou; merge bloqueado pelo classificador de permissões; revisão `/tdd` com 17 achados, todos tratados no PR, incluindo um defeito de produto (resposta desconhecida não marcava `incomplete`) | [D-088](#d-088--ci-revisão-tdd-e-correções) |
 | 2026-09-27 23:38 | `/security-review` do PR #1: nenhuma vulnerabilidade acima do limiar; das duas observações, `*.env` sem ponto passou a ser nome sensível | [D-089](#d-089--revisão-de-segurança) |
 | 2026-09-28 00:12 | README: referências conferidas após o arquivamento em `spec/old/` (todas válidas); citações "PRD §x" viram links para as seções do PRD atual | [D-090](#d-090--links-do-readme-para-o-prd) |
+| 2026-09-28 16:15 | Revisão do repositório: cinco defeitos de robustez corrigidos em TDD — dois panics do leitor tolerante, `dedup` sobre vetor não ordenado, bloco de `memory_recall` descartado em silêncio, espera de nota por polling e caminho não-UTF-8 no `install` | [D-091](#d-091--revisão-do-repositório-e-correções-de-robustez) |
 
 ---
 
@@ -2095,3 +2096,50 @@ Seção §5.4 do plano.
   §23.11, §23.15 e a Fase 6 do roadmap. As âncoras seguem a regra de slug do GitHub, com
   acentos mantidos, no mesmo estilo dos links internos do próprio PRD. Um script conferiu cada
   âncora contra os títulos do PRD.
+
+## D-091 — Revisão do repositório e correções de robustez
+
+- Pedido do usuário: revisar o código do repositório e rodar toda a suíte. A suíte já estava
+  verde (225 no build padrão, 238 com `online`); a revisão leu os ~9.200 linhas de `src/` e
+  apontou cinco defeitos, todos corrigidos em TDD, cada um com o teste vermelho observado antes
+  da correção.
+- **`markup::parse` entrava em panic** (`src/markup.rs`). O passo do caractere de aspas fazia
+  `self.i += 1` para um char que pode ser multibyte ou inexistente, então `rest()` fatiava fora
+  dos limites ou no meio de um caractere: `<ctx a=` e `<ctx a=é>` derrubavam a chamada. Como o
+  payload vem do stdout do ripwire e todos os chamadores em `normalize` tratam a falha como
+  `unparsed_upstream`, um panic ali contradizia o contrato do módulo. Agora, nada depois do `=`
+  encerra o elemento com o que já foi lido, e aspas avançam por `len_utf8()`.
+- **Valor de atributo sem aspas engolia o resto do documento** (ciclo separado, depois de
+  reverter o código escrito sem teste vermelho). `<ctx a=é><sigs>…</sigs></ctx>` perdia o
+  `<sigs>` inteiro, porque o `é` era tratado como aspa de abertura e a busca pela aspa de
+  fechamento consumia tudo. Um valor sem aspas agora termina no próximo espaço, `/` ou `>`.
+- **`gate_notice` deduplicava um vetor não ordenado** (`src/hook.rs`). `Vec::dedup` só remove
+  duplicatas adjacentes, e os riscos chegam em ordem de prioridade, não por tipo: dois
+  `quality_regression` em volta de um `quality_minor` apareciam como três itens na linha do
+  gate. Ordena antes do `dedup`, com `is_sorted()` para evitar o sort no caso comum.
+- **`memory_recall` descartava um bloco final sem par** (`src/normalize.rs`). Os blocos são
+  consumidos em pares (cabeçalho, corpo); uma resposta cortada no meio deixava o último
+  cabeçalho fora, sem qualquer limitação. Um resto não-vazio agora gera `unparsed_upstream`
+  dizendo quantos blocos chegaram incompletos — o documento ausente nunca é adivinhado (RF-12).
+  Um resto só de espaços não gera limitação, então respostas bem-formadas seguem sem ruído.
+- **`NoteEngine::note` esperava por polling** (`src/notes.rs`). O laço acordava a cada 5 ms até
+  `summarizer_wait`, o que custava um tick por grupo de notas mesmo quando o modelo já havia
+  respondido. Passou a usar um `Notify`. O ponto delicado é a perda de sinal: uma nota que
+  assenta entre o `settled()` e o `await` deixaria o waiter dormindo até o timeout, então o
+  waiter é registrado com `Notified::enable()` **antes** de ler o estado, e o produtor chama
+  `notify_waiters()`. O teste mede tempo virtual com `start_paused = true`: com polling a
+  resposta custava 15 ms (três grupos × 5 ms), agora custa zero.
+- **`install::plan` entrava em panic com caminho não-UTF-8** (`src/install.rs`). O `json!` do
+  `.mcp.json` serializava o `&Path` do binário direto, e `Path: Serialize` falha para bytes
+  inválidos; o ramo do Codex fazia conversão lossy e gravaria um caminho corrompido no TOML.
+  Os dois caminhos (binário e workspace) passam por uma validação única no topo de `plan()`.
+  **Lacuna declarada:** o teste só exercita o caminho do binário, porque o APFS do macOS
+  rejeita nomes de arquivo com UTF-8 inválido e o diretório do workspace não pode ser criado
+  para o segundo caso.
+- Suítes: 231 verdes no build padrão (2 ignorados) e 244 com `online` (4 ignorados) — seis
+  testes novos, nenhum teste pré-existente alterado. Clippy e fmt limpos nas duas features.
+- **Observações não corrigidas**, deixadas para decisão do usuário: o registro `Inflight`
+  (`src/mcp.rs`) vaza uma entrada por `tools/call` que o SDK rejeita antes do handler (um
+  `tools/call` sem `name` deixa `tracked_calls` em 1 para sempre, retendo o texto da tarefa em
+  memória, contra o que o comentário de D-052 promete); e `NoteEngine::settled` devolve
+  `cached: false` para um segundo waiter servido do cache.
