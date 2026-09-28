@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 20:32 | Itens 7 e 10 medidos e **recusados** — as duas premissas estavam erradas e a "otimização" do merge era 3x mais lenta; e os números do D-096 ao D-099 refeitos em release, porque os publicados eram de build debug | [D-100](#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release) |
 | 2026-09-28 20:18 | O `budget_tokens` passa a ter teto aplicado (100.000, o que o schema MCP já declarava sem impor) e o shaping do envelope deixa de re-serializar o envelope por candidato: 16x no orçamento padrão e 48x no teto | [D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear) |
 | 2026-09-28 20:05 | `status()` deixa de pagar uma ida e volta upstream por leitura: a sonda de disponibilidade vale por `STATUS_PROBE`; 10 leituras caem de 220 para 22 ms a 20 ms de RTT, e um ripwire ocupado de 3 s para 1 s | [D-098](#d-098--a-sonda-de-disponibilidade-do-status-reaproveitada-por-uma-janela) |
 | 2026-09-28 19:47 | Teto nos três caches sem limite, dimensionado por medição: `SemanticCache` em 4.000, `SessionMemory` em 5.000, notas em 500, despejo do mais antigo | [D-097](#d-097--teto-nos-três-caches-medido-antes-de-escolher-os-números) |
@@ -2747,3 +2748,116 @@ O escalonamento virou quase linear: dobrar de 256 para 512 entradas no teto cust
 
 243 verdes no build padrão e 256 com `online` (eram 240 e 253; +3 testes). Clippy e fmt limpos nas
 duas features.
+
+---
+
+## D-100 — Itens 7 e 10 medidos e recusados, e os números do D-096 ao D-099 refeitos em release
+
+Últimos dois itens com ganho suposto da revisão do
+[D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos): (7) o `dedup`
+copiando o corpo de cada item, (10) as varreduras do `merge`. **Nenhum dos dois foi
+implementado**, e a medição é a razão.
+
+### Item 10 — a descrição no D-096 estava errada, e a mitigação era mais lenta
+
+O D-096 chamou isso de "varreduras O(n·m) no merge". O `m` é o número de arquivos da discovery, e
+ele é **estruturalmente limitado**: `max_candidates` 16 mais `lookahead_max` 32, no máximo 48
+([`src/online/coordinator.rs`](../src/online/coordinator.rs)). Então o custo é linear nas
+entradas, com constante 48 — não quadrático.
+
+Medido em release, o `merge` inteiro:
+
+| entradas | merge |
+| --- | --- |
+| 32 | 4,46 µs |
+| 128 | 7,29 µs |
+| 512 | **14,67 µs** |
+
+Catorze microssegundos. E a mitigação que eu tinha proposto — um `HashMap` por caminho construído
+uma vez — foi **3x mais lenta** (372 µs contra 124 µs, em debug): as duas varreduras rodam 48 vezes
+sobre comparações baratas e não alocam nada, enquanto o índice aloca um `Vec` por caminho. A
+"otimização" era uma pessimização, e só a medição mostrou isso.
+
+### Item 7 — a premissa estava errada
+
+O D-096 disse que o problema era o `dedup` **copiar** o corpo de cada item. A medição desmente:
+com 2048 entradas o `dedup` constrói 4,26 MB de chaves, e copiar 4,26 MB custa cerca de 1 ms
+contra os 90 ms (debug) medidos. **O custo é alocação e hashing**, não a cópia — cada chave é
+`format!`-ada e depois passa por `contains` e por `insert`, ou seja o corpo é hasheado duas vezes.
+
+A mitigação proposta era trocar o corpo por um sha256. Medida em release, contra a
+implementação atual:
+
+| entradas | corpo | atual | com sha256 |
+| --- | --- | --- | --- |
+| 64 | 200 B | 47,21 µs | 107,29 µs |
+| 512 | 200 B | 392,29 µs | 590,21 µs |
+| 512 | 2 KB | 1,10 ms | 1,53 ms |
+| 2048 | 2 KB | 4,51 ms | 4,41 ms |
+
+**Pior em todo tamanho realista**, empatando só no maior. Um sha256 sobre o corpo custa mais que
+dois SipHash sobre ele, que é o que o `HashSet` já faz. Em debug o sha256 parecia 2,5x melhor —
+artefato de build não otimizado, e foi por isso que a decisão exigiu release.
+
+Trocar igualdade exata por igualdade de digest numa função que decide o que entra no envelope, sem
+ganho, seria risco de graça. Fica como está.
+
+### A correção que importa mais: debug contra release
+
+**Todos os números do D-096 ao D-099 foram medidos em build debug**, e os absolutos que publiquei
+são inflados. Refeitos em release:
+
+`snapshot` ([D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos)):
+
+| profundidade | antigo | novo | fator em release | fator publicado |
+| --- | --- | --- | --- | --- |
+| 1 | 165,64 µs | 141,16 µs | 1,17x | — |
+| 3 | 437,25 µs | 241,97 µs | 1,81x | — |
+| 5 | 765,73 µs | 296,91 µs | **2,58x** | 3,4x |
+
+Shaping do envelope ([D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear)):
+
+| entradas | orçamento | antigo | novo | fator |
+| --- | --- | --- | --- | --- |
+| 128 | 2.500 | 3,62 ms | 1,01 ms | 3,6x |
+| 512 | 2.500 | **14,40 ms** | 1,95 ms | 7,4x |
+| 128 | 100.000 | 2,93 ms | 378,04 µs | 7,8x |
+| 512 | 100.000 | **31,82 ms** | 2,04 ms | 15,6x |
+
+O D-099 publicou 295 ms e 1,10 s para essas duas últimas linhas. Em release são **14,40 ms e
+31,82 ms** — cerca de 20x menos. A correção do D-099 continua sendo um ganho real de 7 a 16x, e o
+teto do `budget_tokens` continua justificado por ser entrada controlada pelo chamador, mas a
+urgência que os números sugeriam estava exagerada. O `shown` é idêntico entre antigo e novo nas
+quatro linhas, o que reconfirma que as decisões de corte não mudaram.
+
+### O padrão por trás disso, que vale para a próxima medição
+
+Trabalho **ligado a I/O** quase não muda entre debug e release: o `snapshot` é dominado por
+syscalls do `ignore`, e ficou 1,2–2,6x em release contra os fatores de debug. O
+[D-098](#d-098--a-sonda-de-disponibilidade-do-status-reaproveitada-por-uma-janela) não precisa de
+correção pelo mesmo motivo: o ganho lá são idas e voltas evitadas (10 para 1, 3 para 1), e os
+tempos eram dominados pelo RTT injetado.
+
+Trabalho **ligado a CPU** infla de 10 a 20x em debug: o shaping e o `dedup`. Foi exatamente onde
+eu superestimei, e onde uma decisão marginal (o sha256 do item 7) chegou a **inverter de sinal**
+entre os dois builds.
+
+Os tetos do [D-097](#d-097--teto-nos-três-caches-medido-antes-de-escolher-os-números) não precisam
+de correção: o que os dimensionou foram **contagens de entradas**, que não dependem do build. O RSS
+de lá já estava declarado como não sendo prova de patamar.
+
+### Como fica a lista do D-096
+
+Dos dez itens: 1, 2 (parcial), 3, 5 (parcial), 8 e 9 corrigidos; **7 e 10 recusados por medição**;
+6 recusado por análise (o `ps` a 5 Hz é um fork a cada 200 ms num processo cuja única função é
+vigiar, e trocá-lo por `/proc` traria divergência de plataforma num caminho de segurança); 4 em
+aberto, e é o único que sobra com ganho grande — um processo ripwire novo por evento de hook, cuja
+mitigação é um daemon persistente, com superfície nova de IPC e de segurança. Esse merece proposta
+em `spec/` antes de qualquer código.
+
+### Verificação
+
+Nenhuma mudança de código nesta entrada. 243 verdes no build padrão e 256 com `online`, os mesmos
+do [D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear). Todas as
+sondas e a instrumentação temporária de `dedup`, `merge` e `budget` foram removidas, e a
+visibilidade dos módulos `dedup`, `merge` e `budget`, que foi aberta para medir, voltou ao que era.
