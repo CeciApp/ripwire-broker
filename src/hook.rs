@@ -39,6 +39,13 @@ pub struct SessionState {
     /// Next `request_id`: each hook event is a new process, so the count lives here.
     #[serde(default)]
     pub next_request: u64,
+    /// When an edit was last answered, in milliseconds on the caller's clock; `0` for never.
+    #[serde(default)]
+    pub last_edit_ms: u64,
+    /// Files edited while a burst was being coalesced, waiting to ride along with the next
+    /// answer so that holding an event back never loses the file it named (D-106).
+    #[serde(default)]
+    pub held_edits: Vec<String>,
     /// The ripwire version last read, and what identified the binary then. Every hook event is a
     /// new process, so without this each one starts a whole extra ripwire just to read
     /// `--version` and throw it away (D-105).
@@ -138,7 +145,22 @@ pub struct Policy {
     pub log_refs: bool,
     pub prompt_budget: u32,
     pub edit_budget: u32,
+    /// How long after answering an edit the next ones are held back instead of answered one by
+    /// one. `0` turns the coalescing off. A burst of edits arrives about 100 ms apart and, past
+    /// the first, almost never carries anything the session has not been told: measured at one
+    /// injection in twelve source-file edits, each costing ~99 ms of ripwire work thrown away
+    /// (D-106). Nothing is lost for good: the files held back ride along with the next answer,
+    /// and `Stop` runs the finish gate over the whole tree regardless.
+    pub edit_interval_ms: u64,
+    /// The wall clock, in milliseconds, supplied by the caller. `None` means no clock was given
+    /// and then nothing is ever held back: the tests drive `handle` directly and must not depend
+    /// on real time (the lesson of D-102).
+    pub now_ms: Option<u64>,
 }
+
+/// At most this many edited files are remembered while a burst is coalesced. A burst longer than
+/// this reports on the most recent ones; `Stop` still covers the whole tree.
+pub const MAX_HELD_EDITS: usize = 32;
 
 impl Default for Policy {
     fn default() -> Self {
@@ -148,6 +170,8 @@ impl Default for Policy {
             log_refs: false,
             prompt_budget: 1500,
             edit_budget: 800,
+            edit_interval_ms: 1_000,
+            now_ms: None,
         }
     }
 }
@@ -335,6 +359,30 @@ async fn respond(
             if files.is_empty() {
                 return Ok(None);
             }
+            // A burst of edits is one ask. Past the first, an edit almost never carries anything
+            // the session has not been told, and each ask costs real ripwire work (D-106). The
+            // files named while the window is open are held and ride along with the next answer,
+            // so holding an event back delays news by at most one edit and never drops it; the
+            // `Stop` gate covers the tail of a turn in any case.
+            let mut files = files;
+            if let (Some(now), true) = (policy.now_ms, policy.edit_interval_ms > 0) {
+                let waited = now.saturating_sub(state.last_edit_ms);
+                if state.last_edit_ms != 0 && waited < policy.edit_interval_ms {
+                    for f in files {
+                        if !state.held_edits.contains(&f) && state.held_edits.len() < MAX_HELD_EDITS
+                        {
+                            state.held_edits.push(f);
+                        }
+                    }
+                    return Ok(None);
+                }
+                state.last_edit_ms = now;
+            }
+            for held in std::mem::take(&mut state.held_edits) {
+                if !files.contains(&held) {
+                    files.push(held);
+                }
+            }
             let req = EditRequest {
                 files,
                 budget_tokens: capped(policy.edit_budget),
@@ -391,11 +439,19 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     // Without the lock (e.g. unwritable dir) the hook still runs; only turn-taking is lost.
     let _turn = store.lock(&session_id).ok();
     let mut state = store.load(&session_id);
+    let default = Policy::default();
     let policy = Policy {
         every_prompt: args.every_prompt,
         gate: args.gate,
         log_refs: args.log_refs,
-        ..Policy::default()
+        edit_interval_ms: args.edit_interval_ms.unwrap_or(default.edit_interval_ms),
+        // The clock is read here, at the process boundary, and never inside `handle`, so the
+        // tests stay free of real time (D-102).
+        now_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64),
+        ..default
     };
     // The version of a binary that has not changed is the version we already read. A ripwire
     // swapped mid-session keeps the old reading until the next session, which costs a stale
