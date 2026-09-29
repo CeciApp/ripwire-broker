@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 23:14 | Fatia B: `deny.toml` com as quatro seções verdes (allowlist exata de 8 licenças, não um superconjunto generoso), `cargo-deny` **agendado no `master` e nunca em PR**, e dependabot com a política de pin do `rust-mcp-sdk` | [D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot) |
 | 2026-09-28 23:05 | Fatia A da proposta de PBT/CI: workflow com dois jobs, `permissions` mínimo, actions por SHA, `--locked`, timeout e `concurrency`; `forbid(unsafe_code)`, `deny(print_stdout)`, porta do CA-10 e guarda de fixture — os quatro passavam limpos antes de serem exigidos | [D-107](#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) |
 | 2026-09-28 22:43 | Opção E do item 4: uma rajada de edições passa a ser **uma** pergunta ao ripwire em vez de uma por edição — medido 1 injeção em 12 edições, cada uma custando ~99 ms jogados fora; 12 edições caem de 1169 para 278 ms | [D-106](#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) |
 | 2026-09-28 22:28 | Item 4 fechado na opção B: a versão do ripwire vem do estado de sessão em vez de um processo por evento. E o ripwire real, agora no PATH, **derruba a tese central da proposta** — C e D ficam recusadas, E é a única que sobra | [D-105](#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook) |
@@ -3506,3 +3507,90 @@ Criada nesta entrega, depois de os dois jobs rodarem uma vez para que os nomes e
 `fmt` limpo, clippy limpo com `-D warnings` nas duas features, e as duas portas de shell rodadas na
 árvore. 248 testes no build default e 261 com `online`, sem mudança — esta fatia não toca código de
 produto além dos dois atributos de lint.
+
+---
+
+## D-108 — Cadeia de suprimentos: `cargo-deny` agendado e dependabot
+
+Fatia B de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md).
+
+### O desconhecido que eu tinha apontado resolveu-se verde
+
+A proposta dizia que o `advisories` era "o único desconhecido real", porque consulta uma base viva e
+pode nascer vermelho por um crate transitivo. Instalei o `cargo-deny` 0.20.2 e rodei antes de
+versionar qualquer configuração:
+
+| seção | resultado |
+| --- | --- |
+| `advisories` | **ok**, zero entradas ignoradas |
+| `bans` | ok, com 4 avisos de duplicata (abaixo) |
+| `licenses` | falhava só por falta de allowlist; verde com as 8 entradas deste arquivo |
+| `sources` | ok, tudo de crates.io |
+
+### E derrubou uma afirmação minha
+
+A proposta afirmava, na seção que eu apresentei como verificada: **"Nenhum crate duplicado em duas
+versões."** É falso. O `cargo-deny` encontra **quatro** — `base64`, `getrandom`, `syn` e
+`windows-sys`. Meu pipeline de conferência era
+
+```
+cargo tree --prefix none | awk '{print $1}' | sort -u | awk '{print $1}' | sort | uniq -d
+```
+
+que deduplica nome+versão e **só então** procura linhas repetidas — não podia achar nada, por
+construção. É a mesma classe de erro da função de slug que primeiro me disse que 98 de 98 âncoras
+estavam quebradas: a ferramenta de verificação estava errada, não o objeto verificado. As quatro são
+pins transitivos, não acionáveis daqui, e ficam em `warn`.
+
+### Um achado de licença que se dissolveu ao ser lido
+
+O `cargo deny list` reporta **`LGPL-2.1-or-later`** no grafo, o que num crate MIT é o tipo de coisa
+que para o trabalho. Lido: `r-efi 6.0.0` é `MIT OR Apache-2.0 OR LGPL-2.1-or-later`. O `list`
+**decompõe expressões `OR`**, então o LGPL é uma das três opções e o braço MIT nos satisfaz — não há
+obrigação de copyleft. O crate ainda por cima só entra em target UEFI. Mesma história com `BSL-1.0`
+(`ryu` é `Apache-2.0 OR BSL-1.0`).
+
+Nenhum dos dois entra na allowlist, e o `deny.toml` diz por escrito **por que não**, para ninguém
+"consertar" um alarme futuro alargando a lista.
+
+### A allowlist é exata, não generosa
+
+Oito entradas, exatamente o que está no grafo hoje: `MIT`, `Apache-2.0`,
+`Apache-2.0 WITH LLVM-exception` (o braço de exceção do `wasi` é expressão distinta para o
+casador), `ISC` (a metade `online`: ring, rustls, untrusted), `Unicode-3.0` (a pilha ICU sob o
+`idna`), `Unlicense` (`ignore`, `walkdir`, `memchr`), `BSD-3-Clause` (`subtle`, licença única) e
+`CDLA-Permissive-2.0` (`webpki-roots`, licença única). Cada uma com o crate que a exige em
+comentário, para que alargar a lista apareça como decisão no diff.
+
+`sources` ficou em **`deny`** para registro e git desconhecidos, não em `warn`: algo fora do
+crates.io é pergunta de cadeia de suprimentos, não aviso.
+
+### Agendado no `master`, nunca em PR
+
+Novo workflow `supply-chain.yml`, job **`cargo-deny`** — deliberadamente **não** chamado `default`
+nem `online`, que são os checks obrigatórios criados no
+[D-107](#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) e não podem ser confundidos
+com este. Roda por `schedule` semanal, por `workflow_dispatch`, e em push no `master` **restrito aos
+caminhos** `deny.toml`, `Cargo.lock`, `Cargo.toml` e o próprio workflow — assim um `deny.toml` ruim
+é pego pelo commit que o escreve, sem transformar deriva de base de advisories em falha do autor do
+PR.
+
+O `cargo-deny` é instalado **sem pin de versão**, de propósito: o objetivo do job é ver a base de
+advisories de hoje com a ferramenta de hoje. As duas actions seguem pinadas por SHA.
+
+### Dependabot, e a política de pin explícita
+
+`cargo` e `github-actions`, semanal. **`rust-mcp-sdk` está em `ignore`**: o `=2.0.0` é exato de
+propósito — a data de protocolo stateless foi validada contra um ripwire real
+([D-002](#d-002--compatibilidade-de-protocolo-sdk--ripwire)) e a versão que ele reporta faz parte do
+guarda de compatibilidade ([D-105](#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook)).
+Sobe por decisão registrada aqui, nunca por bump automático. Era o ponto 3 aprovado pelo usuário.
+
+O ecossistema `github-actions` existe justamente por causa do D-107: pinar por SHA troca uma tag
+mutável por uma congelada, e sem alguém propondo a atualização o pin envelhece.
+
+### Verificação
+
+`cargo deny --all-features check`: as quatro seções **ok**, 4 avisos de duplicata. `cargo deny check`
+(só features default): as quatro **ok**. Os dois YAML validados por parser, não por leitura. Nenhum
+código de produto tocado — 248 e 261 testes seguem iguais.

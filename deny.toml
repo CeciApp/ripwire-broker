@@ -1,0 +1,76 @@
+# cargo-deny — supply chain gate (D-108).
+#
+# This runs on a schedule against master, NOT on pull requests. Advisory-database drift is not
+# the fault of whoever opened the PR, and a gate that goes red for reasons outside the author's
+# change trains people to ignore it.
+#
+# Every setting below was validated by running `cargo deny --all-features check` against the tree
+# before being committed: advisories, bans and sources pass with the defaults, and `licenses`
+# needed the allowlist in this file and nothing else.
+
+[graph]
+# Both features, so the `online` half of the graph (reqwest, rustls, webpki-roots) is covered.
+# The default build is the one that must have no network stack (CA-10), and a separate CI step
+# already enforces that; here the concern is licensing and advisories over everything we ship.
+all-features = true
+
+[output]
+feature-depth = 1
+
+[advisories]
+# Nothing ignored. The run was clean on 2026-09-28; the day it is not, the finding gets read
+# rather than silenced, and any entry added here carries the reason and a link.
+ignore = []
+
+[licenses]
+# The crate is MIT. This allowlist is exactly the set present in the graph today — 187 packages,
+# all permissive — not a generous superset. Adding one is a decision, so the diff shows it.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # wasi: `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`. Allowed explicitly because
+    # the WITH-exception arm is a distinct expression to the matcher.
+    "Apache-2.0 WITH LLVM-exception",
+    # ring, rustls, rustls-webpki, untrusted, hyper-rustls — the online half.
+    "ISC",
+    # The ICU stack under idna, via reqwest/url.
+    "Unicode-3.0",
+    # ignore, walkdir, globset, memchr, aho-corasick: `Unlicense OR MIT`.
+    "Unlicense",
+    # subtle, single-licensed.
+    "BSD-3-Clause",
+    # webpki-roots, single-licensed. Permissive, data-oriented license (Mozilla's root store).
+    "CDLA-Permissive-2.0",
+]
+# NOT allowed, deliberately: LGPL-2.1-or-later. `cargo deny list` reports it because it
+# decomposes OR expressions, and `r-efi` is `MIT OR Apache-2.0 OR LGPL-2.1-or-later` — the MIT
+# arm satisfies us, so there is no copyleft obligation and no reason to widen the allowlist.
+# BSL-1.0 is likewise absent: `ryu` is `Apache-2.0 OR BSL-1.0`.
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = false
+registries = []
+
+[bans]
+# Duplicate versions of one crate are worth knowing about but are usually not actionable from
+# here: they come from transitive pins. There are none today, so this starts honest at "warn"
+# rather than pretending a clean graph will stay clean by decree.
+multiple-versions = "warn"
+# A wildcard version requirement in our own Cargo.toml would be ours to fix.
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# Anything not from crates.io is a supply-chain question, so it fails rather than warns.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

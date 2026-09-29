@@ -31,8 +31,13 @@ valor/esforço.
 
 187 pacotes no grafo `online` (100 no default). Todas as licenças são permissivas —
 `MIT OR Apache-2.0` (105), `MIT` (31), `Unicode-3.0` (18), `Apache-2.0 OR MIT` (11),
-`Unlicense OR MIT` (5), `ISC`, `Zlib`, e uma `Apache-2.0 WITH LLVM-exception`. **Nenhum crate
-duplicado em duas versões.** Então `licenses` e `bans` nascem verdes com ~8 entradas.
+`Unlicense OR MIT` (5), `ISC`, `Zlib`, e uma `Apache-2.0 WITH LLVM-exception`.
+
+> **Corrigido na fatia B ([D-108](../changelog.md#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot)):**
+> esta seção afirmava "nenhum crate duplicado em duas versões". **Errado** — o `cargo-deny`
+> encontra quatro (`base64`, `getrandom`, `syn`, `windows-sys`). Meu pipeline de verificação
+> deduplicava nome+versão e só então procurava linhas repetidas, então não podia achar nada.
+> As quatro são pins transitivos, não acionáveis daqui, e ficam em `warn`.
 
 ### A superfície P0 pura é alcançável no build **default**
 
