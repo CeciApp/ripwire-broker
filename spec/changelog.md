@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-29 09:01 | Diagrama de arquitetura versionado em `spec/diagrams/`: fonte JSON do archify (a fonte da verdade) e HTML entregue, com fontes fixadas no commit `5daaf27` | [D-115](#d-115--diagrama-de-arquitetura-versionado) |
 | 2026-09-29 00:29 | O `sha2` 0.11 é recusado: ele **não** muda o digest (premissa minha, errada), e subir o nosso direto apenas **duplica** o crate, porque o `rust-mcp-sdk` pinado traz o 0.10 | [D-114](#d-114--o-sha2-011-é-recusado-e-uma-premissa-minha-estava-errada) |
 | 2026-09-29 00:08 | Fatia G: P1.3 (escalonador) — teto de voo, orçamento de requisições contra o oráculo do classificador, e resposta que nunca migra de pergunta; a proposta de PBT/CI está cumprida | [D-113](#d-113--fatia-g-o-escalonador-e-a-quarta-vez-que-o-instrumento-era-o-problema) |
 | 2026-09-29 00:00 | Fatia F: P0.1, P0.2 e P0.3 com tempdir; nenhum defeito nas duas fronteiras de segurança, mas **quatro** das minhas asserções não testavam nada e só a mutação mostrou | [D-112](#d-112--fatia-f-duas-fronteiras-de-segurança-fuzzadas-e-quatro-testes-meus-que-não-testavam-nada) |
@@ -4094,3 +4095,54 @@ conferido por `if cargo …; then`, sem pipe.
 Árvore de volta em `sha2 = "0.10"`, build e as duas suítes verdes (295 / 308), duplicatas de novo em
 **4**, `cargo deny --all-features check` com as quatro seções ok. O experimento não deixou nada
 atrás: nenhum arquivo de `src/` alterado, `Cargo.toml` e `Cargo.lock` idênticos ao `master`.
+
+## D-115 — Diagrama de arquitetura versionado
+
+Um diagrama da arquitetura do broker, gerado com o archify e versionado em
+[`spec/diagrams/`](diagrams/):
+
+- [`ripwire-broker.architecture.json`](diagrams/ripwire-broker.architecture.json): a fonte. É ela
+  que se edita; o HTML é derivado.
+- [`ripwire-broker.architecture.html`](diagrams/ripwire-broker.architecture.html): o artefato
+  entregue, autocontido (SVG inline, tema claro/escuro, visões guiadas).
+
+### O que ele mostra
+
+O caminho principal `Agent host → MCP facade → Broker core → Read-only guard → Upstream client →
+ripwire --mcp`, com stdio nas duas pontas; o modo automático (hook/prompt chamando o broker
+in-process e gravando fingerprints no estado de sessão); e, tracejados, os dois enriquecimentos
+opcionais: notas por modelo local e o coordenador semântico do `--online` falando HTTPS com o Jev.
+
+Os fatos vêm do README e dos comentários de módulo (`//!`) de `src/`. Cada componente aponta para
+os seus arquivos (17 referências), fixadas no commit `5daaf27` do repositório público; o archify
+verificou que todos existem nessa revisão.
+
+### Duas simplificações, nomeadas
+
+1. O **Read-only guard** aparece como um passo do caminho principal. No código é o
+   `guarded_call` de [`src/broker.rs`](../src/broker.rs), a única passagem para o ripwire: só
+   verbos de leitura da allowlist ([D-014](#d-014--allowlist-e-validação-de-capabilities)) passam.
+   É uma função do núcleo, não um processo nem uma camada separada.
+2. O **`__supervise`** (limite de memória, [D-050](#d-050--limite-de-memória-do-ripwire-por-supervisor)) está
+   dentro da caixa do Upstream client, não desenhado à parte.
+
+### Um erro da primeira versão, apontado na revisão
+
+A primeira versão chamava esse nó de **Workspace guard**, com a seta `paths`: todas as três
+ferramentas pareciam passar pela verificação de caminhos. **Não passam.** O CodeRabbit apontou no
+PR #27, e o código confirma: o [`src/workspace.rs`](../src/workspace.rs) só é aplicado em
+`context_after_edit`, a `files` e `symbols`, antes de qualquer chamada upstream (CA-08).
+`context_for_task` e `context_before_finish` não recebem caminhos do agente e não passam por ele.
+O que toda chamada atravessa é a allowlist de verbos. O nó foi renomeado para o que é universal, e
+a verificação de caminhos ficou no cartão de segurança, restrita a `context_after_edit`.
+
+### Verificação
+
+`validate --quality showcase`: 9/9 checagens do artefato, 0 erros e 0 avisos de composição.
+`deliver`: especificação sha256 `25e8d8d0…` (7732 bytes), HTML `a7287595…` (720229 bytes), 17
+referências de fonte verificadas. `visual-check` no Chrome: sem rolagem em 1440×900, 1600×1000,
+1920×1080 e 2048×1320; menor texto projetado 6,6 px a 1440 (mínimo 6). As capturas e o recibo do `visual-check` não foram versionados:
+são reproduzíveis a partir do HTML.
+
+**Não é atualizado sozinho.** Uma mudança de arquitetura não quebra nada aqui; o diagrama envelhece
+em silêncio. Quem mudar a topologia edita o JSON e roda de novo `deliver`.

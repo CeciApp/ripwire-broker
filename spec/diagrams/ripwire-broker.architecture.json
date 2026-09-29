@@ -1,0 +1,403 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ripwire-broker architecture",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1270,
+      660
+    ],
+    "views": [
+      {
+        "id": "mcp-path",
+        "label": "MCP request path",
+        "focus": [
+          "host",
+          "mcp",
+          "broker",
+          "guard",
+          "upstream",
+          "ripwire"
+        ],
+        "note": "An agent tool call crosses stdio twice: into the broker, then into ripwire --mcp."
+      },
+      {
+        "id": "hooks",
+        "label": "Automatic mode (hooks)",
+        "focus": [
+          "host",
+          "hook",
+          "broker",
+          "state"
+        ],
+        "note": "Host hooks run the broker in-process and keep per-session fingerprints on disk."
+      },
+      {
+        "id": "optional",
+        "label": "Optional enrichment",
+        "focus": [
+          "broker",
+          "notes",
+          "online",
+          "jev"
+        ],
+        "note": "Local-model notes and the --online classifier only add to context_for_task."
+      }
+    ],
+    "repository": {
+      "url": "https://github.com/CeciApp/ripwire-broker",
+      "revision": "5daaf271ecd2298d156edb3de18af3f37c162b15"
+    }
+  },
+  "components": [
+    {
+      "id": "host",
+      "type": "external",
+      "label": "Agent host",
+      "sublabel": "Claude Code / Codex",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "mcp",
+      "type": "frontend",
+      "label": "MCP facade",
+      "sublabel": "3 tools + status",
+      "pos": [
+        250,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/mcp.rs"
+        }
+      ]
+    },
+    {
+      "id": "broker",
+      "type": "backend",
+      "label": "Broker core",
+      "sublabel": "route · shape · budget",
+      "pos": [
+        460,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "context/v1",
+      "sources": [
+        {
+          "path": "src/broker.rs"
+        },
+        {
+          "path": "src/router.rs"
+        },
+        {
+          "path": "src/budget.rs"
+        }
+      ]
+    },
+    {
+      "id": "guard",
+      "type": "security",
+      "label": "Read-only guard",
+      "sublabel": "verb allowlist",
+      "pos": [
+        670,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/broker.rs",
+          "line": 708,
+          "label": "guarded_call"
+        },
+        {
+          "path": "src/workspace.rs",
+          "label": "after_edit paths"
+        }
+      ]
+    },
+    {
+      "id": "upstream",
+      "type": "backend",
+      "label": "Upstream client",
+      "sublabel": "child process",
+      "pos": [
+        880,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/upstream.rs"
+        },
+        {
+          "path": "src/supervise.rs"
+        }
+      ]
+    },
+    {
+      "id": "ripwire",
+      "type": "external",
+      "label": "ripwire --mcp",
+      "sublabel": "33 verbs",
+      "pos": [
+        1090,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "hook",
+      "type": "frontend",
+      "label": "Hook / prompt CLI",
+      "sublabel": "one-shot commands",
+      "pos": [
+        460,
+        110
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/hook.rs"
+        },
+        {
+          "path": "src/local.rs"
+        }
+      ]
+    },
+    {
+      "id": "state",
+      "type": "database",
+      "label": "Hook session state",
+      "sublabel": "private file",
+      "pos": [
+        670,
+        110
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/state.rs"
+        },
+        {
+          "path": "src/session.rs"
+        }
+      ]
+    },
+    {
+      "id": "notes",
+      "type": "external",
+      "label": "Local model CLI",
+      "sublabel": "e.g. ollama",
+      "pos": [
+        460,
+        490
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/summarizer.rs"
+        },
+        {
+          "path": "src/notes.rs"
+        }
+      ]
+    },
+    {
+      "id": "online",
+      "type": "backend",
+      "label": "Semantic coordinator",
+      "sublabel": "--online only",
+      "pos": [
+        670,
+        490
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/online/coordinator.rs"
+        },
+        {
+          "path": "src/online/merge.rs"
+        }
+      ]
+    },
+    {
+      "id": "jev",
+      "type": "cloud",
+      "label": "TypeSafe Jev",
+      "sublabel": "remote classifier",
+      "pos": [
+        880,
+        490
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/online/jev.rs"
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "host-to-mcp",
+      "from": "host",
+      "to": "mcp",
+      "label": "stdio",
+      "variant": "emphasis"
+    },
+    {
+      "id": "mcp-to-broker",
+      "from": "mcp",
+      "to": "broker",
+      "variant": "emphasis"
+    },
+    {
+      "id": "broker-to-guard",
+      "from": "broker",
+      "to": "guard",
+      "label": "verb call",
+      "variant": "emphasis"
+    },
+    {
+      "id": "guard-to-upstream",
+      "from": "guard",
+      "to": "upstream",
+      "variant": "emphasis"
+    },
+    {
+      "id": "upstream-to-ripwire",
+      "from": "upstream",
+      "to": "ripwire",
+      "label": "stdio",
+      "variant": "emphasis"
+    },
+    {
+      "id": "host-to-hook",
+      "from": "host",
+      "to": "hook",
+      "label": "hook event",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "hook-to-broker",
+      "from": "hook",
+      "to": "broker",
+      "label": "in-process",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        530,
+        237
+      ]
+    },
+    {
+      "id": "hook-to-state",
+      "from": "hook",
+      "to": "state",
+      "label": "fingerprints"
+    },
+    {
+      "id": "broker-to-notes",
+      "from": "broker",
+      "to": "notes",
+      "label": "notes",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        523,
+        427
+      ]
+    },
+    {
+      "id": "broker-to-online",
+      "from": "broker",
+      "to": "online",
+      "label": "rank files",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "online-to-jev",
+      "from": "online",
+      "to": "jev",
+      "label": "HTTPS",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Three task-moment tools",
+      "items": [
+        "context_for_task (2500 tokens)",
+        "context_after_edit (1500 tokens)",
+        "context_before_finish (1800 tokens)"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Envelope pipeline",
+      "items": [
+        "router → ripwire verbs → normalize → dedup → budget",
+        "Schema ripwire-broker.context/v1 with provenance",
+        "Tokens ≈ ceil(JSON bytes / 4)"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Safety defaults",
+      "items": [
+        "Only allowlisted read-only verbs reach ripwire",
+        "context_after_edit paths must resolve inside the root",
+        "Repository text under untrusted_repository_data",
+        "Jev key only from RIPWIRE_BROKER_JEV_API_KEY"
+      ]
+    }
+  ]
+}
