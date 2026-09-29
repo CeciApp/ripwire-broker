@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 22:28 | Item 4 fechado na opção B: a versão do ripwire vem do estado de sessão em vez de um processo por evento. E o ripwire real, agora no PATH, **derruba a tese central da proposta** — C e D ficam recusadas, E é a única que sobra | [D-105](#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook) |
 | 2026-09-28 22:09 | Itens 2 e 5 decididos: o precheck do `is_fresh` **recusado** (ele pularia a reverificação de elegibilidade, que é a fronteira de consentimento) e o fan-out do `context_after_edit` **feito** nos dois laços, 3,6–4,0x e custo plano no número de símbolos | [D-104](#d-104--decisão-dos-itens-2-e-5-recusado-e-feito) |
 | 2026-09-28 21:34 | Revisão dos testes-ouro: só um era sensível a plataforma, e ele pegava um **defeito real** — `add_notes` estourava itens cujo corpo já tinha ido ao modelo local. Corrigido reservando a escrituração escrita após o encaixe | [D-103](#d-103--uma-nota-não-custa-mais-um-item-que-já-foi-evidência) |
 | 2026-09-28 21:02 | O teste-ouro do D-099 fixava `shown` em números de **uma** máquina e quebrou no CI: `provenance.workspace` carrega o caminho do workspace, ~40 bytes mais curto no Linux. Trocado por um limite de desperdício medido em tempo de execução | [D-102](#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho) |
@@ -3198,3 +3199,105 @@ explicitamente: `the_build_has_no_network_stack` passa.
 
 244 verdes no build padrão e 257 com `online`, as mesmas contagens — nenhum teste novo, um
 reescrito. Clippy e fmt limpos nas duas features. Sonda de medição removida.
+
+---
+
+## D-105 — A versão do ripwire deixa de custar um processo por evento de hook
+
+Item 4 do [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos), fechado
+na **opção B** da proposta em
+[`spec/plan/proposta-ripwire-por-evento-de-hook.md`](plan/proposta-ripwire-por-evento-de-hook.md),
+por escolha do usuário. O ripwire foi instalado em `~/.local/bin` (versão **0.6.5**), o que destravou
+a medição que o [D-101](#d-101--proposta-para-o-item-4-o-ripwire-por-evento-de-hook) declarava como
+bloqueio — e ela derruba a tese central daquela proposta.
+
+### O ripwire real contra o dublê
+
+O D-101 mediu com um dublê de `ripwire --mcp` em Python, porque o binário não estava no PATH:
+
+| | dublê Python | ripwire real |
+| --- | --- | --- |
+| `ripwire --version` | 19,4 ms | **3,6 ms** |
+| `user-prompt-submit` | 43,0 ms | **19,4 ms** |
+| `post-tool-use` | 43,0 ms | **34,0 ms** |
+| `stop` | 42,6 ms | **222,0 ms** |
+
+O D-101 concluiu: "os três custam o mesmo, e é isso que importa — os 43 ms são overhead fixo de
+subida". **Não se sustenta.** Com o ripwire real os três custam coisas muito diferentes e o `stop`
+custa 5x o mais barato. O que domina é o **trabalho do ripwire**, não a subida: o gate de conclusão
+faz várias chamadas upstream e o ripwire trabalha de verdade em cada uma.
+
+### A rota que a proposta sugeria não existe
+
+A proposta oferecia duas formas para B: ler a versão do handshake MCP que já acontece, ou cachear. A
+primeira **não é possível**: o `rust-mcp-sdk` 2.0.0 não expõe o `Implementation` do servidor ao
+cliente — `server_details()` existe no lado servidor. É o mesmo obstáculo que o
+[D-049](#d-049--cancelamento-pelo-cliente-e-status-que-não-trava) encontrou com o id JSON-RPC.
+
+### O que foi feito
+
+`SessionState` guarda a última leitura com o **stamp do binário** — caminho resolvido, tamanho e
+mtime. Cada evento de hook é um processo novo, então sem isso cada um sobe um ripwire inteiro só
+para ler `--version` e jogar fora. O campo entra como `#[serde(default)]`, o padrão já usado ali, e
+um arquivo de estado anterior a esta entrada continua carregando — verificado.
+
+**Não é hash de conteúdo, e o motivo é aritmético:** hashear vários megabytes custaria mais que os
+3,6 ms do processo que se quer evitar.
+
+**Por que `(mtime, size)` aqui e não no `is_fresh`:** no [D-104](#d-104--decisão-dos-itens-2-e-5-recusado-e-feito)
+o mesmo atalho foi recusado porque lá ele pularia a reverificação de **elegibilidade**, que é a
+fronteira de consentimento (§23.6). Aqui o que se protege é o `check_version`, um guarda de
+**compatibilidade** — os fixtures foram gravados de 0.6.4 em diante. Errar custa uma string de
+versão obsoleta em `provenance` e uma checagem de compatibilidade obsoleta até a sessão seguinte,
+depois de alguém trocar o binário no meio da sessão. Não é a mesma coisa, e a distinção está escrita
+no código.
+
+Um binário que não pôde ser stampeado nunca é lembrado: um `ripwire` ainda não instalado é relido na
+próxima vez, jamais cacheado como `"unavailable"`.
+
+### O ganho entregue
+
+| evento | antes | depois | ganho |
+| --- | --- | --- | --- |
+| `user-prompt-submit` | 19,4 ms | 17,0 ms | 2,4 ms (12%) |
+| `post-tool-use` | 34,0 ms | 33,0 ms | 1,0 ms (3%) |
+| `stop` | 222,0 ms | 218,9 ms | 3,1 ms (1,4%) |
+
+A proposta prometia **45% do total**, número que era artefato do startup do Python. O real é de 1,4
+a 12%. Vale por remover um processo inteiro por evento, com código pequeno e testado, mas o valor é
+modesto e não faz sentido apresentá-lo como mais que isso.
+
+### O que a medição decide sobre as outras opções
+
+- **C (socket para o servidor MCP) e D (daemon próprio): recusadas.** A justificativa das duas era
+  que a subida de processo dominava. Ela é ~3 a 5 ms de 17 a 219 ms. Comprariam pouco e custariam
+  socket autenticado, escopo por workspace canônico e ciclo de vida sob
+  [D-050](#d-050--limite-de-memória-do-ripwire-por-supervisor), além de reabrir o
+  [D-064](#d-064--cache-diagnóstico-e-integração-proposta). A medição que era o bloqueio resolveu o
+  caso, e resolveu **contra** elas.
+- **E (reduzir eventos): a única que sobra com ganho grande.** O `stop` a 219 ms e o `post-tool-use`
+  a 33 ms **por edição** são trabalho real do ripwire. Nada mais nesta proposta ataca isso. Continua
+  decisão de produto sobre PRD 8.4.
+
+### Efeito colateral da instalação: os testes que se pulavam agora rodam
+
+Os testes com `require_ripwire!` retornavam cedo quando o binário faltava, o que os fazia **passar
+vazios**. Com o 0.6.5 no PATH: **zero pulados, todos verdes**. Os fixtures gravados batem com a saída
+real do ripwire 0.6.5, o que até aqui era suposição.
+
+### Testes
+
+Dois novos, no seam do binário real (`tests/cli.rs`), com um dublê em Python que conta cada
+`--version` — portanto rodam no CI, que não tem ripwire:
+
+- `a_second_hook_event_does_not_ask_ripwire_for_its_version_again` — **vermelho antes**, 2 leituras
+  onde deve haver 1.
+- `a_swapped_ripwire_is_read_again` — a invalidação. **Provado que tem dentes**: enfraquecendo a
+  comparação do stamp para só o caminho, ele falha. Um cache cuja invalidação não é testada erra em
+  silêncio.
+
+### Verificação
+
+246 verdes no build padrão e 259 com `online` (eram 244 e 257; +2 testes), com o ripwire real no
+PATH e nenhum teste pulado. Clippy e fmt limpos nas duas features. Um arquivo de estado anterior a
+esta entrada carrega sem erro.

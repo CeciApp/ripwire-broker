@@ -39,6 +39,20 @@ pub struct SessionState {
     /// Next `request_id`: each hook event is a new process, so the count lives here.
     #[serde(default)]
     pub next_request: u64,
+    /// The ripwire version last read, and what identified the binary then. Every hook event is a
+    /// new process, so without this each one starts a whole extra ripwire just to read
+    /// `--version` and throw it away (D-105).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ripwire: Option<CachedVersion>,
+}
+
+/// A version reading, with the stamp of the binary it came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedVersion {
+    pub binary: String,
+    pub size: u64,
+    pub mtime: u64,
+    pub version: String,
 }
 
 pub const LOG_ENTRIES: usize = 5;
@@ -383,7 +397,34 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         log_refs: args.log_refs,
         ..Policy::default()
     };
-    let broker = match crate::local::launch(&workspace, &args.upstream, true).await {
+    // The version of a binary that has not changed is the version we already read. A ripwire
+    // swapped mid-session keeps the old reading until the next session, which costs a stale
+    // string in `provenance` and a stale compatibility check; the alternative is a whole process
+    // per event (D-105).
+    let stamp = crate::upstream::binary_stamp(&args.upstream.ripwire);
+    let known = match (&stamp, &state.ripwire) {
+        (Some((path, size, mtime)), Some(seen))
+            if (&seen.binary, seen.size, seen.mtime) == (path, *size, *mtime) =>
+        {
+            Some(seen.version.clone())
+        }
+        _ => None,
+    };
+    let version = match known {
+        Some(v) => v,
+        None => crate::upstream::ripwire_version(&args.upstream.ripwire),
+    };
+    // Only a binary we could stamp is remembered: a `ripwire` that is not there yet must be read
+    // again next time, never cached as "unavailable".
+    if let Some((binary, size, mtime)) = stamp {
+        state.ripwire = Some(CachedVersion {
+            binary,
+            size,
+            mtime,
+            version: version.clone(),
+        });
+    }
+    let broker = match crate::local::launch(&workspace, &args.upstream, true, Some(version)).await {
         Ok(b) => b,
         // Opted-out sessions stay silent even when ripwire is missing.
         Err(_) if state.opted_out => return None,

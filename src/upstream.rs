@@ -252,6 +252,37 @@ impl Upstream for RipwireUpstream {
 }
 
 /// `ripwire --version` → "0.6.4", or "unavailable". Run with an argument array, never a shell.
+/// `binary` as an absolute path: taken as given when it names a directory component, looked up on
+/// `PATH` otherwise. `None` when nothing executable answers to it.
+pub fn resolve(binary: &Path) -> Option<PathBuf> {
+    if binary.components().count() > 1 {
+        return binary.canonicalize().ok();
+    }
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(binary))
+            .find(|candidate| candidate.is_file())
+            .and_then(|found| found.canonicalize().ok())
+    })
+}
+
+/// What identifies the binary we last asked: its resolved path, size and modification time. Not a
+/// content hash on purpose — hashing several megabytes would cost more than the process it saves
+/// (D-105). Getting this wrong reports a stale version for the rest of a session, which weakens a
+/// **compatibility** check (`check_version`), not the eligibility guard of `is_fresh`, where the
+/// same shortcut was refused because it would be the consent boundary (D-104).
+pub fn binary_stamp(binary: &Path) -> Option<(String, u64, u64)> {
+    let path = resolve(binary)?;
+    let meta = std::fs::metadata(&path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some((path.to_string_lossy().into_owned(), meta.len(), mtime))
+}
+
 pub fn ripwire_version(binary: &std::path::Path) -> String {
     std::process::Command::new(binary)
         .arg("--version")
