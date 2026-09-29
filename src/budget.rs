@@ -47,8 +47,45 @@ enum Added {
     Risk,
 }
 
+/// Room held back from the entries so that the bookkeeping written *after* the fitting decisions
+/// never has to evict one of them (D-103). Two sentences are written that late and neither is
+/// accounted for while entries are being fitted:
+///
+/// - `next_step`, which `finish` writes once it knows how many entries were omitted;
+/// - the `notes_omitted` limitation, which `add_notes` writes even when not one note fits.
+///
+/// Both are bounded, so the reserve is measured from their widest form rather than guessed. It
+/// only applies when a summarizer is configured: without one, `add_notes` never runs, and the
+/// `next_step` overshoot costs nobody an item because nothing is added after it.
+pub fn notes_reserve() -> u32 {
+    // Widest *reachable* form, not widest representable: at most `MAX_GROUPS` notes are ever
+    // written, and `next_step` counts entries, which `MAX_BUDGET_TOKENS` bounds far below
+    // `usize::MAX`. Reserving for unreachable digits would cost items for nothing.
+    let widest_note_record = crate::notes::omitted(crate::notes::MAX_GROUPS);
+    let widest_next_step = format!(
+        "{} items omitted; call again with a larger budget_tokens (more than {}) or a narrower task",
+        crate::broker::MAX_BUDGET_TOKENS,
+        crate::broker::MAX_BUDGET_TOKENS
+    );
+    let tokens = |n: usize| (n + 1).div_ceil(4) as u32;
+    let record = serde_json::to_string(&widest_note_record)
+        .map(|s| tokens(s.len()))
+        .unwrap_or(0);
+    record + tokens(widest_next_step.len())
+}
+
 /// Adds entries in priority order while they fit; limitations are always kept (PRD 10.2 #1).
-pub fn fill(env: &mut Envelope, mut entries: Vec<Entry>) {
+/// `reserve` is budget held back from the entries, for bookkeeping a later step must be able to
+/// write without evicting anything already decided.
+pub fn fill(env: &mut Envelope, entries: Vec<Entry>, reserve: u32) {
+    fill_to(
+        env,
+        entries,
+        env.budget.requested_tokens.saturating_sub(reserve),
+    );
+}
+
+fn fill_to(env: &mut Envelope, mut entries: Vec<Entry>, budget: u32) {
     entries.sort_by_key(|e| match e {
         Entry::Limitation(_) => 0,
         Entry::Item(p, _) | Entry::Test(p, _) | Entry::Risk(p, _) => *p,
@@ -64,7 +101,6 @@ pub fn fill(env: &mut Envelope, mut entries: Vec<Entry>) {
     // loop runs, and each change is accounted for exactly, so the fit decisions are the ones
     // the whole-envelope estimate made (D-099). `finish` recomputes from scratch afterwards.
     let mut len = json_len(env);
-    let budget = env.budget.requested_tokens;
     for entry in entries {
         match entry {
             // Always kept (PRD 10.2 #1), so this one is not a fit decision: it is accounted

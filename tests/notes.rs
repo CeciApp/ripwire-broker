@@ -828,3 +828,56 @@ async fn the_note_cache_stops_at_its_ceiling_dropping_the_oldest_first() {
         "the newest note is still cached"
     );
 }
+
+// --- D-103: notes never cost a delivered item ---
+
+/// Every reference that appeared as evidence in a prompt sent to the local model.
+fn evidence_refs(prompts: &[String]) -> Vec<String> {
+    let mut out = vec![];
+    for p in prompts {
+        for line in p.lines().filter(|l| l.starts_with("- ")) {
+            if let Some(reference) = line[2..].split(" | ").next()
+                && !reference.is_empty()
+                && !out.contains(&reference.to_string())
+            {
+                out.push(reference.to_string());
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_note_never_costs_an_item_that_was_already_evidence() {
+    // A note large enough that fitting it, or recording that it did not fit, presses on the
+    // budget. A fresh broker and model per budget, so prompts never accumulate across runs.
+    for budget in [400u32, 500, 600, 700, 800, 1000, 1200] {
+        let model = Arc::new(FakeSummarizer::replying(&"n".repeat(600)));
+        let (b, _fake, _ws) = notes_broker(
+            FakeUpstream::new().answer("explore", "explore_export_auth"),
+            Some(model.clone()),
+        )
+        .await;
+
+        let env = b.context_for_task(orient(budget)).await.unwrap();
+
+        let present: Vec<String> = env
+            .items
+            .iter()
+            .map(|i| match &i.symbol {
+                Some(s) => format!("{}#{s}", i.path),
+                None => i.path.clone(),
+            })
+            .collect();
+        let gone: Vec<String> = evidence_refs(&model.prompts())
+            .into_iter()
+            .filter(|r| !present.contains(r))
+            .collect();
+        assert!(
+            gone.is_empty(),
+            "budget {budget}: {gone:?} went to the local model as evidence and then was dropped \
+             from the envelope; a note, or the record that a note did not fit, cost delivered \
+             context"
+        );
+    }
+}
