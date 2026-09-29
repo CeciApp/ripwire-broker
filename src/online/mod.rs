@@ -48,7 +48,9 @@ pub enum PathOrigin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankedPath {
     pub path: String,
-    /// Position of the path's first item in ripwire's output.
+    /// Position of the path's first item among the items that reach here — docs are filtered
+    /// out before the count, so this is not an index into ripwire's raw output. Only the
+    /// relative order matters, and filtering preserves it (D-110).
     pub rank: usize,
     /// Best (lowest) priority among the path's items.
     pub priority: u8,

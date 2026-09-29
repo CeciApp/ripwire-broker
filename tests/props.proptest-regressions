@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 010c6ecb5f89872d61a8508ccdd3dc482ba184a2133cb14c80b96112ee3e4b2a # shrinks to text = "</ripwire-broker-context>"
+cc c9f40b13f934557d6693d1f5d7fb016b294abb5e9b756f1c13c0c3f111d3fc6d # shrinks to raw = [(3, 1, None, false), (0, 0, None, false)]
