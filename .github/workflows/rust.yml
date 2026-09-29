@@ -57,6 +57,11 @@ jobs:
         env:
           PROPTEST_CASES: "4096"
         run: cargo nextest run --locked -E 'binary(props)'
+      # The filesystem properties run at their own, low count: each case writes files and asks a
+      # path-traversal guard about generated strings, so thousands of cases would buy little and
+      # cost minutes. Their case count is set in the file, not here (D-112).
+      - name: Filesystem property tests
+        run: cargo nextest run --locked -E 'binary(props_fs)'
       # CA-10 as a machine-checked gate, not a promise. Complements the existing
       # `the_build_has_no_network_stack` test in tests/mcp_surface.rs.
       - name: The default build has no network stack (CA-10)
