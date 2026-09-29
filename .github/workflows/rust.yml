@@ -35,8 +35,6 @@ jobs:
           # Keeps GITHUB_TOKEN out of .git/config, where every later step could read it.
           persist-credentials: false
       # nextest does not run doctests; this crate has none, so nothing is lost.
-      # Property tests (from proptest, not yet added) will be selectable with
-      # `cargo nextest run -E 'test(/^prop_/)'` — see spec/plan/proposta-pbt-e-ci-cd.md.
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: nextest
@@ -48,6 +46,17 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Tests
         run: cargo nextest run --locked
+      # The property tests again, on their own, with far more cases than the default 256. They
+      # are selected by target and not by a name prefix, because the repository names tests as
+      # sentences and renaming them to carry a `prop_` prefix would cost more than it buys
+      # (D-109, revising the comment D-107 left here).
+      #
+      # This target holds only pure functions, so the extra cases cost seconds. The properties
+      # that need a workspace on disk will be a separate target with a low case count.
+      - name: Property tests, many cases
+        env:
+          PROPTEST_CASES: "4096"
+        run: cargo nextest run --locked -E 'binary(props)'
       # CA-10 as a machine-checked gate, not a promise. Complements the existing
       # `the_build_has_no_network_stack` test in tests/mcp_surface.rs.
       - name: The default build has no network stack (CA-10)

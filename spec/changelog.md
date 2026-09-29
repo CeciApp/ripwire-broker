@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 23:28 | Fatia C: 22 propriedades sobre as superfícies puras, e o achado que elas existiam para achar — um segredo com caractere não-ASCII vazava seu esqueleto ASCII para status, log e agente | [D-109](#d-109--primeiras-propriedades-e-um-vazamento-de-credencial-que-elas-fecharam) |
 | 2026-09-28 23:14 | Fatia B: `deny.toml` com as quatro seções verdes (allowlist exata de 8 licenças, não um superconjunto generoso), `cargo-deny` **agendado no `master` e nunca em PR**, e dependabot com a política de pin do `rust-mcp-sdk` | [D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot) |
 | 2026-09-28 23:05 | Fatia A da proposta de PBT/CI: workflow com dois jobs, `permissions` mínimo, actions por SHA, `--locked`, timeout e `concurrency`; `forbid(unsafe_code)`, `deny(print_stdout)`, porta do CA-10 e guarda de fixture — os quatro passavam limpos antes de serem exigidos | [D-107](#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) |
 | 2026-09-28 22:43 | Opção E do item 4: uma rajada de edições passa a ser **uma** pergunta ao ripwire em vez de uma por edição — medido 1 injeção em 12 edições, cada uma custando ~99 ms jogados fora; 12 edições caem de 1169 para 278 ms | [D-106](#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) |
@@ -3594,3 +3595,110 @@ mutável por uma congelada, e sem alguém propondo a atualização o pin envelhe
 `cargo deny --all-features check`: as quatro seções **ok**, 4 avisos de duplicata. `cargo deny check`
 (só features default): as quatro **ok**. Os dois YAML validados por parser, não por leitura. Nenhum
 código de produto tocado — 248 e 261 testes seguem iguais.
+
+---
+
+## D-109 — Primeiras propriedades, e um vazamento de credencial que elas fecharam
+
+Fatia C de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): `proptest` como
+dev-dependency, o alvo `tests/props.rs`, e as propriedades de P0.7, P0.5, P0.8 e P0.9. **P0.6 veio
+junto**, fora da ordem da proposta, porque `decision.rs` é vizinho de `response.rs` e as duas
+propriedades se escrevem com o mesmo material.
+
+### O achado que justifica a fatia: `redact::remote_text` vazava a credencial
+
+O controle é de confidencialidade — é a última barreira antes de texto remoto chegar a status, log ou
+agente. O código fazia, nesta ordem:
+
+1. filtrar o texto para ASCII imprimível e espaço;
+2. `clean.replace(secret, "[redacted]")`.
+
+**Se o segredo carrega qualquer caractere não-ASCII, o passo 1 o apaga do texto, e então o passo 2
+procura uma forma que não está mais lá.** Com `secret = "ab\u{a9}cd"`, a saída era
+`"denied: abcd at edge"` — quatro dos cinco caracteres da credencial, em claro, exatamente onde o
+módulo promete que nada passa.
+
+O teste de exemplo que já existia cobria o caso **inverso** (um caractere de controle dentro do
+*texto*, com segredo ASCII, que funciona). A direção que faltava nunca tinha sido testada.
+
+A propriedade `remote_text_never_carries_the_secret` acha e **encolhe** para
+`secret = "\u{ae}a 0!"`. Ela ficou **vermelha antes** da correção e verde depois, provado revertendo
+só o `redact.rs` e rodando de novo. O caso encolhido virou também teste dirigido em
+`tests/online_units.rs`, porque uma semente de regressão pode ser apagada e um teste com nome não.
+
+A correção filtra o **segredo** do mesmo jeito que o texto e substitui essa forma. Pode
+**super-redigir** — um segredo `a\u{a9}b` também remove um `ab` comum do texto — e isso está
+comentado no código: é a direção segura para um controle de confidencialidade, e o texto em questão
+é mensagem de erro remota, não algo que alguém parseia.
+
+### Dois achados que eram das minhas propriedades, não do código
+
+Vale distinguir, porque contar os dois como defeito do produto seria inflar o resultado.
+
+1. **Subnormal.** Afirmei que uma probabilidade válida volta bit-exata. `1.591213237000899e-308`
+   volta `1.5912132370008993e-308`.
+2. **E nem um double normal volta bit-exato:** `0.45623431892261956` volta
+   `0.4562343189226195`. O `serde_json` decodifica float de forma aproximada a menos que a feature
+   `float_roundtrip` esteja ligada.
+
+O segundo é fato do sistema e fica registrado: **`parse_answers` não promete round-trip exato.** A
+deriva é de **1 ULP**, está no decodificador de JSON e não no validador, e só mudaria uma decisão
+para uma probabilidade a 1 ULP de `ADMISSION` ou `SELECTION` — as comparações estritas toleram isso e
+nenhum classificador responde nessa resolução. **Ligar a feature para comprar exatidão onde 1 ULP não
+pode importar foi recusado.** A propriedade passou a afirmar "dentro de 1 ULP e dentro da faixa", que
+ainda pega regressão real: truncamento, arredondamento para duas decimais, ler o campo errado.
+
+### E três propriedades que abortaram por desperdício, não por falha
+
+Com `PROPTEST_CASES=4096`, três abortaram com **"Too many global rejects"** — o `proptest` desiste em
+1024 rejeições, **mesmo tendo 1857 sucessos**. A causa era minha: `prop::num::f64::ANY` mais um
+`prop_assume!` de "fora da faixa" descarta quase todo caso, e `joined`/`cut` independentes geram
+`cut >= len` na maioria das vezes.
+
+Reescritas para **gerar por construção** em vez de filtrar: um `prop_oneof!` com NaN, ±infinito e as
+duas faixas fora de `[0,1]`; e `prop_flat_map` tirando o corte do próprio comprimento da string.
+Zero rejeições, e a propriedade do segredo passou a construir deliberadamente a classe que vazou —
+núcleo ASCII imprimível mais um caractere que o filtro remove — em vez de gerar strings arbitrárias e
+esperar acertar.
+
+### O filtro do CI, corrigindo o comentário que o D-107 deixou
+
+O [D-107](#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) deixou como comentário
+`-E 'test(/^prop_/)'`. **Está errado para este repositório:** os testes são nomeados como frases
+(`a_note_never_costs_an_item_that_was_already_evidence`), e renomear tudo para carregar um prefixo
+custaria mais do que compra. O filtro passa a ser por alvo, `-E 'binary(props)'`, e deixa de ser
+comentário: virou passo, com `PROPTEST_CASES=4096`, que custa **~9 s** porque este alvo só tem
+funções puras.
+
+### Semente de regressão
+
+O caminho do arquivo de regressões é fixado explicitamente
+(`FileFailurePersistence::Direct("tests/props.proptest-regressions")`). Sem isso o `proptest` procura
+um `lib.rs`/`main.rs` acima do teste — que nunca existe para um alvo de integração — e avisa no log a
+cada corrida.
+
+As duas sementes que ficaram das minhas propriedades defeituosas foram **apagadas**: as estratégias
+mudaram de forma, e semente velha reinterpretada contra estratégia nova é ruído. Nenhum arquivo é
+versionado nesta entrega porque não há falha pendente; a regra de versioná-lo segue valendo para
+quando houver.
+
+### Uma nota de processo: pela terceira vez o instrumento estava errado
+
+O comando com que eu ia declarar a fatia verde era
+
+```
+cargo clippy --all-targets --locked -q -- -D warnings 2>&1 | tail -3 && echo "clippy ok"
+```
+
+O status de um pipeline é o do **último** comando, então o `tail` sempre devolve 0 e o `echo`
+imprimia "ok" com o clippy falhando — havia um `unused_assignments` real em `props.rs`. É o terceiro
+caso desta série: a função de slug que disse que 98 de 98 âncoras estavam quebradas, o pipeline de
+duplicatas do [D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot), e agora este.
+**O padrão é meu, não do repositório**, e a correção é sempre a mesma: checar o código de saída em
+vez de ler a saída.
+
+### Verificação
+
+**271** testes no build default e **284** com `online` (eram 248 e 261): 22 propriedades mais o teste
+dirigido do vazamento. `fmt` limpo, clippy limpo com `-D warnings` nas duas features — conferido pelo
+código de saída — e `cargo deny --all-features check` com as quatro seções ok.
