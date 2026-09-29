@@ -1,6 +1,6 @@
 # Proposta — testes de propriedade e CI/CD
 
-Status: **proposta, nada aprovado** · 2026-09-28 22:59 · fonte:
+Status: **cumprida — as sete fatias entregues em [D-107](../changelog.md#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) a [D-113](../changelog.md#d-113--fatia-g-o-escalonador-e-a-quarta-vez-que-o-instrumento-era-o-problema); dois defeitos de segurança achados** · 2026-09-28 22:59, fechada 2026-09-29 00:08 · fonte:
 [`spec/prompt/ci-cd.md`](../prompt/ci-cd.md)
 
 Este documento **não vira código antes de aprovação**. Ele faz três coisas: separa o que o prompt
