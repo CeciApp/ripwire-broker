@@ -5,3 +5,9 @@
 
 # macOS
 .DS_Store
+
+# Local environment files. The product already treats *.env as a sensitive name
+# (SENSITIVE_EXTENSIONS, D-089), but the repository did not ignore them, so one created
+# by accident was committable.
+.env
+.envrc

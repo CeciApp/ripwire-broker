@@ -1,3 +1,13 @@
+//! `ripwire-broker` as a library: the broker core and the modules the binary drives.
+//!
+//! Two lints are denied crate-wide rather than trusted to review. `unsafe_code` is
+//! forbidden because this crate has none and should keep none. `print_stdout` and
+//! `dbg_macro` are denied because in `serve` stdout carries the MCP protocol: one stray
+//! `println!` in the library corrupts the session. `main.rs` is a separate crate root, so
+//! the legitimate `println!` of the one-shot commands is unaffected (D-107).
+#![forbid(unsafe_code)]
+#![deny(clippy::print_stdout, clippy::dbg_macro)]
+
 pub mod broker;
 mod budget;
 pub mod cli;

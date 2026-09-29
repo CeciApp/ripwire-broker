@@ -1,7 +1,8 @@
 # Proposta — o processo ripwire por evento de hook (item 4 da revisão de arquitetura)
 
 Status: **fechado — opção B feita em [D-105](../changelog.md#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook);
-C e D recusadas pela medição com o ripwire real; E segue aberta como decisão de produto** ·
+C e D recusadas pela medição com o ripwire real; E feita em
+[D-106](../changelog.md#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) — item 4 fechado** ·
 2026-09-28 · item 4 de
 [D-096](../changelog.md#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos),
 único em aberto depois de [D-100](../changelog.md#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release)
