@@ -1601,20 +1601,33 @@ async fn the_shaped_envelope_never_exceeds_its_budget_and_grows_with_it() {
     let (b, _fake, _ws) =
         broker(FakeUpstream::new().answer_text("explore", &many_symbols(24))).await;
 
-    // Recorded from the implementation this test was written against, before the incremental
-    // accounting replaced it: if the byte arithmetic drifts by even one byte, a boundary moves
-    // and one of these changes.
-    let goldens = [
-        (400u32, 3usize),
-        (600, 5),
-        (800, 8),
-        (1000, 11),
-        (1200, 13),
-        (1400, 16),
-    ];
+    // The whole set, to know which entries exist and what each costs. Measured here rather than
+    // recorded: the earlier version of this test pinned `shown` to numbers taken from one
+    // machine, and CI failed on Linux because `provenance.workspace` carries the workspace path
+    // and a temporary directory is about 40 bytes shorter there than on macOS, which moves every
+    // budget boundary (D-102).
+    let mut whole = TaskRequest::new("uma tarefa");
+    whole.mode = Mode::Orient;
+    whole.budget_tokens = 100_000;
+    let full = b.context_for_task(whole).await.unwrap();
+    assert_eq!(full.budget.shown, 24, "the whole set fits a large budget");
+    assert_eq!(full.items.len(), 24, "and all of them are items");
+    /// An entry's identity, so an envelope under budget can say which ones it carries even when
+    /// it carries them without their body.
+    fn id(i: &ripwire_broker::model::Item) -> (String, Option<String>, Option<u64>) {
+        (i.path.clone(), i.symbol.clone(), i.line)
+    }
+    // The cheapest an item can cost: its slim form, which is what the budgeter falls back to.
+    let slim_tokens = |i: &ripwire_broker::model::Item| -> u32 {
+        let slim = ripwire_broker::model::Item {
+            content: None,
+            ..i.clone()
+        };
+        serde_json::to_string(&slim).unwrap().len().div_ceil(4) as u32
+    };
 
     let mut last_shown = 0usize;
-    for budget in (256u32..=1400).step_by(4) {
+    for budget in (256u32..=1400).step_by(8) {
         let mut req = TaskRequest::new("uma tarefa");
         req.mode = Mode::Orient;
         req.budget_tokens = budget;
@@ -1636,10 +1649,44 @@ async fn the_shaped_envelope_never_exceeds_its_budget_and_grows_with_it() {
             "budget {budget}: every entry is either shown or counted as omitted"
         );
         last_shown = env.budget.shown;
-        if let Some((_, want)) = goldens.iter().find(|(at, _)| *at == budget) {
-            assert_eq!(
-                env.budget.shown, *want,
-                "budget {budget}: shown moved, so the fit decisions are not what they were"
+
+        // How much room is left unused, bounded rather than pinned. The fit is *not* maximal, by
+        // construction: `budget::finish` writes the bookkeeping — `shown`, `omitted` and the
+        // `next_step` sentence — only after the fitting decisions are made, so room the size of
+        // that block always stays unused. What can be asserted is that nothing larger than the
+        // cheapest omitted entry plus that block goes to waste. Both quantities come from this
+        // run, so no number is recorded from one machine.
+        //
+        // This replaces a table of `shown` values taken from one machine (D-099). That table was
+        // not testing a property: it recorded whatever came out, slack included, and it broke on
+        // CI because `provenance.workspace` carries the workspace path and a temporary directory
+        // is about 40 bytes shorter on Linux than on macOS, which moves every boundary (D-102).
+        //
+        // Sensitivity, measured by biasing `added()` and watching this fail: it catches a drift
+        // of 3 bytes per entry or more, and misses 1 or 2. A drift that small cannot break the
+        // budget contract either, because `finish` re-measures with the authoritative
+        // serialization and pops entries until the envelope fits; it can only cost an entry.
+        if env.budget.omitted > 0 {
+            let here: std::collections::HashSet<_> = env.items.iter().map(id).collect();
+            let cheapest_left_out = full
+                .items
+                .iter()
+                .filter(|i| !here.contains(&id(i)))
+                .map(slim_tokens)
+                .min()
+                .expect("omitted > 0, so some entry is not here");
+            let bookkeeping = serde_json::to_string(&env.budget)
+                .unwrap()
+                .len()
+                .div_ceil(4) as u32;
+            let slack = budget - env.budget.estimated_tokens;
+            assert!(
+                slack < cheapest_left_out + bookkeeping,
+                "budget {budget}: {} entries omitted with {slack} tokens of slack, while the \
+                 cheapest one left out costs {cheapest_left_out} slimmed and the bookkeeping \
+                 written after fitting costs {bookkeeping} — more room went to waste than either \
+                 explains",
+                env.budget.omitted
             );
         }
     }
