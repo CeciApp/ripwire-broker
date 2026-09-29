@@ -607,3 +607,195 @@ async fn dropping_the_run_aborts_requests_in_flight_and_queued_retries() {
         "the queue closed with the run"
     );
 }
+
+// --- D-113: P1.3, the scheduler's limits as properties ---
+
+/// Every invariant the scheduler owes its caller, over generated job mixes and configurations:
+/// the in-flight ceiling, the request budget counting every attempt, every admitted job accounted
+/// for exactly once, and — the one that costs most to get right — an answer never migrating to
+/// another job's question when responses come back out of order.
+///
+/// `proptest!` cannot wrap an async body, so the runner is driven directly and each case blocks on
+/// its own scheduler under paused time. Few cases, because each one runs a scheduler to
+/// completion; the test finishing at all is the no-deadlock assertion.
+#[test]
+fn the_scheduler_keeps_its_limits_and_never_mixes_up_an_answer() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config as PropConfig, TestRunner};
+
+    /// Item `j{k}` is scripted with its own probability, so a misrouted answer is visible rather
+    /// than plausible: every item would otherwise share one value and any mix-up would pass.
+    fn probability_of(k: usize) -> f64 {
+        0.1 + (k % 800) as f64 / 1000.0
+    }
+
+    TestRunner::new(PropConfig {
+        cases: 40,
+        failure_persistence: None,
+        ..PropConfig::default()
+    })
+    .run(
+        &(
+            // Items per job, so jobs differ in size.
+            prop::collection::vec(1usize..4, 1..10),
+            1usize..5, // max_in_flight
+            // Weighted toward a budget that actually runs out, because that is the only region
+            // where the unaccounted-job clause has anything to check. Measured over the generated
+            // cases: 8 jobs with a limit of 1 leaves 6 jobs never admitted, while a wide uniform
+            // draw mostly finishes everything and the clause never fires (D-113).
+            prop_oneof![
+                3 => 1usize..4,
+                1 => 4usize..25,
+            ],
+            1usize..6, // queue
+            // Which jobs fail once, to put retries in the accounting.
+            prop::collection::vec(any::<bool>(), 0..10),
+            // Which jobs answer late, to force completion out of submission order.
+            prop::collection::vec(0u64..40, 0..10),
+        ),
+        |(shapes, max_in_flight, request_limit, queue, fails, delays)| {
+            // A fresh runtime per case, with time already paused: `tokio::time::pause()` panics
+            // if called twice on one runtime, and a shared runtime would also keep each case's
+            // producer task alive into the next one.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut fake = FakeClassifier::new();
+                let mut jobs = Vec::new();
+                let mut items_of: Vec<Vec<usize>> = Vec::new();
+                let mut next = 0usize;
+                for (id, n) in shapes.iter().enumerate() {
+                    let ks: Vec<usize> = (next..next + n).collect();
+                    next += n;
+                    for k in &ks {
+                        fake = fake.answer(&format!("j{k}"), probability_of(*k));
+                    }
+                    if fails.get(id).copied().unwrap_or(false) {
+                        fake =
+                            fake.fail_times(&format!("j{}", ks[0]), ClassifyError::Server(503), 1);
+                    }
+                    if let Some(d) = delays.get(id).copied().filter(|d| *d > 0) {
+                        fake = fake.delay(&format!("j{}", ks[0]), Duration::from_millis(d));
+                    }
+                    jobs.push(batch(id, SemanticStage::FileAdmission, &ks));
+                    items_of.push(ks);
+                }
+                let fake = Arc::new(fake);
+                let cfg = SchedulerConfig {
+                    max_in_flight,
+                    request_limit,
+                    queue,
+                };
+
+                let report = run_jobs(fake.clone(), cfg, jobs).await;
+
+                // RF-ONLINE-08: the ceiling is on concurrent requests, observed by the classifier
+                // itself rather than inferred from the report.
+                let peak = fake.counters.max_in_flight.load(SeqCst);
+                prop_assert!(
+                    peak <= max_in_flight,
+                    "{peak} requests in flight against a ceiling of {max_in_flight}"
+                );
+                // Every attempt counts, retries included — and the count is checked against what
+                // the classifier actually saw, not only against the ceiling. A `<=` assertion
+                // alone cannot see **under**-counting: making the counter stop incrementing keeps
+                // it under any limit forever, and the limit then never stops anything (D-113).
+                // With `fresh: None` every admitted job is really sent, so the two must be equal.
+                prop_assert_eq!(
+                    report.requests,
+                    fake.calls(),
+                    "the report counts {} requests, the classifier saw {}",
+                    report.requests,
+                    fake.calls()
+                );
+                prop_assert!(
+                    report.requests <= request_limit,
+                    "{} requests sent against a limit of {request_limit}",
+                    report.requests
+                );
+                if report.stop == Some(Stop::RequestLimit) {
+                    prop_assert_eq!(
+                        report.requests,
+                        request_limit,
+                        "stopped for the limit without reaching it"
+                    );
+                }
+
+                // Accounting. `unfinished` holds jobs that were **admitted** and never answered,
+                // so a job still in the queue when the scheduler stops at its request limit is in
+                // none of the three lists — it was never admitted. Asserting that every submitted
+                // job appears somewhere was my property claiming a promise the report never made
+                // (D-113).
+                //
+                // What must hold is the safety direction: a job missing from the accounting is
+                // only acceptable while the report **says it is incomplete**, because absence must
+                // never be readable as an answer (PRD §23.2).
+                let mut seen: std::collections::HashSet<usize> =
+                    report.results.iter().map(|r| r.id).collect();
+                seen.extend(report.unfinished.iter().copied());
+                seen.extend(report.stale.iter().copied());
+                let missing: Vec<usize> = (0..shapes.len()).filter(|i| !seen.contains(i)).collect();
+                if !missing.is_empty() {
+                    prop_assert!(
+                        report.incomplete(),
+                        "jobs {missing:?} are unaccounted for and the report calls itself complete"
+                    );
+                }
+                // A complete run leaves nothing out.
+                if !report.incomplete() {
+                    prop_assert!(
+                        missing.is_empty(),
+                        "a complete report is missing jobs {missing:?}"
+                    );
+                }
+                // And no id was invented.
+                for id in &seen {
+                    prop_assert!(
+                        *id < shapes.len(),
+                        "the report names job {id}, never submitted"
+                    );
+                }
+                prop_assert!(
+                    report.unfinished.windows(2).all(|w| w[0] < w[1]),
+                    "unfinished is not sorted"
+                );
+
+                // The one that matters most: an answer belongs to the item it was asked about,
+                // whatever order the responses arrived in.
+                for r in &report.results {
+                    let Ok(answers) = &r.result else { continue };
+                    prop_assert_eq!(
+                        answers.len(),
+                        r.request.state.items.len(),
+                        "job {}: {} answers for {} items",
+                        r.id,
+                        answers.len(),
+                        r.request.state.items.len()
+                    );
+                    for (item, got) in r.request.state.items.iter().zip(answers) {
+                        let k: usize = item.id.trim_start_matches('j').parse().unwrap();
+                        prop_assert_eq!(
+                            *got,
+                            Some(probability_of(k)),
+                            "job {}: item {} came back with another item's answer",
+                            r.id,
+                            item.id
+                        );
+                        // And a split half only ever carries items of its own job.
+                        prop_assert!(
+                            items_of[r.id].contains(&k),
+                            "job {} carries item {}, which belongs to another job",
+                            r.id,
+                            item.id
+                        );
+                    }
+                }
+                Ok(())
+            })
+        },
+    )
+    .unwrap();
+}

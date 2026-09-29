@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-29 00:08 | Fatia G: P1.3 (escalonador) — teto de voo, orçamento de requisições contra o oráculo do classificador, e resposta que nunca migra de pergunta; a proposta de PBT/CI está cumprida | [D-113](#d-113--fatia-g-o-escalonador-e-a-quarta-vez-que-o-instrumento-era-o-problema) |
 | 2026-09-29 00:00 | Fatia F: P0.1, P0.2 e P0.3 com tempdir; nenhum defeito nas duas fronteiras de segurança, mas **quatro** das minhas asserções não testavam nada e só a mutação mostrou | [D-112](#d-112--fatia-f-duas-fronteiras-de-segurança-fuzzadas-e-quatro-testes-meus-que-não-testavam-nada) |
 | 2026-09-28 23:48 | Fatia E: `markup::parse` **abortava o processo** com 10 000 elementos aninhados (estouro de pilha, não capturável); teto de profundidade, `markup` a `pub`, e o P0.11 pela costura pública | [D-111](#d-111--fatia-e-o-leitor-tolerante-derrubava-o-processo-por-aninhamento) |
 | 2026-09-28 23:36 | Fatia D: 12 propriedades (P0.4, P0.10, P0.13, P1.1, P1.2), `local::wrap` extraído para o controle de injeção ser alcançável, e a ordem prometida no P0.4 do prompt corrigida | [D-110](#d-110--fatia-d-doze-propriedades-e-uma-afirmação-do-prompt-que-não-se-sustenta) |
@@ -3927,3 +3928,81 @@ milhares de casos.
 
 **294** testes no default e **307** com `online` (eram 287 e 300). `fmt` limpo e clippy limpo com
 `-D warnings` nas duas features, conferido por código de saída depois de um `unused import` real meu.
+
+---
+
+## D-113 — Fatia G: o escalonador, e a quarta vez que o instrumento era o problema
+
+Fatia G e última de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): P1.3, o
+escalonador com o `FakeClassifier` que já existia. **Nenhum defeito.**
+
+### O que a propriedade afirma
+
+Sobre misturas geradas de jobs e configurações, com tempo pausado: o teto de requisições em voo
+(RF-ONLINE-08) **observado pelo próprio classificador**, o orçamento de requisições contando toda
+tentativa, nada de id inventado, e — a que custa mais para acertar — **uma resposta nunca migra para
+a pergunta de outro job** quando as respostas voltam fora de ordem. Cada item é roteirizado com uma
+probabilidade própria, senão todos compartilhariam um valor e qualquer troca passaria.
+
+O teste terminar é a asserção de ausência de deadlock.
+
+### Duas afirmações minhas que não valiam
+
+1. **"Todo job submetido aparece no relatório."** Falso, e não é defeito: `unfinished` é documentado
+   como jobs **admitidos** e nunca respondidos, então um job ainda na fila quando o escalonador para
+   no `request_limit` não está em lista nenhuma — nunca foi admitido. Eu afirmei uma promessa que o
+   relatório não faz, o mesmo erro do `files_in` no
+   [D-112](#d-112--fatia-f-duas-fronteiras-de-segurança-fuzzadas-e-quatro-testes-meus-que-não-testavam-nada).
+   O que vale é a direção de segurança: **um job fora da contabilidade só é aceitável enquanto o
+   relatório se declara incompleto**, porque ausência nunca pode ser lida como resposta (PRD §23.2).
+
+2. **`report.requests <= request_limit` sozinho não vê subcontagem.** Fazer o contador parar de
+   incrementar o mantém abaixo de qualquer limite para sempre — e aí o limite nunca para nada. A
+   propriedade passou a comparar com o **oráculo**: `report.requests == fake.calls()`, o que o
+   classificador realmente viu.
+
+### As quatro mutações, todas pegas
+
+| mutação | resultado |
+| --- | --- |
+| teto de voo + 2 | **pega** — `2 requests in flight against a ceiling of 1` |
+| `report.requests += 0` | **pega** pelo oráculo — `the report counts 0, the classifier saw 1` |
+| respostas invertidas antes do `JobResult` | **pega** — `came back with another item's answer` |
+| `incomplete()` devolvendo `false` | **pega** — `jobs [2, 3, 4, 5] are unaccounted for and the report calls itself complete` |
+
+### E a nota que importa mais que a fatia
+
+A quarta mutação eu **declarei não pega, e estava errado: ela nunca compilou.** Usei
+`return false; #[allow(unreachable_code)] …`, e atributo em expressão é instável — o `cargo test`
+falhou com `error[E0658]`, e o meu `grep` por uma mensagem específica não distingue "o teste passou"
+de "nada compilou".
+
+É a **quarta vez nesta série** em que o instrumento de verificação, não o objeto verificado, era o
+defeituoso: a função de slug que disse que 98 de 98 âncoras estavam quebradas, o pipeline de
+duplicatas do [D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot), o
+`clippy | tail -3 && echo ok` do
+[D-109](#d-109--primeiras-propriedades-e-um-vazamento-de-credencial-que-elas-fecharam), e agora este.
+Todas as quatro têm a mesma forma: **eu li a saída em vez de checar o código de saída.**
+
+E isso teve consequência: eu já havia mudado o gerador de `request_limit` "para consertar" a mutação 4,
+sob diagnóstico errado. A mudança continua justificada pelos próprios méritos — medido nos casos
+gerados, 8 jobs com limite 1 deixam 6 nunca admitidos, enquanto um sorteio uniforme largo termina
+quase tudo e a cláusula não dispara —, mas **a razão que eu havia escrito no comentário era falsa** e
+foi corrigida antes do commit.
+
+### A proposta está cumprida
+
+Todas as sete fatias: A ([D-107](#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas)),
+B ([D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot)),
+C ([D-109](#d-109--primeiras-propriedades-e-um-vazamento-de-credencial-que-elas-fecharam)),
+D ([D-110](#d-110--fatia-d-doze-propriedades-e-uma-afirmação-do-prompt-que-não-se-sustenta)),
+E ([D-111](#d-111--fatia-e-o-leitor-tolerante-derrubava-o-processo-por-aninhamento)),
+F ([D-112](#d-112--fatia-f-duas-fronteiras-de-segurança-fuzzadas-e-quatro-testes-meus-que-não-testavam-nada))
+e G. Dois defeitos de produto achados, os dois de segurança: o vazamento de credencial do D-109 e o
+abort por aninhamento do D-111.
+
+### Verificação
+
+**295** testes no default e **308** com `online` (eram 294 e 307). `fmt` limpo, clippy limpo com
+`-D warnings` nas duas features conferido por código de saída, e `cargo deny --all-features check`
+com as quatro seções ok.
