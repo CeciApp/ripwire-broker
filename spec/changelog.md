@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-29 00:29 | O `sha2` 0.11 é recusado: ele **não** muda o digest (premissa minha, errada), e subir o nosso direto apenas **duplica** o crate, porque o `rust-mcp-sdk` pinado traz o 0.10 | [D-114](#d-114--o-sha2-011-é-recusado-e-uma-premissa-minha-estava-errada) |
 | 2026-09-29 00:08 | Fatia G: P1.3 (escalonador) — teto de voo, orçamento de requisições contra o oráculo do classificador, e resposta que nunca migra de pergunta; a proposta de PBT/CI está cumprida | [D-113](#d-113--fatia-g-o-escalonador-e-a-quarta-vez-que-o-instrumento-era-o-problema) |
 | 2026-09-29 00:00 | Fatia F: P0.1, P0.2 e P0.3 com tempdir; nenhum defeito nas duas fronteiras de segurança, mas **quatro** das minhas asserções não testavam nada e só a mutação mostrou | [D-112](#d-112--fatia-f-duas-fronteiras-de-segurança-fuzzadas-e-quatro-testes-meus-que-não-testavam-nada) |
 | 2026-09-28 23:48 | Fatia E: `markup::parse` **abortava o processo** com 10 000 elementos aninhados (estouro de pilha, não capturável); teto de profundidade, `markup` a `pub`, e o P0.11 pela costura pública | [D-111](#d-111--fatia-e-o-leitor-tolerante-derrubava-o-processo-por-aninhamento) |
@@ -4006,3 +4007,90 @@ abort por aninhamento do D-111.
 **295** testes no default e **308** com `online` (eram 294 e 307). `fmt` limpo, clippy limpo com
 `-D warnings` nas duas features conferido por código de saída, e `cargo deny --all-features check`
 com as quatro seções ok.
+
+---
+
+## D-114 — O `sha2` 0.11 é recusado, e uma premissa minha estava errada
+
+Primeira proposta do dependabot desde o
+[D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot), e o primeiro teste da
+política de pin que ele registrou: PR #20, `sha2` 0.10.9 → 0.11.0. **Fechada sem mesclar.**
+
+### A premissa que eu havia afirmado, e que é falsa
+
+Eu disse duas vezes ao usuário que o `sha2` 0.11 "mexe no que gera as chaves de cache" e que, se o
+digest mudasse, "todo cache armazenado é invalidado de uma vez". **Não muda.** SHA-256 é SHA-256; a
+versão do crate não altera o valor do hash.
+
+Verificado, não deduzido: apliquei o bump, portei os sítios e rodei
+`the_keys_are_stable_across_runs`, o teste-ouro do
+[D-109](#d-109--primeiras-propriedades-e-um-vazamento-de-credencial-que-elas-fecharam) que fixa o hex
+de `notes::key`. **Passa.** Então não há cache invalidado e nenhum arquivo de estado órfão — o
+[`src/state.rs`](../src/state.rs) nomeia o arquivo de sessão pelo hash do id da sessão, e esse nome
+continua idêntico.
+
+Transformei "é um crate de hash" em "muda os hashes" sem conferir, e apresentei isso como o risco
+central duas vezes. O teste-ouro que responde à pergunta existia desde o D-109.
+
+### Os três fatos que decidem, medidos
+
+1. **Não compila como está.** O 0.11 devolve `hybrid_array::Array` em vez de
+   `generic_array::GenericArray`, e `Array` não implementa `LowerHex`: quebram **8** sítios de
+   `format!("{:x}", …)` — `session`, `notes`, `state`, `summarizer`, `online::coordinator`,
+   `online::reader`, mais dois em `tests/`. Com um helper de hex de três linhas compila. **O porte é
+   mecânico e não é o obstáculo.**
+
+2. **O obstáculo é que não compra nada.** O `rust-mcp-sdk 2.0.0` depende ele mesmo de `sha2 0.10.9`
+   e de `hmac 0.12`:
+
+   ```
+   digest v0.10.7
+   ├── hmac v0.12.1   → rust-mcp-sdk v2.0.0
+   └── sha2 v0.10.9   → rust-mcp-sdk v2.0.0
+   ```
+
+   Subir o nosso direto **não remove** o 0.10 do grafo: **adiciona uma segunda cópia**. Passaríamos a
+   compilar duas implementações do mesmo hash, com duas versões de `digest`, `block-buffer` e
+   `crypto-common`. As duplicatas que o `cargo-deny` reporta vão de **4 para 9**. E o
+   `rust-mcp-sdk = "=2.0.0"` é exato por decisão
+   ([D-002](#d-002--compatibilidade-de-protocolo-sdk--ripwire),
+   [D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot)), então **o `sha2` sai do
+   0.10 junto com o SDK, não antes dele.**
+
+3. **Não há advisory empurrando.** `cargo deny check advisories` está limpo no 0.10.9. É higiene de
+   versão, não segurança.
+
+### A decisão
+
+Recusado. Trocar uma versão de um crate de hash por duas, para não ganhar nada enquanto o SDK pinado
+mantém a antiga, é andar para trás. **Revisitar quando o `rust-mcp-sdk` mover** — e aí o `sha2` sobe
+no mesmo movimento, que é o que a política de pin do D-108 já dizia por outras palavras.
+
+### O que **não** foi feito, e a consequência
+
+Eu havia recomendado também adicionar `sha2` ao `ignore` do `dependabot.yml`, com o motivo, para o
+mesmo PR não voltar toda semana. **Não foi pedido e não foi feito.** A consequência é concreta: o
+dependabot vai propor de novo no próximo ciclo, e esta decisão não tem dente nenhum contra isso —
+alguém terá de fechar à mão outra vez, olhando para este registro.
+
+O contrapeso de ignorar, se um dia for feito, é que um bump de **segurança** do `sha2` também
+deixaria de ser proposto. Isso está coberto: o `cargo-deny` **agendado no `master`** vê advisories
+independentemente do dependabot, que é exatamente a razão de ele ter ido para o schedule e não para o
+CI de PR no D-108.
+
+### Nota de método, a quinta
+
+Ao restaurar a árvore depois do experimento, escrevi `cargo build … | tail -2 && echo ok` e o "ok"
+imprimiu **com o build falhando**: um pipeline devolve o status do último comando. Mesma forma dos
+quatro casos já registrados (a função de slug, o pipeline de duplicatas do D-108, o
+`clippy | tail -3` do D-109, a mutação que não compilava do
+[D-113](#d-113--fatia-g-o-escalonador-e-a-quarta-vez-que-o-instrumento-era-o-problema)). E, pior, o
+`git checkout -- Cargo.toml` restaurou **do índice**, que o experimento havia deixado com o 0.11
+staged, então a árvore parecia restaurada e não estava. Resolvido com `git reset --hard HEAD` e
+conferido por `if cargo …; then`, sem pipe.
+
+### Verificação
+
+Árvore de volta em `sha2 = "0.10"`, build e as duas suítes verdes (295 / 308), duplicatas de novo em
+**4**, `cargo deny --all-features check` com as quatro seções ok. O experimento não deixou nada
+atrás: nenhum arquivo de `src/` alterado, `Cargo.toml` e `Cargo.lock` idênticos ao `master`.
