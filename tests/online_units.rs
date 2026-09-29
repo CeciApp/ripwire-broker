@@ -740,6 +740,30 @@ fn remote_text_is_sanitized_capped_and_redacts_the_secret() {
     assert!(!redact::remote_text("tok\u{7}-123", Some("tok-123"), 64).contains("tok-123"));
 }
 
+/// D-109: the case above covers a control character inside the **text**. The opposite — a
+/// non-ASCII character inside the **secret** — used to leak. The printable filter ran before the
+/// replacement, so `replace` looked for a form that could no longer be there, and the
+/// credential's ASCII skeleton survived into the output. Found by the property
+/// `remote_text_never_carries_the_secret`, which shrank it to `secret = "\u{ae}a 0!"`.
+#[test]
+fn a_secret_carrying_a_non_ascii_character_still_never_reaches_the_output() {
+    let secret = "ab\u{a9}cd";
+    let out = redact::remote_text(&format!("denied: {secret} at edge"), Some(secret), 64);
+
+    assert!(
+        !out.contains("abcd"),
+        "the secret's ASCII skeleton survived: {out:?}"
+    );
+    assert!(out.contains("[redacted]"), "{out:?}");
+
+    // The shrunk case from the property, verbatim.
+    let shrunk = "\u{ae}a 0!";
+    assert!(
+        !redact::remote_text(shrunk, Some(shrunk), 4).contains("a 0!"),
+        "the shrunk case regressed"
+    );
+}
+
 // --- D-081: shorter previews for lookahead admission ---
 
 #[test]
