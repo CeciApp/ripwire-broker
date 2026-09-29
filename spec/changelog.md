@@ -98,6 +98,7 @@
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
 | 2026-09-28 21:02 | O teste-ouro do D-099 fixava `shown` em números de **uma** máquina e quebrou no CI: `provenance.workspace` carrega o caminho do workspace, ~40 bytes mais curto no Linux. Trocado por um limite de desperdício medido em tempo de execução | [D-102](#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho) |
+| 2026-09-28 20:48 | Proposta do item 4 em `spec/plan/`: ~43 ms de overhead fixo por evento de hook, dos quais ~38 são duas subidas de processo; cinco opções comparadas, e a recomendação é a barata e isolada (não subir um processo só para ler a versão) | [D-101](#d-101--proposta-para-o-item-4-o-ripwire-por-evento-de-hook) |
 | 2026-09-28 20:32 | Itens 7 e 10 medidos e **recusados** — as duas premissas estavam erradas e a "otimização" do merge era 3x mais lenta; e os números do D-096 ao D-099 refeitos em release, porque os publicados eram de build debug | [D-100](#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release) |
 | 2026-09-28 20:18 | O `budget_tokens` passa a ter teto aplicado (100.000, o que o schema MCP já declarava sem impor) e o shaping do envelope deixa de re-serializar o envelope por candidato: 16x no orçamento padrão e 48x no teto | [D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear) |
 | 2026-09-28 20:05 | `status()` deixa de pagar uma ida e volta upstream por leitura: a sonda de disponibilidade vale por `STATUS_PROBE`; 10 leituras caem de 220 para 22 ms a 20 ms de RTT, e um ripwire ocupado de 3 s para 1 s | [D-098](#d-098--a-sonda-de-disponibilidade-do-status-reaproveitada-por-uma-janela) |
@@ -2934,3 +2935,68 @@ dois.
 243 verdes no build padrão e 256 com `online`, as mesmas contagens — nenhum teste novo, o existente
 foi reescrito. Clippy e fmt limpos nas duas features. Só `tests/broker.rs` muda; nenhuma linha de
 produção foi tocada, porque o defeito era do teste e não do `budget.rs`.
+## D-101 — Proposta para o item 4: o ripwire por evento de hook
+
+Item 4 do [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos), o único
+que sobrou em aberto depois do
+[D-100](#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release).
+A proposta está em
+[`spec/plan/proposta-ripwire-por-evento-de-hook.md`](plan/proposta-ripwire-por-evento-de-hook.md).
+**Nada implementado**: o item envolve superfície de segurança nova e decisão de PRD, então vira
+documento antes de virar código.
+
+### Medido
+
+Em release, com um dublê de `ripwire --mcp` em Python que responde na hora, mediana de 15
+execuções depois de aquecimento: `user-prompt-submit` 43,0 ms, `post-tool-use` 43,0 ms, `stop`
+42,6 ms.
+
+**Os três custam o mesmo, e é o achado.** Com o dublê instantâneo não há trabalho de ripwire na
+conta: os 43 ms são overhead fixo de subida, e nada nele depende do evento. Decomposto: 2,6 ms para
+subir o `ripwire-broker`, 19,4 ms para `ripwire --version` (um processo inteiro descartado),
+~19 ms para `ripwire --mcp` mais o handshake, ~2 ms de broker.
+
+**Não medido, e por isso não afirmado:** o custo do ripwire real, que não está no PATH desta
+máquina. Os 19,4 ms de cada subida são startup do **Python**; um ripwire em Rust subiria em poucos
+milissegundos, mas indexa a cada subida, o que o dublê não faz. O número real por evento é
+desconhecido; o que ficou estabelecido é que ~38 dos 43 ms são as duas subidas de processo.
+
+Uma primeira medição deu 146,9 ms para `user-prompt-submit` contra ~50 ms dos outros. Era artefato
+de cache frio — foi o primeiro do laço. Fica registrado porque a diferença de 3x parecia um achado
+sobre o evento e não era.
+
+### O fato que reenquadra o item
+
+Um `install` padrão escreve **as duas coisas**: o servidor MCP em `.mcp.json` e os hooks em
+`.claude/settings.json`. E o `BrokerServer` guarda `broker: Mutex<Option<Arc<Broker>>>`
+([`src/mcp.rs`](../src/mcp.rs)), mantido pela sessão inteira, com ripwire filho vivo e aquecido.
+
+Então já existe um broker de vida longa com ripwire quente, ocioso entre chamadas de tool,
+**enquanto cada evento de hook sobe um broker e um ripwire novos ao lado dele**. O item 4 não é
+necessariamente "construir um daemon" — é "deixar de duplicar um processo que já está lá".
+
+### Cinco opções, e a que a proposta recomenda
+
+| opção | ganho | superfície nova | risco |
+| --- | --- | --- | --- |
+| B — não subir um processo só para ler a versão | 19,4 ms/evento no dublê; um processo a menos sempre | nenhuma | baixo |
+| E — reduzir o número de eventos | ataca o `N`, que é o que escala | nenhuma | médio, de produto |
+| A — não fazer nada | — | nenhuma | zero |
+| C — socket para o servidor MCP | quase todo o overhead | socket, autenticação, dois caminhos | **alto, de segurança** |
+| D — daemon próprio | igual a C | tudo de C mais ciclo de vida | o mais alto |
+
+A recomendação é **fazer B como item próprio** — um processo a menos por evento, sem superfície
+nova — e **medir o ripwire real antes de considerar C ou E**, porque toda a comparação repousa num
+número que não tenho.
+
+C e D são tratadas como mudança de PRD, não refactor: exigem autenticação do socket (sem ela,
+qualquer processo do usuário pede contexto do workspace, e com `--online` pede **envio remoto**),
+escopo por workspace canônico (errar vaza contexto entre repositórios), e ciclo de vida sob
+[D-050](#d-050--limite-de-memória-do-ripwire-por-supervisor). E qualquer uma das duas **reabre o
+[D-064](#d-064--cache-diagnóstico-e-integração-proposta)**, cuja justificativa para hooks offline é
+exatamente que o hook é um processo curto com consentimento por processo.
+
+### Verificação
+
+Nenhuma mudança de código. A sonda de medição e o dublê foram descartados. As âncoras do documento
+novo para o changelog e os cinco caminhos de fonte que ele cita foram validados.
