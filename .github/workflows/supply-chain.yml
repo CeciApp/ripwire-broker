@@ -1,0 +1,45 @@
+name: Supply chain
+
+# Scheduled against master, and never on a pull request. Advisory-database drift is not the fault
+# of whoever opened the PR: a gate that goes red for reasons outside the author's change teaches
+# people to ignore gates. It also runs when the config or the lockfile itself changes, so a bad
+# deny.toml is caught by the commit that writes it (D-108).
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [ "master" ]
+    paths:
+      - "deny.toml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/supply-chain.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Not named `default` or `online`: those two are required status checks on master, and this job
+  # must never be mistaken for one of them.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo-deny is deliberately not version-pinned: the whole point of this job is to see
+      # today's advisory database with today's tooling.
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-deny
+      # --all-features so the `online` half of the graph is covered too. deny.toml sets
+      # all-features itself; passing it here keeps the command honest if the config changes.
+      - name: cargo-deny
+        run: cargo deny --all-features check

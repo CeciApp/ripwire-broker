@@ -1,0 +1,26 @@
+# Dependency updates. Two ecosystems, weekly.
+#
+# The pin policy matters more than the cadence: `rust-mcp-sdk = "=2.0.0"` is an exact requirement
+# on purpose. The SDK's stateless protocol date was validated against a real ripwire (D-002), and
+# the version it reports is part of the compatibility guard (D-105). It moves by a decision
+# recorded in spec/changelog.md, never by an automatic bump, so it is ignored here (D-108).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "rust-mcp-sdk"
+
+  # Keeps the SHA pins in the workflows current. Without this, pinning by SHA means the actions
+  # are frozen at whatever was current the day they were pinned, which trades a mutable tag for
+  # a stale one.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
