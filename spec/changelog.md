@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-29 00:00 | Fatia F: P0.1, P0.2 e P0.3 com tempdir; nenhum defeito nas duas fronteiras de segurança, mas **quatro** das minhas asserções não testavam nada e só a mutação mostrou | [D-112](#d-112--fatia-f-duas-fronteiras-de-segurança-fuzzadas-e-quatro-testes-meus-que-não-testavam-nada) |
 | 2026-09-28 23:48 | Fatia E: `markup::parse` **abortava o processo** com 10 000 elementos aninhados (estouro de pilha, não capturável); teto de profundidade, `markup` a `pub`, e o P0.11 pela costura pública | [D-111](#d-111--fatia-e-o-leitor-tolerante-derrubava-o-processo-por-aninhamento) |
 | 2026-09-28 23:36 | Fatia D: 12 propriedades (P0.4, P0.10, P0.13, P1.1, P1.2), `local::wrap` extraído para o controle de injeção ser alcançável, e a ordem prometida no P0.4 do prompt corrigida | [D-110](#d-110--fatia-d-doze-propriedades-e-uma-afirmação-do-prompt-que-não-se-sustenta) |
 | 2026-09-28 23:28 | Fatia C: 22 propriedades sobre as superfícies puras, e o achado que elas existiam para achar — um segredo com caractere não-ASCII vazava seu esqueleto ASCII para status, log e agente | [D-109](#d-109--primeiras-propriedades-e-um-vazamento-de-credencial-que-elas-fecharam) |
@@ -3862,3 +3863,67 @@ Nota de processo: o arquivo `tests/props.proptest-regressions` entrou no
 [D-110](#d-110--fatia-d-doze-propriedades-e-uma-afirmação-do-prompt-que-não-se-sustenta) **sem eu
 revisá-lo antes de commitar**, contra a regra que eu mesmo escrevi na proposta. Revisado agora: duas
 sementes das corridas de mutação, sintéticas, sem caminho nem nada com cara de credencial. Ficam.
+
+---
+
+## D-112 — Fatia F: duas fronteiras de segurança fuzzadas, e quatro testes meus que não testavam nada
+
+Fatia F de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): P0.1 (guarda de
+workspace), P0.2 (política de elegibilidade) e P0.3 (unidades de evidência), em alvo próprio
+`tests/props_fs.rs` porque cada caso faz E/S.
+
+**Nenhum defeito nas duas fronteiras de segurança.** O guarda de traversal e a política de
+elegibilidade passaram como estavam. O valor desta fatia está quase todo no que a mutação revelou
+sobre os meus próprios testes.
+
+### Quatro asserções minhas que não testavam nada
+
+Cada uma passava. Cada uma foi exposta **quebrando o código de propósito** e vendo que o teste
+continuava verde.
+
+| o que eu afirmei | por que não valia | como ficou |
+| --- | --- | --- |
+| `!rel.contains("..")` | `"...."` é um **nome de arquivo** legítimo; só `Component::ParentDir` sobe. Falhava por a asserção estar errada, não o guarda | asserção sobre **componentes**, não substring |
+| "uma listagem nunca oferece arquivo recusado" | `files_in` é **listador, não porta**: oferece nomes, e o `snapshot` decide — o chamador no `coordinator` já diz isso. Falhava em `.env` | afirma o limite que existe: o que a listagem oferecer, só elegível pode ser **lido** |
+| a tabela de arquivos recusados | **nenhum caso isolava `sensitive_name`**: `.env` também é oculto, e `id_rsa`/`key.pem` também trazem marcador de chave privada. Removendo `sensitive_name` inteiro, a tabela **seguia verde** | entrou `service.key`, nome sensível com conteúdo inócuo e não oculto |
+| cobertura das unidades sob `if !units.is_empty()` | o guarda dispensava a asserção exatamente quando a unidade perdida era **a única**. Removendo `out.extend(open)`, nada falhava | por caso, sem guarda — e o caso vazio tratado à parte |
+
+A terceira é a mais séria: era defesa em profundidade escondendo um teste cego. Três controles
+independentes recusavam os mesmos arquivos, então a tabela media o resultado e não o controle que eu
+pensava estar medindo.
+
+E a quarta rendeu um fato que eu tinha suposto errado: **um arquivo vazio é elegível**, snapshota com
+digest de nenhum byte, e tem zero unidades.
+
+### As mutações, todas pegas depois
+
+| mutação | resultado |
+| --- | --- |
+| `resolve_existing` devolve o caminho lexical, sem resolver symlink | **pega** — o caminho por `out/` (symlink para `/etc`) é aceito e o oráculo o resolve fora da raiz |
+| `sensitive_name` sempre `false` | **pega** — `service.key: expected eligible=false, got Ok(...)` |
+| linhas de símbolo ignoradas | **pega** — `no unit starts at symbol line 2` |
+| a última unidade aberta descartada | **pega** — `a non-empty file produced no unit` |
+
+### As regras de segurança do próprio suíte, cumpridas
+
+Duas destas propriedades geram **caminhos** e perguntam a um guarda de traversal, então: raiz sempre
+em `tempfile::TempDir`; **nenhum caminho gerado é criado, escrito ou removido** — string gerada só é
+*perguntada*; os arquivos são feitos à mão em nomes fixos; nada gerado é executado; e onde o conteúdo
+é gerado (o `is_fresh` e as unidades), o **caminho é fixo e o valor gerado é o conteúdo**. Tamanhos
+com teto muito abaixo de `MAX_READ_BYTES`.
+
+O oráculo do P0.1 é o que o prompt pede: quando o caminho aceito existe, ele tem de
+**`canonicalize` de volta para dentro da raiz**. É essa cláusula que pega a fuga por symlink, e a
+raiz de teste tem um symlink para `/etc` de propósito — lido nunca, escrito nunca.
+
+### No CI
+
+Passo próprio, `-E 'binary(props_fs)'`, **sem** `PROPTEST_CASES=4096`: a contagem (48) está no
+arquivo, porque cada caso escreve arquivos. O alvo inteiro leva **0,24 s**, então o custo é
+desprezível e a separação existe pelo motivo certo — não misturar um alvo que faz E/S com um que roda
+milhares de casos.
+
+### Verificação
+
+**294** testes no default e **307** com `online` (eram 287 e 300). `fmt` limpo e clippy limpo com
+`-D warnings` nas duas features, conferido por código de saída depois de um `unused import` real meu.
