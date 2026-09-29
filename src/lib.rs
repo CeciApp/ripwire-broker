@@ -16,7 +16,10 @@ pub mod doctor;
 pub mod hook;
 pub mod install;
 pub mod local;
-mod markup;
+/// Public for the property tests that fuzz it over arbitrary input (D-111). It reads another
+/// process's stdout and has a history of panics there, so the property has to reach it directly
+/// rather than through a broker. Internal: no stability promise.
+pub mod markup;
 pub mod mcp;
 pub mod metrics;
 pub mod model;

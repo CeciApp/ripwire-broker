@@ -11,6 +11,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{FileFailurePersistence, TestCaseError};
 use ripwire_broker::cli::{self, Command};
 use ripwire_broker::local;
+use ripwire_broker::markup;
 use ripwire_broker::model::{Budget, Envelope, Item, Provenance, Role, Source, Status, Untrusted};
 use ripwire_broker::notes;
 use ripwire_broker::online::cache::{self, KeyParts};
@@ -810,4 +811,78 @@ proptest! {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------- P0.12 — the lenient reader
+
+/// How deep the parsed tree goes. Safe to recurse over: `MAX_DEPTH` bounds it.
+fn tree_depth(n: &markup::Node) -> usize {
+    1 + n.children.iter().map(tree_depth).max().unwrap_or(0)
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// For **any** input: no panic, no hang, and the tree it returns is bounded in depth.
+    /// Historically false — two panics by out-of-bounds and mid-character slicing (D-091), and
+    /// stack exhaustion by nesting (D-111).
+    #[test]
+    fn markup_parse_is_total_and_bounded(
+        // Drawn from the alphabet that matters — tag punctuation, quotes, entities, CDATA,
+        // multi-byte characters — instead of arbitrary text that would almost never form a tag.
+        input in prop::collection::vec(
+            prop::sample::select(vec![
+                "<", ">", "/", "=", "\"", "'", " ", "a", "ctx", "&lt;", "&amp;", "&", ";",
+                "<!--", "-->", "<![CDATA[", "]]>", "\u{e9}", "\u{1f600}", "\n", "\u{0}",
+            ]),
+            0..60,
+        ).prop_map(|v| v.concat()),
+    ) {
+        if let Some(node) = markup::parse(&input) {
+            prop_assert!(
+                tree_depth(&node) <= markup::MAX_DEPTH + 1,
+                "a tree {} deep came out of a cap of {}",
+                tree_depth(&node),
+                markup::MAX_DEPTH
+            );
+        }
+    }
+
+    /// And it still reads what it is for: a name, quoted attributes and text come back whole.
+    #[test]
+    fn a_well_formed_element_round_trips(
+        name in "[a-z][a-z_]{0,8}",
+        key in "[a-z][a-z_]{0,8}",
+        value in "[a-zA-Z0-9 ./_-]{0,20}",
+        text in "[a-zA-Z0-9 ./_-]{0,20}",
+    ) {
+        let doc = format!("<{name} {key}=\"{value}\">{text}</{name}>");
+        let node = markup::parse(&doc).expect("a well-formed element must parse");
+        prop_assert_eq!(&node.name, &name);
+        prop_assert_eq!(node.attr(&key), Some(value.as_str()));
+        prop_assert_eq!(&node.text, &text);
+    }
+}
+
+/// D-111: nesting used to be stack recursion without a bound. 1 000 levels parsed; **10 000
+/// aborted the process with SIGABRT**, which `catch_unwind` cannot save — for a long-lived
+/// `serve` reading another process's stdout, that is a denial of service.
+///
+/// Well past the old breaking point, so this test would abort rather than fail if the cap went
+/// away. It is the reason the cap is a constant and not a comment.
+#[test]
+fn nesting_past_the_cap_is_read_as_text_instead_of_exhausting_the_stack() {
+    let hostile = "<a>".repeat(50_000);
+
+    let node = markup::parse(&hostile).expect("the outermost element still parses");
+
+    assert!(
+        tree_depth(&node) <= markup::MAX_DEPTH + 1,
+        "{} levels deep",
+        tree_depth(&node)
+    );
+    // The same for a balanced document, which also has to come back bounded.
+    let balanced = format!("{}{}", "<a>".repeat(5_000), "</a>".repeat(5_000));
+    let node = markup::parse(&balanced).expect("a balanced document still parses");
+    assert!(tree_depth(&node) <= markup::MAX_DEPTH + 1);
 }

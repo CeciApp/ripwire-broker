@@ -1,5 +1,19 @@
 //! Lenient reader for ripwire's XML-like answers (`<ctx>`, `<impact>`, `<affected>`...).
 //! Not a general XML parser: it only needs elements, quoted attributes, CDATA and comments.
+//!
+//! The input comes from another process's stdout, so the reader must survive anything: it
+//! returns `Option` rather than an error, and it is bounded in depth. See `MAX_DEPTH`.
+
+/// How deep elements may nest before `<` is read as text instead of being opened.
+///
+/// `content` and `element` call each other, so nesting is stack recursion, and stack exhaustion
+/// is **not** a catchable panic — the process aborts, which for a long-lived `serve` is a denial
+/// of service from outside-process input. Measured before the cap existed: 1 000 levels parsed,
+/// **10 000 aborted with SIGABRT** (D-111).
+///
+/// Ripwire's real answers nest a handful deep, so 64 is far above anything legitimate and far
+/// below what any stack cares about.
+pub const MAX_DEPTH: usize = 64;
 
 #[derive(Debug, Default, Clone)]
 pub struct Node {
@@ -38,7 +52,7 @@ impl Node {
 pub fn parse(input: &str) -> Option<Node> {
     let mut root = Node::default();
     let mut p = Parser { s: input, i: 0 };
-    p.content(&mut root);
+    p.content(&mut root, 0);
     root.children.into_iter().next()
 }
 
@@ -76,8 +90,9 @@ impl<'a> Parser<'a> {
         &rest[..n]
     }
 
-    /// Reads children and text into `node` until its closing tag (or EOF).
-    fn content(&mut self, node: &mut Node) {
+    /// Reads children and text into `node` until its closing tag (or EOF). `depth` is how many
+    /// elements are already open; at `MAX_DEPTH` a `<` is read as text rather than opened.
+    fn content(&mut self, node: &mut Node, depth: usize) {
         while self.i < self.s.len() {
             let rest = self.rest();
             if rest.starts_with("<!--") {
@@ -89,18 +104,27 @@ impl<'a> Parser<'a> {
             } else if rest.starts_with("</") {
                 self.skip_past(">");
                 return;
-            } else if rest.starts_with('<') {
-                let child = self.element();
+            } else if rest.starts_with('<') && depth < MAX_DEPTH {
+                let child = self.element(depth + 1);
                 node.children.push(child);
             } else {
-                let n = rest.find('<').unwrap_or(rest.len());
+                // Either ordinary text, or a `<` at the depth cap. Taking it as text keeps the
+                // loop making progress and costs structure only in a document nested past
+                // anything ripwire writes.
+                //
+                // The search starts after the **first character**, not after the first byte:
+                // `rest[1..]` slices inside a multi-byte character and panics, which is how this
+                // very guard first went in and what the property caught (D-111). It is the same
+                // class of defect as the two panics of D-091.
+                let head = rest.chars().next().map_or(1, char::len_utf8);
+                let n = rest[head..].find('<').map_or(rest.len(), |k| k + head);
                 node.text.push_str(&unescape(&rest[..n]));
                 self.i += n;
             }
         }
     }
 
-    fn element(&mut self) -> Node {
+    fn element(&mut self, depth: usize) -> Node {
         self.i += 1; // '<'
         let mut node = Node::default();
         let rest = self.rest();
@@ -142,7 +166,7 @@ impl<'a> Parser<'a> {
             };
             node.attrs.push((key, unescape(value)));
         }
-        self.content(&mut node);
+        self.content(&mut node, depth);
         node
     }
 }
