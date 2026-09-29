@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 22:09 | Itens 2 e 5 decididos: o precheck do `is_fresh` **recusado** (ele pularia a reverificação de elegibilidade, que é a fronteira de consentimento) e o fan-out do `context_after_edit` **feito** nos dois laços, 3,6–4,0x e custo plano no número de símbolos | [D-104](#d-104--decisão-dos-itens-2-e-5-recusado-e-feito) |
 | 2026-09-28 21:34 | Revisão dos testes-ouro: só um era sensível a plataforma, e ele pegava um **defeito real** — `add_notes` estourava itens cujo corpo já tinha ido ao modelo local. Corrigido reservando a escrituração escrita após o encaixe | [D-103](#d-103--uma-nota-não-custa-mais-um-item-que-já-foi-evidência) |
 | 2026-09-28 21:02 | O teste-ouro do D-099 fixava `shown` em números de **uma** máquina e quebrou no CI: `provenance.workspace` carrega o caminho do workspace, ~40 bytes mais curto no Linux. Trocado por um limite de desperdício medido em tempo de execução | [D-102](#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho) |
 | 2026-09-28 20:48 | Proposta do item 4 em `spec/plan/`: ~43 ms de overhead fixo por evento de hook, dos quais ~38 são duas subidas de processo; cinco opções comparadas, e a recomendação é a barata e isolada (não subir um processo só para ler a versão) | [D-101](#d-101--proposta-para-o-item-4-o-ripwire-por-evento-de-hook) |
@@ -3103,3 +3104,97 @@ também com `TMPDIR` de 164 caracteres** — a correção curou a causa, não o 
 244 verdes no build padrão e 257 com `online` (eram 243 e 256; +1 teste). Suíte inteiro verde nas
 duas features sob `TMPDIR` de 4 e de 164 caracteres. Clippy e fmt limpos. Sondas removidas e a
 visibilidade de `budget`, aberta para medir, devolvida.
+
+---
+
+## D-104 — Decisão dos itens 2 e 5: recusado e feito
+
+As duas decisões que o [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos)
+deixou em aberto foram delegadas ao implementador. Ambas foram relidas no código antes de decidir,
+não a partir do resumo de quem as propôs.
+
+### Item 2 — recusado
+
+O lever era pré-checar `(mtime, size)` e só re-hashear se mudassem: um `stat` custa 1,3 µs contra
+~993 µs de leitura e sha256 num arquivo de 384 KiB, 240x menos.
+
+**A releitura do código decide o caso.** `is_fresh` ([`src/online/reader.rs`](../src/online/reader.rs))
+não compara conteúdo: ele chama `snapshot()`, que faz **a travessia de elegibilidade inteira** e
+depois o hash. Um precheck por `stat` curto-circuitaria as duas coisas.
+
+O que se perderia não é precisão de hash, é **elegibilidade**. Um `.gitignore` editado para excluir
+o arquivo não muda o `mtime` nem o tamanho **do arquivo**: o precheck diria "fresco" e o broker
+enviaria ao provider remoto um arquivo que as regras de ignore agora excluem. Elegibilidade é a
+fronteira de consentimento (§23.6) — isso é um furo no consentimento, não uma troca de exatidão por
+velocidade.
+
+E o custo que se economizaria não está no caminho crítico: o guarda roda no máximo 48 vezes por
+discovery (`max_candidates` 16 + `lookahead_max` 32), a ~182 µs cada, contra a ida e volta HTTP ao
+Jev que ele protege, que custa ordens de magnitude mais. Otimizar 240x no lado barato de uma chamada
+de rede é otimizar o lado errado.
+
+**Nenhum código mudou por este item.**
+
+### Item 5 — feito, e o número do D-096 estava errado
+
+O D-096 reportou que o fan-out dos `edit_check` levava `context_after_edit` de 241 para 45 ms, 5,3x.
+**Medido em release, o fan-out só dos checks dá 1,6x**, e a aritmética explica por quê: com 5
+símbolos a chamada são 11 idas e voltas — 1 de `situational_awareness`, 5 de `edit_check`, 5 de
+`impact` — e mexer só nos checks a deixa em 7. O laço de `impact` continuava sequencial e passava a
+dominar. O 5,3x publicado no D-096 não se sustenta.
+
+Se a leitura do RF-14 permite chamadas concorrentes, ela vale igual para o `impact`, que também é
+independente entre símbolos e limitado pelo mesmo `max_edit_checks` — um símbolo só chega lá se o
+próprio check dele voltou `changed`. Com os dois laços em fan-out a chamada são **3 idas e voltas,
+independentemente do número de símbolos**:
+
+| RTT | símbolos | sequencial | só os checks | os dois | fator |
+| --- | --- | --- | --- | --- | --- |
+| 5 ms | 5 | 74,9 ms | 47,4 ms | **18,9 ms** | 4,0x |
+| 20 ms | 5 | 240,4 ms | 150,6 ms | **65,8 ms** | 3,7x |
+| 50 ms | 5 | 569,1 ms | 362,6 ms | **156,6 ms** | 3,6x |
+
+O custo ficou plano: 18,9 ms com 5 símbolos contra 20,5 ms com 2. Medido em release, e o ganho é
+ligado a RTT, então não depende do build ([D-100](#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release)).
+Isso importa porque `context_after_edit` é o caminho do `PostToolUse`, que dispara **por edição** —
+a dimensão que escala num turno ([D-101](#d-101--proposta-para-o-item-4-o-ripwire-por-evento-de-hook)).
+
+### O que o RF-14 exige, e o que o meu comentário dizia que exigia
+
+O comentário que eu havia deixado em `src/broker.rs` afirmava que "RF-14 (D-049) exige que um
+cancelamento não deixe trabalho upstream a mais em voo". **O [D-049](#d-049--cancelamento-pelo-cliente-e-status-que-não-trava)
+não diz isso.** Ele trata de o cancelamento ser respeitado: o future é descartado por um
+`tokio::select!`, a tool registra `outcome: "cancelled"` com as chamadas upstream já concluídas, e
+nada novo é pedido depois. Nada ali limita quanto já estava em voo.
+
+Com o fan-out, as chamadas saem **antes** do cancelamento, nunca depois. O RF-14 continua valendo.
+O que muda é o **desperdício** quando um cancelamento chega no meio: até `max_edit_checks` (5)
+respostas que ninguém lê, em vez de uma. São chamadas ao ripwire na mesma máquina, então o
+desperdício é CPU local — **nunca uma requisição remota**, porque a etapa semântica não passa por
+aqui ([D-060](#d-060--gate-por-rota-proposta)).
+
+### O teste, e um limite dele que vale dizer
+
+`a_cancelled_call_stops_its_upstream_work_and_is_recorded` afirmava a **lista exata** de chamadas,
+`["situational_awareness", "edit_check"]`, o que só valia porque os checks corriam um por vez. Passou
+a comparar o que estava em voo no instante do cancelamento com o que existe depois dele — o
+requisito de verdade — mais um limite: os checks em voo são no máximo os símbolos pedidos.
+
+Foi confirmado **verde no código sequencial** antes do fan-out, como caracterização.
+
+**O limite honesto:** neste teste o `edit_check` está retido, então o código sequencial também não
+emitiria mais chamadas de qualquer forma. A asserção "nada depois do cancelamento" tem pouca força
+aqui; os dentes deste teste estão no `outcome: "cancelled"`, nas chamadas upstream registradas e no
+"o broker continua servindo". Reescrever a asserção para o requisito é mais fiel que a lista exata,
+mas não a torna forte, e vale dizer isso em vez de deixar parecer que torna.
+
+### `futures-util`
+
+Declarada como dependência direta. Ela **já estava** no grafo do build padrão, trazida pelo
+`rust-mcp-sdk` via `futures`, então declarar não acrescenta nada à árvore. O CA-10 foi rodado
+explicitamente: `the_build_has_no_network_stack` passa.
+
+### Verificação
+
+244 verdes no build padrão e 257 com `online`, as mesmas contagens — nenhum teste novo, um
+reescrito. Clippy e fmt limpos nas duas features. Sonda de medição removida.

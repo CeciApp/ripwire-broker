@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rust-mcp-sdk = { version = "=2.0.0", default-features = false, features = [
   "server",
   "client",

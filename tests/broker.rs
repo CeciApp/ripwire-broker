@@ -1343,6 +1343,12 @@ async fn a_cancelled_call_stops_its_upstream_work_and_is_recorded() {
         tokio::task::yield_now().await;
     }
 
+    // What was already in flight when the cancellation arrived. RF-14 (D-049) is that the
+    // cancellation is respected -- the future is dropped, the tool records `cancelled`, and no
+    // further upstream call is made. It says nothing about how much was already in flight, so
+    // that is what this compares, instead of pinning the exact call list, which only held
+    // because the checks happened to run one at a time (D-104).
+    let in_flight = fake.called();
     running.abort();
     assert!(running.await.unwrap_err().is_cancelled());
     for _ in 0..10 {
@@ -1351,8 +1357,17 @@ async fn a_cancelled_call_stops_its_upstream_work_and_is_recorded() {
 
     assert_eq!(
         fake.called(),
-        vec!["situational_awareness", "edit_check"],
-        "nothing after the cancellation"
+        in_flight,
+        "no upstream call was made after the cancellation"
+    );
+    assert!(
+        in_flight.starts_with(&["situational_awareness".to_string()]),
+        "the situation is read first: {in_flight:?}"
+    );
+    let checks = in_flight.iter().filter(|v| *v == "edit_check").count();
+    assert!(
+        (1..=2).contains(&checks),
+        "the checks in flight are bounded by the symbols asked for, 2 here: {in_flight:?}"
     );
     let status = to_json(&b.status().await);
     let last = status["metrics"]["recent_requests"]

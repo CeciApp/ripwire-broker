@@ -631,26 +631,50 @@ impl Broker {
         } else {
             json!({"files": files.join(",")})
         };
-        // Sequencial de propósito: RF-14 (D-049) exige que um cancelamento não deixe
-        // trabalho upstream a mais em voo, e um fan-out dos `edit_check` emitiria até
-        // `max_edit_checks` chamadas antes de o cancelamento poder chegar (D-096).
         let mut entries = normalize::situation(&self.call("situational_awareness", args).await?);
-        let mut impact_needed = Vec::new();
-        for symbol in req.symbols.iter().take(self.max_edit_checks) {
+        // The checks are independent of each other, so they go out together: at most
+        // `max_edit_checks` of them, the same bound the sequential loop had. RF-14 (D-049) is
+        // that a cancellation is respected -- the future is dropped, the tool records
+        // `cancelled`, and nothing further is asked upstream -- not that only one call may be in
+        // flight, so this keeps it. What it does change is the waste when a cancellation lands
+        // mid-flight: up to `max_edit_checks` answers nobody reads instead of one. They are
+        // ripwire calls on the same machine, so the waste is local CPU, never a remote request
+        // (D-104). The results are collected in the order asked, so `impact_needed` and the
+        // entries do not depend on which check answered first.
+        let symbols: Vec<&String> = req.symbols.iter().take(self.max_edit_checks).collect();
+        if !symbols.is_empty() {
             push_once(&mut verbs, "edit_check");
-            let (found, changed) =
-                normalize::edit_check(&self.call("edit_check", json!({"symbol": symbol})).await?);
+        }
+        let checks = futures_util::future::join_all(
+            symbols
+                .iter()
+                .map(|symbol| self.call("edit_check", json!({"symbol": symbol}))),
+        )
+        .await;
+        let mut impact_needed = Vec::new();
+        for (symbol, answer) in symbols.iter().zip(checks) {
+            let (found, changed) = normalize::edit_check(&answer?);
             entries.extend(found);
             if changed {
-                impact_needed.push(symbol);
+                impact_needed.push(*symbol);
             }
         }
-        // `impact` only to clarify a high-risk change: a contract that actually changed.
-        for symbol in impact_needed {
+        // `impact` only to clarify a high-risk change: a contract that actually changed. Also
+        // independent of each other, and bounded by the same `max_edit_checks`, since a symbol
+        // only reaches here after its own check came back changed. Fanning out the checks alone
+        // left this loop as the cost: with 5 symbols the call was 11 round trips and became 7,
+        // where doing both makes it 3 (D-104).
+        if !impact_needed.is_empty() {
             push_once(&mut verbs, "impact");
-            entries.extend(normalize::impact(
-                &self.call("impact", json!({"symbol": symbol})).await?,
-            ));
+        }
+        let impacts = futures_util::future::join_all(
+            impact_needed
+                .iter()
+                .map(|symbol| self.call("impact", json!({"symbol": symbol}))),
+        )
+        .await;
+        for answer in impacts {
+            entries.extend(normalize::impact(&answer?));
         }
         let attention = entries
             .iter()
