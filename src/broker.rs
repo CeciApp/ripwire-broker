@@ -1157,8 +1157,15 @@ impl Broker {
             },
         };
         let entries = normalize::cap_items(entries, self.max_item_tokens as usize * 4);
+        // With a summarizer, `add_notes` runs after this and always writes at least the record
+        // that notes did not fit. Holding that room back here is what keeps it from evicting an
+        // item whose body `attach_notes` has already sent to the local model (D-103).
+        let reserve = match self.notes.is_some() {
+            true => budget::notes_reserve(),
+            false => 0,
+        };
         if !self.incremental {
-            budget::fill(&mut env, entries);
+            budget::fill(&mut env, entries, reserve);
             let included = env.items.clone();
             return (env, included);
         }
@@ -1200,7 +1207,7 @@ impl Broker {
                 (env.budget.already_delivered + references) as u64;
         }
         drop(memory);
-        budget::fill(&mut env, entries);
+        budget::fill(&mut env, entries, reserve);
         let included = env
             .items
             .iter()

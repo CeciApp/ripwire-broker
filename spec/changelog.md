@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 21:34 | Revisão dos testes-ouro: só um era sensível a plataforma, e ele pegava um **defeito real** — `add_notes` estourava itens cujo corpo já tinha ido ao modelo local. Corrigido reservando a escrituração escrita após o encaixe | [D-103](#d-103--uma-nota-não-custa-mais-um-item-que-já-foi-evidência) |
 | 2026-09-28 21:02 | O teste-ouro do D-099 fixava `shown` em números de **uma** máquina e quebrou no CI: `provenance.workspace` carrega o caminho do workspace, ~40 bytes mais curto no Linux. Trocado por um limite de desperdício medido em tempo de execução | [D-102](#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho) |
 | 2026-09-28 20:32 | Itens 7 e 10 medidos e **recusados** — as duas premissas estavam erradas e a "otimização" do merge era 3x mais lenta; e os números do D-096 ao D-099 refeitos em release, porque os publicados eram de build debug | [D-100](#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release) |
 | 2026-09-28 20:18 | O `budget_tokens` passa a ter teto aplicado (100.000, o que o schema MCP já declarava sem impor) e o shaping do envelope deixa de re-serializar o envelope por candidato: 16x no orçamento padrão e 48x no teto | [D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear) |
@@ -2934,3 +2935,105 @@ dois.
 243 verdes no build padrão e 256 com `online`, as mesmas contagens — nenhum teste novo, o existente
 foi reescrito. Clippy e fmt limpos nas duas features. Só `tests/broker.rs` muda; nenhuma linha de
 produção foi tocada, porque o defeito era do teste e não do `budget.rs`.
+
+---
+
+## D-103 — Uma nota não custa mais um item que já foi evidência
+
+Pedido do usuário depois do [D-102](#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho):
+revisar os outros testes-ouro que pudessem ter o mesmo defeito.
+
+### A varredura
+
+Em vez de ler teste por teste, o suíte inteiro foi rodado nas duas features variando exatamente o
+que quebrou o CI — o comprimento do caminho — com `TMPDIR` de 4 e de 164 caracteres.
+
+| classe | resultado |
+| --- | --- |
+| dependência de comprimento de caminho | **1 teste** |
+| asserções exatas em `shown` / `omitted` / `budget_tokens` | derivam de constantes de configuração ou de fixtures; seguras |
+| comprimentos comparados com literal | são limites (`<=`), não valores gravados |
+| relógio real | 1 teste, `#[ignore]` e documentado para rodar à mão em release |
+| tempo virtual (`start_paused`) | corretos; um afirma `Duration::ZERO`, exato por construção |
+
+Nenhum outro teste-ouro da forma que quebrou no D-102.
+
+### O único achado não era fragilidade de teste
+
+`a_cut_item_never_reaches_the_model` falhava com caminho de workspace acima de ~136 caracteres. O
+caminho **não é a causa**: ele só desloca quais orçamentos entram no caso ruim. O defeito existe em
+qualquer plataforma, e o teste estava certo.
+
+Reproduzido sem `TMPDIR`, com broker e modelo novos por orçamento:
+
+| orçamento | itens no envelope | notas | item que foi evidência e saiu |
+| --- | --- | --- | --- |
+| 500 | 3 | 0 | `src/auth.py#login` |
+| 600 | 4 | 0 | `docs/auth.md#Authentication decision` |
+| 700 | 6 | 0 | `tests/test_auth.py#test_login` |
+
+O mecanismo: `attach_notes` monta os prompts a partir de `included`, que é `env.items` **depois** do
+`fill`. Em seguida `budget::add_notes` estoura primeiro as notas e **depois os itens**. Um item cujo
+corpo já foi enviado ao modelo local sai do envelope.
+
+E o detalhe que fecha o diagnóstico: nesses casos **todas** as notas foram descartadas e ainda assim
+itens foram estourados. Se as notas saem, o envelope volta ao tamanho que já cabia — então o item
+não foi sacrificado por uma nota, e sim pela limitação `notes_omitted`, a frase que **diz** que as
+notas não couberam.
+
+### A correção proposta tinha um furo, e mudou
+
+A proposta original era "só acrescentar `notes_omitted` se ela couber sem estourar item". Com o
+código na frente isso troca o defeito por **silêncio**: descartar a limitação faz o envelope omitir
+notas sem dizer, contra o princípio de nunca descartar em silêncio, e contra PRD 10.2 #1, que manda
+sempre manter as limitações.
+
+O que os números mostram é que o envelope estoura por **menos de uma limitação**. Então a correção é
+**reservar esse espaço antes do encaixe**, não descartar depois.
+
+### `budget::notes_reserve()`
+
+Duas frases são escritas **depois** das decisões de encaixe, e nenhuma é contabilizada enquanto as
+entradas são encaixadas:
+
+- `next_step`, que o `finish` escreve quando já sabe quantas entradas foram omitidas;
+- a limitação `notes_omitted`, que o `add_notes` escreve mesmo quando nenhuma nota cabe.
+
+É a mesma assimetria registrada no [D-102](#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho):
+o encaixe não é maximal porque o `finish` escreve escrituração depois. A reserva mede as duas na
+**forma mais larga alcançável** — no máximo `MAX_GROUPS` notas, e `next_step` contando entradas que
+`MAX_BUDGET_TOKENS` limita — em vez da mais larga representável. Reservar para dígitos inalcançáveis
+custaria itens de graça: com `usize::MAX` a reserva dava 75 tokens, com o limite real dá **66**.
+
+A reserva **só se aplica quando há summarizer configurado**. Sem ele o `add_notes` nunca roda, e o
+excesso do `next_step` não custa item a ninguém porque nada é acrescentado depois dele.
+
+### O custo, medido
+
+Varredura de 91 orçamentos de 300 a 1200, comparando com e sem summarizer:
+
+| | |
+| --- | --- |
+| orçamentos sem custo | 73 |
+| orçamentos que perdem 1 item | 18 |
+| pior caso | 2 itens |
+
+Todos na faixa apertada (310 a 640). A partir de ~700 não há custo, porque todos os itens do
+fixture já cabem. **Em troca, nenhum corpo de item vai ao modelo local para depois ser descartado do
+envelope.**
+
+### Testes
+
+Um teste novo, **vermelho por asserção antes** da correção:
+`a_note_never_costs_an_item_that_was_already_evidence` varre sete orçamentos, com broker e modelo
+novos em cada um para que os prompts não acumulem, e afirma que nenhuma referência que apareceu como
+evidência num prompt está ausente do envelope. Falhava no orçamento 500 com `src/auth.py#login`.
+
+O `a_cut_item_never_reaches_the_model`, que era o teste que denunciou o defeito, **passa agora
+também com `TMPDIR` de 164 caracteres** — a correção curou a causa, não o sintoma.
+
+### Verificação
+
+244 verdes no build padrão e 257 com `online` (eram 243 e 256; +1 teste). Suíte inteiro verde nas
+duas features sob `TMPDIR` de 4 e de 164 caracteres. Clippy e fmt limpos. Sondas removidas e a
+visibilidade de `budget`, aberta para medir, devolvida.
