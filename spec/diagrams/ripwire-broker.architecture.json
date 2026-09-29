@@ -114,8 +114,8 @@
     {
       "id": "guard",
       "type": "security",
-      "label": "Workspace guard",
-      "sublabel": "fixed root",
+      "label": "Read-only guard",
+      "sublabel": "verb allowlist",
       "pos": [
         670,
         300
@@ -126,7 +126,13 @@
       ],
       "sources": [
         {
-          "path": "src/workspace.rs"
+          "path": "src/broker.rs",
+          "line": 708,
+          "label": "guarded_call"
+        },
+        {
+          "path": "src/workspace.rs",
+          "label": "after_edit paths"
         }
       ]
     },
@@ -292,7 +298,7 @@
       "id": "broker-to-guard",
       "from": "broker",
       "to": "guard",
-      "label": "paths",
+      "label": "verb call",
       "variant": "emphasis"
     },
     {
@@ -387,7 +393,8 @@
       "dot": "rose",
       "title": "Safety defaults",
       "items": [
-        "Local, offline, read-only by default",
+        "Only allowlisted read-only verbs reach ripwire",
+        "context_after_edit paths must resolve inside the root",
         "Repository text under untrusted_repository_data",
         "Jev key only from RIPWIRE_BROKER_JEV_API_KEY"
       ]

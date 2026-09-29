@@ -4108,29 +4108,40 @@ Um diagrama da arquitetura do broker, gerado com o archify e versionado em
 
 ### O que ele mostra
 
-O caminho principal `Agent host → MCP facade → Broker core → Workspace guard → Upstream client →
+O caminho principal `Agent host → MCP facade → Broker core → Read-only guard → Upstream client →
 ripwire --mcp`, com stdio nas duas pontas; o modo automático (hook/prompt chamando o broker
 in-process e gravando fingerprints no estado de sessão); e, tracejados, os dois enriquecimentos
 opcionais: notas por modelo local e o coordenador semântico do `--online` falando HTTPS com o Jev.
 
 Os fatos vêm do README e dos comentários de módulo (`//!`) de `src/`. Cada componente aponta para
-os seus arquivos (16 referências), fixadas no commit `5daaf27` do repositório público; o archify
+os seus arquivos (17 referências), fixadas no commit `5daaf27` do repositório público; o archify
 verificou que todos existem nessa revisão.
 
 ### Duas simplificações, nomeadas
 
-1. O **Workspace guard** aparece como um passo do caminho principal. No código é uma verificação
-   que o núcleo aplica a todo caminho que encaminha ([`src/workspace.rs`](../src/workspace.rs)),
-   não um processo nem uma camada separada.
+1. O **Read-only guard** aparece como um passo do caminho principal. No código é o
+   `guarded_call` de [`src/broker.rs`](../src/broker.rs), a única passagem para o ripwire: só
+   verbos de leitura da allowlist ([D-014](#d-014--allowlist-e-validação-de-capabilities)) passam.
+   É uma função do núcleo, não um processo nem uma camada separada.
 2. O **`__supervise`** (limite de memória, [D-050](#d-050--limite-de-memória-do-ripwire-por-supervisor)) está
    dentro da caixa do Upstream client, não desenhado à parte.
+
+### Um erro da primeira versão, apontado na revisão
+
+A primeira versão chamava esse nó de **Workspace guard**, com a seta `paths`: todas as três
+ferramentas pareciam passar pela verificação de caminhos. **Não passam.** O CodeRabbit apontou no
+PR #27, e o código confirma: o [`src/workspace.rs`](../src/workspace.rs) só é aplicado em
+`context_after_edit`, a `files` e `symbols`, antes de qualquer chamada upstream (CA-08).
+`context_for_task` e `context_before_finish` não recebem caminhos do agente e não passam por ele.
+O que toda chamada atravessa é a allowlist de verbos. O nó foi renomeado para o que é universal, e
+a verificação de caminhos ficou no cartão de segurança, restrita a `context_after_edit`.
 
 ### Verificação
 
 `validate --quality showcase`: 9/9 checagens do artefato, 0 erros e 0 avisos de composição.
-`deliver`: especificação sha256 `ec889ea8…` (7497 bytes), HTML `dcd5ba72…` (719891 bytes).
-`visual-check` no Chrome: sem rolagem em 1440×900, 1600×1000, 1920×1080 e 2048×1320; menor texto
-projetado 7,3 px a 1440 (mínimo 6). As capturas e o recibo do `visual-check` não foram versionados:
+`deliver`: especificação sha256 `25e8d8d0…` (7732 bytes), HTML `a7287595…` (720229 bytes), 17
+referências de fonte verificadas. `visual-check` no Chrome: sem rolagem em 1440×900, 1600×1000,
+1920×1080 e 2048×1320; menor texto projetado 6,6 px a 1440 (mínimo 6). As capturas e o recibo do `visual-check` não foram versionados:
 são reproduzíveis a partir do HTML.
 
 **Não é atualizado sozinho.** Uma mudança de arquitetura não quebra nada aqui; o diagrama envelhece
