@@ -1,5 +1,6 @@
 //! `ripwire-broker [serve] --workspace DIR ...` and the other commands in `cli::USAGE`.
 //! Local MCP server over stdio. Stdout carries protocol only; diagnostics go to stderr.
+#![forbid(unsafe_code)]
 
 use ripwire_broker::broker::BrokerConfig;
 use ripwire_broker::cli::{self, Command, ServeArgs};

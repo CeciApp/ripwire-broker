@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 23:05 | Fatia A da proposta de PBT/CI: workflow com dois jobs, `permissions` mínimo, actions por SHA, `--locked`, timeout e `concurrency`; `forbid(unsafe_code)`, `deny(print_stdout)`, porta do CA-10 e guarda de fixture — os quatro passavam limpos antes de serem exigidos | [D-107](#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) |
 | 2026-09-28 22:43 | Opção E do item 4: uma rajada de edições passa a ser **uma** pergunta ao ripwire em vez de uma por edição — medido 1 injeção em 12 edições, cada uma custando ~99 ms jogados fora; 12 edições caem de 1169 para 278 ms | [D-106](#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) |
 | 2026-09-28 22:28 | Item 4 fechado na opção B: a versão do ripwire vem do estado de sessão em vez de um processo por evento. E o ripwire real, agora no PATH, **derruba a tese central da proposta** — C e D ficam recusadas, E é a única que sobra | [D-105](#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook) |
 | 2026-09-28 22:09 | Itens 2 e 5 decididos: o precheck do `is_fresh` **recusado** (ele pularia a reverificação de elegibilidade, que é a fronteira de consentimento) e o fan-out do `context_after_edit` **feito** nos dois laços, 3,6–4,0x e custo plano no número de símbolos | [D-104](#d-104--decisão-dos-itens-2-e-5-recusado-e-feito) |
@@ -3406,3 +3407,102 @@ Dois novos, **vermelhos antes** (o campo `now_ms` não existia):
 248 verdes no build padrão e 261 com `online` (eram 246 e 259; +2 testes). Clippy e fmt limpos nas
 duas features. Os campos novos do estado entram como `#[serde(default)]`, então um arquivo de estado
 anterior continua carregando.
+
+---
+
+## D-107 — CI endurecido: dois jobs, e quatro promessas viram portas
+
+Fatia A de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md), que nasce nesta
+mesma decisão a partir de [`spec/prompt/ci-cd.md`](prompt/ci-cd.md). Os quatro pontos que a proposta
+deixava para aprovação foram aprovados pelo usuário; este registro diz o que cada um virou.
+
+### O ponto de partida
+
+O workflow era um job `build` com quatro passos: `cargo build`, `cargo test`, e os mesmos dois com
+`--features online`. **Sem `fmt`, sem `clippy`, sem `permissions`, sem `--locked`, sem timeout, sem
+`concurrency`, actions por tag mutável.** E o `master` **não tinha proteção de branch nenhuma** —
+`GET /branches/master/protection` devolvia 404. A porta que o D-102 descreve como frágil não era
+frágil: não existia.
+
+### Medido antes de exigir
+
+Nada aqui foi ligado na esperança de que passasse. Cada controle foi rodado na árvore primeiro:
+
+| controle | resultado antes de ser exigido |
+| --- | --- |
+| `forbid(unsafe_code)` + `deny(clippy::print_stdout, clippy::dbg_macro)` | `clippy --all-targets --locked -- -D warnings` limpo nas **duas** features |
+| porta do CA-10 (`cargo tree -e normal`) | default: zero de `reqwest`/`secrecy`/`rustls`/`hyper`; com `online`: 18 linhas |
+| guarda de fixture sintética | zero acertos em `tests/fixtures/` |
+| `--locked` | `Cargo.lock` em sincronia |
+
+### O que o workflow passa a ter
+
+- **Dois jobs, `default` e `online`.** O `default` roda `fmt --all --check`, `clippy --all-targets
+  -D warnings`, os testes, a porta do CA-10 e a guarda de fixture. O `online` roda clippy e testes
+  com a feature. O build default **continua tendo de passar sem pilha de rede** (CA-10), e agora
+  isso é verificado por máquina, complementando o teste `the_build_has_no_network_stack` que já
+  existia — que **não** foi duplicado.
+- **`permissions: contents: read`** no topo. Sem isso o workflow herda o padrão do
+  repositório/organização, que pode ser `write-all`.
+- **Actions por SHA completo:** `actions/checkout@3d3c42e` (v7.0.1) e
+  `taiki-e/install-action@4cef141` (v2.87.21). Tag é mutável, SHA não.
+- **`persist-credentials: false`** no checkout, para o `GITHUB_TOKEN` não ficar no `.git/config`
+  ao alcance dos passos seguintes.
+- **`--locked` em todo comando cargo.** O `Cargo.lock` é versionado e o CI podia resolver versões
+  que ninguém testou.
+- **`timeout-minutes: 20` por job.** O suíte sobe subprocessos, tem um ripwire falso que dorme 30 s,
+  supervisores de memória e processos vigia; job sem timeout pendura o runner.
+- **`concurrency` com `cancel-in-progress`** por ref.
+- O gatilho **continua `pull_request`**, nunca `pull_request_target`: PR de fork não recebe segredo.
+
+### `nextest`, com uma ressalva honesta
+
+Os testes passam a rodar por `cargo nextest run`. **O `nextest` não roda doctests** — este crate não
+tem nenhum, então nada se perde, mas fica dito para o dia em que tiver. O filtro para os testes de
+propriedade (`-E 'test(/^prop_/)'`) está documentado no workflow como comentário e **ainda não é um
+passo**, porque `proptest` só entra na fatia C. Apresentá-lo como pronto seria mentira.
+
+### Os quatro pontos aprovados
+
+1. **Visibilidade:** `markup` vai a `pub` com doc de "interno, sem promessa de estabilidade";
+   `normalize`, `router`, `budget` e `dedup` ficam privados e são exercitados pela costura pública.
+   **Aprovado, mas não implementado aqui** — é a fatia E.
+2. **Nomes dos jobs:** `default` e `online`, e a proteção de branch **nesta mesma entrega**
+   (adiante). Um comentário no workflow diz que renomear um job é decisão, não edição, porque
+   renomear remove a porta em silêncio.
+3. **Política de pin do dependabot:** `rust-mcp-sdk = "=2.0.0"` é exato de propósito e só sobe por
+   decisão registrada no changelog, nunca por bump automático. Vale a partir de agora; o
+   `dependabot.yml` em si é a fatia B.
+4. **Revisão obrigatória no `master`:** a pergunta da proposta era se ela passa a ser exigida, e
+   **eu a registro como não exigida**, com a razão. Exigir uma aprovação bloquearia o único padrão
+   de merge em uso — o autor não pode aprovar o próprio PR, e todo PR desta série foi mesclado pelo
+   próprio autor com o CI verde. Ligar isso sem um segundo revisor humano pararia o trabalho.
+   **Fica explícito em vez de implícito, que era o pedido**; inverter é um ajuste de configuração,
+   não de código.
+
+### `.gitignore`
+
+`.env` e `.envrc` entram. O produto já trata `*.env` como nome sensível
+(`SENSITIVE_EXTENSIONS`, [D-089](#d-089--revisão-de-segurança)), mas o repositório não os ignorava,
+então um arquivo local criado por engano era commitável.
+
+### O que **não** entrou, de propósito
+
+- **Cache de build.** O prompt o trata como opcional e alerta que restaurar no `main` um cache
+  gravado por branch de PR é o caminho clássico de envenenamento. O suíte leva poucos minutos; não
+  vale a superfície.
+- **`deny.toml` e `dependabot.yml`** — fatia B. O `advisories` do `cargo-deny` consulta uma base
+  viva e pode nascer vermelho por um crate transitivo, então ele entra **agendado no `master`, não
+  bloqueando PR**.
+- **SBOM e `harden-runner`** seguem opcionais, como a proposta diz.
+
+### Proteção de branch
+
+Criada nesta entrega, depois de os dois jobs rodarem uma vez para que os nomes existam: `default` e
+`online` como status checks obrigatórios no `master`, com `strict` ligado.
+
+### Verificação
+
+`fmt` limpo, clippy limpo com `-D warnings` nas duas features, e as duas portas de shell rodadas na
+árvore. 248 testes no build default e 261 com `online`, sem mudança — esta fatia não toca código de
+produto além dos dois atributos de lint.

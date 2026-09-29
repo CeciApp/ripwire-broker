@@ -6,21 +6,81 @@ on:
   pull_request:
     branches: [ "master" ]
 
+# Least privilege at the workflow level; no job here needs more. Without this the workflow
+# inherits the repository/organization default, which may be write-all.
+permissions:
+  contents: read
+
+# Successive pushes to the same ref supersede each other instead of queueing runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  # The two job names below are required status checks on master. Renaming one silently removes
+  # the gate, so it is a decision, not an edit (D-107).
+  default:
+    name: default
     runs-on: ubuntu-latest
-
+    # The suite starts subprocesses, including a fake ripwire that sleeps 30 s, memory
+    # supervisors and watch processes. Without a timeout a hung test holds the runner.
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Build with the online feature
-      run: cargo build --verbose --features online
-    - name: Run tests with the online feature
-      run: cargo test --verbose --features online
+      # Actions are pinned by full commit SHA: a tag is mutable, a SHA is not.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Keeps GITHUB_TOKEN out of .git/config, where every later step could read it.
+          persist-credentials: false
+      # nextest does not run doctests; this crate has none, so nothing is lost.
+      # Property tests (from proptest, not yet added) will be selectable with
+      # `cargo nextest run -E 'test(/^prop_/)'` — see spec/plan/proposta-pbt-e-ci-cd.md.
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: nextest
+      # Every cargo command takes --locked: Cargo.lock is committed, and without the flag CI
+      # may resolve versions that were never tested locally.
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo nextest run --locked
+      # CA-10 as a machine-checked gate, not a promise. Complements the existing
+      # `the_build_has_no_network_stack` test in tests/mcp_surface.rs.
+      - name: The default build has no network stack (CA-10)
+        run: |
+          if cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'; then
+            echo "::error::a network crate reached the default build (CA-10)"
+            exit 1
+          fi
+          echo "no network crate in the default dependency graph"
+      # A future recording taken straight from the provider is the likeliest way a secret or
+      # real source enters the repository. Today every fixture is synthetic.
+      - name: Fixtures stay synthetic
+        run: |
+          if grep -rEinl 'Bearer |api_key|authorization|sk-[A-Za-z0-9]{10}' tests/fixtures/; then
+            echo "::error::a fixture above looks like it carries a credential"
+            exit 1
+          fi
+          echo "no credential-shaped string in tests/fixtures/"
+
+  online:
+    name: online
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: nextest
+      - name: Clippy
+        run: cargo clippy --all-targets --locked --features online -- -D warnings
+      # The #[ignore] tests stay ignored: nextest does not run them without --run-ignored,
+      # and the two in online_live.rs need RIPWIRE_BROKER_JEV_API_KEY, which no PR run has.
+      - name: Tests
+        run: cargo nextest run --locked --features online
