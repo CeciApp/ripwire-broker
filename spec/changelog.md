@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 23:48 | Fatia E: `markup::parse` **abortava o processo** com 10 000 elementos aninhados (estouro de pilha, não capturável); teto de profundidade, `markup` a `pub`, e o P0.11 pela costura pública | [D-111](#d-111--fatia-e-o-leitor-tolerante-derrubava-o-processo-por-aninhamento) |
 | 2026-09-28 23:36 | Fatia D: 12 propriedades (P0.4, P0.10, P0.13, P1.1, P1.2), `local::wrap` extraído para o controle de injeção ser alcançável, e a ordem prometida no P0.4 do prompt corrigida | [D-110](#d-110--fatia-d-doze-propriedades-e-uma-afirmação-do-prompt-que-não-se-sustenta) |
 | 2026-09-28 23:28 | Fatia C: 22 propriedades sobre as superfícies puras, e o achado que elas existiam para achar — um segredo com caractere não-ASCII vazava seu esqueleto ASCII para status, log e agente | [D-109](#d-109--primeiras-propriedades-e-um-vazamento-de-credencial-que-elas-fecharam) |
 | 2026-09-28 23:14 | Fatia B: `deny.toml` com as quatro seções verdes (allowlist exata de 8 licenças, não um superconjunto generoso), `cargo-deny` **agendado no `master` e nunca em PR**, e dependabot com a política de pin do `rust-mcp-sdk` | [D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot) |
@@ -3774,3 +3775,90 @@ revertidas em seguida:
 `PROPTEST_CASES=4096`, os 34 testes do alvo `props` levam **~20 s** — subiu de ~9 s, o que é o preço
 de P0.4 e P1.2 gerarem coleções. `fmt` limpo e clippy limpo com `-D warnings` nas duas features,
 conferido pelo código de saída e não pela saída, depois de um `manual_range_contains` real meu.
+
+---
+
+## D-111 — Fatia E: o leitor tolerante derrubava o processo por aninhamento
+
+Fatia E de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): a decisão de
+visibilidade aprovada, P0.12 (`markup::parse`) e P0.11 (invariantes do orçamento pela costura
+pública).
+
+### O achado, pior que um panic
+
+`content` e `element` se chamam, então aninhamento é **recursão de pilha**. Sondado antes de escrever
+qualquer propriedade:
+
+| entrada | resultado |
+| --- | --- |
+| `"<a>".repeat(1_000)` | parseia |
+| `"<a>".repeat(10_000)` | **`fatal runtime error: stack overflow`, SIGABRT** |
+
+Estouro de pilha **não é panic capturável**: o `catch_unwind` não salva, o processo morre. Num `serve`
+de vida longa lendo o stdout de outro processo, isso é negação de serviço a partir de entrada de fora
+do processo — exatamente a classe que o P0.12 existe para fechar, e um grau acima dos dois panics do
+[D-091](#d-091--revisão-do-repositório-e-correções-de-robustez).
+
+`MAX_DEPTH = 64` fecha: passado o teto, um `<` é lido como **texto** em vez de aberto como elemento.
+Os payloads reais do ripwire aninham meia dúzia de níveis, então 64 está muito acima do legítimo e
+muito abaixo do que qualquer pilha nota. O custo é estrutura perdida num documento aninhado além do
+que o ripwire escreve, e está comentado no código.
+
+**Provado que o teto sustenta peso:** com `MAX_DEPTH` em 10 000 000 o teste dirigido **aborta com
+SIGABRT**; com 64, passa. É por isso que o teto é constante e não comentário.
+
+### E a propriedade pegou a minha própria regressão em minutos
+
+O primeiro corte do conserto usava `rest[1..]` para garantir progresso no branch de texto. Isso
+**fatia no meio de um caractere multibyte** e entra em panic — `start byte index 1 is not a char
+boundary; it is inside 'é'`. A mesma classe de defeito que o D-091 consertou, reintroduzida por mim,
+no próprio patch que fechava o aninhamento, e achada pela propriedade antes de sair da máquina. O
+branch agora avança pelo **primeiro caractere**, não pelo primeiro byte.
+
+### A decisão de visibilidade, executada
+
+`markup` passa a `pub mod` com doc dizendo que é interno e **não carrega promessa de estabilidade**.
+`normalize`, `router`, `budget` e `dedup` ficam privados, como aprovado. O `markup` é o único dos
+cinco que lê bytes de fora do processo, e o achado acima é a justificativa: fuzzá-lo por um
+`FakeUpstream` teria significado que cada caso atravessa spawn, JSON-RPC e normalização — e um
+documento com 10 000 níveis provavelmente nunca teria sido gerado.
+
+### P0.11 pela costura pública, e três correções ao meu próprio teste
+
+A propriedade **não repete** o
+`the_shaped_envelope_never_exceeds_its_budget_and_grows_with_it`, que já cobre teto, monotonicidade,
+`shown + omitted` e folga. Ela acrescenta a consistência do bookkeeping (`truncated ⟺ omitted > 0`,
+`next_step ⟺ truncated`, `shown` conta o que está lá) e que **limitações nunca são descartadas**.
+
+Três vezes a propriedade nasceu sem valor e eu só descobri **mutando o código**:
+
+1. **A cláusula das limitações era `0 == 0`.** O fixture não produzia limitação nenhuma. Passei a
+   injetar `dropped_positive` e `capped` para ter seis.
+2. **Com uma limitação só, ainda era vacuosa.** Limitações ordenam primeiro, então uma é contabilizada
+   com o envelope quase vazio e cabe em qualquer orçamento legal. Precisa de várias.
+3. **E o gerador nunca chegava à fronteira.** `256..=100_000` uniforme praticamente não sorteia
+   256–500, que é a única região onde a cláusula morde: com o invariante quebrado de propósito e
+   sorteio uniforme, 32 casos **não pegaram nada**. Agora é `prop_oneof!` pesado no piso (6:2:1).
+
+Depois das três, as duas mutações são pegas: `truncated = true` sempre, e limitação sujeita ao
+orçamento.
+
+### E um achado sobre o produto que saiu disso
+
+Com seis limitações e o orçamento no piso, o envelope reporta **348 tokens contra 256 pedidos**. Não
+é defeito — limitações nunca são cortadas (PRD 10.2 #1), e o próprio
+[`spec/prompt/ci-cd.md`](prompt/ci-cd.md) enuncia a ressalva, que eu havia omitido da propriedade.
+Vale registrar que **a tensão é alcançável no `MIN_BUDGET_TOKENS` com uma resposta realista**, não só
+em teoria: um agente que pede o mínimo sobre uma resposta muito truncada recebe 36% além do que pediu.
+A propriedade afirma `estimated ≤ budget` **ou** `shown == 0`.
+
+### Verificação
+
+**287** testes no default e **300** com `online` (eram 283 e 296). `fmt` limpo e clippy limpo com
+`-D warnings` nas duas features, conferido por código de saída. O alvo `props` com 4096 casos:
+**~21 s**.
+
+Nota de processo: o arquivo `tests/props.proptest-regressions` entrou no
+[D-110](#d-110--fatia-d-doze-propriedades-e-uma-afirmação-do-prompt-que-não-se-sustenta) **sem eu
+revisá-lo antes de commitar**, contra a regra que eu mesmo escrevi na proposta. Revisado agora: duas
+sementes das corridas de mutação, sintéticas, sem caminho nem nada com cara de credencial. Ficam.

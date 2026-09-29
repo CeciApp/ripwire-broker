@@ -1706,3 +1706,128 @@ async fn the_shaped_envelope_never_exceeds_its_budget_and_grows_with_it() {
         }
     }
 }
+
+/// P0.11 through the public seam: `budget` is private on purpose, so the invariants are asserted
+/// on what a caller can see. This does **not** repeat
+/// `the_shaped_envelope_never_exceeds_its_budget_and_grows_with_it`, which already covers the
+/// ceiling, monotonicity, `shown + omitted` and the slack across a deterministic sweep. What is
+/// added here is the bookkeeping's internal consistency, that limitations are never dropped, and
+/// budgets drawn from the whole legal range rather than one window.
+///
+/// `proptest!` cannot wrap an async body, so the runner is driven directly and each case blocks
+/// on its own broker. That costs a process-free but real setup per case, which is why the count
+/// is 32 and not thousands (D-111).
+#[test]
+fn the_budget_bookkeeping_stays_consistent_at_any_budget() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // The same 24 entries, plus enough `upstream_truncated` limitations that the clause below
+    // has something to lose. One limitation is not enough: limitations sort first, so a single
+    // one is accounted for while the envelope is still nearly empty and fits at any legal
+    // budget. Measured with the invariant deliberately broken, six of them lose two at 256
+    // tokens and one at 300 — which is what makes the clause a property instead of `0 == 0`.
+    let fixture = many_symbols(24)
+        .replace("<ctx ", "<ctx dropped_positive=\"3\" over_ceiling=\"1\" ")
+        .replace("<sigs>", "<sigs capped=\"1\" shown=\"2\" total=\"9\">")
+        .replace("<bodies ", "<bodies capped=\"1\" ")
+        .replace(
+            "</ctx>",
+            "<tests capped=\"1\" shown=\"1\" total=\"9\"></tests>\
+             <callers capped=\"1\" shown=\"1\" total=\"9\"></callers></ctx>",
+        );
+    let baseline = rt.block_on(async {
+        let (b, _f, _ws) = broker(FakeUpstream::new().answer_text("explore", &fixture)).await;
+        let mut whole = TaskRequest::new("uma tarefa");
+        whole.mode = Mode::Orient;
+        whole.budget_tokens = 100_000;
+        let env = b.context_for_task(whole).await.unwrap();
+        (env.budget.shown + env.budget.omitted, env.limitations.len())
+    });
+    let (total, limitations) = baseline;
+    assert_eq!(
+        total, 24,
+        "the fixture's entry count, measured not recorded"
+    );
+    assert_eq!(
+        limitations, 6,
+        "the fixture must carry several limitations, or the clause below is vacuous"
+    );
+
+    let mut runner = TestRunner::new(Config {
+        cases: 32,
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        // Weighted toward the tight end. A uniform draw over `256..=100_000` never lands near
+        // the floor, so the clauses that only bite under pressure — a limitation that no longer
+        // fits, `shown` at zero — would never be exercised: with the invariant deliberately
+        // broken and a uniform draw, 32 cases caught nothing (D-111).
+        .run(
+            &prop_oneof![
+                6 => 256u32..=500,
+                2 => 500u32..=3_000,
+                1 => 3_000u32..=100_000,
+            ],
+            |budget| {
+                rt.block_on(async {
+                    let (b, _f, _ws) =
+                        broker(FakeUpstream::new().answer_text("explore", &fixture)).await;
+                    let mut req = TaskRequest::new("uma tarefa");
+                    req.mode = Mode::Orient;
+                    req.budget_tokens = budget;
+                    let env = b.context_for_task(req).await.unwrap();
+                    let bd = &env.budget;
+
+                    // The ceiling holds **unless nothing but limitations is left**: they are
+                    // never cut (PRD 10.2 #1), so when they alone pass the budget the envelope
+                    // goes over rather than dropping a warning. Reachable at the floor with a
+                    // realistic answer, not a theoretical clause: six `upstream_truncated`
+                    // limitations report 348 tokens against a requested 256 (D-111).
+                    prop_assert!(
+                        bd.estimated_tokens <= budget || bd.shown == 0,
+                        "budget {budget}: reported {} tokens with {} entries shown",
+                        bd.estimated_tokens,
+                        bd.shown
+                    );
+                    prop_assert_eq!(
+                        bd.shown,
+                        env.items.len() + env.tests.len() + env.risks.len(),
+                        "budget {}: shown does not count what is there",
+                        budget
+                    );
+                    prop_assert_eq!(bd.shown + bd.omitted, total, "budget {}", budget);
+                    prop_assert_eq!(
+                        bd.truncated,
+                        bd.omitted > 0,
+                        "budget {}: truncated={} with {} omitted",
+                        budget,
+                        bd.truncated,
+                        bd.omitted
+                    );
+                    prop_assert_eq!(
+                        bd.next_step.is_some(),
+                        bd.truncated,
+                        "budget {}: next_step and truncated disagree",
+                        budget
+                    );
+                    // Limitations are kept whatever the budget (PRD 10.2 #1): they are the envelope
+                    // saying what it could not do, so dropping one to fit is dropping the warning.
+                    prop_assert_eq!(
+                        env.limitations.len(),
+                        limitations,
+                        "budget {}: a limitation was dropped to fit",
+                        budget
+                    );
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+}
