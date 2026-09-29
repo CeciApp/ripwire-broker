@@ -9,13 +9,22 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::{FileFailurePersistence, TestCaseError};
+use ripwire_broker::cli::{self, Command};
+use ripwire_broker::local;
+use ripwire_broker::model::{Budget, Envelope, Item, Provenance, Role, Source, Status, Untrusted};
 use ripwire_broker::notes;
 use ripwire_broker::online::cache::{self, KeyParts};
 use ripwire_broker::online::decision::{self, FileDecision, SourceDecision};
 use ripwire_broker::online::redact::remote_text;
 use ripwire_broker::online::response::{InvalidResponse, parse_answers};
+use ripwire_broker::online::{
+    self,
+    request::{self, StateItem},
+    retry_after,
+};
 use ripwire_broker::online::{SemanticStage, prompt};
 use serde_json::json;
+use std::time::{Duration, SystemTime};
 
 /// Seeds for past failures go next to this file, named explicitly. Left to guess, proptest looks
 /// for a `lib.rs`/`main.rs` above the test and warns in the log when it cannot find one, which is
@@ -422,5 +431,383 @@ proptest! {
         prop_assert_eq!(csi, format!("{before}{after}").trim().to_string());
         let osc = notes::sanitize(&format!("{before}\u{1b}]0;title\u{7}{after}"));
         prop_assert_eq!(osc, format!("{before}{after}").trim().to_string());
+    }
+}
+
+// ---------------------------------------------------------------- P0.13 — prompt injection
+
+/// A minimal envelope whose repository-text fields carry `text`. Every field is `pub`, so this
+/// needs no constructor in `src/`.
+fn envelope_carrying(text: &str) -> Envelope {
+    Envelope {
+        schema_version: "ripwire-broker.context/v1",
+        tool: "context_for_task",
+        status: Status::Ready,
+        intent: None,
+        summary: text.to_string(),
+        items: vec![Item {
+            kind: "file",
+            role: Role::Primary,
+            path: text.to_string(),
+            line: None,
+            symbol: Some(text.to_string()),
+            signature: None,
+            why_included: text.to_string(),
+            source: Source::fact("route"),
+            content: Some(Untrusted {
+                untrusted_repository_data: text.to_string(),
+            }),
+            semantic: None,
+        }],
+        tests: vec![],
+        risks: vec![],
+        limitations: vec![],
+        notes: vec![],
+        provenance: Provenance {
+            request_id: 1,
+            upstream_tools: vec!["route"],
+            workspace: text.to_string(),
+            ripwire_version: text.to_string(),
+            broker_version: "0.1.0",
+            online: None,
+        },
+        budget: Budget {
+            requested_tokens: 2500,
+            estimated_tokens: 10,
+            truncated: false,
+            shown: 1,
+            omitted: 0,
+            next_step: None,
+            already_delivered: 0,
+        },
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Repository text can never close the block that wraps it, whatever it contains — including
+    /// the closing tag itself. The payload region carries no `<` and no `>` at all, so there is
+    /// nothing to reason about case by case.
+    #[test]
+    fn repository_text_can_never_close_its_own_block(
+        text in prop_oneof![
+            Just(local::CONTEXT_CLOSE.to_string()),
+            Just(local::CONTEXT_OPEN.to_string()),
+            Just("</ripwire-broker-context>".to_string()),
+            ".{0,120}",
+            "[<>\"\\\\/ a-z-]{0,60}",
+        ],
+    ) {
+        let out = local::wrap("a task", &envelope_carrying(&text));
+        prop_assert_eq!(out.matches(local::CONTEXT_OPEN).count(), 1, "{:?}", out);
+        prop_assert_eq!(out.matches(local::CONTEXT_CLOSE).count(), 1, "{:?}", out);
+
+        let start = out.find(local::CONTEXT_OPEN).unwrap() + local::CONTEXT_OPEN.len();
+        let end = out.rfind(local::CONTEXT_CLOSE).unwrap();
+        let payload = &out[start..end];
+        prop_assert!(!payload.contains('<'), "a raw < reached the payload: {:?}", payload);
+        prop_assert!(!payload.contains('>'), "a raw > reached the payload: {:?}", payload);
+    }
+}
+
+// ---------------------------------------------------------------- P0.4 — request batching
+
+fn state_item(id: usize, text_len: usize) -> StateItem {
+    StateItem {
+        id: format!("i{id}"),
+        path: format!("src/f{id}.rs"),
+        text: "x".repeat(text_len),
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Every batch is under every limit, and nothing is lost or invented.
+    ///
+    /// The order claim needs care: an item that cannot be sent even alone goes to `too_large`
+    /// **where it occurs**, so concatenating the batches and then `too_large` does not reproduce
+    /// the input — the two lists interleave. What holds, and what is asserted, is that each list
+    /// is a subsequence of the input and together they are exactly the input's multiset.
+    #[test]
+    fn every_batch_is_within_every_limit_and_nothing_is_lost(
+        lens in prop::collection::vec(prop_oneof![0usize..200, 3_000usize..6_000], 0..40),
+        source_selection in any::<bool>(),
+    ) {
+        let stage = if source_selection {
+            SemanticStage::SourceSelection
+        } else {
+            SemanticStage::FileAdmission
+        };
+        let items: Vec<StateItem> =
+            lens.iter().enumerate().map(|(i, n)| state_item(i, *n)).collect();
+        let (sent, too_large) = request::batches("m", "q", stage, items.clone());
+
+        for batch in &sent {
+            let n = batch.questions.0.len();
+            prop_assert!((1..=request::MAX_QUESTIONS).contains(&n), "{n} questions");
+            let bytes = serde_json::to_string(batch).unwrap().len();
+            prop_assert!(bytes <= request::MAX_REQUEST_BYTES, "{bytes} bytes in one request");
+            if source_selection {
+                prop_assert!(n <= request::MAX_EVIDENCE_UNITS, "{n} evidence units");
+                let text: usize = batch.state.items.iter().map(|i| i.text.len()).sum();
+                // One item alone is allowed past the text budget: refusing it would drop
+                // evidence the request can still carry.
+                prop_assert!(
+                    n == 1 || text <= request::EVIDENCE_BATCH_BYTES,
+                    "{text} bytes of evidence across {n} units"
+                );
+            }
+        }
+
+        let ids = |v: &[StateItem]| v.iter().map(|i| i.id.clone()).collect::<Vec<_>>();
+        let batched: Vec<String> =
+            sent.iter().flat_map(|b| ids(&b.state.items)).collect();
+        let apart = ids(&too_large);
+        let mut all = [batched.clone(), apart.clone()].concat();
+        all.sort();
+        let mut want = ids(&items);
+        want.sort();
+        prop_assert_eq!(all, want, "an item was lost or invented");
+
+        let input = ids(&items);
+        prop_assert!(is_subsequence(&batched, &input), "the batches reordered the input");
+        prop_assert!(is_subsequence(&apart, &input), "too_large reordered the input");
+    }
+
+    /// `request_bytes` is the length of the JSON `build` produces, not an estimate of it.
+    #[test]
+    fn request_bytes_is_exactly_the_json_length(
+        lens in prop::collection::vec(0usize..300, 0..12),
+        source_selection in any::<bool>(),
+    ) {
+        let stage = if source_selection {
+            SemanticStage::SourceSelection
+        } else {
+            SemanticStage::FileAdmission
+        };
+        let items: Vec<StateItem> =
+            lens.iter().enumerate().map(|(i, n)| state_item(i, *n)).collect();
+        let built = serde_json::to_string(&request::build("m", "q", stage, items.clone()))
+            .unwrap()
+            .len();
+        prop_assert_eq!(request::request_bytes("m", "q", stage, &items), built);
+    }
+}
+
+fn is_subsequence(part: &[String], whole: &[String]) -> bool {
+    let mut it = whole.iter();
+    part.iter().all(|x| it.any(|y| y == x))
+}
+
+// ---------------------------------------------------------------- P0.10 — the command line
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Arbitrary `argv` never panics, and a refusal always tells the caller how to invoke it.
+    #[test]
+    fn parse_is_total_and_every_refusal_carries_the_usage(
+        args in prop::collection::vec(
+            prop_oneof![
+                "[a-z-]{0,12}",
+                "--[a-z-]{0,12}",
+                "--[a-z-]{1,12}=[a-z0-9/.]{0,8}",
+                Just("serve".to_string()),
+                Just("hook".to_string()),
+                Just("prompt".to_string()),
+                Just("doctor".to_string()),
+                Just("--online".to_string()),
+                Just("--workspace".to_string()),
+                Just("--".to_string()),
+                ".{0,6}",
+            ],
+            0..8,
+        ),
+    ) {
+        match cli::parse(args) {
+            Ok(_) => {}
+            Err(e) => prop_assert!(
+                e.contains(cli::USAGE),
+                "a refusal without the usage text: {:?}", e
+            ),
+        }
+    }
+
+    /// The flags of `serve` survive the round trip. `budget_tokens` is deliberately absent:
+    /// it is a per-request field on the tool call, not a process flag.
+    #[test]
+    fn the_serve_flags_survive_a_round_trip(
+        rss in 1u64..64_000,
+        incremental in any::<bool>(),
+        redact in any::<bool>(),
+    ) {
+        let mut argv = vec![
+            "serve".to_string(),
+            "--workspace".to_string(),
+            ".".to_string(),
+            "--ripwire-max-rss-mb".to_string(),
+            rss.to_string(),
+        ];
+        if incremental {
+            argv.push("--incremental".to_string());
+        }
+        if redact {
+            argv.push("--redact-workspace".to_string());
+        }
+        match cli::parse(argv) {
+            Ok(Command::Serve(a)) => {
+                prop_assert_eq!(a.ripwire_max_rss_mb, Some(rss));
+                prop_assert_eq!(a.incremental, incremental);
+                prop_assert_eq!(a.redact_workspace, redact);
+                prop_assert_eq!(a.workspace, std::path::PathBuf::from("."));
+            }
+            Ok(_) => prop_assert!(false, "a serve argv parsed as another command"),
+            Err(e) => prop_assert!(false, "a valid serve argv was refused: {:?}", e),
+        }
+    }
+
+    /// `--online` belongs to `serve` alone: a one-shot command that accepted it silently would
+    /// promise a remote classifier it never starts.
+    #[test]
+    fn online_outside_serve_is_refused(sub in prop::sample::select(vec!["doctor", "hook", "prompt"])) {
+        let argv: Vec<String> = [sub, "--workspace", ".", "--online"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        prop_assert!(cli::parse(argv).is_err(), "{} accepted --online", sub);
+    }
+
+    /// A `--jev-*` flag without `--online` is a refusal, not a silent no-op.
+    #[test]
+    fn a_jev_flag_without_online_is_refused(value in "[a-z0-9]{1,8}") {
+        let argv = vec![
+            "serve".to_string(),
+            "--workspace".to_string(),
+            ".".to_string(),
+            "--jev-model".to_string(),
+            value,
+        ];
+        prop_assert!(cli::parse(argv).is_err(), "a --jev flag passed without --online");
+    }
+}
+
+// ---------------------------------------------------------------- P1.1 — Retry-After
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Delay seconds are read as seconds, whatever the surrounding whitespace.
+    #[test]
+    fn a_delay_in_seconds_is_read_as_seconds(secs in 0u64..100_000, pad in "[ \\t]{0,3}") {
+        let got = retry_after::parse(&format!("{pad}{secs}{pad}"), SystemTime::UNIX_EPOCH);
+        prop_assert_eq!(got, Some(Duration::from_secs(secs)));
+    }
+
+    /// Anything that is neither digits nor an IMF-fixdate is `None`, and nothing panics.
+    #[test]
+    fn a_malformed_retry_after_is_none(value in ".{0,40}") {
+        let digits = !value.trim().is_empty() && value.trim().bytes().all(|b| b.is_ascii_digit());
+        let got = retry_after::parse(&value, SystemTime::UNIX_EPOCH);
+        if !digits && got.is_some() {
+            // Then it parsed as a date, which must mean it had the fixdate shape.
+            prop_assert!(value.contains("GMT"), "{:?} parsed as a date", value);
+        }
+    }
+
+    /// A date in the past is no wait at all, never a wait into the past.
+    #[test]
+    fn a_date_in_the_past_is_no_wait(day in 1u32..=28, hour in 0u32..=23) {
+        let value = format!("Mon, {day:02} Jan 1994 {hour:02}:00:00 GMT");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(60 * 365 * 86_400);
+        prop_assert_eq!(retry_after::parse(&value, now), Some(Duration::ZERO));
+    }
+
+    /// An impossible date is refused, not clamped into a possible one.
+    #[test]
+    fn an_impossible_date_is_refused(hour in 24u32..99, day in 32u32..99) {
+        let bad_hour = format!("Mon, 06 Nov 1994 {hour:02}:00:00 GMT");
+        prop_assert_eq!(retry_after::parse(&bad_hour, SystemTime::UNIX_EPOCH), None);
+        let bad_day = format!("Mon, {day:02} Nov 1994 08:00:00 GMT");
+        prop_assert_eq!(retry_after::parse(&bad_day, SystemTime::UNIX_EPOCH), None);
+        prop_assert_eq!(
+            retry_after::parse("Mon, 31 Feb 1994 08:00:00 GMT", SystemTime::UNIX_EPOCH),
+            None
+        );
+    }
+}
+
+// ---------------------------------------------------------------- P1.2 — candidate ordering
+
+fn item_at(path: &str, role: Role, line: Option<u64>) -> Item {
+    Item {
+        kind: "file",
+        role,
+        path: path.to_string(),
+        line,
+        symbol: None,
+        signature: None,
+        why_included: String::new(),
+        source: Source::fact("route"),
+        content: None,
+        semantic: None,
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Docs are out; paths are distinct; the order is `(best priority, ripwire's order)`; and
+    /// each path's lines are sorted and without repetition.
+    #[test]
+    fn the_candidates_are_ordered_distinct_and_free_of_docs(
+        raw in prop::collection::vec(
+            (0u8..4, 0usize..5, prop::option::of(1u64..6), any::<bool>()),
+            0..25,
+        ),
+    ) {
+        let items: Vec<Item> = raw
+            .iter()
+            .map(|(_, p, line, doc)| {
+                let role = if *doc { Role::Doc } else { Role::Primary };
+                item_at(&format!("src/f{p}.rs"), role, *line)
+            })
+            .collect();
+        let pairs: Vec<(u8, &Item)> =
+            raw.iter().map(|(pri, ..)| *pri).zip(items.iter()).collect();
+        let ranked = online::ranked_paths(pairs);
+
+        let docs: Vec<&str> = items
+            .iter()
+            .filter(|i| i.role == Role::Doc)
+            .map(|i| i.path.as_str())
+            .collect();
+        for p in &ranked {
+            // A path is excluded only when *every* item naming it is a doc.
+            let also_source = items
+                .iter()
+                .any(|i| i.path == p.path && i.role != Role::Doc);
+            prop_assert!(also_source || !docs.contains(&p.path.as_str()));
+            let mut sorted = p.lines.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            prop_assert_eq!(&sorted, &p.lines, "lines out of order or repeated");
+        }
+
+        let paths: Vec<&String> = ranked.iter().map(|p| &p.path).collect();
+        let mut distinct = paths.clone();
+        distinct.sort();
+        distinct.dedup();
+        prop_assert_eq!(distinct.len(), paths.len(), "a path appears twice");
+
+        for w in ranked.windows(2) {
+            prop_assert!(
+                (w[0].priority, w[0].rank) <= (w[1].priority, w[1].rank),
+                "{:?} before {:?}",
+                (w[0].priority, w[0].rank),
+                (w[1].priority, w[1].rank)
+            );
+        }
     }
 }

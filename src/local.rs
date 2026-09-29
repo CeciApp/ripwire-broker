@@ -44,19 +44,23 @@ pub async fn prompt(args: &PromptArgs) -> (String, Option<BrokerError>) {
         broker.context_for_task(req).await
     };
     match context.await {
-        Ok(env) => (
-            format!(
-                "{}\n\n{CONTEXT_OPEN}\n{}\n{CONTEXT_CLOSE}\n",
-                args.task,
-                // `<` and `>` only occur inside JSON strings; as \u escapes the payload can
-                // never contain the closing tag of its own block (prompt injection, D-052).
-                serde_json::to_string(&env)
-                    .unwrap_or_default()
-                    .replace('<', "\\u003c")
-                    .replace('>', "\\u003e")
-            ),
-            None,
-        ),
+        Ok(env) => (wrap(&args.task, &env), None),
         Err(e) => (format!("{}\n", args.task), Some(e)),
     }
+}
+
+/// The task, a blank line, then the envelope as delimited untrusted data.
+///
+/// `<` and `>` only occur inside JSON strings, so writing them as `\u` escapes means the payload
+/// cannot contain the closing tag of its own block (prompt injection, D-052). Extracted from
+/// `prompt` so that this control is reachable as a property without starting a broker and a
+/// ripwire — the same reasoning as the visibility decision for `markup` (D-110).
+pub fn wrap(task: &str, env: &crate::model::Envelope) -> String {
+    format!(
+        "{task}\n\n{CONTEXT_OPEN}\n{}\n{CONTEXT_CLOSE}\n",
+        serde_json::to_string(env)
+            .unwrap_or_default()
+            .replace('<', "\\u003c")
+            .replace('>', "\\u003e")
+    )
 }

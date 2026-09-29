@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 23:36 | Fatia D: 12 propriedades (P0.4, P0.10, P0.13, P1.1, P1.2), `local::wrap` extraído para o controle de injeção ser alcançável, e a ordem prometida no P0.4 do prompt corrigida | [D-110](#d-110--fatia-d-doze-propriedades-e-uma-afirmação-do-prompt-que-não-se-sustenta) |
 | 2026-09-28 23:28 | Fatia C: 22 propriedades sobre as superfícies puras, e o achado que elas existiam para achar — um segredo com caractere não-ASCII vazava seu esqueleto ASCII para status, log e agente | [D-109](#d-109--primeiras-propriedades-e-um-vazamento-de-credencial-que-elas-fecharam) |
 | 2026-09-28 23:14 | Fatia B: `deny.toml` com as quatro seções verdes (allowlist exata de 8 licenças, não um superconjunto generoso), `cargo-deny` **agendado no `master` e nunca em PR**, e dependabot com a política de pin do `rust-mcp-sdk` | [D-108](#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot) |
 | 2026-09-28 23:05 | Fatia A da proposta de PBT/CI: workflow com dois jobs, `permissions` mínimo, actions por SHA, `--locked`, timeout e `concurrency`; `forbid(unsafe_code)`, `deny(print_stdout)`, porta do CA-10 e guarda de fixture — os quatro passavam limpos antes de serem exigidos | [D-107](#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) |
@@ -3702,3 +3703,74 @@ vez de ler a saída.
 **271** testes no build default e **284** com `online` (eram 248 e 261): 22 propriedades mais o teste
 dirigido do vazamento. `fmt` limpo, clippy limpo com `-D warnings` nas duas features — conferido pelo
 código de saída — e `cargo deny --all-features check` com as quatro seções ok.
+
+---
+
+## D-110 — Fatia D: doze propriedades, e uma afirmação do prompt que não se sustenta
+
+Fatia D de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): P0.4 (lotes de
+requisição), P0.10 (linha de comando), P0.13 (injeção de prompt), P1.1 (`Retry-After`) e P1.2
+(ordenação de candidatos).
+
+**Nenhum defeito de produto nestas cinco superfícies.** Elas passaram como estavam, e isso é
+resultado, não anticlímax — o vazamento do [D-109](#d-109--primeiras-propriedades-e-um-vazamento-de-credencial-que-elas-fecharam)
+mostrou que quando há defeito as propriedades acham.
+
+### A afirmação do prompt que é falsa
+
+O [`spec/prompt/ci-cd.md`](prompt/ci-cd.md), no P0.4, pede como propriedade: *"a concatenação dos
+lotes mais os `too_large` é exatamente a entrada, **na ordem**"*.
+
+**Não se sustenta.** Um item que não cabe nem sozinho vai para `too_large` **onde ele ocorre**, então
+as duas listas se intercalam: com o terceiro item grande demais, os lotes carregam `[1,2,4]` e o
+`too_large` carrega `[3]`, e concatenar dá `[1,2,4,3]`, que não é a entrada. Escrever a propriedade
+como o prompt pede a faria falhar por estar errada, não por o código estar.
+
+O que vale, e o que está afirmado: **cada lista é subsequência da entrada** (nenhuma reordena) **e as
+duas juntas são exatamente o multiconjunto da entrada** (nada se perde nem se inventa).
+
+Também precisei afrouxar uma cláusula — com razão registrada no teste. No `source_selection`, um
+lote pode passar de `EVIDENCE_BATCH_BYTES` **quando tem um único item**: o `batches` tem uma escapada
+explícita (`n == 0`) porque recusar o item sozinho jogaria fora evidência que a requisição ainda
+consegue carregar. A propriedade afirma `n == 1 || text <= EVIDENCE_BATCH_BYTES`.
+
+### `local::wrap`, extraído para o controle ser alcançável
+
+O escapamento do P0.13 vivia dentro do `format!` de `local::prompt`, que sobe um broker e um ripwire.
+Uma propriedade não alcançava isso, e reimplementar o escape no teste testaria a minha cópia, não o
+código. Extraí `pub fn local::wrap(task, &Envelope) -> String`, e `prompt` passou a chamá-la — mesma
+razão da decisão de visibilidade do `markup`, com a diferença de que aqui é **função nova num módulo
+já público**, não mudança de visibilidade.
+
+A propriedade é forte por construção: **a região do payload não contém nenhum `<` nem `>`**, então
+não há caso a caso a analisar, e há exatamente uma ocorrência de `CONTEXT_OPEN` e uma de
+`CONTEXT_CLOSE` — inclusive quando o texto de repositório é literalmente `</ripwire-broker-context>`.
+
+### Provado que as propriedades mordem, por mutação
+
+"Passou" não é evidência de que uma propriedade detecta a deriva que afirma. Duas mutações dirigidas,
+revertidas em seguida:
+
+| mutação | resultado |
+| --- | --- |
+| tirar o `.replace('<', "\u003c")` do `wrap` | **pega** — `a raw < reached the payload` |
+| inverter a chave de ordenação para `(rank, priority)` | **pega** — `(3, 0) before (0, 1)` |
+
+### Correções menores encontradas ao escrever
+
+- **`ServeArgs` não tem `budget_tokens`.** Escrevi a propriedade de ida-e-volta contra ele por
+  inércia; `budget_tokens` é campo por requisição na chamada de ferramenta, não flag de processo. O
+  round-trip usa `--ripwire-max-rss-mb`, `--incremental` e `--redact-workspace`.
+- **O comentário de `RankedPath.rank` estava impreciso.** Dizia "posição do primeiro item do caminho
+  na saída do ripwire", mas o `enumerate()` roda **depois** do filtro de docs, então é a posição entre
+  os itens que chegam. Não é defeito — só a ordem relativa importa, e filtrar a preserva — mas o
+  comentário agora diz isso.
+- Confirmei por sonda que `--online` fora do `serve` é recusado nos três comandos de um disparo
+  (`doctor`, `hook`, `prompt`), como o prompt afirma, e a afirmação virou propriedade.
+
+### Verificação
+
+**283** testes no default e **296** com `online` (eram 271 e 284): +12 propriedades. Com
+`PROPTEST_CASES=4096`, os 34 testes do alvo `props` levam **~20 s** — subiu de ~9 s, o que é o preço
+de P0.4 e P1.2 gerarem coleções. `fmt` limpo e clippy limpo com `-D warnings` nas duas features,
+conferido pelo código de saída e não pela saída, depois de um `manual_range_contains` real meu.
