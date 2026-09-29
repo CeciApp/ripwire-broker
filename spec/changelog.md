@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 21:02 | O teste-ouro do D-099 fixava `shown` em números de **uma** máquina e quebrou no CI: `provenance.workspace` carrega o caminho do workspace, ~40 bytes mais curto no Linux. Trocado por um limite de desperdício medido em tempo de execução | [D-102](#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho) |
 | 2026-09-28 20:32 | Itens 7 e 10 medidos e **recusados** — as duas premissas estavam erradas e a "otimização" do merge era 3x mais lenta; e os números do D-096 ao D-099 refeitos em release, porque os publicados eram de build debug | [D-100](#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release) |
 | 2026-09-28 20:18 | O `budget_tokens` passa a ter teto aplicado (100.000, o que o schema MCP já declarava sem impor) e o shaping do envelope deixa de re-serializar o envelope por candidato: 16x no orçamento padrão e 48x no teto | [D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear) |
 | 2026-09-28 20:05 | `status()` deixa de pagar uma ida e volta upstream por leitura: a sonda de disponibilidade vale por `STATUS_PROBE`; 10 leituras caem de 220 para 22 ms a 20 ms de RTT, e um ripwire ocupado de 3 s para 1 s | [D-098](#d-098--a-sonda-de-disponibilidade-do-status-reaproveitada-por-uma-janela) |
@@ -2861,3 +2862,75 @@ Nenhuma mudança de código nesta entrada. 243 verdes no build padrão e 256 com
 do [D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear). Todas as
 sondas e a instrumentação temporária de `dedup`, `merge` e `budget` foram removidas, e a
 visibilidade dos módulos `dedup`, `merge` e `budget`, que foi aberta para medir, voltou ao que era.
+
+---
+
+## D-102 — O teste-ouro do D-099 era dependente de plataforma, e deixou o master vermelho
+
+Correção de um defeito que **eu** introduzi no
+[D-099](#d-099--teto-aplicado-no-budget_tokens-e-shaping-do-envelope-em-tempo-linear) e que passou
+por dois merges antes de aparecer.
+
+### O que quebrou
+
+`the_shaped_envelope_never_exceeds_its_budget_and_grows_with_it` fixava seis valores de `shown`
+colhidos nesta máquina. No CI, no orçamento 600, deu 6 onde a tabela dizia 5.
+
+A causa: `provenance.workspace` carrega o caminho do workspace
+([`src/broker.rs`](../src/broker.rs)), e ele entra no envelope, logo entra na contagem de bytes.
+Um diretório temporário no macOS é `/var/folders/.../T/.tmpXXXXXX`, uns 55 caracteres; no Linux é
+`/tmp/.tmpXXXXXX`, uns 15. Os ~40 bytes de diferença são 10 tokens, o bastante para caber um item
+a mais e mover toda fronteira de orçamento.
+
+Reproduzido localmente antes de corrigir, com `TMPDIR=/tmp`: a falha é idêntica à do CI,
+`budget 600: left: 6, right: 5`. `redact_workspace` não ajuda — ele só afeta o recurso de status,
+não o envelope.
+
+### Por que passou por dois merges
+
+O `master` ficou vermelho em `b9e9385` (merge da #10) e `b3a20a5` (merge da #11). O CI de PR das
+duas passou porque **o script que conduziu a pilha tratava "nenhum check pendente e nenhum
+falhando" como verde** — e quando só o check do CodeRabbit existia e o job `build` ainda não tinha
+sido criado, essa condição era verdadeira. Ele mesclou antes de o build rodar. O erro é de processo,
+não do repositório, mas fica registrado porque explica dois commits vermelhos no histórico.
+
+### O que os valores-ouro tinham de errado, além da plataforma
+
+Investigando, o defeito é mais fundo que o caminho do tempdir: **aquela tabela não testava
+propriedade alguma.** Ela registrava o que saía, folga inclusa. Três tentativas de substituí-la por
+uma propriedade real mostraram por quê:
+
+1. **"Pedir exatamente `estimated_tokens` deve mostrar o mesmo"** — não detecta nada. O `finish`
+   recalcula `estimated_tokens` com a serialização autoritativa, então o viés se auto-cancela.
+2. **"A folga é menor que o menor item"** — falha no código correto. O budgeter entra em ordem de
+   prioridade, e o menor item de todos pode já estar dentro.
+3. **"A folga é menor que o menor item omitido"** — também falha no código correto, e aqui está o
+   achado: **o encaixe não é maximal, por construção.** O `budget::finish` escreve a escrituração
+   (`shown`, `omitted` e a frase de `next_step`, que sozinha custa ~23 tokens) **depois** das
+   decisões de encaixe, então sobra sempre espaço do tamanho desse bloco.
+
+### O que ficou
+
+O teste afirma o que é verdade e é independente de máquina:
+
+- `estimated_tokens <= budget` — o contrato, garantido pelo `finish`
+- `shown` nunca cai quando o orçamento cresce
+- `shown + omitted` é o total
+- **a folga é menor que o item omitido mais barato mais o bloco de escrituração**, com as duas
+  quantidades medidas na própria execução, sem constante registrada
+
+**Sensibilidade medida**, injetando viés no `added()` e verificando que o teste falha: pega desvio
+de **3 bytes por entrada ou mais**, e não pega 1 nem 2. Isso está escrito no teste, não implícito.
+Um desvio desse tamanho também não pode quebrar o contrato de orçamento: o `finish` remede com a
+serialização autoritativa e estoura entradas até caber, então drift custa **uma entrada, nunca
+estouro**. Foi essa a checagem que faltou no D-099 — lá eu registrei valores e os vi passar, sem
+nunca provar que o teste detectava desvio.
+
+Verificado sob `TMPDIR=/tmp` (curto, como no Linux) e sob um `TMPDIR` de 144 caracteres: passa nos
+dois.
+
+### Verificação
+
+243 verdes no build padrão e 256 com `online`, as mesmas contagens — nenhum teste novo, o existente
+foi reescrito. Clippy e fmt limpos nas duas features. Só `tests/broker.rs` muda; nenhuma linha de
+produção foi tocada, porque o defeito era do teste e não do `budget.rs`.
