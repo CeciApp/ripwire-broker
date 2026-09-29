@@ -1,6 +1,8 @@
 # Proposta — o processo ripwire por evento de hook (item 4 da revisão de arquitetura)
 
-Status: **proposta, nada implementado** · 2026-09-28 · item 4 de
+Status: **fechado — opção B feita em [D-105](../changelog.md#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook);
+C e D recusadas pela medição com o ripwire real; E segue aberta como decisão de produto** ·
+2026-09-28 · item 4 de
 [D-096](../changelog.md#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos),
 único em aberto depois de [D-100](../changelog.md#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release)
 
@@ -13,6 +15,50 @@ RF-14, e as decisões [D-033](../changelog.md#d-033--instalação-e-diagnóstico
 Este documento **não decide nada**. Ele mede o custo, nomeia o que cada mitigação quebra, e
 separa o que é barato e isolado do que é mudança de arquitetura com superfície de segurança nova.
 Nada disso vira código antes de aprovação.
+
+## 0-bis. ADENDO (2026-09-28 22:28) — o ripwire real foi medido, e derruba a tese central
+
+Tudo abaixo desta seção foi escrito com um **dublê** de `ripwire --mcp` em Python, porque o ripwire
+não estava no PATH. Ele foi instalado (`~/.local/bin`, versão **0.6.5**) e medido. O que muda:
+
+| | dublê Python | ripwire real |
+| --- | --- | --- |
+| `ripwire --version` | 19,4 ms | **3,6 ms** |
+| `user-prompt-submit` | 43,0 ms | **19,4 ms** |
+| `post-tool-use` | 43,0 ms | **34,0 ms** |
+| `stop` | 42,6 ms | **222,0 ms** |
+
+**A tese central da proposta não sobrevive.** Ela dizia: "os três custam o mesmo, e é isso que
+importa — os 43 ms são overhead fixo de subida". Com o ripwire real os três custam coisas muito
+diferentes, e o `stop` custa **5x** o mais barato. O que domina é o **trabalho do ripwire**, não a
+subida do processo: o gate de conclusão faz várias chamadas upstream e o ripwire trabalha de verdade
+em cada uma.
+
+O que isso faz com cada opção:
+
+- **B — feita.** Ganho entregue de 1 a 3 ms por evento: `user-prompt-submit` 19,4 → 17,0 ms (12%),
+  `post-tool-use` 34,0 → 33,0 (3%), `stop` 222,0 → 218,9 (1,4%). A proposta prometia **45% do
+  total**, o que era artefato do startup do Python. Continua valendo por remover um processo
+  inteiro por evento, com código pequeno e testado, mas o valor é modesto e vale dizer isso.
+- **C e D — recusadas.** A justificativa das duas era "a subida de processo domina". Com o ripwire
+  real a subida é ~3 a 5 ms de 17 a 219 ms. Elas comprariam pouco e custariam superfície nova de
+  segurança — socket autenticado, escopo por workspace, ciclo de vida sob
+  [D-050](../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor) — além de reabrir o
+  [D-064](../changelog.md#d-064--cache-diagnóstico-e-integração-proposta). **A medição que era o
+  bloqueio resolveu o caso, e resolveu contra elas.**
+- **E — segue aberta**, e agora é a única com ganho grande. O `stop` a 219 ms e o `post-tool-use`
+  a 33 ms **por edição** são custo real de trabalho do ripwire, não de subida. Reduzir eventos ataca
+  isso; nada mais nesta proposta ataca. Continua sendo decisão de produto sobre PRD 8.4, não
+  otimização.
+
+Uma rota que a proposta sugeria para B **não existe**: ler a versão do handshake MCP. O
+`rust-mcp-sdk` 2.0.0 não expõe o `Implementation` do servidor ao cliente — `server_details()` é do
+lado servidor. Mesmo obstáculo que o [D-049](../changelog.md#d-049--cancelamento-pelo-cliente-e-status-que-não-trava)
+encontrou. B foi feita pela outra rota, cache no estado de sessão com stamp do binário.
+
+E os testes que exigem ripwire, que até agora "passavam" retornando cedo por ausência dele, passaram
+a **executar de verdade** contra o 0.6.5: zero pulados, todos verdes. Os fixtures gravados batem com
+a saída real.
 
 ## 0. O que foi medido, e o que não foi
 

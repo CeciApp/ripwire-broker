@@ -133,3 +133,37 @@ pub fn write_executable(path: &Path, body: impl AsRef<str>) {
         path.display()
     );
 }
+
+/// A stand-in `ripwire` that records every `--version` invocation in `counter`, and otherwise
+/// speaks just enough MCP over stdio to let a broker connect.
+pub fn counting_ripwire(dir: &Path, counter: &Path) -> std::path::PathBuf {
+    let verbs = crate::common::fake::RIPWIRE_TOOLS
+        .iter()
+        .map(|v| format!("\"{v}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = dir.join("counting-ripwire");
+    write_executable(
+        &script,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+if "--version" in sys.argv:
+    open("{counter}", "a").write("asked\n")
+    print("ripwire 0.6.5"); sys.exit(0)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    if msg.get("method") == "tools/list":
+        result = {{"tools": [{{"name": v, "inputSchema": {{"type": "object"}}}} for v in [{verbs}]]}}
+    else:
+        result = {{"content": [{{"type": "text", "text": "<ctx></ctx>"}}]}}
+    sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": result}}) + "\n")
+    sys.stdout.flush()
+"#,
+            counter = counter.display()
+        ),
+    );
+    script
+}

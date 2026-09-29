@@ -1499,3 +1499,97 @@ fn install_refuses_a_workspace_path_that_is_not_utf8() {
 
     assert!(err.contains("UTF-8"), "{err}");
 }
+
+// --- D-105: the version is not worth a process per hook event ---
+
+#[test]
+fn a_second_hook_event_does_not_ask_ripwire_for_its_version_again() {
+    let state = tempfile::tempdir().unwrap();
+    let ws = common::sample_repo();
+    let stub_dir = tempfile::tempdir().unwrap();
+    let counter = stub_dir.path().join("version-asks");
+    let ripwire = common::counting_ripwire(stub_dir.path(), &counter);
+
+    let ev = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/hooks/claude_code_user_prompt_submit.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .replace("__WORKSPACE__", &ws.path().display().to_string());
+
+    let asks = || {
+        std::fs::read_to_string(&counter)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    };
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--ripwire",
+        ripwire.to_str().unwrap(),
+    ];
+
+    let (code, _, err) = run(&args, &ev);
+    assert_eq!(code, 0, "first event: {err}");
+    assert_eq!(asks(), 1, "the first event has to read the version once");
+
+    let (code, _, err) = run(&args, &ev);
+    assert_eq!(code, 0, "second event: {err}");
+    assert_eq!(
+        asks(),
+        1,
+        "the second event of the same session reuses it instead of starting a whole process"
+    );
+}
+
+#[test]
+fn a_swapped_ripwire_is_read_again() {
+    let state = tempfile::tempdir().unwrap();
+    let ws = common::sample_repo();
+    let stub_dir = tempfile::tempdir().unwrap();
+    let counter = stub_dir.path().join("version-asks");
+    let ripwire = common::counting_ripwire(stub_dir.path(), &counter);
+
+    let ev = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/hooks/claude_code_user_prompt_submit.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .replace("__WORKSPACE__", &ws.path().display().to_string());
+
+    let asks = || {
+        std::fs::read_to_string(&counter)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    };
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--ripwire",
+        ripwire.to_str().unwrap(),
+    ];
+
+    run(&args, &ev);
+    assert_eq!(asks(), 1);
+
+    // The same path, different bytes: the reading that was remembered is not this binary's.
+    let body = std::fs::read_to_string(&ripwire).unwrap();
+    common::write_executable(&ripwire, format!("{body}# swapped\n"));
+
+    run(&args, &ev);
+    assert_eq!(
+        asks(),
+        2,
+        "a ripwire whose bytes changed has to be asked again, not answered from the state file"
+    );
+}
