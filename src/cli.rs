@@ -15,6 +15,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
+                      [--edit-interval-ms N]
        ripwire-broker hook-log --session ID [--state-dir DIR]
        ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
@@ -118,6 +119,8 @@ pub struct HookArgs {
     pub every_prompt: bool,
     pub gate: bool,
     pub log_refs: bool,
+    /// Absent: the default coalescing window. `0` answers every edit on its own.
+    pub edit_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +221,7 @@ struct Flags {
     summarizer_wait: Option<Duration>,
     summarizer_timeout: Option<Duration>,
     max_rss_mb: Option<u64>,
+    edit_interval_ms: Option<u64>,
     jev: HashMap<&'static str, String>,
     switches: Vec<&'static str>,
     words: Vec<String>,
@@ -357,6 +361,7 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             "--budget" => f.budget = Some(number(&value)? as u32),
             "--summarizer-cmd" => f.summarizer_cmd = Some(value),
             "--ripwire-max-rss-mb" | "--max-rss-mb" => f.max_rss_mb = Some(number(&value)?),
+            "--edit-interval-ms" => f.edit_interval_ms = Some(number(&value)?),
             "--summarizer-version-cmd" => f.summarizer_version_cmd = Some(value),
             "--summarizer-wait-ms" => {
                 f.summarizer_wait = Some(Duration::from_millis(number(&value)?))
@@ -484,7 +489,13 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             let (host, event) = (host(it.next())?, event(it.next())?);
             let f = flags(
                 it,
-                &with(&["--state-dir", "--every-prompt", "--gate", "--log-refs"]),
+                &with(&[
+                    "--state-dir",
+                    "--every-prompt",
+                    "--gate",
+                    "--log-refs",
+                    "--edit-interval-ms",
+                ]),
             )?;
             no_words(&f)?;
             Ok(Command::Hook(HookArgs {
@@ -496,6 +507,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 every_prompt: f.on("--every-prompt"),
                 gate: f.on("--gate"),
                 log_refs: f.on("--log-refs"),
+                edit_interval_ms: f.edit_interval_ms,
             }))
         }
         Some("hook-log") => {

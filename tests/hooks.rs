@@ -6,7 +6,7 @@ use common::fake::FakeUpstream;
 use ripwire_broker::broker::{Broker, BrokerConfig};
 use ripwire_broker::cli::{Event, Host};
 use ripwire_broker::hook::{self, Policy, SessionState};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -679,4 +679,98 @@ async fn the_gate_notice_never_repeats_a_risk_kind() {
         "each kind once: {note}"
     );
     assert_eq!(note.matches("quality_minor").count(), 1, "{note}");
+}
+
+// --- D-106: a burst of edits is one ask, not one per edit ---
+
+/// `Policy::default()` with a clock, so the coalescing window can be driven exactly. Tests must
+/// never depend on real time (D-102).
+fn at(now_ms: u64) -> Policy {
+    Policy {
+        now_ms: Some(now_ms),
+        ..Policy::default()
+    }
+}
+
+async fn post_tool_use_at(
+    input: &Value,
+    b: &Broker,
+    state: &mut SessionState,
+    policy: &Policy,
+) -> Option<Value> {
+    hook::handle(
+        Host::ClaudeCode,
+        Event::PostToolUse,
+        input,
+        b,
+        state,
+        policy,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn edits_inside_the_window_share_one_upstream_ask() {
+    let (b, fake, ws) = hook_broker(edit_fake()).await;
+    std::fs::write(ws.path().join("a.txt"), "hello.").unwrap();
+    let input = event("claude_code_post_tool_use", ws.path());
+    let mut state = SessionState::default();
+
+    let first = post_tool_use_at(&input, &b, &mut state, &at(10_000)).await;
+    assert!(first.is_some(), "the first edit of a burst is answered");
+    let after_first = fake.called().len();
+    assert!(after_first > 0, "and it asks upstream");
+
+    // Two more edits, 100 ms apart, well inside the default window.
+    let second = post_tool_use_at(&input, &b, &mut state, &at(10_100)).await;
+    let third = post_tool_use_at(&input, &b, &mut state, &at(10_200)).await;
+
+    assert!(
+        second.is_none() && third.is_none(),
+        "edits inside the window are not answered one by one"
+    );
+    assert_eq!(
+        fake.called().len(),
+        after_first,
+        "and cost no upstream call at all: {:?}",
+        fake.called()
+    );
+}
+
+#[tokio::test]
+async fn an_edit_past_the_window_is_answered_again_and_carries_what_was_held() {
+    let (b, fake, ws) = hook_broker(edit_fake()).await;
+    std::fs::write(ws.path().join("a.txt"), "hello.").unwrap();
+    let mut state = SessionState::default();
+    let one = event("claude_code_post_tool_use", ws.path());
+    let mut two = one.clone();
+    two["tool_input"]["file_path"] = json!(ws.path().join("b.txt").display().to_string());
+    std::fs::write(ws.path().join("b.txt"), "second file").unwrap();
+
+    post_tool_use_at(&one, &b, &mut state, &at(10_000)).await;
+    // Held back: inside the window, and naming a file the first ask did not cover.
+    assert!(
+        post_tool_use_at(&two, &b, &mut state, &at(10_100))
+            .await
+            .is_none()
+    );
+    let held = fake.called().len();
+
+    // Past the window, the next edit is answered and the held file goes with it.
+    let later = post_tool_use_at(&one, &b, &mut state, &at(20_000)).await;
+
+    assert!(
+        later.is_some() || fake.called().len() > held,
+        "the ask happens"
+    );
+    let files = fake
+        .calls()
+        .iter()
+        .rfind(|(verb, _)| verb == "situational_awareness")
+        .map(|(_, args)| args["files"].as_str().unwrap_or("").to_string())
+        .expect("situational_awareness was asked");
+    assert!(
+        files.contains("b.txt"),
+        "the edit held back during the window is not forgotten: {files}"
+    );
 }

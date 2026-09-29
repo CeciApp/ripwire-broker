@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-28 22:43 | Opção E do item 4: uma rajada de edições passa a ser **uma** pergunta ao ripwire em vez de uma por edição — medido 1 injeção em 12 edições, cada uma custando ~99 ms jogados fora; 12 edições caem de 1169 para 278 ms | [D-106](#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) |
 | 2026-09-28 22:28 | Item 4 fechado na opção B: a versão do ripwire vem do estado de sessão em vez de um processo por evento. E o ripwire real, agora no PATH, **derruba a tese central da proposta** — C e D ficam recusadas, E é a única que sobra | [D-105](#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook) |
 | 2026-09-28 22:09 | Itens 2 e 5 decididos: o precheck do `is_fresh` **recusado** (ele pularia a reverificação de elegibilidade, que é a fronteira de consentimento) e o fan-out do `context_after_edit` **feito** nos dois laços, 3,6–4,0x e custo plano no número de símbolos | [D-104](#d-104--decisão-dos-itens-2-e-5-recusado-e-feito) |
 | 2026-09-28 21:34 | Revisão dos testes-ouro: só um era sensível a plataforma, e ele pegava um **defeito real** — `add_notes` estourava itens cujo corpo já tinha ido ao modelo local. Corrigido reservando a escrituração escrita após o encaixe | [D-103](#d-103--uma-nota-não-custa-mais-um-item-que-já-foi-evidência) |
@@ -3222,6 +3223,8 @@ O D-101 mediu com um dublê de `ripwire --mcp` em Python, porque o binário não
 | `post-tool-use` | 43,0 ms | **34,0 ms** |
 | `stop` | 42,6 ms | **222,0 ms** |
 
+> **Corrigido no [D-106](#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição):** os `34,0 ms` de `post-tool-use` acima são o caminho de retorno antecipado — o placeholder do fixture não foi substituído, então o arquivo editado não resolvia dentro do workspace. O custo real é ~40 ms editando texto e ~99 ms editando código.
+
 O D-101 concluiu: "os três custam o mesmo, e é isso que importa — os 43 ms são overhead fixo de
 subida". **Não se sustenta.** Com o ripwire real os três custam coisas muito diferentes e o `stop`
 custa 5x o mais barato. O que domina é o **trabalho do ripwire**, não a subida: o gate de conclusão
@@ -3263,6 +3266,8 @@ próxima vez, jamais cacheado como `"unavailable"`.
 | `post-tool-use` | 34,0 ms | 33,0 ms | 1,0 ms (3%) |
 | `stop` | 222,0 ms | 218,9 ms | 3,1 ms (1,4%) |
 
+> **Corrigido no [D-106](#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição):** os `34,0 ms` de `post-tool-use` acima são o caminho de retorno antecipado — o placeholder do fixture não foi substituído, então o arquivo editado não resolvia dentro do workspace. O custo real é ~40 ms editando texto e ~99 ms editando código.
+
 A proposta prometia **45% do total**, número que era artefato do startup do Python. O real é de 1,4
 a 12%. Vale por remover um processo inteiro por evento, com código pequeno e testado, mas o valor é
 modesto e não faz sentido apresentá-lo como mais que isso.
@@ -3301,3 +3306,103 @@ Dois novos, no seam do binário real (`tests/cli.rs`), com um dublê em Python q
 246 verdes no build padrão e 259 com `online` (eram 244 e 257; +2 testes), com o ripwire real no
 PATH e nenhum teste pulado. Clippy e fmt limpos nas duas features. Um arquivo de estado anterior a
 esta entrada carrega sem erro.
+
+---
+
+## D-106 — Uma rajada de edições é uma pergunta, não uma por edição
+
+Opção E da proposta do item 4
+([`spec/plan/proposta-ripwire-por-evento-de-hook.md`](plan/proposta-ripwire-por-evento-de-hook.md)),
+a única que o [D-105](#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook)
+deixou com ganho grande, por escolha do usuário.
+
+### A medição que decidiu a forma
+
+Doze edições de arquivos de código numa sessão, com ripwire 0.6.5 real:
+
+| | |
+| --- | --- |
+| edições que produziram injeção | **1 de 12** |
+| custo por evento | ~99 ms |
+
+O `PostToolUse` **já** faz todo o trabalho — `context_after_edit`, com as chamadas upstream — e só
+então chama `has_news` e devolve `Ok(None)` quando nada é novidade. Onze dos doze eventos gastaram
+~99 ms de trabalho de ripwire e jogaram o resultado fora.
+
+### E uma correção do D-105
+
+O [D-105](#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook) publicou
+`post-tool-use` a 34 ms. **Era o caminho de retorno antecipado.** O fixture aponta para
+`__WORKSPACE__/a.txt` e eu o passei por stdin sem substituir o placeholder, então o arquivo editado
+não resolvia dentro do workspace, `files` ficava vazio e o handler retornava antes de qualquer
+chamada upstream. Medido de novo com o placeholder substituído: **~40 ms editando um `.txt` e ~99 ms
+editando código**. É o segundo caso desta série em que um fixture não substituído me deu um número
+errado.
+
+### Por que coalescer por tempo, e não das outras duas formas
+
+A proposta listava três formas para E. As outras duas foram descartadas com razão:
+
+- **"Só edições que mudam elegibilidade"** não é calculável sem fazer a chamada — é a chamada que
+  diz se há novidade.
+- **"Pular quando o conjunto de arquivos não cresceu"** perde novidade **para sempre**: um arquivo
+  editado vinte vezes nunca voltaria a ser relatado, e a vigésima edição pode ter introduzido um
+  risco.
+
+A janela por tempo é a única com **perda limitada**: os arquivos nomeados enquanto a janela está
+aberta são guardados e viajam com a próxima resposta, então uma novidade atrasa no máximo uma edição
+mais a janela — e o `Stop` roda o gate de conclusão sobre a árvore inteira de qualquer forma.
+
+### Como ficou
+
+Na primeira edição a resposta sai normalmente e o instante é marcado. As edições seguintes dentro de
+`edit_interval_ms` não perguntam nada: os arquivos entram em `held_edits` no estado da sessão. Passada
+a janela, a próxima edição pergunta com os arquivos dela **mais os guardados**, e a lista é limpa.
+`MAX_HELD_EDITS` (32) limita o acúmulo; uma rajada maior relata as mais recentes, e o `Stop` cobre o
+resto.
+
+`--edit-interval-ms N` configura a janela; **`0` devolve o comportamento anterior**, uma resposta por
+edição. O padrão é **1000 ms**, e esse número é juízo, não medição: as edições chegaram a ~100 ms uma
+da outra, então 1000 ms coalesce cerca de dez. A cadência real de um agente em uso não é algo que eu
+possa medir aqui.
+
+**O relógio é lido no `hook::run`, na fronteira do processo, nunca dentro do `handle`.** O `handle`
+recebe `now_ms: Option<u64>` e `None` significa nunca coalescer, então os 37 testes que dirigem o
+`handle` direto seguem intactos e nenhum passa a depender de tempo real — a lição do
+[D-102](#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho).
+
+### Medido depois
+
+| | sem coalescência | com o padrão | |
+| --- | --- | --- | --- |
+| rajada de 12 edições | 1169 ms | **278 ms** | 4,2x |
+| turno inteiro, com `Stop` | 1537 ms | **611 ms** | 2,5x |
+
+### O que a medição não prova
+
+Nas duas corridas da sonda o número de injeções foi **0 em ambas**, então ela **não demonstra** que a
+novidade sobrevive à coalescência — 0 para 0 não diz nada sobre isso. O que está verificado é o
+mecanismo: um teste afirma que o arquivo guardado durante a janela viaja com a resposta seguinte, e o
+`Stop` roda sempre. Apresentar os 4,2x como se também provassem preservação de novidade seria errado.
+
+### A troca, explícita
+
+Isto **muda comportamento observável** e vem ligado por padrão: depois de uma edição, se a anterior
+foi respondida há menos de um segundo, o agente não recebe contexto agora. Ele recebe na próxima
+resposta, com o arquivo incluído, ou no gate do `Stop`. É matéria de PRD 8.4, e está aqui por decisão
+do usuário; `--edit-interval-ms 0` reverte.
+
+### Testes
+
+Dois novos, **vermelhos antes** (o campo `now_ms` não existia):
+
+- `edits_inside_the_window_share_one_upstream_ask` — duas edições 100 ms depois da primeira não são
+  respondidas e **não custam chamada upstream nenhuma**.
+- `an_edit_past_the_window_is_answered_again_and_carries_what_was_held` — passada a janela a pergunta
+  acontece, e o `files` do `situational_awareness` contém o arquivo que tinha sido guardado.
+
+### Verificação
+
+248 verdes no build padrão e 261 com `online` (eram 246 e 259; +2 testes). Clippy e fmt limpos nas
+duas features. Os campos novos do estado entram como `#[serde(default)]`, então um arquivo de estado
+anterior continua carregando.
