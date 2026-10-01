@@ -519,6 +519,7 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     // Without the lock (e.g. unwritable dir) the hook still runs; only turn-taking is lost.
     let _turn = store.lock(&session_id).ok();
     let mut state = store.load(&session_id);
+    let loaded_ripwire = state.ripwire.clone();
     if let Some(r) = &root {
         crate::statusline_state::bind(&mut state, &crate::statusline_state::workspace_key(r));
     }
@@ -578,6 +579,8 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         // Opted-out sessions stay silent even when ripwire is missing.
         Err(_) if state.opted_out => return None,
         Err(e) => {
+            // A binary that exists but cannot run must not be cached as "unavailable" (D-105).
+            state.ripwire = loaded_ripwire;
             analysed(&mut state, args.event, AnalysisStatus::Error, Some(e.error));
             finish(&state);
             return Some(failure(&e));

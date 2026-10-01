@@ -1921,3 +1921,33 @@ fn the_published_totals_reproduce_the_session_tally_with_the_real_ripwire() {
     assert_eq!(s.stats.events, tally.events);
     assert_eq!(s.stats.injections, tally.injections);
 }
+
+#[test]
+fn a_launch_failure_does_not_cache_the_unrunnable_ripwire_version() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let bin = ws.path().join("ripwire-not-executable");
+    std::fs::write(&bin, "not a program").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--ripwire",
+        bin.to_str().unwrap(),
+    ];
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-1", "hello"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "same failure answer: {out}");
+    let saved = ripwire_broker::state::StateStore::new(state.path().to_path_buf()).load("s-1");
+    assert!(
+        saved.ripwire.is_none(),
+        "no cached version: {:?}",
+        saved.ripwire
+    );
+}
