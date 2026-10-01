@@ -5143,9 +5143,14 @@ antes do primeiro `Stop`. Não explicado nem reproduzido; anotado para a próxim
    o valor.
 4. **`hooks off` mantém `última: atenção` (3.4).** A análise é anterior ao opt-out e pode ser lida
    como estado atual. Decidir no §24 se omite ou marca como antiga.
-5. **`há …` do `--detail` mede a análise, não a entrega (3.6).** A saída
-   `último contexto ~523 tok · há 18s` tinha 18 s desde o último `Stop`; a última entrega tinha 290 s.
-   Ou o rótulo muda de lugar, ou o tempo passa a ser o de `last_delivery.at`.
+5. **`há …` do `--detail` parece a idade da entrega, mas é a da observação (3.6): o código segue a
+   spec; a ambiguidade é de apresentação.** `há` é `now - updated_at`, e `updated_at` é gravado a
+   cada hook do broker que roda (prompt, edição, `Stop`, opt-out/opt-in), como o §24.5.2 pede ("a
+   idade indica o momento da observação"). Na saída `último contexto ~523 tok · há 18s`, os 18 s
+   eram desde o último hook (um `Stop`); a última entrega tinha 290 s. Mas o §24.5.2 põe `há` logo
+   depois de `último contexto`, e a leitura natural é "contexto entregue há 18 s". **Decisão
+   pendente no §24.5.2:** trocar o rótulo (`visto há`/`atualizado há`), mudar a posição, ou somar a
+   idade da entrega (`last_delivery.at`, que o snapshot já guarda) ao `último contexto`.
 6. **Injeção vazia conta em `inj` (6).** O `UserPromptSubmit` da segunda rodada entregou
    `context_for_task · 0 items · ~186 tokens` (`delivered: 0`), e a barra mostra `inj 1`. Decidir se
    um envelope sem itens é injeção.
