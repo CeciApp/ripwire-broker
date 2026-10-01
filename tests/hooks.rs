@@ -6,6 +6,7 @@ use common::fake::FakeUpstream;
 use ripwire_broker::broker::{Broker, BrokerConfig};
 use ripwire_broker::cli::{Event, Host};
 use ripwire_broker::hook::{self, Policy, SessionState};
+use ripwire_broker::statusline_state::{self as projection, AnalysisStatus};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
@@ -934,5 +935,259 @@ async fn a_reference_to_something_already_delivered_is_a_hit_not_a_delivery() {
     assert!(
         s["session_hits"].as_u64().unwrap() >= references as u64,
         "{s}"
+    );
+}
+
+fn bound() -> SessionState {
+    let mut s = SessionState::default();
+    projection::bind(&mut s, "k");
+    s
+}
+
+fn last(state: &SessionState) -> Option<AnalysisStatus> {
+    state
+        .statusline
+        .as_ref()?
+        .last_analysis
+        .as_ref()
+        .map(|a| a.status)
+}
+
+#[tokio::test]
+async fn an_injection_records_the_analysis_and_the_delivery() {
+    let (b, _, ws) =
+        hook_broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    let mut state = bound();
+    hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &event("claude_code_user_prompt_submit", ws.path()),
+        &b,
+        &mut state,
+        &Policy::default(),
+    )
+    .await;
+    let summary = state.statusline.as_ref().unwrap();
+    assert_eq!(
+        summary.last_analysis.as_ref().unwrap().event,
+        "UserPromptSubmit"
+    );
+    assert!(summary.last_delivery.as_ref().unwrap().estimated_tokens > 0);
+    let snap = projection::project(&state, 5).unwrap();
+    assert_eq!(snap.stats.injections, state.stats.injections);
+}
+
+#[tokio::test]
+async fn a_silent_ready_stop_replaces_an_earlier_attention() {
+    // First Stop: attention (the gate blocks). Second: ready, which the hook answers with silence.
+    let (b, _, ws) = hook_broker(finish_fake()).await;
+    let mut state = bound();
+    let input = event("claude_code_stop", ws.path());
+    hook::handle(
+        Host::ClaudeCode,
+        Event::Stop,
+        &input,
+        &b,
+        &mut state,
+        &Policy {
+            gate: true,
+            ..Policy::default()
+        },
+    )
+    .await;
+    assert_eq!(last(&state), Some(AnalysisStatus::AttentionRequired));
+    let delivered_at = state.statusline.as_ref().unwrap().last_delivery.clone();
+
+    let (ready, _, _) = hook_broker(
+        FakeUpstream::new()
+            .answer("situational_awareness", "situational_awareness_clean")
+            .answer("quality_delta", "quality_delta_clean"),
+    )
+    .await;
+    let out = hook::handle(
+        Host::ClaudeCode,
+        Event::Stop,
+        &input,
+        &ready,
+        &mut state,
+        &Policy::default(),
+    )
+    .await;
+    assert!(out.is_none(), "ready stays silent");
+    assert_eq!(last(&state), Some(AnalysisStatus::Ready));
+    assert_eq!(
+        state.statusline.as_ref().unwrap().last_delivery,
+        delivered_at,
+        "silence delivers nothing"
+    );
+}
+
+#[tokio::test]
+async fn an_event_without_analysis_keeps_the_summary() {
+    let (b, fake, ws) = hook_broker(finish_fake()).await;
+    let mut state = bound();
+    hook::handle(
+        Host::ClaudeCode,
+        Event::Stop,
+        &event("claude_code_stop", ws.path()),
+        &b,
+        &mut state,
+        &Policy {
+            gate: true,
+            ..Policy::default()
+        },
+    )
+    .await;
+    let before = state.statusline.clone();
+    // A second prompt without --every-prompt asks nothing upstream.
+    let calls = fake.called().len();
+    state.prompts_seen = 1;
+    hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &event("claude_code_user_prompt_submit", ws.path()),
+        &b,
+        &mut state,
+        &Policy::default(),
+    )
+    .await;
+    assert_eq!(fake.called().len(), calls);
+    assert_eq!(state.statusline, before);
+}
+
+#[tokio::test]
+async fn opt_out_and_opt_in_show_in_the_projection() {
+    let (b, _, ws) =
+        hook_broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    let mut state = bound();
+    let mut input = event("claude_code_user_prompt_submit", ws.path());
+    input["prompt"] = "stop it #ripwire-off".into();
+    hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &input,
+        &b,
+        &mut state,
+        &Policy::default(),
+    )
+    .await;
+    assert!(projection::project(&state, 0).unwrap().opted_out);
+    input["prompt"] = "back #ripwire-on".into();
+    hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &input,
+        &b,
+        &mut state,
+        &Policy {
+            every_prompt: true,
+            ..Policy::default()
+        },
+    )
+    .await;
+    assert!(!projection::project(&state, 0).unwrap().opted_out);
+}
+
+#[tokio::test]
+async fn a_broker_failure_becomes_an_error_analysis_with_its_kind_only() {
+    let (b, _, ws) = hook_broker(FakeUpstream::new().fail(
+        "explore",
+        ripwire_broker::upstream::UpstreamError::Refused("boom /secret/path".into()),
+    ))
+    .await;
+    let mut state = bound();
+    hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &event("claude_code_user_prompt_submit", ws.path()),
+        &b,
+        &mut state,
+        &Policy::default(),
+    )
+    .await;
+    let a = state
+        .statusline
+        .as_ref()
+        .unwrap()
+        .last_analysis
+        .clone()
+        .unwrap();
+    assert_eq!(a.status, AnalysisStatus::Error);
+    let kind = a.error_kind.unwrap();
+    assert!(
+        !kind.contains("secret") && !kind.contains(' '),
+        "a kind, not a message: {kind}"
+    );
+}
+
+#[test]
+fn rebinding_starts_a_new_visual_baseline_and_legacy_state_loads() {
+    let legacy = r#"{"memory":{"seen":[]},"prompts_seen":3,"opted_out":false,
+        "stats":{"started_at":1,"events":40,"injections":9,"delivered":30,"session_hits":12}}"#;
+    let mut state: SessionState = serde_json::from_str(legacy).expect("legacy state still loads");
+    assert!(state.statusline.is_none());
+    projection::bind(&mut state, "k1");
+    assert_eq!(
+        projection::project(&state, 0).unwrap().stats.injections,
+        0,
+        "old totals are not this workspace's"
+    );
+    state.stats.injections += 2;
+    assert_eq!(projection::project(&state, 0).unwrap().stats.injections, 2);
+    projection::bind(&mut state, "k1");
+    assert_eq!(
+        projection::project(&state, 0).unwrap().stats.injections,
+        2,
+        "same key: no reset"
+    );
+    projection::bind(&mut state, "k2");
+    let p = projection::project(&state, 0).unwrap();
+    assert_eq!(
+        (p.stats.injections, p.last_analysis.is_none()),
+        (0, true),
+        "another root: fresh"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_without_news_still_updates_the_last_analysis() {
+    let (first, _f, ws) = hook_broker(edit_fake()).await;
+    std::fs::write(ws.path().join("a.txt"), "x").unwrap();
+    let input = event("claude_code_post_tool_use", ws.path());
+    let mut state = bound();
+    post_tool_use(Host::ClaudeCode, &input, &first, &mut state)
+        .await
+        .expect("the first edit has news");
+    let delivery = state.statusline.as_ref().unwrap().last_delivery.clone();
+    assert!(delivery.is_some());
+    // Mark the summary stale, so only a fresh analysis can clear the mark.
+    state.statusline.as_mut().unwrap().last_analysis = None;
+
+    let mut config = BrokerConfig::new(ws.path());
+    config.incremental = true;
+    let second = Broker::connect(Arc::new(edit_fake()), config)
+        .await
+        .unwrap();
+    let again = post_tool_use(Host::ClaudeCode, &input, &second, &mut state).await;
+    assert!(again.is_none(), "nothing new: {again:?}");
+    assert!(
+        last(&state).is_some(),
+        "an analysis without news is still an analysis"
+    );
+    assert_eq!(
+        state
+            .statusline
+            .as_ref()
+            .unwrap()
+            .last_analysis
+            .as_ref()
+            .unwrap()
+            .event,
+        "PostToolUse"
+    );
+    assert_eq!(
+        state.statusline.as_ref().unwrap().last_delivery,
+        delivery,
+        "nothing delivered"
     );
 }

@@ -2,6 +2,7 @@
 //! and workspace, written by the hooks after they save their state, read by `statusline` without a
 //! lock. Counts and kinds only: no prompt, code, plain path, symbol or fingerprint.
 
+use crate::hook::{SessionState, SessionTally};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read as _;
@@ -64,6 +65,56 @@ pub enum Read {
     Corrupt,
     Incompatible,
     Valid(Snapshot),
+}
+
+/// What the hooks keep in the session state for the status line: the workspace it is bound to,
+/// the tally at binding time, and the last analysis and delivery.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Summary {
+    pub workspace_key: String,
+    /// `SessionTally` when this workspace was bound: the bar counts from here (spec §6.3).
+    pub baseline: SessionTally,
+    pub last_analysis: Option<Analysis>,
+    pub last_delivery: Option<Delivery>,
+}
+
+/// Binds the session to a workspace. A new key (or a state saved before the status line existed)
+/// starts a fresh visual baseline and forgets the summaries of the previous root (spec §6.3).
+pub fn bind(state: &mut SessionState, workspace_key: &str) {
+    if state
+        .statusline
+        .as_ref()
+        .is_some_and(|s| s.workspace_key == workspace_key)
+    {
+        return;
+    }
+    state.statusline = Some(Summary {
+        workspace_key: workspace_key.into(),
+        baseline: state.stats.clone(),
+        last_analysis: None,
+        last_delivery: None,
+    });
+}
+
+/// The projection of a bound state: counters since the binding, replaced whole on every write.
+pub fn project(state: &SessionState, now: u64) -> Option<Snapshot> {
+    let s = state.statusline.as_ref()?;
+    let (t, b) = (&state.stats, &s.baseline);
+    Some(Snapshot {
+        schema_version: SCHEMA_VERSION,
+        host: HOST.into(),
+        workspace_key: s.workspace_key.clone(),
+        updated_at: now,
+        opted_out: state.opted_out,
+        stats: VisibleStats {
+            events: t.events.saturating_sub(b.events),
+            injections: t.injections.saturating_sub(b.injections),
+            delivered: t.delivered.saturating_sub(b.delivered),
+            session_hits: t.session_hits.saturating_sub(b.session_hits),
+        },
+        last_analysis: s.last_analysis.clone(),
+        last_delivery: s.last_delivery.clone(),
+    })
 }
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {

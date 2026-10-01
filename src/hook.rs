@@ -7,6 +7,7 @@ use crate::cli::{Event, HookArgs, Host};
 use crate::model::{Envelope, Status};
 use crate::session::{self, SessionMemory};
 use crate::state::StateStore;
+use crate::statusline_state::{Analysis, AnalysisStatus, Delivery};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -55,6 +56,9 @@ pub struct SessionState {
     /// (§21.3). A state saved before they existed loads with zeros.
     #[serde(default)]
     pub stats: SessionTally,
+    /// What the status line shows (PRD §24.6.3); absent in states saved before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statusline: Option<crate::statusline_state::Summary>,
 }
 
 /// What one session's hooks did, in counts only (PRD 16.1).
@@ -128,6 +132,26 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Records what the last analysis said, when the session is bound to a workspace.
+fn analysed(state: &mut SessionState, event: Event, status: AnalysisStatus, kind: Option<&str>) {
+    if let Some(s) = state.statusline.as_mut() {
+        s.last_analysis = Some(Analysis {
+            at: now(),
+            event: event_name(event).into(),
+            status,
+            error_kind: kind.map(str::to_string),
+        });
+    }
+}
+
+fn status_of(s: Status) -> AnalysisStatus {
+    match s {
+        Status::Ready => AnalysisStatus::Ready,
+        Status::AttentionRequired => AnalysisStatus::AttentionRequired,
+        Status::Unknown => AnalysisStatus::Unknown,
+    }
+}
+
 /// Called exactly for the answers that reach the model, so it also keeps the tally of what
 /// was delivered whole.
 fn record(state: &mut SessionState, event: Event, env: &Envelope, policy: &Policy) {
@@ -165,6 +189,12 @@ fn record(state: &mut SessionState, event: Event, env: &Envelope, policy: &Polic
     });
     if state.log.len() > LOG_ENTRIES {
         state.log.remove(0);
+    }
+    if let Some(s) = state.statusline.as_mut() {
+        s.last_delivery = Some(Delivery {
+            at: now(),
+            estimated_tokens: env.budget.estimated_tokens,
+        });
     }
 }
 
@@ -338,7 +368,10 @@ pub async fn handle(
     state.stats.events += 1;
     let out = match respond(event, input, broker, state, policy).await {
         Ok(out) => out,
-        Err(e) => Some(failure(&e)),
+        Err(e) => {
+            analysed(state, event, AnalysisStatus::Error, Some(e.error));
+            Some(failure(&e))
+        }
     };
     // The model sees an answer only when it is injected (or sent as a block reason). A
     // user-facing notice (`systemMessage` alone) delivers nothing to it, so the session
@@ -384,6 +417,7 @@ async fn respond(
             let mut req = TaskRequest::new(task.trim());
             req.budget_tokens = capped(policy.prompt_budget);
             let env = broker.context_for_task(req).await?;
+            analysed(state, event, status_of(env.status), None);
             record(state, event, &env, policy);
             Ok(Some(inject(event, &env)))
         }
@@ -428,6 +462,7 @@ async fn respond(
                 ..EditRequest::default()
             };
             let env = broker.context_after_edit(req).await?;
+            analysed(state, event, status_of(env.status), None);
             if !has_news(&env, &state.memory) {
                 return Ok(None);
             }
@@ -443,6 +478,7 @@ async fn respond(
                 ..FinishRequest::default()
             };
             let env = broker.context_before_finish(req).await?;
+            analysed(state, event, status_of(env.status), None);
             let looping = input
                 .get("stop_hook_active")
                 .and_then(Value::as_bool)
