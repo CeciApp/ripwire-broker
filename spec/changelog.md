@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 08:14 | Duas pendências do handoff fechadas: o `sha2` >= 0.11 vai para o `ignore` do dependabot, e os links dos planos no PRD, no changelog e nos próprios planos passam a apontar para `spec/plan/` | [D-119](#d-119--pendências-do-handoff-sha2-no-dependabot-e-links-dos-planos) |
 | 2026-10-01 07:50 | Revisão do PR #29: a guarda de shell enxerga atribuições, invólucros, `sh -c` e aspas; `fix` validado como commit; edição do agente num arquivo que o `setup` tocou volta a contar. E o `handoff.md` | [D-118](#d-118--revisão-do-pr-29-e-handoff) |
 | 2026-10-01 01:06 | Corpus real (32 tarefas em três repositórios, dois privados, fora deste repositório) e o que montá-lo ensinou: hooks e índice de outra ferramenta versionados num repositório, `setup`/`env`/`teardown`, `validate`, e um `check` que falha sem causa provada | [D-117](#d-117--o-corpus-real-três-repositórios-e-duas-falhas-de-isolamento) |
 | 2026-09-30 23:36 | Plano e instrumentos dos itens 1 e 2: `ripwire-eval` (A/B do §16.2, §17 e §23.15) e `hook-stats` (§21.3); o `session_hits` dos hooks morria com o processo, e o clone do A/B vazava a resposta das tarefas tiradas do histórico | [D-116](#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real) |
@@ -456,7 +457,7 @@ Revisão feita a pedido do usuário. Decisões:
 
 ## D-028 — Plano das Fases 2 e 3
 
-Plano completo em [plan-fases-2-3.md](plan-fases-2-3.md). Estado: **proposta, aguardando
+Plano completo em [plan-fases-2-3.md](plan/plan-fases-2-3.md). Estado: **proposta, aguardando
 aprovação do usuário**. As decisões D-029 a D-037 também são propostas até essa aprovação.
 
 - TDD em fatias verticais: 30 fatias na Fase 2 (S2.1–S2.30) e 18 na Fase 3 (S3.1–S3.18),
@@ -1181,7 +1182,7 @@ Cada achado de D-052 ganhou um teste vermelho, confirmado antes da correção.
 
 ## D-058 — Plano das Fases 4 e 5
 
-Plano completo em [plan-fases-4-5.md](plan-fases-4-5.md). Estado: **proposta, aguardando
+Plano completo em [plan-fases-4-5.md](plan/plan-fases-4-5.md). Estado: **proposta, aguardando
 aprovação do usuário**. As decisões D-059 a D-064 também são propostas até essa aprovação.
 
 - Fonte: PRD §19 (Fases 4 e 5) e §23. Cada lacuna *sem fonte na v0.1* do §23.17 recebe
@@ -4442,3 +4443,29 @@ Ele nomeia os repositórios privados do corpus só como A e B.
 **323** testes no padrão e **336** com `online` (eram 320 e 333). `fmt` e clippy limpos nas duas
 features. `ripwire-eval check` passa no corpus real com a validação nova do `fix`.
 
+## D-119 — Pendências do handoff: `sha2` no dependabot e links dos planos
+
+Duas pendências do [`handoff.md`](../handoff.md) que não dependiam do mantenedor.
+
+### O `sha2` 0.11 no `ignore`
+
+O D-114 recusou o `sha2` 0.11, mas o `dependabot.yml` não o ignorava, e o PR voltaria toda segunda.
+Agora `sha2` com `versions: [">= 0.11"]` está no `ignore`, com o motivo no comentário. **Ele sobe
+junto com o `rust-mcp-sdk`:** quando uma decisão mover o SDK pinado para uma versão que traga o
+0.11, a mesma decisão tira essa linha.
+
+### Links dos planos
+
+Os planos foram para `spec/plan/`, e os links não acompanharam:
+
+- o PRD e o changelog apontavam para `plan-fases-2-3.md` e `plan-fases-4-5.md` em `spec/`;
+- os dois planos apontavam para `changelog.md` em `spec/plan/`.
+
+Todos corrigidos. Uma varredura dos links relativos em `spec/`, `README.md`, `handoff.md` e
+`integrations/` não acha outro quebrado, **exceto em `spec/old/`**, que é arquivo histórico e fica
+como está.
+
+### Verificação
+
+Sem mudança de código. A sintaxe do `ignore` com `versions` é a da documentação do dependabot; só a
+próxima execução semanal confirma que o PR não reabre.

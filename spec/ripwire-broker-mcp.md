@@ -1304,7 +1304,7 @@ conexão de rede é necessária ou iniciada.
 - opt-out e visualização do conteúdo injetado;
 - instalação e diagnóstico automatizados.
 
-Estado: implementada ([plano](plan-fases-2-3.md), D-040 a D-045). O contexto
+Estado: implementada ([plano](plan/plan-fases-2-3.md), D-040 a D-045). O contexto
 incremental vem desligado no `serve` (`--incremental`) e ligado nos hooks. `install` é
 dry-run por padrão, e `doctor` verifica a instalação.
 
@@ -1345,7 +1345,7 @@ v0.1* são lacunas (§23.17), não requisitos.
 - Nenhuma tool MCP nova; nada de classificador em `context_after_edit` nem em
   `context_before_finish`.
 
-Estado: implementada ([plano](plan-fases-4-5.md), D-065 a D-072), atrás da feature Cargo
+Estado: implementada ([plano](plan/plan-fases-4-5.md), D-065 a D-072), atrás da feature Cargo
 `online`. A barra de merge da Fase 4 está verde. Num processo `--online`,
 `context_for_task` exige 512 tokens (D-072).
 
@@ -1363,7 +1363,7 @@ Estado: implementada ([plano](plan-fases-4-5.md), D-065 a D-072), atrás da feat
 - Corpus A/B e barra de produto (§23.15).
 - Sem fronteira remota de diretórios.
 
-Estado: implementada ([plano](plan-fases-4-5.md), D-073 a D-085), exceto o corpus A/B e a
+Estado: implementada ([plano](plan/plan-fases-4-5.md), D-073 a D-085), exceto o corpus A/B e a
 barra de produto, que dependem da escolha dos repositórios. Destaques:
 - revalidação por hash antes de cada tentativa e antes da saída;
 - retry e divisão por etapa, e `429` com cooldown compartilhado;
@@ -1511,7 +1511,7 @@ produto, mas não substituem a avaliação A/B específica do `ripwire-broker`.
 até lá o modo é **experimental**. O instrumento que mede a barra existe desde o
 [D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real) (`ripwire-eval`, braço
 `broker-online`); falta a rodada real. As lacunas do §23.17 foram resolvidas como diz o seu fim.
-Plano em [plan-fases-4-5.md](plan-fases-4-5.md).
+Plano em [plan-fases-4-5.md](plan/plan-fases-4-5.md).
 
 **Fonte.** Este capítulo transporta o conteúdo normativo de
 [`spec/old/jev-integration-prd.md`](old/jev-integration-prd.md) na versão **0.1**, a única disponível. A fusão
