@@ -268,6 +268,7 @@ hook contract, so the same command serves both:
 | `Stop` | `context_before_finish`. With `--gate`, blocks once on `attention_required` and sends the evidence; otherwise a one-line notice |
 
 - **Opt-out:** type `#ripwire-off` in a prompt to silence the session, and `#ripwire-on` to resume.
+  The marker counts only as the whole last (or first) word of the prompt; one quoted mid-text does nothing.
 - **What was injected:** every injection shows a one-line `systemMessage`, and the full context sits in the
   host's transcript. `ripwire-broker hook-log --session ID` lists the last 5 injections with counts. Paths and
   symbols appear there only if the hook ran with `--log-refs`.
@@ -312,7 +313,7 @@ rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
 | `rw-brkr` | Fixed prefix (the executable is still `ripwire-broker`) |
 | `Sonnet 4.6 hig` | Model name, version and effort (`low`, `mid`, `hig`, `xtr`, `max`) from the host; any other effort is omitted |
 | `ctx 32%` | Context window used, from the host. With `--color always` it is grey below 40, white below 60, yellow up to 80, red above |
-| `hooks on` / `hooks off` | `off` means the automatic context is paused (`#ripwire-off`); MCP is not affected |
+| `hooks on` / `hooks off` | `off` means the automatic context is paused (`#ripwire-off`); MCP is not affected. With `--color always`, `off` is red and `on` light blue |
 | `última: pronta\|atenção\|incerta\|erro` | Outcome of the last analysis, shown as "last", never as current health. `pronta` does not certify the code |
 | `inj 7` | Injections and blocks the hooks counted in this session |
 | `não reenviados 18` | Logical items not resent because the session already had them (not tokens, not Anthropic prompt-cache hits) |

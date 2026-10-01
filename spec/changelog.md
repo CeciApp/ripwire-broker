@@ -97,6 +97,8 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
+| 2026-10-01 18:10 | Com `--color always`, `hooks off` fica vermelho e `hooks on` azul claro (`38;5;117`); `hooks sem dados` segue sem cor; 1 teste novo (395 padrão, 409 com `online`) | [D-124](#d-124--cores-do-estado-dos-hooks-na-barra) |
 | 2026-10-01 16:40 | A barra de status do Claude Code (`statusline`, projeção publicada pelos hooks, `install --statusline`) é implementada em 9 tarefas por subagentes; 61 testes novos (384 padrão, 398 com `online`); p95 de 2,8 ms medido em release; **validação manual e fixture de payload real pendentes** | [D-123](#d-123--a-barra-de-status-é-implementada) |
 | 2026-10-01 15:20 | A barra de status entra no PRD como §24 (a spec `spec/status-bar.md`, fundida e removida), o plano vai para `spec/plan/`, e a barra entra no roadmap antes da Fase 6 | [D-122](#d-122--a-barra-de-status-entra-no-prd) |
 | 2026-10-01 13:28 | Três mecanismos reproduzem o sintoma do D-117 num corpus de diagnóstico (a causa daquela rodada segue sem prova): a porta fixa do endpoint de teste do repositório A (`eaddrinuse`), a data (provada com o relógio congelado) e, fraca, a carga. O Postgres disputado sozinho não derrubou nada. Regra nova: cada tarefa do A fixa relógio e porta no `env` | [D-121](#d-121--três-mecanismos-que-reproduzem-as-falhas-de-validação-do-d-117) |
@@ -4902,3 +4904,53 @@ teste primeiro (vermelho visto) e mutação (reverter o conserto e ver o teste f
   `a_cut_after_a_space_leaves_no_trailing_space` e
   `the_agent_segment_is_soft_and_goes_before_the_alert_and_ctx` (larguras 40 e 80). Contagem final:
   padrão **394 passados, 2 ignorados**; com `online` **408 passados, 4 ignorados**.
+
+## D-124 — Cores do estado dos hooks na barra
+
+**Data:** 2026-10-01. **Pedido do mantenedor**, depois do D-123.
+
+Com `--color always`, o segmento de estado dos hooks ganha cor, como o `ctx`:
+
+| texto | cor | ANSI |
+| --- | --- | --- |
+| `hooks off` | vermelho | `\x1b[31m` |
+| `hooks on` | azul claro | `\x1b[38;5;117m` |
+| `hooks sem dados` | sem cor | — |
+
+- **Por quê:** `hooks off` é uma pausa pedida pelo usuário (`#ripwire-off`) e é essencial na ordem de
+  descarte (D2); o vermelho a destaca como os outros alertas. `hooks on` em azul claro mostra o estado
+  normal sem confundir com as faixas do `ctx` (cinza, branco, amarelo, vermelho).
+- **`hooks sem dados` fica sem cor:** não é um estado que a sessão escolheu, só a falta de projeção.
+- **Escolha do azul:** o índice 117 da paleta de 256 cores (o mesmo formato do cinza 250 do `ctx`). A
+  aparência exata depende da paleta do terminal, como diz o §24.5.
+- **`--color never`** continua sem ANSI; o ajuste à largura continua calculado sem os escapes.
+- **Teste:** `hooks_off_is_red_and_hooks_on_light_blue_when_colored` (falhou antes da mudança; a
+  mutação que devolve `hooks on` a `Plain` é pega). O teste de `--color never` passou a remover também
+  o escape azul ao comparar o texto visível. Contagem: padrão **395 passados, 2 ignorados**; com
+  `online` **409 passados, 4 ignorados**.
+
+## D-125 — O marcador de opt-out só vale na borda do prompt
+
+**Data:** 2026-10-01. **Pedido do mantenedor**, no mesmo PR do D-124.
+
+- **Defeito:** o hook tratava como comando qualquer prompt que *contivesse* `#ripwire-off`
+  (`prompt.contains`), e o opt-out era testado antes do opt-in. Na sessão que implementou a barra, os
+  relatórios dos subagentes chegam ao Claude Code como prompts e passam pelo `UserPromptSubmit`. Um deles
+  descrevia o defeito do D-123 ("nem `#ripwire-on` nem `#ripwire-off` …") e pausou os hooks da sessão
+  sem que ninguém pedisse. A barra do D-124 mostrou `hooks off` em vermelho, e o `hook-log` parava
+  ~70 minutos antes.
+- **Regra nova:** o marcador só conta como **palavra inteira** e só na **borda**: a última palavra do
+  prompt, ou então a primeira. Se as duas bordas tiverem marcadores, vale a última. Fora disso o
+  prompt é uma tarefa comum, mesmo que cite o marcador (entre crases, com barra, colado a outra
+  palavra ou no meio de uma frase).
+- **Tarefa enviada ao broker:** só o marcador da borda é removido. Antes, todo `#ripwire-on` era
+  apagado do texto em qualquer posição.
+- **Custo:** quem escrevia o marcador no meio da frase ("pode #ripwire-off agora") precisa movê-lo
+  para o começo ou o fim. O README e o §8.4 dizem isso.
+- **Teste:** `a_marker_only_counts_as_the_first_or_last_word_of_the_prompt` (falhou antes da mudança
+  com o primeiro texto citado). Mutações pegas: voltar a `contains`; tirar a exigência de fronteira de
+  palavra no fim (`x#ripwire-off`). Os testes anteriores do opt-out (marcador no começo e no fim)
+  continuam passando sem mudança. Contagem: padrão **396 passados, 2 ignorados**; com `online`
+  **410 passados, 4 ignorados**.
+- **Não muda:** o defeito do D-123 continua (com falha de launch, o marcador da borda também não é
+  processado).
