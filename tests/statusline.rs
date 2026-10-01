@@ -1,7 +1,11 @@
 //! The status line (PRD §24): rendering, the `statusline` command and its projection.
-use ripwire_broker::statusline::{HostInput, Options, model_label, parse_input, render, width};
+use ripwire_broker::statusline::{
+    HostInput, Options, model_label, parse_input, render, resolve_root, sanitize, width,
+};
 use ripwire_broker::statusline_state::*;
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command as Proc, Stdio};
 
 const WIDE: Options = Options {
     detail: false,
@@ -270,7 +274,8 @@ fn opts(w: usize) -> Options {
 fn drop_order_detail_before_counter() {
     // Detail dropped, counters kept: Detail segments omitted, others present.
     // Input: snap(false, 7, 18, Ready), SONNET, detail: true, width 90.
-    // Full line would include details; at width 90, details drop but counters stay.
+    // Without the details the line is 7 + 14 + 7 + 8 + 14 + 5 + 17 = 72 columns of text plus six
+    // separators of 3 = 90, so it fits from 90 up and the counters go below that.
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let line = render(&host(SONNET), Some(&s), &opts(90), 1_020);
     assert_eq!(
@@ -283,7 +288,8 @@ fn drop_order_detail_before_counter() {
 fn drop_order_counter_before_model() {
     // Counter dropped, model kept: Model visible, counters omitted.
     // Input: snap(false, 7, 18, Ready), SONNET, detail: false, width 70.
-    // At width 70 (in range 62..=72), counters drop but model stays.
+    // Without the two counters (5 + 17 columns and their separators) the line is 90 - 28 = 62
+    // columns: width 70 is inside the range 62..=89 where the counters drop and the model stays.
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let no_counter_opts = Options {
         detail: false,
@@ -300,7 +306,8 @@ fn drop_order_counter_before_model() {
 #[test]
 fn drop_order_model_before_soft_and_d2_rules() {
     // Model dropped, soft kept: Model omitted, soft segments (hooks on, última: pronta) visible.
-    // Verify: width 60 (threshold: model drops at 60, fits at 61).
+    // Without the model (14 columns and a separator) the line is 62 - 17 = 45 columns: width 60 is
+    // inside the range 45..=61 where the model drops and the soft segments stay.
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let line = render(
         &host(SONNET),
@@ -315,8 +322,10 @@ fn drop_order_model_before_soft_and_d2_rules() {
     assert_eq!(line, "rw-brkr · ctx 32% · hooks on · última: pronta");
 
     // D2 rule: soft drops but essential alerts survive (não é pausa nem alerta, saem).
-    // With Error status, hooks off and última: erro are alerts, not soft.
-    // At width 40, soft drops but alerts stay.
+    // With Error status, última: erro is an alert, not soft.
+    // With `hooks on` and no model the line is 7 + 7 + 8 + 12 + 3 separators of 3 = 43 columns; at
+    // width 40 `hooks on` drops and the alerts stay: 7 + 7 + 12 + 2 separators = 32 columns, which
+    // is what fits in 32..=42.
     let alert_snap = snap(false, 7, 18, Some(AnalysisStatus::Error));
     let alert_line = render(
         &host(SONNET),
@@ -330,7 +339,8 @@ fn drop_order_model_before_soft_and_d2_rules() {
     );
     assert_eq!(alert_line, "rw-brkr · ctx 32% · última: erro");
 
-    // At width 30, soft also drops with Ready (hooks on and última: pronta are soft).
+    // At width 30, soft also drops with Ready (hooks on and última: pronta are soft): only the
+    // prefix and ctx remain, 7 + 3 + 7 = 17 columns, for 17..=44.
     let wide_ready = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let ready_line = render(
         &host(SONNET),
@@ -367,7 +377,7 @@ fn lines_fit_40_80_and_120_columns_and_shed_in_order() {
 #[test]
 fn extreme_widths_keep_alerts_then_the_prefix() {
     let s = snap(true, 7, 18, Some(AnalysisStatus::Error));
-    // 7 + 3 + 7 + 3 + 7 + 3 + 9 + 3 + 12 = 44 columns: the essentials exactly.
+    // 7 + 3 + 7 + 3 + 9 + 3 + 12 = 44 columns: the essentials exactly.
     let line = render(&host(SONNET), Some(&s), &opts(44), 1_020);
     assert_eq!(line, "rw-brkr · ctx 32% · hooks off · última: erro");
     assert_eq!(
@@ -380,6 +390,129 @@ fn extreme_widths_keep_alerts_then_the_prefix() {
     );
     assert_eq!(render(&host(SONNET), Some(&s), &opts(10), 1_020), "rw-brkr");
     assert_eq!(render(&host(SONNET), Some(&s), &opts(3), 1_020), "rw-");
+}
+
+#[test]
+fn tiny_widths_cut_the_prefix_on_a_column() {
+    let s = snap(true, 7, 18, Some(AnalysisStatus::Error));
+    for (w, expected) in [
+        (0, ""),
+        (1, "r"),
+        (4, "rw-b"),
+        (5, "rw-br"),
+        (6, "rw-brk"),
+        (7, "rw-brkr"),
+    ] {
+        assert_eq!(
+            render(&host(SONNET), Some(&s), &opts(w), 1_020),
+            expected,
+            "width {w}"
+        );
+    }
+}
+
+#[test]
+fn model_labels_are_trimmed_after_the_control_characters_go() {
+    assert_eq!(
+        model_label(Some("Son \u{7}"), None, None).as_deref(),
+        Some("Son")
+    );
+    assert_eq!(
+        model_label(Some("\u{1b} Son"), None, None).as_deref(),
+        Some("Son")
+    );
+    assert_eq!(model_label(Some(" \u{7} "), None, None), None);
+}
+
+#[test]
+fn invisible_format_characters_are_dropped_like_controls() {
+    let hidden = [
+        '\u{061C}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}',
+        '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}', '\u{2061}', '\u{2062}',
+        '\u{2063}', '\u{2064}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{FEFF}',
+    ];
+    for c in hidden {
+        assert_eq!(sanitize(&format!("A{c}B")), "AB", "U+{:04X}", c as u32);
+    }
+    // Neighbours of the ranges, and ordinary non-ASCII text, stay.
+    for kept in [
+        '\u{200A}', '\u{2010}', '\u{202F}', '\u{205F}', '\u{2065}', 'é', '日',
+    ] {
+        assert_eq!(
+            sanitize(&format!("A{kept}B")),
+            format!("A{kept}B"),
+            "{kept:?}"
+        );
+    }
+    let line = render(
+        &host(r#"{"model":{"display_name":"Op\u202Eus\u200B"}}"#),
+        None,
+        &WIDE,
+        0,
+    );
+    assert_eq!(line, "rw-brkr · Opus · hooks sem dados");
+}
+
+fn detail_line(s: &Snapshot, now: u64) -> String {
+    render(&host(SONNET), Some(s), &opts(1_000), now)
+}
+
+#[test]
+fn token_counts_show_whole_below_a_thousand_and_drop_a_zero_decimal() {
+    let at = |tokens: u32| {
+        let mut s = snap(false, 1, 1, None);
+        s.last_delivery = Some(Delivery {
+            at: 1,
+            estimated_tokens: tokens,
+        });
+        detail_line(&s, 1_000)
+    };
+    for (tokens, shown) in [
+        (0, "~0 tok"),
+        (999, "~999 tok"),
+        (1_000, "~1k tok"),
+        (1_240, "~1,2k tok"),
+        (10_000, "~10k tok"),
+        (10_500, "~10,5k tok"),
+    ] {
+        assert!(
+            at(tokens).contains(&format!("último contexto {shown} ·")),
+            "{tokens}: {}",
+            at(tokens)
+        );
+    }
+}
+
+#[test]
+fn age_counts_seconds_minutes_and_hours_and_a_future_stamp_is_zero() {
+    let s = snap(false, 1, 1, None);
+    for (now, shown) in [
+        (1_000, "há 0s"),
+        (1_059, "há 59s"),
+        (1_060, "há 1min"),
+        (1_000 + 3_599, "há 59min"),
+        (1_000 + 3_600, "há 1h"),
+        (1_000 + 7_300, "há 2h"),
+    ] {
+        let line = detail_line(&s, now);
+        assert!(line.contains(&format!(" · {shown}")), "{now}: {line}");
+    }
+    // `updated_at` ahead of the clock (a skew, or a hand-written file): no panic, no "old" mark.
+    let future = detail_line(&s, 500);
+    assert!(
+        future.ends_with("· há 0s") && !future.contains("dados antigos"),
+        "{future}"
+    );
+}
+
+#[test]
+fn counters_near_the_limit_do_not_overflow_the_reuse_rate() {
+    let mut s = snap(false, 1, u64::MAX, None);
+    s.stats.delivered = u64::MAX;
+    let line = detail_line(&s, 1_000);
+    assert!(line.contains("reuso 100%"), "{line}");
+    s.stats.delivered = 0;
+    assert!(detail_line(&s, 1_000).contains("reuso 100%"));
 }
 
 #[test]
@@ -651,10 +784,6 @@ fn concurrent_readers_see_whole_versions_only() {
 }
 
 // Binary-level tests: Command::Statusline dispatch (Task 5).
-use ripwire_broker::statusline::resolve_root;
-use std::io::Write;
-use std::process::{Command as Proc, Stdio};
-
 fn run_bar(args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"));
     cmd.arg("statusline")

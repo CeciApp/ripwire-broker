@@ -75,9 +75,25 @@ pub fn resolve_root(flag: Option<&std::path::Path>, input: &HostInput) -> Option
     candidate.canonicalize().ok()
 }
 
-/// Drops control characters (ESC, newline, BEL...), so external text cannot steer the terminal.
+/// Format characters that draw nothing or reorder what follows: the Arabic letter mark, the
+/// zero-width and directional marks, the bidi embeddings and isolates, the invisible operators and
+/// the BOM. Not controls to Rust, but just as able to disguise what the bar shows.
+fn is_invisible_format(c: char) -> bool {
+    matches!(c,
+        '\u{061C}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{FEFF}')
+}
+
+/// Drops control characters (ESC, newline, BEL...) and invisible format characters, so external
+/// text cannot steer the terminal or hide in the bar.
 pub fn sanitize(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
+    text.chars()
+        .filter(|c| !c.is_control() && !is_invisible_format(*c))
+        .collect()
 }
 
 fn effort_label(level: &str) -> Option<&'static str> {
@@ -107,7 +123,8 @@ fn version_from_id(name: &str, id: &str) -> Option<String> {
 }
 
 pub fn model_label(name: Option<&str>, id: Option<&str>, effort: Option<&str>) -> Option<String> {
-    let name = sanitize(name?.trim());
+    // Trimmed last: dropping a character can leave a space at the edge.
+    let name = sanitize(name?).trim().to_string();
     if name.is_empty() {
         return None;
     }
@@ -156,6 +173,8 @@ pub struct Segment {
     pub text: String,
     pub keep: Keep,
     pub style: Style,
+    /// The context-window reading: the last thing `fit` gives up before the prefix.
+    pub ctx: bool,
 }
 
 fn seg(text: impl Into<String>, keep: Keep, style: Style) -> Segment {
@@ -163,6 +182,7 @@ fn seg(text: impl Into<String>, keep: Keep, style: Style) -> Segment {
         text: text.into(),
         keep,
         style,
+        ctx: false,
     }
 }
 
@@ -225,11 +245,10 @@ pub fn segments(
     }
     if let Some(p) = input.ctx_percent.filter(|p| (0.0..=100.0).contains(p)) {
         let shown = p.round() as u32;
-        out.push(seg(
-            format!("ctx {shown}%"),
-            Keep::Essential,
-            ctx_style(shown),
-        ));
+        out.push(Segment {
+            ctx: true,
+            ..seg(format!("ctx {shown}%"), Keep::Essential, ctx_style(shown))
+        });
     }
     let Some(s) = snapshot else {
         out.push(seg("hooks sem dados", Keep::Soft, Style::Plain));
@@ -265,7 +284,8 @@ pub fn segments(
             Keep::Detail,
             Style::Plain,
         ));
-        let whole = s.stats.session_hits + s.stats.delivered;
+        // The snapshot comes from a file: its counters are not trusted to stay in range.
+        let whole = s.stats.session_hits.saturating_add(s.stats.delivered);
         if whole > 0 {
             let rate = (s.stats.session_hits as f64 * 100.0 / whole as f64).round() as u64;
             out.push(seg(format!("reuso {rate}%"), Keep::Detail, Style::Plain));
@@ -327,7 +347,7 @@ fn fit(mut segs: Vec<Segment>, cols: usize) -> Vec<Segment> {
     if width(&joined(&segs)) <= cols {
         return segs;
     }
-    segs.retain(|s| s.text == PREFIX || !s.text.starts_with("ctx "));
+    segs.retain(|s| !s.ctx);
     if width(&joined(&segs)) <= cols {
         return segs;
     }
