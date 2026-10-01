@@ -138,6 +138,7 @@ pub enum Style {
     White,
     Yellow,
     Red,
+    LightBlue,
 }
 
 /// Dropped first to last: Detail, Counter, Model, Soft. Essential is never dropped (D2).
@@ -235,8 +236,8 @@ pub fn segments(
         return out;
     };
     out.push(match s.opted_out {
-        true => seg("hooks off", Keep::Essential, Style::Plain),
-        false => seg("hooks on", Keep::Soft, Style::Plain),
+        true => seg("hooks off", Keep::Essential, Style::Red),
+        false => seg("hooks on", Keep::Soft, Style::LightBlue),
     });
     if let Some(a) = &s.last_analysis {
         out.push(match a.status {
@@ -340,6 +341,7 @@ fn paint(s: &Segment) -> String {
         Style::White => "\x1b[97m",
         Style::Yellow => "\x1b[33m",
         Style::Red => "\x1b[31m",
+        Style::LightBlue => "\x1b[38;5;117m",
     };
     format!("{code}{}\x1b[0m", s.text)
 }

@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 18:10 | Com `--color always`, `hooks off` fica vermelho e `hooks on` azul claro (`38;5;117`); `hooks sem dados` segue sem cor; 1 teste novo (395 padrão, 409 com `online`) | [D-124](#d-124--cores-do-estado-dos-hooks-na-barra) |
 | 2026-10-01 16:40 | A barra de status do Claude Code (`statusline`, projeção publicada pelos hooks, `install --statusline`) é implementada em 9 tarefas por subagentes; 61 testes novos (384 padrão, 398 com `online`); p95 de 2,8 ms medido em release; **validação manual e fixture de payload real pendentes** | [D-123](#d-123--a-barra-de-status-é-implementada) |
 | 2026-10-01 15:20 | A barra de status entra no PRD como §24 (a spec `spec/status-bar.md`, fundida e removida), o plano vai para `spec/plan/`, e a barra entra no roadmap antes da Fase 6 | [D-122](#d-122--a-barra-de-status-entra-no-prd) |
 | 2026-10-01 13:28 | Três mecanismos reproduzem o sintoma do D-117 num corpus de diagnóstico (a causa daquela rodada segue sem prova): a porta fixa do endpoint de teste do repositório A (`eaddrinuse`), a data (provada com o relógio congelado) e, fraca, a carga. O Postgres disputado sozinho não derrubou nada. Regra nova: cada tarefa do A fixa relógio e porta no `env` | [D-121](#d-121--três-mecanismos-que-reproduzem-as-falhas-de-validação-do-d-117) |
@@ -4902,3 +4903,27 @@ teste primeiro (vermelho visto) e mutação (reverter o conserto e ver o teste f
   `a_cut_after_a_space_leaves_no_trailing_space` e
   `the_agent_segment_is_soft_and_goes_before_the_alert_and_ctx` (larguras 40 e 80). Contagem final:
   padrão **394 passados, 2 ignorados**; com `online` **408 passados, 4 ignorados**.
+
+## D-124 — Cores do estado dos hooks na barra
+
+**Data:** 2026-10-01. **Pedido do mantenedor**, depois do D-123.
+
+Com `--color always`, o segmento de estado dos hooks ganha cor, como o `ctx`:
+
+| texto | cor | ANSI |
+| --- | --- | --- |
+| `hooks off` | vermelho | `\x1b[31m` |
+| `hooks on` | azul claro | `\x1b[38;5;117m` |
+| `hooks sem dados` | sem cor | — |
+
+- **Por quê:** `hooks off` é uma pausa pedida pelo usuário (`#ripwire-off`) e é essencial na ordem de
+  descarte (D2); o vermelho a destaca como os outros alertas. `hooks on` em azul claro mostra o estado
+  normal sem confundir com as faixas do `ctx` (cinza, branco, amarelo, vermelho).
+- **`hooks sem dados` fica sem cor:** não é um estado que a sessão escolheu, só a falta de projeção.
+- **Escolha do azul:** o índice 117 da paleta de 256 cores (o mesmo formato do cinza 250 do `ctx`). A
+  aparência exata depende da paleta do terminal, como diz o §24.5.
+- **`--color never`** continua sem ANSI; o ajuste à largura continua calculado sem os escapes.
+- **Teste:** `hooks_off_is_red_and_hooks_on_light_blue_when_colored` (falhou antes da mudança; a
+  mutação que devolve `hooks on` a `Plain` é pega). O teste de `--color never` passou a remover também
+  o escape azul ao comparar o texto visível. Contagem: padrão **395 passados, 2 ignorados**; com
+  `online` **409 passados, 4 ignorados**.

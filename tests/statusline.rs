@@ -472,9 +472,27 @@ fn color_never_has_no_escape_and_alerts_are_colored_when_asked() {
     // The fit is computed without escapes: same visible text either way.
     let stripped = colored
         .replace("\x1b[38;5;250m", "")
+        .replace("\x1b[38;5;117m", "")
         .replace("\x1b[31m", "")
         .replace("\x1b[0m", "");
     assert_eq!(stripped, plain);
+}
+
+#[test]
+fn hooks_off_is_red_and_hooks_on_light_blue_when_colored() {
+    let colored = Options {
+        detail: false,
+        width: 200,
+        color: true,
+    };
+    let off = render(&host(SONNET), Some(&snap(true, 1, 1, None)), &colored, 0);
+    assert!(off.contains("\x1b[31mhooks off\x1b[0m"), "{off:?}");
+    let on = render(&host(SONNET), Some(&snap(false, 1, 1, None)), &colored, 0);
+    assert!(on.contains("\x1b[38;5;117mhooks on\x1b[0m"), "{on:?}");
+    // `hooks sem dados` is not a hook state the session chose: it stays plain.
+    let none = render(&host(SONNET), None, &colored, 0);
+    assert!(none.contains(" · hooks sem dados"), "{none:?}");
+    assert!(!none.contains("\x1b[38;5;117m"), "{none:?}");
 }
 
 #[test]

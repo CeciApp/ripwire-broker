@@ -312,7 +312,7 @@ rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
 | `rw-brkr` | Fixed prefix (the executable is still `ripwire-broker`) |
 | `Sonnet 4.6 hig` | Model name, version and effort (`low`, `mid`, `hig`, `xtr`, `max`) from the host; any other effort is omitted |
 | `ctx 32%` | Context window used, from the host. With `--color always` it is grey below 40, white below 60, yellow up to 80, red above |
-| `hooks on` / `hooks off` | `off` means the automatic context is paused (`#ripwire-off`); MCP is not affected |
+| `hooks on` / `hooks off` | `off` means the automatic context is paused (`#ripwire-off`); MCP is not affected. With `--color always`, `off` is red and `on` light blue |
 | `última: pronta\|atenção\|incerta\|erro` | Outcome of the last analysis, shown as "last", never as current health. `pronta` does not certify the code |
 | `inj 7` | Injections and blocks the hooks counted in this session |
 | `não reenviados 18` | Logical items not resent because the session already had them (not tokens, not Anthropic prompt-cache hits) |

@@ -2550,6 +2550,8 @@ Colorir o segmento inteiro `ctx xx%` conforme o percentual inteiro exibido, depo
 | `60 <= ctx <= 80` | Amarelo | `"\x1b[33m"` |
 | `80 < ctx <= 100` | Vermelho | `"\x1b[31m"` |
 
+O segmento de estado dos hooks também é colorido: `hooks off` em vermelho (`"\x1b[31m"`), por ser uma pausa que o usuário precisa ver, e `hooks on` em azul claro (`"\x1b[38;5;117m"`). `hooks sem dados` não é um estado escolhido pela sessão e fica sem cor (D-124).
+
 Usar `"\x1b[0m"` ao terminar cada segmento colorido, antes do separador, para impedir vazamento de cor aos campos seguintes. Aplicar ANSI somente após sanitização e cálculo de largura; os escapes gerados pelo renderizador não contam como colunas. Percentual ausente/inválido continua omitido, sem cor artificial. Essa paleta é um requisito de produto; a aparência exata depende da paleta do terminal.
 
 ### 24.6 Arquitetura proposta em Rust
@@ -2744,7 +2746,7 @@ Cuidados específicos: no commit examinado, o renderizador não exibe `% enriche
 5. `#ripwire-off` aparece como pausa; `#ripwire-on` reativa. `Stop` com `ready` silencioso substitui a última análise de atenção; evento sem análise preserva o resumo.
 6. Falha de upstream aparece como última análise com erro; gravação de projeção recusada não muda a saída esperada do hook. Crash entre gravações não duplica totais no evento seguinte.
 7. Leitura concorrente durante publicação vê somente versões completas e não espera lock. Totais reproduzem `SessionTally` descontado do baseline, sem outro acumulador.
-8. Linhas cabem em 40, 80 e 120 colunas, inclusive Unicode; nenhuma sequência externa de controle chega ao terminal. `--color never` e a ausência de opção removem ANSI; `--color always` gera cores mesmo sem TTY e com `NO_COLOR`. Verificar cinza claro em 0/39%, branco em 40/59%, amarelo em 60/80% e vermelho em 81/100%, além de arredondamento nas fronteiras e reset após cada segmento.
+8. Linhas cabem em 40, 80 e 120 colunas, inclusive Unicode; nenhuma sequência externa de controle chega ao terminal. `--color never` e a ausência de opção removem ANSI; `--color always` gera cores mesmo sem TTY e com `NO_COLOR`. Verificar cinza claro em 0/39%, branco em 40/59%, amarelo em 60/80% e vermelho em 81/100%, além de arredondamento nas fronteiras e reset após cada segmento; `hooks off` vermelho, `hooks on` azul claro e `hooks sem dados` sem cor (D-124).
 9. Instalar sem `--write` não altera arquivos; instalar duas vezes é idempotente. Hooks e statusLine convivem no mesmo plano. Preservar barras alheias em settings de projeto, usuário e local, além de opções desconhecidas do broker.
 10. Paths com espaços, aspas e caracteres shell são escapados; erro de UTF-8/JSON não produz configuração executável parcial.
 11. O mesmo binário funciona sem feature `online`; registrar desempenho observado e versão do Claude usada no teste manual.
