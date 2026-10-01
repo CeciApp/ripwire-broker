@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 13:28 | As falhas de validação do D-117 têm três mecanismos, medidos num corpus de diagnóstico: a porta fixa do endpoint de teste do repositório A (`eaddrinuse`), a data (provada com o relógio congelado) e, fraca, a carga. O Postgres disputado sozinho não derrubou nada. Regra nova: cada tarefa do A fixa relógio e porta no `env` | [D-121](#d-121--as-três-causas-das-falhas-de-validação-do-d-117) |
 | 2026-10-01 08:46 | O cancelamento sob HTTP/2 ganha teste: um fixture `h2` (h2c) mostra que cada stream em voo recebe `RST_STREAM(CANCEL)`; `h2` entra como dev-dependency, já presente no grafo pelo `reqwest` | [D-120](#d-120--o-cancelamento-sob-http2-ganha-teste) |
 | 2026-10-01 08:14 | Duas pendências do handoff fechadas: o `sha2` >= 0.11 vai para o `ignore` do dependabot, e os links dos planos no PRD, no changelog e nos próprios planos passam a apontar para `spec/plan/` | [D-119](#d-119--pendências-do-handoff-sha2-no-dependabot-e-links-dos-planos) |
 | 2026-10-01 07:50 | Revisão do PR #29: a guarda de shell enxerga atribuições, invólucros, `sh -c` e aspas; `fix` validado como commit; edição do agente num arquivo que o `setup` tocou volta a contar. E o `handoff.md` | [D-118](#d-118--revisão-do-pr-29-e-handoff) |
@@ -4518,3 +4519,79 @@ Rodado 20 vezes seguidas, sem falha.
 
 **323** testes no padrão (sem mudança) e **337** com `online` (eram 336). `fmt` e clippy limpos nas
 duas features, e o gate do CA-10 continua limpo.
+
+## D-121 — As três causas das falhas de validação do D-117
+
+O D-117 registrou nove tarefas do repositório A falhando **no fix** na primeira validação do corpus,
+e passando de novo depois, com duas suspeitas não provadas: carga e outra sessão no mesmo Postgres.
+O corpus original está noutra máquina, indisponível, então a investigação usou um **corpus de
+diagnóstico**: 8 tarefas de PRs recentes do A (os mais novos que o último `mix.lock`), fora de
+qualquer repositório, só para `validate`, nunca para um agente. As fases foram rodadas pelo
+mantenedor, uma por vez.
+
+### O que foi medido
+
+| fase | condição | tarefas estáveis no fix |
+| --- | --- | --- |
+| base | máquina parada, relógio real (01/10) | 4 ok; **2 falham pela data** |
+| congelado | relógio do A preso no dia em que cada PR foi escrito | **6 ok** |
+| carga | 16 processos saturando 8 núcleos, relógio congelado | 4 ok; **1 teste perdido** em 389; 1 cortada |
+| disputa | a suíte inteira do A em laço no mesmo Postgres, noutra porta | **6 ok** (3 rodadas concorrentes) |
+| sobreposta | duas fases ao mesmo tempo, por engano | **todas falham com `eaddrinuse`** |
+
+Duas tarefas ficaram fora da conta: uma cujo `check` passa no base, e outra que falha no fix em
+todas as condições, com o relógio congelado inclusive. A causa dessa última não foi achada, e ela
+não é o sintoma do D-117.
+
+### As três causas, por força
+
+1. **A porta do endpoint de teste.** A suíte do A sobe o servidor HTTP numa porta fixa, a menos que
+   uma variável de ambiente diga outra. Duas suítes do A ao mesmo tempo na mesma máquina: a segunda
+   morre com `eaddrinuse` **antes do primeiro teste**, e o `check` inteiro conta como falha. É o
+   único mecanismo visto que produz falhas **em série** que **somem sozinhas** quando a outra suíte
+   para, que é o que o D-117 descreve. A "outra sessão do Claude Code" que ele achou ativa no A teria
+   esse efeito se rodou a suíte. O próprio A já tinha visto isso no CI, com dois PRs em paralelo.
+2. **A data.** Testes do A fixam datas ou janelas relativas a hoje. Nos commits `fix` do histórico
+   eles ficam congelados como foram escritos, e envelhecem: dois `check` validados em 30/09 falharam
+   em 01/10, e voltaram a passar com o relógio de teste do A preso em 30/09. **Provado por
+   experimento.** O D-117 rodou exatamente na virada de 30/09 para 01/10, e o A consertou esses testes
+   na mesma madrugada.
+3. **A carga.** Real, mas fraca: com a CPU saturada, um teste com janela de 100 ms perdeu a
+   mensagem. Um teste em cerca de 500 não explica nove tarefas.
+
+**O Postgres compartilhado, sozinho, não derrubou nada.** O `tuple concurrently updated` do D-117
+veio de duas validações aplicando migrações ao mesmo tempo, o que a regra de uma execução por vez já
+impede. Esta disputa só pôs a suíte concorrente no banco depois das migrações dela, então não mede
+migração contra migração.
+
+**Para o D-117 em si, nada está provado:** sem os logs e os horários daquela rodada, porta e data
+são as duas explicações que encaixam, talvez juntas.
+
+### Regra nova para o corpus
+
+- **Toda tarefa de um repositório cujos testes leem a data ou abrem porta fixa** declara no `env`:
+  o relógio congelado no dia em que o PR foi escrito (a data de autoria do branch, `fix^2`, não a do
+  merge), e uma porta própria. O A oferece as duas variáveis. "Revalidar no dia" só descobre o
+  envelhecimento; congelar o evita.
+- **O `deps/` do repositório de origem tem de casar com o `mix.lock` do `base`.** O `setup` o copia:
+  com um `deps.get` atrasado, nenhum `check` chega a rodar testes.
+- **Uma execução por vez, máquina parada, nenhuma outra sessão no A** continua valendo, mas deixa de
+  ser a única proteção.
+
+Aplicar ao corpus original fica para quando a outra máquina voltar: lá, cada tarefa do A ganha as
+duas linhas de `env`, e o corpus é revalidado.
+
+### Notas de método
+
+- **Datas de merge enganam.** O primeiro experimento congelou o relógio na data do commit `fix`, que
+  é um merge: os oito foram mesclados em 01/10, e o relógio ficou onde já estava. Nada provou nem
+  refutou. A data certa é a de autoria do branch.
+- **Duas fases ao mesmo tempo dividem bancos, porta e logs** (os ids de execução se repetem). A
+  rodada sobreposta foi o que revelou o `eaddrinuse`, mas não vale como teste de nenhuma hipótese. O
+  script de diagnóstico agora recusa uma segunda fase.
+- **Um processo em segundo plano tem limite de 30 minutos** no host do agente. A fase de carga não
+  cabe: foi cortada, e o resultado parcial foi lido dos logs.
+
+### Verificação
+
+Sem mudança de código. O script e os logs ficam no corpus de diagnóstico, fora do repositório.
