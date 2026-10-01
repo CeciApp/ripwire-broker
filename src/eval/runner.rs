@@ -15,12 +15,14 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// Claude Code, headless, isolated from the user's own configuration: only the arm's MCP
-/// server (`--strict-mcp-config`), and no user-level settings, hooks or plugins
-/// (`--setting-sources project`). Split on whitespace; never through a shell.
+/// Claude Code, headless, isolated: only the arm's MCP server (`--strict-mcp-config`), and no
+/// settings but `.claude/settings.local.json`, which a fresh repository never has
+/// (`--setting-sources local`). Neither the user's hooks and plugins nor the ones a repository
+/// commits load; hook events are reported so the guard can see one that slipped through.
+/// Split on whitespace; never through a shell.
 pub const DEFAULT_AGENT: &str = "claude -p --output-format stream-json --verbose \
-    --strict-mcp-config --mcp-config {mcp_config} --setting-sources project \
-    --permission-mode bypassPermissions --no-session-persistence";
+    --include-hook-events --strict-mcp-config --mcp-config {mcp_config} \
+    --setting-sources local --permission-mode bypassPermissions --no-session-persistence";
 
 pub const ONLINE_KEY: &str = "RIPWIRE_BROKER_JEV_API_KEY";
 
@@ -56,13 +58,13 @@ fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// A fresh private directory under the system temp dir; removed by the caller.
-fn scratch(n: usize) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!(
-        "ripwire-eval-{}-{n}-{}",
-        std::process::id(),
-        Instant::now().elapsed().as_nanos()
-    ));
+/// A fresh directory under the system temp dir, unique within this process; removed by the
+/// caller.
+fn scratch() -> Result<PathBuf, String> {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ripwire-eval-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     Ok(dir)
 }
@@ -72,19 +74,20 @@ fn scratch(n: usize) -> Result<PathBuf, String> {
 /// `git log --all` would hand the agent the fix. So: a new repository, fetched by the base's id
 /// alone (only its ancestors come along), with no ref but a detached `HEAD`.
 fn checkout_base(task: &Task, into: &Path) -> Result<(), String> {
+    checkout(task, &task.base, into)
+}
+
+/// `rev` of the task's repository and its ancestors only, as `checkout_base` explains.
+fn checkout(task: &Task, rev: &str, into: &Path) -> Result<(), String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(&task.repo)
-        .args([
-            "rev-parse",
-            "--verify",
-            &format!("{}^{{commit}}", task.base),
-        ])
+        .args(["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("git rev-parse: {e}"))?;
     if !out.status.success() {
-        return Err(format!("base {} is not a commit", task.base));
+        return Err(format!("{rev} is not a commit"));
     }
     let base = String::from_utf8_lossy(&out.stdout).trim().to_string();
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
@@ -111,8 +114,53 @@ struct AgentRun {
     timed_out: bool,
 }
 
+/// The run's id, safe for a database or file name: lowercase letters, digits and `_`.
+fn run_id(task: &Task, arm: Arm, repeat: u32) -> String {
+    format!("{}__{}__{repeat}", task.id, arm.name())
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// `{run}`, `{repo}` and `{fix}` in a task's command or environment value.
+fn expand(task: &Task, id: &str, text: &str) -> String {
+    text.replace("{run}", id)
+        .replace("{repo}", &task.repo.to_string_lossy())
+        .replace("{fix}", task.fix.as_deref().unwrap_or(""))
+}
+
+fn environment(task: &Task, id: &str) -> Vec<(String, String)> {
+    task.env
+        .iter()
+        .map(|(k, v)| (k.clone(), expand(task, id, v)))
+        .collect()
+}
+
+/// A task's shell command (`setup`, `check`, `teardown`) in the copy, with the run's environment.
+fn shell(
+    task: &Task,
+    id: &str,
+    workdir: &Path,
+    env: &[(String, String)],
+    command: &str,
+) -> Command {
+    let mut c = Command::new("sh");
+    c.args(["-c", &expand(task, id, command)])
+        .current_dir(workdir)
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null());
+    c
+}
+
 fn run_agent(
     argv: &[String],
+    env: &[(String, String)],
     workdir: &Path,
     prompt: &str,
     transcript: &Path,
@@ -123,6 +171,7 @@ fn run_agent(
     let err = std::fs::File::create(stderr).map_err(|e| e.to_string())?;
     let mut child = Command::new(program)
         .args(args)
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -197,7 +246,7 @@ fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) ->
     }
 }
 
-fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, n: usize) -> RunRecord {
+fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
     let failed = |why: String| RunRecord {
         task: task.id.clone(),
         repo: task.repo_name(),
@@ -207,13 +256,29 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, n: usize) -> RunReco
         invalid: Some(why),
         ..RunRecord::default()
     };
-    let dir = match scratch(n) {
+    let dir = match scratch() {
         Ok(d) => d,
         Err(e) => return failed(e),
     };
+    let work = dir.join("work");
+    let id = run_id(task, arm, repeat);
+    let env = environment(task, &id);
     let result = (|| {
-        let work = dir.join("work");
         checkout_base(task, &work)?;
+        let logs = cfg.out.join("transcripts");
+        let name = format!("{}__{}__{repeat}", task.id, arm.name());
+        let setup_log = logs.join(format!("{name}.setup.log"));
+        if let Some(setup) = &task.setup
+            && !score::passes(
+                shell(task, &id, &work, &env, setup),
+                cfg.check_timeout,
+                Some(&setup_log),
+            )
+        {
+            return Err(format!("setup failed (see {})", setup_log.display()));
+        }
+        // What setup left in the tree (builds, caches) is not the agent's edit.
+        let before_agent = score::modified_files(&work);
         let config = dir.join("mcp.json");
         std::fs::write(&config, arm.mcp_config(&cfg.tools, &work).to_string())
             .map_err(|e| e.to_string())?;
@@ -225,10 +290,10 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, n: usize) -> RunReco
                     .replace("{workdir}", &work.to_string_lossy())
             })
             .collect();
-        let name = format!("{}__{}__{repeat}", task.id, arm.name());
-        let transcripts = cfg.out.join("transcripts");
+        let transcripts = &logs;
         let run = run_agent(
             &argv,
+            &env,
             &work,
             &task.prompt,
             &transcripts.join(format!("{name}.jsonl")),
@@ -241,14 +306,31 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, n: usize) -> RunReco
         } else if s.valid() {
             s.invalid = arm.contamination(&s);
         }
-        let modified = score::modified_files(&work);
-        let correct = task
-            .check
-            .as_deref()
-            .map(|c| score::run_check(&work, c, cfg.check_timeout));
+        let modified: Vec<String> = score::modified_files(&work)
+            .into_iter()
+            .filter(|f| !before_agent.contains(f))
+            .collect();
+        let correct = task.check.as_deref().map(|c| {
+            score::passes(
+                shell(task, &id, &work, &env, c),
+                cfg.check_timeout,
+                Some(&logs.join(format!("{name}.check.log"))),
+            )
+        });
         let sc = score::score(task, &s, &modified, correct);
         Ok::<_, String>(record(task, arm, repeat, &s, &sc))
     })();
+    // Whatever happened after the copy existed: a database left behind by a failed run is still
+    // a database left behind.
+    if let Some(teardown) = &task.teardown
+        && work.exists()
+    {
+        let _ = score::passes(
+            shell(task, &id, &work, &env, teardown),
+            cfg.check_timeout,
+            None,
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
     result.unwrap_or_else(failed)
 }
@@ -278,7 +360,7 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
                     continue;
                 }
                 log(&format!("{} · {} · {repeat}", task.id, arm.name()));
-                let r = one(cfg, task, arm, repeat, made);
+                let r = one(cfg, task, arm, repeat);
                 if let Some(why) = &r.invalid {
                     log(&format!("  invalid: {why}"));
                 }
@@ -289,4 +371,83 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
         }
     }
     Ok(made)
+}
+
+/// Whether a task's check tells its base from its fix: it must fail on a copy at the base and
+/// pass on a copy at the fix, each prepared by the task's `setup`. A check that passes at the base
+/// measures nothing; one that fails at the fix cannot be met.
+fn verify(task: &Task, timeout: Duration, logs: &Path) -> Result<(), String> {
+    let (Some(check), Some(fix)) = (&task.check, &task.fix) else {
+        return Err(
+            "no check or no fix: it can still run, but its correctness is not measured".into(),
+        );
+    };
+    for (rev, label, must_pass) in [(&task.base, "base", false), (fix, "fix", true)] {
+        let dir = scratch()?;
+        let work = dir.join("work");
+        let id = run_id(task, Arm::None, 0).replace("__none__0", &format!("__validate_{label}"));
+        let env = environment(task, &id);
+        let log = |step: &str| logs.join(format!("{}.{label}.{step}.log", task.id));
+        let outcome = (|| {
+            checkout(task, rev, &work)?;
+            if let Some(setup) = &task.setup
+                && !score::passes(
+                    shell(task, &id, &work, &env, setup),
+                    timeout,
+                    Some(&log("setup")),
+                )
+            {
+                return Err(format!(
+                    "setup failed at the {label} (see {})",
+                    log("setup").display()
+                ));
+            }
+            Ok(score::passes(
+                shell(task, &id, &work, &env, check),
+                timeout,
+                Some(&log("check")),
+            ))
+        })();
+        if let Some(teardown) = &task.teardown
+            && work.exists()
+        {
+            let _ = score::passes(shell(task, &id, &work, &env, teardown), timeout, None);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let see = log("check").display().to_string();
+        match (outcome?, must_pass) {
+            (true, false) => {
+                return Err(format!(
+                    "the check passes at the base: it measures nothing (see {see})"
+                ));
+            }
+            (false, true) => {
+                return Err(format!(
+                    "the check fails at the fix: it cannot be met (see {see})"
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Every task, verified: `(id, Ok(()))`, or why the task is broken or unverifiable. A task with no
+/// check or no fix is reported, not refused: it still measures cost and recall. The output of each
+/// setup and check goes to `logs`, as `<id>.<base|fix>.<setup|check>.log`.
+pub fn validate(
+    corpus: &Corpus,
+    timeout: Duration,
+    logs: &Path,
+    log: &mut dyn FnMut(&str),
+) -> Vec<(String, Result<(), String>)> {
+    let _ = std::fs::create_dir_all(logs);
+    corpus
+        .tasks
+        .iter()
+        .map(|t| {
+            log(&format!("{} …", t.id));
+            (t.id.clone(), verify(t, timeout, logs))
+        })
+        .collect()
 }

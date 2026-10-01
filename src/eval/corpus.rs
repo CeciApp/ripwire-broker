@@ -2,7 +2,7 @@
 //! patch it is scored against.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -18,14 +18,30 @@ pub struct Task {
     pub repo: PathBuf,
     /// The commit the agent starts from.
     pub base: String,
+    /// The reference commit, when the task comes from history. `validate` checks the task
+    /// against it, and commands may name it as `{fix}` (e.g. to bring in its tests).
+    #[serde(default)]
+    pub fix: Option<String>,
     pub prompt: String,
     /// The task's words differ from the code's: the cases §23.15's recall bar is about.
     #[serde(default)]
     pub vocabulary_diverges: bool,
     pub reference: Reference,
-    /// A shell command run in the agent's clone after it finishes; exit 0 is a correct task.
+    /// A shell command run in the agent's copy after it finishes; exit 0 is a correct task.
     #[serde(default)]
     pub check: Option<String>,
+    /// A shell command run in the copy before the agent starts: dependencies, build caches, a
+    /// database. Its failure makes the run invalid, and what it creates is not the agent's edit.
+    #[serde(default)]
+    pub setup: Option<String>,
+    /// A shell command run after the check, whatever happened; its failure is ignored.
+    #[serde(default)]
+    pub teardown: Option<String>,
+    /// Environment for setup, agent, check and teardown. `{run}` becomes the run's id, safe for
+    /// a database name, so that runs never share state. The commands also take `{run}`, plus
+    /// `{repo}` (the source repository) and `{fix}`.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

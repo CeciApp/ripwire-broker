@@ -49,6 +49,12 @@ pub struct Summary {
     pub mcp_status: HashMap<String, String>,
     /// MCP tools the session offered (`mcp__server__tool`).
     pub mcp_tools: Vec<String>,
+    /// Hooks that ran in the session (`--include-hook-events`). A repository can commit hooks of
+    /// its own, and they inject context into every arm.
+    pub hooks: Vec<String>,
+    /// Context tools the agent ran from the shell (`graft`, `ripwire`), which no MCP listing
+    /// shows. A repository can ship another tool's index that tells the agent to run it.
+    pub shell_tools: Vec<String>,
     pub calls: Calls,
     pub tokens: Tokens,
     pub cost_usd: f64,
@@ -87,6 +93,10 @@ const SEARCH: &[&str] = &[
 const READ: &[&str] = &[
     "cat", "head", "tail", "sed", "less", "more", "bat", "nl", "awk", "wc",
 ];
+/// Context tools an agent could run from the shell. `ripwire-broker` is not one: in its own
+/// repository, running the binary under development is the work.
+pub const SHELL_TOOLS: &[&str] = &["graft", "ripwire"];
+
 const BROKER_TOOLS: &[&str] = &[
     "context_for_task",
     "context_after_edit",
@@ -193,6 +203,11 @@ fn on_tool_use(s: &mut Summary, names: &mut HashMap<String, String>, at: u64, bl
     if name == "Bash"
         && let Some(c) = block["input"]["command"].as_str()
     {
+        for p in programs(c) {
+            if SHELL_TOOLS.contains(&p.as_str()) {
+                push_new(&mut s.shell_tools, &p);
+            }
+        }
         s.commands.push(c.to_string());
     }
 }
@@ -253,6 +268,13 @@ pub fn summarize(events: &[(u64, Value)]) -> Summary {
             Some("system") if e["subtype"] == "init" => {
                 saw_init = true;
                 on_init(&mut s, e);
+            }
+            Some("system") if e["subtype"].as_str().is_some_and(|t| t.contains("hook")) => {
+                let name = ["hook_name", "hook_event", "subtype"]
+                    .iter()
+                    .find_map(|k| e[*k].as_str())
+                    .unwrap_or("hook");
+                push_new(&mut s.hooks, name);
             }
             Some("assistant") => {
                 for block in blocks(e, "tool_use") {

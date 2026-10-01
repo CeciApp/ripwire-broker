@@ -646,3 +646,247 @@ echo '{"type":"result","is_error":false,"usage":{"input_tokens":1,"output_tokens
         "the agent works on the base:\n{seen}"
     );
 }
+
+// --- per-task setup, environment and teardown (real repositories need deps and a database) ---
+
+#[test]
+fn setup_env_and_teardown_wrap_each_run_and_setup_is_not_an_edit() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let agent = fake_agent(work.path());
+    let log = work.path().join("log");
+    let corpus = work.path().join("corpus.json");
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [
+            {"id": "T-1", "repo": repo.path(), "base": head, "prompt": "p",
+             "reference": {"files": ["src/auth.py"]},
+             "env": {"RUN_TAG": "db_{run}"},
+             // What setup builds (deps, caches) is not something the agent edited.
+             "setup": "echo \"setup $RUN_TAG\" >> \"$COUNTER\" && echo built > built.txt",
+             "check": "echo \"check $RUN_TAG\" >> \"$COUNTER\" && echo check-said-this",
+             "teardown": "echo \"teardown $RUN_TAG\" >> \"$COUNTER\""},
+            {"id": "broken-setup", "repo": repo.path(), "base": head, "prompt": "p",
+             "reference": {"files": ["src/auth.py"]},
+             "setup": "exit 3"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let out = work.path().join("out");
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+
+    let (code, _, err) = eval(
+        &[
+            "run",
+            "--corpus",
+            corpus.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--arms",
+            "none,broker",
+            "--agent-cmd",
+            &agent_cmd,
+        ],
+        &log,
+    );
+    assert_eq!(code, 0, "{err}");
+
+    let lines: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    // Run ids are safe for a database name: lowercase, letters, digits and underscores.
+    assert_eq!(
+        lines,
+        vec![
+            "setup db_t_1__none__1",
+            "run",
+            "check db_t_1__none__1",
+            "teardown db_t_1__none__1",
+            "setup db_t_1__broker__1",
+            "run",
+            "check db_t_1__broker__1",
+            "teardown db_t_1__broker__1",
+        ],
+        "the broken setup never reached its agent"
+    );
+    let records: Vec<Value> = std::fs::read_to_string(out.join("results.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    for r in records.iter().filter(|r| r["task"] == "T-1") {
+        assert_eq!(
+            r["file_precision"], 1.0,
+            "built.txt is setup's, not the agent's: {r}"
+        );
+        assert_eq!(r["correct"], true, "{r}");
+    }
+    // The check's output sits next to the transcript, for the run that needs explaining.
+    let check_log = out.join("transcripts/T-1__none__1.check.log");
+    assert!(
+        std::fs::read_to_string(&check_log)
+            .unwrap()
+            .contains("check-said-this")
+    );
+    let broken: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["task"] == "broken-setup")
+        .collect();
+    assert_eq!(broken.len(), 2);
+    for r in broken {
+        assert_eq!(r["valid"], false, "{r}");
+        assert!(r["invalid"].as_str().unwrap().contains("setup"), "{r}");
+    }
+}
+
+#[test]
+fn a_hook_that_ran_in_the_session_invalidates_every_arm() {
+    // A repository can commit hooks of its own (e.g. another context tool's): they inject into
+    // every arm, `none` included, and no MCP listing would show them.
+    let hook = json!({"type": "system", "subtype": "hook_response", "hook_name": "SessionStart:startup",
+                      "hook_event": "SessionStart", "output": "context from a tool"});
+    let init = json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []});
+    let result = json!({"type": "result", "is_error": false, "usage": {}});
+    let s = transcript::summarize(&[(0, hook), (1, init), (2, result)]);
+
+    assert_eq!(s.hooks, vec!["SessionStart:startup"]);
+    for arm in [Arm::None, Arm::Ripwire, Arm::Broker] {
+        let why = arm.contamination(&s).expect("a hook ran");
+        assert!(why.contains("hook"), "{why}");
+    }
+}
+
+#[test]
+fn the_default_agent_loads_no_settings_and_reports_hooks() {
+    let argv: Vec<&str> = ripwire_broker::eval::runner::DEFAULT_AGENT
+        .split_whitespace()
+        .collect();
+    let after = |flag: &str| argv[argv.iter().position(|a| *a == flag).unwrap() + 1];
+    // `local` is .claude/settings.local.json, which a fresh repository never has: neither the
+    // user's settings nor the ones a repository commits.
+    assert_eq!(after("--setting-sources"), "local");
+    assert!(argv.contains(&"--strict-mcp-config"));
+    assert!(argv.contains(&"--include-hook-events"));
+}
+
+// --- a task is only worth running if its check tells the base from the fix ---
+
+#[test]
+fn validate_requires_the_check_to_fail_at_the_base_and_pass_at_the_fix() {
+    let repo = common::sample_repo();
+    let base = git(repo.path(), &["rev-parse", "HEAD"]);
+    std::fs::write(
+        repo.path().join("src/auth.py"),
+        "def login(user, token):\n    raise ValueError('expired')\n",
+    )
+    .unwrap();
+    std::fs::write(repo.path().join("tests/test_expiry.txt"), "hidden test\n").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(
+        repo.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "the fix",
+        ],
+    );
+    let fix = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    // The hidden test comes from the fix commit, through {repo} and {fix}.
+    let hidden = "git -C {repo} show {fix}:tests/test_expiry.txt > tests/test_expiry.txt && grep -q expired src/auth.py";
+    let task = |id: &str, check: &str| {
+        json!({"id": id, "repo": repo.path(), "base": base, "fix": fix, "prompt": "p",
+               "reference": {"files": ["src/auth.py"]}, "check": check})
+    };
+    let corpus = work.path().join("corpus.json");
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [
+            task("good", hidden),
+            task("trivial", "true"),
+            task("impossible", "echo boom-at-the-fix >&2; false"),
+            {"id": "unverifiable", "repo": repo.path(), "base": base, "prompt": "p",
+             "reference": {"files": ["src/auth.py"]}}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let (code, out, err) = eval(
+        &["validate", "--corpus", corpus.to_str().unwrap()],
+        &work.path().join("unused"),
+    );
+
+    assert_ne!(code, 0, "two tasks are broken: {out}{err}");
+    let line = |id: &str| {
+        out.lines()
+            .find(|l| l.starts_with(&format!("{id}:")))
+            .unwrap_or_else(|| panic!("{id} missing:\n{out}"))
+            .to_string()
+    };
+    assert!(line("good").contains("ok"), "{out}");
+    assert!(line("trivial").contains("passes at the base"), "{out}");
+    assert!(line("impossible").contains("fails at the fix"), "{out}");
+    // A failure says where its output went: a check that fails without a trace cannot be fixed.
+    let log = work.path().join("validate-logs/impossible.fix.check.log");
+    assert!(
+        line("impossible").contains("validate-logs/impossible.fix.check.log"),
+        "{out}"
+    );
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("boom-at-the-fix"),
+        "{}",
+        log.display()
+    );
+    assert!(line("unverifiable").contains("no check"), "{out}");
+    // The source repository is only read.
+    assert_eq!(git(repo.path(), &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_context_tool_run_from_the_shell_is_contamination_too() {
+    // A repository can ship another tool's index whose README says "run graft ask"; ripwire is on
+    // the PATH too. Through Bash, no MCP listing shows either.
+    let bash = |id: &str, command: &str| {
+        json!({"type": "assistant", "message": {"id": id, "content": [
+            {"type": "tool_use", "id": id, "name": "Bash", "input": {"command": command}}]}})
+    };
+    let init = json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []});
+    let result = json!({"type": "result", "is_error": false, "usage": {}});
+    let session = |command: &str| {
+        transcript::summarize(&[
+            (0, init.clone()),
+            (1, bash("b1", command)),
+            (2, result.clone()),
+        ])
+    };
+
+    let graft = session("cd /work && graft ask \"where is login\" --source");
+    for arm in [Arm::None, Arm::Ripwire, Arm::Broker] {
+        let why = arm
+            .contamination(&graft)
+            .expect("graft is never part of an arm");
+        assert!(why.contains("graft"), "{why}");
+    }
+    let ripwire = session("/Users/me/.local/bin/ripwire . --for=\"login\"");
+    assert!(Arm::None.contamination(&ripwire).is_some());
+    assert!(
+        Arm::Broker.contamination(&ripwire).is_some(),
+        "the broker arm goes through the broker"
+    );
+    // Running the binary under development is the work, not a context tool.
+    let own = session("cargo build && ./target/debug/ripwire-broker --help | grep ripwire");
+    assert_eq!(Arm::None.contamination(&own), None);
+    // `rg ripwire` searches for the word; it does not run the tool.
+    assert_eq!(Arm::None.contamination(&session("rg -n ripwire src")), None);
+}

@@ -75,10 +75,30 @@ impl Arm {
         json!({"mcpServers": servers})
     }
 
-    /// Why a run cannot count for this arm: an MCP server the arm did not declare (the user's
-    /// global configuration leaking in), or the arm's own server not connected (the arm would
-    /// silently become `none`).
+    /// Why a run cannot count for this arm: a hook that ran (it injects into every arm), a context
+    /// tool run from the shell that the arm does not include, an MCP
+    /// server the arm did not declare (the user's global configuration leaking in), or the arm's
+    /// own server not connected (the arm would silently become `none`).
     pub fn contamination(self, s: &Summary) -> Option<String> {
+        if !s.hooks.is_empty() {
+            return Some(format!(
+                "hook(s) ran in the session: {}",
+                s.hooks.join(", ")
+            ));
+        }
+        let foreign_cli: Vec<&str> = s
+            .shell_tools
+            .iter()
+            .map(String::as_str)
+            .filter(|t| !(self == Arm::Ripwire && *t == "ripwire"))
+            .collect();
+        if !foreign_cli.is_empty() {
+            return Some(format!(
+                "context tool(s) run from the shell outside arm {}: {}",
+                self.name(),
+                foreign_cli.join(", ")
+            ));
+        }
         let mine = self.server();
         let mut foreign: Vec<&str> = s
             .mcp_servers
