@@ -1142,6 +1142,47 @@ fn it_reads_the_projection_of_this_session_and_workspace() {
     );
 }
 
+/// The payload Claude Code 2.1.285 sent in the manual validation (§24.10), with paths replaced.
+fn claude_code_payload(ws: &Path) -> String {
+    let path = format!(
+        "{}/tests/fixtures/statusline/claude_code.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read_to_string(path)
+        .unwrap()
+        .replace("__WORKSPACE__", &ws.display().to_string())
+}
+
+#[test]
+fn the_captured_claude_code_payload_reads_its_own_projection() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let input = claude_code_payload(ws.path());
+    let session = parse_input(&input).session_id.unwrap();
+    publish(
+        state.path(),
+        &session,
+        &root,
+        &Snapshot {
+            workspace_key: workspace_key(&root),
+            ..snap(false, 7, 18, Some(AnalysisStatus::AttentionRequired))
+        },
+    )
+    .unwrap();
+    // No --workspace: the root comes from `workspace.project_dir` of the real payload.
+    let (code, out, err) = run_bar(
+        &["--state-dir", state.path().to_str().unwrap()],
+        input.as_bytes(),
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out.trim_end(),
+        "rw-brkr · Opus 5.5 mid · ctx 6% · hooks on · última: atenção · inj 7 · não reenviados 18"
+    );
+}
+
 #[test]
 fn without_a_session_id_nothing_is_read() {
     let ws = tempfile::tempdir().unwrap();

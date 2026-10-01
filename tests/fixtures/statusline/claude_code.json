@@ -1,0 +1,75 @@
+{
+ "session_id": "6e7a0961-9bd6-428a-a5c8-66cdd256bd09",
+ "transcript_path": "__TRANSCRIPT__",
+ "cwd": "__WORKSPACE__",
+ "scratchpad_dir": "__SCRATCHPAD__",
+ "prompt_id": "0397d529-9b88-44e4-a538-559eae1d4fe5",
+ "effort": {
+  "level": "medium"
+ },
+ "session_name": "Função sub em src/lib.rs",
+ "model": {
+  "id": "claude-opus-5-5",
+  "display_name": "Opus 5.5"
+ },
+ "workspace": {
+  "current_dir": "__WORKSPACE__",
+  "project_dir": "__WORKSPACE__",
+  "added_dirs": []
+ },
+ "version": "2.1.285",
+ "output_style": {
+  "name": "default"
+ },
+ "cost": {
+  "total_cost_usd": 0.37491179999999996,
+  "total_duration_ms": 282697,
+  "total_api_duration_ms": 22099,
+  "total_lines_added": 0,
+  "total_lines_removed": 0
+ },
+ "context_window": {
+  "total_input_tokens": 58170,
+  "total_output_tokens": 33,
+  "context_window_size": 1000000,
+  "current_usage": {
+   "input_tokens": 2,
+   "output_tokens": 33,
+   "cache_creation_input_tokens": 34,
+   "cache_read_input_tokens": 58134
+  },
+  "used_percentage": 6,
+  "remaining_percentage": 94
+ },
+ "exceeds_200k_tokens": false,
+ "prompt_cache": {
+  "warm": true,
+  "caching_observed": true,
+  "ttl": "1h",
+  "expires_at": 1790901374,
+  "requests": 7,
+  "misses": 0,
+  "expected_rebuilds": 0,
+  "hit_ratio": 0.9272696960799439,
+  "cache_write_tokens": 29215,
+  "miss_recache_tokens": 0,
+  "last_miss_at": null,
+  "last_miss_cause": null,
+  "miss_causes": {},
+  "recache_tokens_if_cold": 58170
+ },
+ "fast_mode": false,
+ "thinking": {
+  "enabled": true
+ },
+ "rate_limits": {
+  "five_hour": {
+   "used_percentage": 4,
+   "resets_at": 1790906400
+  },
+  "seven_day": {
+   "used_percentage": 30,
+   "resets_at": 1791090000
+  }
+ }
+}
