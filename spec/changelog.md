@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-09-30 23:36 | Plano e instrumentos dos itens 1 e 2: `ripwire-eval` (A/B do §16.2, §17 e §23.15) e `hook-stats` (§21.3); o `session_hits` dos hooks morria com o processo, e o clone do A/B vazava a resposta das tarefas tiradas do histórico | [D-116](#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real) |
 | 2026-09-29 09:01 | Diagrama de arquitetura versionado em `spec/diagrams/`: fonte JSON do archify (a fonte da verdade) e HTML entregue, com fontes fixadas no commit `5daaf27` | [D-115](#d-115--diagrama-de-arquitetura-versionado) |
 | 2026-09-29 00:29 | O `sha2` 0.11 é recusado: ele **não** muda o digest (premissa minha, errada), e subir o nosso direto apenas **duplica** o crate, porque o `rust-mcp-sdk` pinado traz o 0.10 | [D-114](#d-114--o-sha2-011-é-recusado-e-uma-premissa-minha-estava-errada) |
 | 2026-09-29 00:08 | Fatia G: P1.3 (escalonador) — teto de voo, orçamento de requisições contra o oráculo do classificador, e resposta que nunca migra de pergunta; a proposta de PBT/CI está cumprida | [D-113](#d-113--fatia-g-o-escalonador-e-a-quarta-vez-que-o-instrumento-era-o-problema) |
@@ -4146,3 +4147,129 @@ são reproduzíveis a partir do HTML.
 
 **Não é atualizado sozinho.** Uma mudança de arquitetura não quebra nada aqui; o diagrama envelhece
 em silêncio. Quem mudar a topologia edita o JSON e roda de novo `deliver`.
+
+## D-116 — Plano da avaliação A/B e de `session_hits` em uso real
+
+Pedido do usuário: implementar os itens 1 (corpus A/B e barras, §16.2, §17 e §23.15) e 2
+(medir `session_hits` em uso real, §21.3) da revisão de pendências. Pediu um plano, testes que
+provem a falta antes e a solução depois, e o mínimo de impacto no resto. Plano em
+[`spec/plan/plano-ab-e-session-hits.md`](plan/plano-ab-e-session-hits.md).
+
+### O que não dá para entregar num commit
+
+Os dois itens são **medições**. O commit entrega o instrumento; a medição continua com o usuário:
+
+- o A/B real precisa dos três repositórios, de ≥ 30 tarefas e da autorização do gasto. Cada
+  execução é uma sessão paga de agente;
+- o `session_hits` real precisa de dias de hooks em uso. Nesta máquina, `hook-stats` encontrou
+  **zero** sessões: os hooks não estão instalados aqui.
+
+### Item 2: a medição era impossível, não só pendente
+
+Cada evento de hook é um processo novo (D-030). O `metrics.session_hits` vive na memória do broker e
+morria com o processo; o estado em disco (D-032) guardava as impressões digitais, mas não o
+contador. O teste `session_hits_survive_across_hook_processes` mostrou isso em vermelho: o segundo
+processo **contou** os hits (asserção da linha 827 passou até ali), e o estado não guardou nada.
+
+- `SessionState.stats` (`#[serde(default)]`): `events`, `injections`, `delivered`,
+  `session_hits` e `started_at`. Um estado antigo carrega com zeros.
+- `hook::handle` soma a diferença de `Broker::session_hits()`, um getter novo e a única
+  adição ao núcleo, para não duplicar a conta do broker.
+- `delivered` conta só o que chegou ao modelo inteiro. Uma referência a algo já entregue é hit,
+  não entrega.
+- `ripwire-broker hook-stats [--json]` soma todas as sessões e mede a repetição **entre**
+  sessões. Essa repetição é o que um cache persistente acrescentaria, e as impressões digitais já
+  estavam em disco. Só contagens: nenhum caminho, símbolo, impressão digital ou id de sessão,
+  nem o hash.
+- Regra proposta para S3.15, **a decidir pelo usuário**: depois de ≥ 20 sessões, repetição
+  entre sessões < 15% recusa o cache persistente, e ≥ 30% o põe no plano.
+
+### Item 1: `ripwire-eval`, um segundo binário
+
+- **Onde.** `ripwire_broker::eval` e `src/bin/ripwire-eval.rs`, com
+  `default-run = "ripwire-broker"`. O broker não ganha subcomando; nada do `serve` ou dos hooks
+  chama o módulo.
+- **Braços.** `none`, `ripwire`, `broker` e `broker-online`. O online exige a chave e recusa
+  antes de rodar qualquer coisa.
+- **Agente.** Claude Code headless (`stream-json`) com `--strict-mcp-config
+  --setting-sources project`. Sem isso, os hooks e MCPs globais deste ambiente (ripwire, graft)
+  contaminariam o braço `none`. Uma **guarda de contaminação** lê o `system/init` e invalida a
+  execução com servidor MCP não declarado, ou com o servidor do braço desconectado.
+- **Extração do transcript.** Tokens e custo do `result`, chamadas por classe (busca, leitura,
+  edição, MCP), bytes MCP, primeira edição e arquivos apresentados pelos envelopes do broker. Um
+  transcript sem `init` ou `result` é **inválido**, nunca zero.
+- **Pontuação.** Recall e precisão de arquivos por `git status` contra o patch de referência,
+  posição do primeiro arquivo certo, testes de referência mostrados ou rodados, e correção pelo
+  `check` da tarefa.
+- **Barras.** §17.1–17.5 e §23.15.1–3, com bordas exatas (tolerância 1e-9) e `insuficiente`
+  abaixo de 30 tarefas em 3 repositórios válidas nos dois braços comparados.
+
+A fixture de transcript é **sintética**, escrita conforme a documentação do `stream-json`.
+Gravar uma real exige uma chamada paga, e fica para a primeira rodada autorizada.
+
+### Um vazamento achado ao montar a primeira tarefa
+
+Para o teste de fumaça, montei uma tarefa a partir do histórico deste repositório: o `base` no
+pai de `2a646f3` e a referência no próprio `2a646f3`. Ao escrevê-la ficou claro que o desenho do
+plano (`git clone` local) levaria **todos** os branches, inclusive o commit da correção, para
+dentro da cópia do agente. Um `git log --all` lhe daria a resposta. Isso invalidaria em silêncio
+toda tarefa tirada de commits reais, que é justamente o jeito barato de montar o corpus.
+
+O teste `the_agent_cannot_see_history_after_the_base` ficou vermelho (o agente de teste leu
+`the reference fix`). A cópia passou a ser um `git init` com `git fetch` só do id do `base`: vêm o
+commit e seus ancestrais, sem branch nem tag. O repositório de origem continua só lido.
+
+### Provado que os testes mordem, por mutação
+
+Doze mutações:
+
+- **Seis pegas na primeira passada.** A soma dos hits, a contagem de injeções, a ordenação
+  cronológica do `hook-stats`, a guarda de contaminação, a chamada da guarda no runner e o
+  `result` ausente.
+- **Três sobreviveram, e cada uma virou correção.**
+  - `delivered` contando referências: nenhum teste injetava referências. Novo teste
+    `a_reference_to_something_already_delivered_is_a_hit_not_a_delivery`.
+  - Primeira edição × última: a fixture tinha uma edição só. Novo teste
+    `the_first_edit_is_the_earliest_one`.
+  - `EPS = 0`: **o instrumento estava errado**. O filtro `bars` não casava com
+    `the_online_bar…`, o único caso em que `1 − 40/50` dá `0,19999…`. Com o filtro certo, pega.
+- **As três, repetidas, foram pegas.**
+
+### Nota de método, a sexta
+
+Restaurar o arquivo mutado com `shutil.copy` + `move` devolveu um mtime **anterior** ao do build do
+mutante. O cargo não recompilou, e um teste "falhou" no código correto, porque rodava o binário
+mutante. Resolvido com `touch` nos fontes antes de cada verificação final. É o mesmo padrão dos
+cinco casos anteriores: o instrumento mentindo de um jeito plausível.
+
+### Impacto no resto
+
+- As suítes existentes ficaram verdes **sem editar nenhum teste antigo**.
+- `cargo tree -e normal` está byte a byte igual ao de antes, então o CA-10 está intacto. A guarda
+  de fixture também passa.
+- A saída dos hooks para o host não mudou; o arquivo de estado ganhou um objeto de contagens.
+- `ripwire --quality-delta`: a complexidade 70 de `transcript::summarize` foi dividida em
+  tratadores por evento. Os achados que bloqueiam e restam são `match` de enum para `&str`
+  (`Arm::name`, `Verdict::label`) lidos como clones de `event_name` e `Status::as_str`, e
+  funções de teste lidas como código morto: limitações da ferramenta, aceitas.
+
+### Também visto, não mexido
+
+Os links `plan-fases-2-3.md` e `plan-fases-4-5.md` do PRD apontam para `spec/`, mas os planos
+estão em `spec/plan/`. Esses links estão quebrados desde antes desta mudança.
+
+### O CI pegou o que a minha máquina escondia
+
+A primeira execução do CI no PR #28 falhou em `the_agent_cannot_see_history_after_the_base`. O
+commit da "correção" no repositório de teste dependia de uma identidade do git: a minha máquina
+tem uma global, e o runner não tem. O `sample_repo` já passava `-c user.email`/`-c user.name`, e
+o teste novo não. Agora passa também, e a suíte inteira roda verde com
+`GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null`, a condição do runner. O runner do A/B
+não faz commit e não precisa de identidade.
+
+### Verificação
+
+**315** testes no padrão e **328** com `online` (eram 295 e 308; 20 novos: 4 de hooks, 3 de CLI e
+13 do A/B). Ignorados continuam 2 e 4. `fmt` limpo, clippy limpo com `-D warnings` nas duas
+features, conferido por `if cargo …; then`, sem pipe.
+

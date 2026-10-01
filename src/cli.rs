@@ -1,5 +1,5 @@
 //! Command line (D-028): `serve` (the default, also without a subcommand), `hook`, `hook-log`,
-//! `prompt`, `doctor` and `install`. Parsing is pure; nothing here touches the disk.
+//! `hook-stats`, `prompt`, `doctor` and `install`. Parsing is pure; nothing here touches the disk.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +17,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
                       [--edit-interval-ms N]
        ripwire-broker hook-log --session ID [--state-dir DIR]
+       ripwire-broker hook-stats [--state-dir DIR] [--json]
        ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--jev-probe [--jev-model MODEL]]
@@ -166,6 +167,11 @@ pub enum Command {
     HookLog {
         session: String,
         state_dir: Option<PathBuf>,
+    },
+    /// Every saved hook session reduced to counts (§21.3).
+    HookStats {
+        state_dir: Option<PathBuf>,
+        json: bool,
     },
     Prompt(PromptArgs),
     Doctor(DoctorArgs),
@@ -516,6 +522,14 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             Ok(Command::HookLog {
                 session: f.session.ok_or_else(|| usage("--session is required"))?,
                 state_dir: f.state_dir,
+            })
+        }
+        Some("hook-stats") => {
+            let f = flags(it, &["--state-dir", "--json"])?;
+            no_words(&f)?;
+            Ok(Command::HookStats {
+                state_dir: f.state_dir.clone(),
+                json: f.on("--json"),
             })
         }
         Some("prompt") => {

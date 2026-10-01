@@ -1164,6 +1164,13 @@ Cada corpus deve executar a mesma tarefa em três braços:
 2. agente com Ripwire MCP direto;
 3. agente com `ripwire-broker`.
 
+**Estado:** o instrumento existe, o binário `ripwire-eval`
+([plano](plan/plano-ab-e-session-hits.md),
+[D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real)). Ele roda os três
+braços e o `broker-online` do §23.15, extrai as métricas do §16.3–16.4 do transcript do agente e
+julga as barras do §17 e do §23.15. A medição real ainda não foi feita: depende da escolha dos
+repositórios e da autorização do gasto.
+
 ### 16.3 Métricas de qualidade
 
 - arquivos corretos encontrados em top-k;
@@ -1445,6 +1452,13 @@ Fase 3 começou com o cache de notas só em memória
 ([D-046](changelog.md#d-046--fase-3-com-cache-em-memória)). O cache persistente
 continua pendente dessa medição em uso real.
 
+Até o [D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real), essa medição
+era impossível, não só pendente. Cada evento de hook é um processo novo, e `session_hits` morria
+com ele. Agora o estado da sessão acumula o contador, e `ripwire-broker hook-stats` soma todas as
+sessões salvas. Ele reporta a taxa dentro da sessão e a repetição **entre** sessões, que é o que
+um cache persistente acrescentaria. Proposta de regra (o usuário decide), depois de ao menos 20
+sessões reais: abaixo de 15% de repetição entre sessões, S3.15 é recusado; a partir de 30%, entra.
+
 ### 21.4 Política de falha
 
 Definir se falha do broker:
@@ -1494,7 +1508,9 @@ produto, mas não substituem a avaliação A/B específica do `ripwire-broker`.
 **Estado:** Fases 4 e 5 implementadas atrás da feature Cargo `online`, e testadas ao vivo contra
 `jev-1.13.0` ([D-065](changelog.md#d-065--aprovação-das-propostas-das-fases-4-e-5) a
 [D-085](changelog.md#d-085--testes-live)). Pendente: o corpus A/B e a barra de produto do §23.15;
-até lá o modo é **experimental**. As lacunas do §23.17 foram resolvidas como diz o seu fim.
+até lá o modo é **experimental**. O instrumento que mede a barra existe desde o
+[D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real) (`ripwire-eval`, braço
+`broker-online`); falta a rodada real. As lacunas do §23.17 foram resolvidas como diz o seu fim.
 Plano em [plan-fases-4-5.md](plan-fases-4-5.md).
 
 **Fonte.** Este capítulo transporta o conteúdo normativo de

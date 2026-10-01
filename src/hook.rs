@@ -51,6 +51,27 @@ pub struct SessionState {
     /// `--version` and throw it away (D-105).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ripwire: Option<CachedVersion>,
+    /// Counters that outlive the process, so `session_hits` can be measured in real use
+    /// (§21.3). A state saved before they existed loads with zeros.
+    #[serde(default)]
+    pub stats: SessionTally,
+}
+
+/// What one session's hooks did, in counts only (PRD 16.1).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionTally {
+    /// Seconds since the Unix epoch of the first event seen with these counters.
+    pub started_at: u64,
+    /// Hook events handled, answered or not.
+    pub events: u64,
+    /// Answers that reached the model: injected context or a gate block.
+    pub injections: u64,
+    /// Items, tests, risks and notes those answers carried whole.
+    pub delivered: u64,
+    /// Items, tests, risks and notes left out or reduced to a reference because the session
+    /// already had them: the broker's `metrics.session_hits`, summed over processes.
+    pub session_hits: u64,
 }
 
 /// A version reading, with the stamp of the binary it came from.
@@ -107,7 +128,19 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Called exactly for the answers that reach the model, so it also keeps the tally of what
+/// was delivered whole.
 fn record(state: &mut SessionState, event: Event, env: &Envelope, policy: &Policy) {
+    let whole = env
+        .items
+        .iter()
+        .filter(|i| i.why_included != session::SEEN_REFERENCE)
+        .count()
+        + env.tests.len()
+        + env.risks.len()
+        + env.notes.len();
+    state.stats.injections += 1;
+    state.stats.delivered += whole as u64;
     let refs = if policy.log_refs {
         env.items
             .iter()
@@ -298,6 +331,11 @@ pub async fn handle(
 ) -> Option<Value> {
     broker.restore_session(state.memory.clone());
     broker.resume_request_ids(state.next_request);
+    let hits_before = broker.session_hits();
+    if state.stats.started_at == 0 {
+        state.stats.started_at = now();
+    }
+    state.stats.events += 1;
     let out = match respond(event, input, broker, state, policy).await {
         Ok(out) => out,
         Err(e) => Some(failure(&e)),
@@ -312,6 +350,7 @@ pub async fn handle(
         state.memory = broker.session_snapshot();
     }
     state.next_request = broker.next_request_id();
+    state.stats.session_hits += broker.session_hits().saturating_sub(hits_before);
     out
 }
 

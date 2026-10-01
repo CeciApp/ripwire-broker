@@ -57,6 +57,21 @@ impl StateStore {
             .unwrap_or_default()
     }
 
+    /// Every saved session in the directory. Lock files, temporaries and files that do not
+    /// parse are not sessions; a missing directory has none.
+    pub fn sessions(&self) -> Vec<SessionState> {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return vec![];
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter_map(|p| fs::read_to_string(p).ok())
+            .filter_map(|t| serde_json::from_str(&t).ok())
+            .collect()
+    }
+
     /// Forgets a session; missing files are fine.
     pub fn remove(&self, session_id: &str) {
         let _ = fs::remove_file(self.path(session_id));

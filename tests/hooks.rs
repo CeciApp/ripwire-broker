@@ -774,3 +774,165 @@ async fn an_edit_past_the_window_is_answered_again_and_carries_what_was_held() {
         "the edit held back during the window is not forgotten: {files}"
     );
 }
+
+// --- §21.3: session_hits must survive the hook process to be measurable in real use ---
+
+/// The session counters as persisted, read through the state's serialized form so that this
+/// test describes the file a later `hook-stats` reads, not an in-memory field.
+fn stats(state: &SessionState) -> Value {
+    serde_json::to_value(state).unwrap()["stats"].clone()
+}
+
+/// Everything an injected envelope delivered whole: items that are not mere references,
+/// tests, risks and notes.
+fn whole(env: &Value) -> u64 {
+    let full_items = env["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| {
+            !i["why_included"]
+                .as_str()
+                .unwrap()
+                .starts_with("already delivered")
+        })
+        .count();
+    let len = |k: &str| env[k].as_array().map_or(0, Vec::len);
+    (full_items + len("tests") + len("risks") + len("notes")) as u64
+}
+
+#[tokio::test]
+async fn session_hits_survive_across_hook_processes() {
+    let (first, _f, ws) = hook_broker(edit_fake()).await;
+    std::fs::write(ws.path().join("a.txt"), "x").unwrap();
+    let input = event("claude_code_post_tool_use", ws.path());
+    let mut state = SessionState::default();
+
+    let out = post_tool_use(Host::ClaudeCode, &input, &first, &mut state)
+        .await
+        .expect("the first edit has news");
+    let delivered = whole(&injected(&out));
+    assert!(delivered > 0);
+
+    // The next hook event is a new process: a new Broker, the saved state.
+    let mut config = BrokerConfig::new(ws.path());
+    config.incremental = true;
+    let second = Broker::connect(Arc::new(edit_fake()), config)
+        .await
+        .unwrap();
+    let again = post_tool_use(Host::ClaudeCode, &input, &second, &mut state).await;
+    assert!(again.is_none(), "nothing new: {again:?}");
+
+    let hits_in_second =
+        serde_json::to_value(second.status().await).unwrap()["metrics"]["session_hits"]
+            .as_u64()
+            .unwrap();
+    assert!(hits_in_second > 0, "the second process saw repeats");
+    let s = stats(&state);
+    assert_eq!(s["session_hits"], hits_in_second, "{s}");
+    assert_eq!(s["delivered"], delivered, "{s}");
+    assert_eq!(s["events"], 2, "{s}");
+    assert_eq!(s["injections"], 1, "{s}");
+    assert!(s["started_at"].as_u64().unwrap() > 0, "{s}");
+}
+
+#[tokio::test]
+async fn only_what_reached_the_model_counts_as_delivered() {
+    // A Stop without the gate is a notice for the user: the model never sees its tests.
+    let (b, _fake, ws) = hook_broker(finish_fake()).await;
+    std::fs::write(ws.path().join("a.txt"), "x").unwrap();
+    let mut state = SessionState::default();
+
+    let notice = hook::handle(
+        Host::ClaudeCode,
+        Event::Stop,
+        &event("claude_code_stop", ws.path()),
+        &b,
+        &mut state,
+        &Policy::default(),
+    )
+    .await
+    .unwrap();
+    assert!(notice.get("hookSpecificOutput").is_none(), "{notice}");
+
+    let s = stats(&state);
+    assert_eq!(s["events"], 1, "{s}");
+    assert_eq!(s["injections"], 0, "{s}");
+    assert_eq!(s["delivered"], 0, "{s}");
+}
+
+#[test]
+fn an_old_state_file_loads_with_zero_stats() {
+    // The shape written before the counters existed (D-032 .. D-106).
+    let old = r#"{"memory":{"seen":["fp-1"]},"prompts_seen":1,"opted_out":false,"log":[],"next_request":2}"#;
+    let state: SessionState = serde_json::from_str(old).unwrap();
+
+    let s = stats(&state);
+    for field in [
+        "events",
+        "injections",
+        "delivered",
+        "session_hits",
+        "started_at",
+    ] {
+        assert_eq!(s[field], 0, "{field}: {s}");
+    }
+    assert_eq!(state.next_request, 2, "the rest of the state is untouched");
+}
+
+#[tokio::test]
+async fn a_reference_to_something_already_delivered_is_a_hit_not_a_delivery() {
+    let every = Policy {
+        every_prompt: true,
+        ..Policy::default()
+    };
+    let (b, _fake, ws) = hook_broker(
+        FakeUpstream::new()
+            .answer("explore", "explore_export_auth")
+            .answer("explore", "explore_export_auth"),
+    )
+    .await;
+    let input = event("claude_code_user_prompt_submit", ws.path());
+    let mut state = SessionState::default();
+
+    let first = hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &input,
+        &b,
+        &mut state,
+        &every,
+    )
+    .await
+    .expect("injected");
+    let second = hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &input,
+        &b,
+        &mut state,
+        &every,
+    )
+    .await
+    .expect("every prompt is injected");
+
+    let (first, second) = (injected(&first), injected(&second));
+    let references = second["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| {
+            i["why_included"]
+                .as_str()
+                .unwrap()
+                .starts_with("already delivered")
+        })
+        .count();
+    assert!(references > 0, "the second answer points back: {second}");
+    let s = stats(&state);
+    assert_eq!(s["delivered"], whole(&first) + whole(&second), "{s}");
+    assert!(
+        s["session_hits"].as_u64().unwrap() >= references as u64,
+        "{s}"
+    );
+}

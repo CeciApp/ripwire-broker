@@ -132,6 +132,22 @@ async fn main() -> ExitCode {
             }
             return ExitCode::SUCCESS;
         }
+        Ok(Command::HookStats { state_dir, json }) => {
+            let Some(dir) = state_dir.or_else(StateStore::default_dir) else {
+                eprintln!("no state directory: pass --state-dir");
+                return ExitCode::from(2);
+            };
+            let report = ripwire_broker::usage::report(&StateStore::new(dir).sessions());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
+            } else {
+                print!("{}", ripwire_broker::usage::render(&report));
+            }
+            return ExitCode::SUCCESS;
+        }
         Ok(Command::Prompt(a)) => {
             let (text, err) = ripwire_broker::local::prompt(&a).await;
             print!("{text}");

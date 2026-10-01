@@ -96,6 +96,11 @@ impl SessionMemory {
         self.seen.is_empty()
     }
 
+    /// The fingerprints themselves, for counting overlap between sessions; never content.
+    pub(crate) fn fingerprints(&self) -> impl Iterator<Item = &str> {
+        self.seen.iter().map(String::as_str)
+    }
+
     /// Whether this exact risk was delivered before; gate risks are resent, so callers that
     /// must tell old from new ask here.
     pub fn knows_risk(&self, r: &Risk) -> bool {
