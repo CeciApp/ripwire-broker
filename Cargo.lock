@@ -1099,6 +1099,7 @@ dependencies = [
  "futures-util",
  "h2",
  "ignore",
+ "libc",
  "proptest",
  "reqwest",
  "rust-mcp-sdk",

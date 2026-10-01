@@ -25,6 +25,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util"] }
 # Visual width of the status line (PRD §24.5.3, D-123): no deps, no network.
 unicode-width = "0.2"
+# `O_NOFOLLOW` and `O_NONBLOCK` for the private files (D-127). Already in the graph through
+# tokio and sha2: no new crate, no unsafe.
+libc = "0.2"
 
 [features]
 # The remote classifier's HTTP client (PRD §23, D-059). Off by default: the default build

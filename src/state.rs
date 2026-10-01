@@ -5,8 +5,9 @@ use crate::hook::SessionState;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct StateStore {
     dir: PathBuf,
@@ -87,27 +88,76 @@ impl StateStore {
     pub fn save(&self, session_id: &str, state: &SessionState) -> std::io::Result<()> {
         write_private(
             &self.dir,
+            &self.dir,
             &self.path(session_id),
             serde_json::to_string(state)?.as_bytes(),
         )
     }
 }
 
+/// Tightens an existing directory that is looser than 0700. Only one we own is touched (`owner` is
+/// the uid of a file we just made), and never a sticky one: a shared `/tmp` given as the state
+/// directory is not ours to restrict.
+fn tighten(dir: &Path, owner: u32) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(dir)?;
+    let mode = meta.mode();
+    if meta.is_dir() && meta.uid() == owner && mode & 0o1000 == 0 && mode & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Process-wide: threads writing the same file never share a temporary.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A new file that did not exist and is not a link: a planted name is skipped, never written
+/// through.
+fn create_temp(path: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+    let mut last = None;
+    for _ in 0..8 {
+        let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp{}-{n}", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.expect("at least one attempt"))
+}
+
 /// Writes `bytes` to `path` through a private temporary file in `dir` and a rename: readers see
-/// the old file or the new one, never half of it. Creates `dir` as 0700; the file is 0600.
-pub(crate) fn write_private(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// the old file or the new one, never half of it. `dir` is created as 0700 and, when it already
+/// exists looser and is ours, tightened to it; so is `outer`, the directory above it that this
+/// store also owns. The file is 0600. A failed write leaves no temporary behind.
+pub(crate) fn write_private(
+    outer: &Path,
+    dir: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&tmp, path)
+    let (tmp, mut file) = create_temp(path)?;
+    let written = file
+        .metadata()
+        .and_then(|m| {
+            tighten(outer, m.uid())?;
+            tighten(dir, m.uid())
+        })
+        .and_then(|()| file.write_all(bytes))
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }

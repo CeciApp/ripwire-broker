@@ -759,6 +759,141 @@ fn reading_creates_nothing() {
     let missing = state.path().join("never");
     assert_eq!(read(&missing, HOST, "s", Path::new("/r")), Read::Missing);
     assert!(!missing.exists());
+    // A state dir that exists but has no `statusline/` yet stays as it is.
+    assert_eq!(
+        read(state.path(), HOST, "s", Path::new("/r")),
+        Read::Missing
+    );
+    assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_fifo_reads_as_missing_without_blocking() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let file = path(state.path(), HOST, "s", root);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    assert!(Proc::new("mkfifo").arg(&file).status().unwrap().success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir = state.path().to_path_buf();
+    // Detached on purpose: a read that blocks on the FIFO must fail the test, not hang it.
+    std::thread::spawn(move || tx.send(read(&dir, HOST, "s", Path::new("/r"))));
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("read blocked on a FIFO"),
+        Read::Missing
+    );
+}
+
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn writers_of_one_file_do_not_share_a_temporary() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let dir = state.path().to_path_buf();
+    let writers: Vec<_> = (0..8)
+        .map(|t| {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                for i in 0..50 {
+                    let mut s = valid(Path::new("/r"));
+                    s.stats.injections = t * 100 + i;
+                    publish(&dir, "s", Path::new("/r"), &s).expect("a concurrent write failed");
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().unwrap();
+    }
+    assert!(matches!(
+        read(state.path(), HOST, "s", root),
+        Read::Valid(_)
+    ));
+    assert_eq!(
+        entries(&state.path().join("statusline")).len(),
+        1,
+        "no temporary is left behind"
+    );
+}
+
+#[test]
+fn a_failed_write_removes_its_temporary() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let file = path(state.path(), HOST, "s", root);
+    // A non-empty directory where the file goes: the rename cannot succeed.
+    std::fs::create_dir_all(file.join("inside")).unwrap();
+    assert!(publish(state.path(), "s", root, &valid(root)).is_err());
+    assert_eq!(
+        entries(file.parent().unwrap()),
+        vec![file.file_name().unwrap().to_string_lossy().into_owned()],
+        "only the directory that was already there"
+    );
+}
+
+#[test]
+fn a_symlink_planted_at_a_temporary_name_is_never_written_through() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let file = path(state.path(), HOST, "s", root);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let victim = state.path().join("victim");
+    std::fs::write(&victim, "precious").unwrap();
+    // The temporary is `<file>.tmp<pid>-<n>` with a process-wide counter: plant every name this
+    // process can reach in this test binary.
+    for n in 0..5_000 {
+        let name = file.with_extension(format!("tmp{}-{n}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, name).unwrap();
+    }
+    let _ = publish(state.path(), "s", root, &valid(root));
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+}
+
+#[test]
+fn a_looser_existing_directory_is_tightened_and_a_shared_one_is_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let sub = state.path().join("statusline");
+    std::fs::create_dir(&sub).unwrap();
+    for d in [state.path(), sub.as_path()] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    publish(state.path(), "s", root, &valid(root)).unwrap();
+    assert_eq!(mode(state.path()), 0o700);
+    assert_eq!(mode(&sub), 0o700);
+    // A sticky, world-writable directory (a shared `/tmp`) is not ours to restrict.
+    let shared = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(shared.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
+    publish(shared.path(), "s", root, &valid(root)).unwrap();
+    assert_eq!(mode(shared.path()), 0o1777);
+    assert_eq!(mode(&shared.path().join("statusline")), 0o700);
+}
+
+#[test]
+fn the_session_store_tightens_its_directory_too() {
+    use ripwire_broker::hook::SessionState;
+    use ripwire_broker::state::StateStore;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let store = StateStore::new(dir.path().to_path_buf());
+    store.save("s", &SessionState::default()).unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(store.load("s"), SessionState::default());
 }
 
 #[test]
