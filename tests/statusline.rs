@@ -978,11 +978,13 @@ fn a_state_directory_owned_by_another_user_is_refused() {
     let saved = store.save(&id, &SessionState::default());
     store.remove(&id);
     assert!(saved.is_err(), "wrote into another user's directory");
+    // Only this process's temporaries (`<hash>.tmp<pid>-<n>`): other tests' temp dirs also live in
+    // `/tmp` on Linux, as `.tmpXXXXXX`.
+    let ours = format!(".tmp{}-", std::process::id());
     let left: Vec<_> = std::fs::read_dir(shared)
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
-        .filter(|e| e.metadata().is_ok_and(|m| m.uid() == me))
+        .filter(|e| e.file_name().to_string_lossy().contains(&ours))
         .collect();
     assert!(left.is_empty(), "no temporary left behind: {left:?}");
 }
