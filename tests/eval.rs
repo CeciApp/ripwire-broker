@@ -582,7 +582,19 @@ fn the_agent_cannot_see_history_after_the_base() {
     let repo = common::sample_repo();
     let base = git(repo.path(), &["rev-parse", "HEAD"]);
     std::fs::write(repo.path().join("src/auth.py"), "the answer\n").unwrap();
-    git(repo.path(), &["commit", "-qam", "the reference fix"]);
+    // An identity of its own, as `sample_repo` does: CI runners have none configured.
+    git(
+        repo.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qam",
+            "the reference fix",
+        ],
+    );
     let work = tempfile::tempdir().unwrap();
     let seen = work.path().join("seen");
     let agent = work.path().join("curious-agent");

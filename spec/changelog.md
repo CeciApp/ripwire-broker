@@ -4258,6 +4258,15 @@ cinco casos anteriores: o instrumento mentindo de um jeito plausível.
 Os links `plan-fases-2-3.md` e `plan-fases-4-5.md` do PRD apontam para `spec/`, mas os planos
 estão em `spec/plan/`. Esses links estão quebrados desde antes desta mudança.
 
+### O CI pegou o que a minha máquina escondia
+
+A primeira execução do CI no PR #28 falhou em `the_agent_cannot_see_history_after_the_base`. O
+commit da "correção" no repositório de teste dependia de uma identidade do git: a minha máquina
+tem uma global, e o runner não tem. O `sample_repo` já passava `-c user.email`/`-c user.name`, e
+o teste novo não. Agora passa também, e a suíte inteira roda verde com
+`GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null`, a condição do runner. O runner do A/B
+não faz commit e não precisa de identidade.
+
 ### Verificação
 
 **315** testes no padrão e **328** com `online` (eram 295 e 308; 20 novos: 4 de hooks, 3 de CLI e
