@@ -1,7 +1,8 @@
 # Handoff — ripwire-broker
 
-Estado em 2026-10-01, até o [D-118](spec/changelog.md#d-118--revisão-do-pr-29-e-handoff). Para quem
-pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
+Estado em 2026-10-01, até o
+[D-119](spec/changelog.md#d-119--pendências-do-handoff-sha2-no-dependabot-e-links-dos-planos). Para
+quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
 
@@ -56,7 +57,7 @@ cargo fmt --check
   `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-118, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-119, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -100,13 +101,10 @@ Os instrumentos estão prontos; as medições, não.
 ## Pendências conhecidas, fora das medições
 
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
-- **Dependabot vai reabrir o `sha2` 0.11 toda semana.** Ele foi recusado no D-114 (duplicaria o
-  crate enquanto o `rust-mcp-sdk` pinado traz o 0.10), mas não foi posto no `ignore` do
-  `dependabot.yml`. Fechar à mão, ou ignorar com o motivo.
 - **Cancelamento sob HTTP/2** (reset de stream) não tem teste: os fixtures falam HTTP/1.1
   (`tests/online_protocol.rs`).
-- **Links quebrados no PRD:** `plan-fases-2-3.md` e `plan-fases-4-5.md` apontam para `spec/`, mas os
-  planos estão em `spec/plan/`.
+- **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
+  essa linha na mesma decisão.
 - **Diagrama:** `spec/diagrams/` não se atualiza sozinho. Quem mudar a topologia edita o JSON e roda
   `deliver` de novo (D-115).
 - **Uma validação do corpus falhou sem causa provada:** 9 tarefas do repositório A falharam no fix

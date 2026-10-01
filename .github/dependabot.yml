@@ -4,6 +4,9 @@
 # on purpose. The SDK's stateless protocol date was validated against a real ripwire (D-002), and
 # the version it reports is part of the compatibility guard (D-105). It moves by a decision
 # recorded in spec/changelog.md, never by an automatic bump, so it is ignored here (D-108).
+#
+# `sha2` >= 0.11 is refused while that pinned SDK brings 0.10: bumping ours alone only duplicates
+# the crate in the build graph (D-114). It moves together with the SDK (D-119).
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -14,6 +17,8 @@ updates:
     open-pull-requests-limit: 5
     ignore:
       - dependency-name: "rust-mcp-sdk"
+      - dependency-name: "sha2"
+        versions: [">= 0.11"]
 
   # Keeps the SHA pins in the workflows current. Without this, pinning by SHA means the actions
   # are frozen at whatever was current the day they were pinned, which trades a mutable tag for
