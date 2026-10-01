@@ -268,6 +268,7 @@ hook contract, so the same command serves both:
 | `Stop` | `context_before_finish`. With `--gate`, blocks once on `attention_required` and sends the evidence; otherwise a one-line notice |
 
 - **Opt-out:** type `#ripwire-off` in a prompt to silence the session, and `#ripwire-on` to resume.
+  The marker counts only as the whole last (or first) word of the prompt; one quoted mid-text does nothing.
 - **What was injected:** every injection shows a one-line `systemMessage`, and the full context sits in the
   host's transcript. `ripwire-broker hook-log --session ID` lists the last 5 injections with counts. Paths and
   symbols appear there only if the hook ran with `--log-refs`.

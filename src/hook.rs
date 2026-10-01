@@ -387,6 +387,29 @@ pub async fn handle(
     out
 }
 
+/// The opt-out/opt-in marker of a prompt and the prompt without it. A marker
+/// counts only as the whole last word, or else the whole first word, so a
+/// marker quoted or mentioned inside the text (a report, a question about it)
+/// toggles nothing.
+fn marker(prompt: &str) -> (Option<&'static str>, &str) {
+    let text = prompt.trim();
+    for m in [OPT_OUT, OPT_IN] {
+        if let Some(rest) = text.strip_suffix(m)
+            && (rest.is_empty() || rest.ends_with(char::is_whitespace))
+        {
+            return (Some(m), rest.trim());
+        }
+    }
+    for m in [OPT_OUT, OPT_IN] {
+        if let Some(rest) = text.strip_prefix(m)
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return (Some(m), rest.trim());
+        }
+    }
+    (None, text)
+}
+
 async fn respond(
     event: Event,
     input: &Value,
@@ -401,20 +424,20 @@ async fn respond(
             };
             let first = state.prompts_seen == 0;
             state.prompts_seen += 1;
-            if prompt.contains(OPT_OUT) {
+            let (marker, task) = marker(prompt);
+            if marker == Some(OPT_OUT) {
                 state.opted_out = true;
                 return Ok(Some(json!({"systemMessage": format!(
                     "ripwire-broker: automatic context is off for this session; type {OPT_IN} to resume"
                 )})));
             }
-            if prompt.contains(OPT_IN) {
+            if marker == Some(OPT_IN) {
                 state.opted_out = false;
             }
             if state.opted_out || (!first && !policy.every_prompt) {
                 return Ok(None);
             }
-            let task = prompt.replace(OPT_IN, "");
-            let mut req = TaskRequest::new(task.trim());
+            let mut req = TaskRequest::new(task);
             req.budget_tokens = capped(policy.prompt_budget);
             let env = broker.context_for_task(req).await?;
             analysed(state, event, status_of(env.status), None);

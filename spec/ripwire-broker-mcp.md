@@ -494,7 +494,9 @@ foi injetado.
   contrato de hook.
 - O contexto é injetado no primeiro prompt e depois de edições. O gate de `Stop` é
   opt-in (`--gate`).
-- `#ripwire-off` / `#ripwire-on` fazem o opt-out por sessão.
+- `#ripwire-off` / `#ripwire-on` fazem o opt-out por sessão. O marcador só vale como palavra
+  inteira no fim ou no começo do prompt; citado no meio do texto não altera nada
+  ([D-125](changelog.md#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt)).
 - Cada injeção mostra um `systemMessage`, e o `hook-log` mostra contagens.
 - `ripwire-broker prompt` é o wrapper.
 - Detalhes em [D-030](changelog.md#d-030--hooks-nos-dois-hosts-proposta),

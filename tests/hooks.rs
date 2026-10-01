@@ -252,6 +252,50 @@ async fn an_opt_out_marker_silences_the_session_until_opt_in() {
     );
 }
 
+#[tokio::test]
+async fn a_marker_only_counts_as_the_first_or_last_word_of_the_prompt() {
+    let (b, _fake, ws) =
+        hook_broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    let mut input = event("claude_code_user_prompt_submit", ws.path());
+    let every = Policy {
+        every_prompt: true,
+        ..Policy::default()
+    };
+    let mut state = SessionState::default();
+    let mut say = async |state: &mut SessionState, prompt: &str| {
+        input["prompt"] = prompt.into();
+        hook::handle(
+            Host::ClaudeCode,
+            Event::UserPromptSubmit,
+            &input,
+            &b,
+            state,
+            &every,
+        )
+        .await
+    };
+
+    // A marker quoted or mentioned inside the text is not a command.
+    for quoted in [
+        "neither `#ripwire-on` nor `#ripwire-off` is processed",
+        "the defect: neither #ripwire-on nor #ripwire-off is processed here",
+        "type #ripwire-off/#ripwire-on to toggle",
+        "a tag glued to a word, like x#ripwire-off",
+    ] {
+        say(&mut state, quoted).await;
+        assert!(!state.opted_out, "{quoted}");
+    }
+
+    say(&mut state, "pause now #ripwire-off").await;
+    assert!(state.opted_out, "last word");
+    say(&mut state, "a report quoting #ripwire-on mid-sentence").await;
+    assert!(state.opted_out, "a quoted opt-in does not resume");
+    say(&mut state, "#ripwire-on and carry on").await;
+    assert!(!state.opted_out, "first word");
+    say(&mut state, "#ripwire-off").await;
+    assert!(state.opted_out, "the marker alone");
+}
+
 fn edit_fake() -> FakeUpstream {
     FakeUpstream::new()
         .answer("situational_awareness", "situational_awareness_files")
