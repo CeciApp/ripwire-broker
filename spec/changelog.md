@@ -4695,7 +4695,7 @@ sessão real do Claude Code e a fixture de um payload real do `statusLine` (seç
 | D3 | só os hooks do Claude Code publicam | a barra só existe lá; o host entra na chave e no snapshot, então publicar para o Codex depois é uma linha |
 | D4 | falha do `local::launch`: a análise vira `erro`, o estado é salvo e publicado; contadores intactos | esse caminho não conta evento hoje, e mudá-lo mudaria o `hook-stats` |
 | D5 | barra alheia no settings do usuário: a nossa não é escrita (sombrearia), nota com trecho manual; no `settings.local.json`: a nossa é escrita, com nota de que a local prevalece; settings do usuário ilegível ou sem como localizar: nada é escrito, nota | não pisar numa barra que o usuário escolheu |
-| D6 | `agent` (objeto) no JSON do host: só segmentos do host e `agente`, sem ler snapshot | o payload de um subagente não descreve a sessão dos hooks |
+| D6 | **Revisada** (ver "Revisão final"): `agent` (objeto) só acrescenta `agente: <nome>` depois do modelo; o snapshot é lido. ~~Original: só segmentos do host e `agente`, sem ler snapshot~~ | o original supunha que o payload de um subagente não descreve a sessão dos hooks; a documentação diz o contrário |
 
 ### Decisões tomadas durante a execução (rulings do controlador)
 
@@ -4707,9 +4707,8 @@ Cada uma resolve um defeito do plano ou da revisão, com o custo.
   no nível da saída (só muda memória); passou a valer "remover a checagem `> MAX_STDIN_BYTES`", que um
   teste com JSON válido preenchido até o limite e um byte além tem de pegar. *Custo:* o `take`, que
   limita a leitura sem estourar a memória, continua sem teste.
-- **Guarda de agente em `main.rs` sem teste** (T5). `(Some(session), false)` é um mutante equivalente: o
-  `render` já ignora o snapshot com `agent`. A guarda fica como economia de leitura. *Custo:* um payload
-  de agente pode ler o snapshot sem efeito visível.
+- ~~**Guarda de agente em `main.rs` sem teste** (T5). `(Some(session), false)` é um mutante equivalente.~~
+  Superada pela D6 revisada: a guarda foi removida e o snapshot é lido também com `agent`.
 - **Falha de launch não persiste a versão do ripwire** (T7). A revisão achou que o salvamento novo
   guardaria `{carimbo, "unavailable"}` em `state.ripwire` para um binário que existe mas não roda, e
   eventos seguintes confiariam nisso até o arquivo mudar (um `chmod +x` não muda tamanho nem mtime).
@@ -4726,9 +4725,10 @@ Cada uma resolve um defeito do plano ou da revisão, com o custo.
 
 ### Defeito existente, fora do escopo, registrado e não corrigido
 
-Quando o `local::launch` falha, `hook::run` retorna antes de `handle`, e o `#ripwire-on` desse prompt
-não é processado. Com o ripwire ausente, a barra mostra `hooks off` até um prompt com o ripwire de pé.
-Está no handoff. Consequência nova do D4: uma sessão cujos eventos todos falham no launch deixa um
+Quando o `local::launch` falha, `hook::run` retorna antes de `handle` (conferido em `src/hook.rs`: o
+ramo `Err` devolve `failure(..)` sem chamar `handle`), e **nem `#ripwire-on` nem `#ripwire-off`** desse
+prompt são processados: o opt-out não vale e o opt-in não reativa. Com o ripwire ausente, a barra mostra
+`hooks off` se a sessão já estava pausada, até um prompt com o ripwire de pé. Está no handoff. Consequência nova do D4: uma sessão cujos eventos todos falham no launch deixa um
 arquivo de sessão com contadores zerados, e o `hook-stats` passa a contar mais uma sessão.
 
 ### A ordem save → publish vale por leitura, não por teste
@@ -4753,7 +4753,7 @@ publica os totais certos.
 | 4 | tirar o prefixo de comprimento do hash do caminho | pega |
 | 4 | `is_file()` -> `!is_dir()` na leitura | pega (symlinks leem como ausentes) |
 | 5 | apagar a checagem `> MAX_STDIN_BYTES` | pega, depois que o teste passou a usar JSON válido |
-| 5 | `(Some(session), false)` -> `(Some(session), _)` | **equivalente** (ver rulings) |
+| 5 | `(Some(session), false)` -> `(Some(session), _)` | **equivalente** então; a guarda foi removida na revisão final |
 | 6 | `analysed` depois de `has_news` na edição | sobrevivia; teste de edição sem novidade, agora pega |
 | 6 | remover o `analysed` do ramo `Err` | pega |
 | 7 | tirar `real_session` de `publishes` | pega |
@@ -4798,7 +4798,7 @@ por caso, processo novo a cada uma, stdin com `session_id`, `workspace.project_d
 
 - **Máquina:** Apple M3; macOS 27.0.1 (build 26A434).
 - **Comando:** `target/release/ripwire-broker statusline --workspace WS --state-dir SD --detail --width 200`.
-- A projeção foi publicada **antes** de medir e conferida pela saída: nos casos com snapshot, a linha
+- (O script do plano, Tarefa 9 passo 2, como escrito mede o caminho sem snapshot.) A projeção foi publicada **antes** de medir e conferida pela saída: nos casos com snapshot, a linha
   traz `hooks on · última: atenção · inj 7 · não reenviados 18 · entregues 25 · reuso 42% · último
   contexto ~1,2k tok · há 0s`. Sem o snapshot, `hooks sem dados`. Um snapshot não lido mediria o
   caminho errado, e o primeiro roteiro do plano (`--state-dir` sem projeção) mediria só o "sem snapshot".
@@ -4819,7 +4819,8 @@ ms (p50/p95/max). A medição não inclui o tempo de o Claude Code desenhar a ba
 `--hooks --statusline --write` numa pasta de teste, abrir o Claude Code, mandar um prompt, editar um
 arquivo, encerrar o turno, `#ripwire-off` e `#ripwire-on`, comparando a barra com
 `ripwire-broker hook-log --session ID` e com o snapshot, e registrar a versão do Claude Code. O
-roteiro está pronto em `~/projects/ai/CECI/statusline-manual/` (`ROTEIRO.md`, `capture.sh` e a pasta
+roteiro está pronto em `~/projects/ai/CECI/statusline-manual/` (a pasta local do mantenedor, não
+versionada; `ROTEIRO.md`, `capture.sh` e a pasta
 `ws/`); o `capture.sh` grava o payload real do `statusLine` em `payload-<epoch>-<pid>.json`.
 
 Também pendente: transformar um desses payloads em `tests/fixtures/statusline/claude_code.json` (com
@@ -4852,3 +4853,40 @@ T8 somou 11 (com as rodadas de correção), o que dá os 384/398 finais.
 `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` (também com
 `--features online`) e as duas suítes: **OK**, sem falhas. Gate do CA-10: `cargo tree --locked -e normal`
 filtrado por `reqwest|secrecy|rustls|hyper` sai vazio.
+
+### Revisão final
+
+Uma revisão do branch inteiro pediu oito correções; todas feitas, cada mudança de comportamento com
+teste primeiro (vermelho visto) e mutação (reverter o conserto e ver o teste falhar).
+
+- **D6 revisada (F1).** A documentação do Claude Code (`code.claude.com/docs/en/statusline`) diz que o
+  objeto `agent` (`agent.name`) aparece quando a sessão **principal** roda com `--agent` ou configurações
+  de agente, e que subagentes usam um `subagentStatusLine` separado. A premissa da D6 original (o payload
+  com `agent` é de um subagente e não descreve a sessão dos hooks) era falsa, e com a regra antiga quem
+  usa `--agent` nunca via os dados dos hooks. *Decisão do mantenedor:* `agent` não muda o que é lido nem
+  mostrado; a barra mostra os segmentos normais mais um segmento macio `agente: <nome>` logo depois do
+  modelo (nome saneado, no máximo 24 colunas; sem nome usável, `agente`). A guarda `(Some(session), false)`
+  de `main.rs` foi removida; `HostInput` guarda `agent_name`. A decisão original continua visível, riscada,
+  no §24.13 e na tabela acima.
+- **Teste de ponta a ponta sem ripwire (F2).** `installed_hook_and_bar_agree_through_a_symlinked_workspace`
+  roda `install --hooks --statusline --write` por um symlink, executa por `sh -c` o comando do hook e o da
+  barra que o install escreveu (mais `--ripwire /nonexistent/ripwire` e `--state-dir`) e confere
+  `última: erro`. O install grava a raiz canônica, então o symlink não é discriminante sozinho: a mutação
+  que bate é desligar a publicação do hook. Os helpers que rodam o binário agora removem `XDG_STATE_HOME`.
+- **Defeito conhecido (F3):** documentado acima (`#ripwire-off` também fica sem processar).
+- **`install` (F4, ruling).** Se o settings do usuário passou a ter barra alheia e o do projeto tem a
+  **nossa** (identificada pela estrutura, como `bar()` já faz), a do projeto é removida e sai uma nota
+  ("removing the broker's statusLine ... so it does not shadow ..."), no dry run e no `--write`;
+  reexecutar é idempotente. Uma barra alheia no projeto nunca é removida.
+- **`"statusLine": null` (F5)** lê como ausente em `bar()`, não como alheia.
+- **Saída da barra (F6):** `let _ = writeln!(stdout, ..)` no lugar de `println!`, que entra em pânico (101)
+  com stdout fechado (EPIPE). Teste: `a_closed_stdout_never_makes_the_bar_fail`.
+- **Docs (F7, F8):** README (mesmo `--workspace` nos hooks e na barra; `--agent`; sombreamento), §19 do
+  PRD reformatado, e a pasta `statusline-manual/` marcada como local e não versionada.
+- **Continua pendência:** o endurecimento de `write_private` contra links (e os itens da lista de
+  pendências menores acima), a validação manual e a fixture real.
+- **Contagem depois da revisão** (`cargo test --all-targets --locked`): padrão **391 passados, 2 ignorados**
+  (+7); com `online` **405 passados, 4 ignorados** (+7). `tests/statusline.rs` 34 -> 36 (o teste de
+  agente foi substituído, +1 de nome do agente, +1 de stdout fechado); `tests/cli.rs` 62 -> 67 (+5: `null`,
+  remoção da barra nossa em dois cenários, barra alheia do projeto preservada, e o ponta a ponta). Gate
+  completo (fmt, clippy nas duas features, as duas suítes) OK; `cargo tree` filtrado sai vazio.

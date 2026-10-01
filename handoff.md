@@ -22,7 +22,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 2 · hooks, contexto incremental, `install`, `doctor` | feita |
 | 3 · notas por modelo local | feita, com cache só em memória (o de disco espera a medição do §21.3) |
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
-| barra de status do Claude Code (§24) | **implementada** (D-123); **validação manual numa sessão real e fixture de payload real pendentes** (roteiro em `~/projects/ai/CECI/statusline-manual/`) |
+| barra de status do Claude Code (§24) | **implementada** (D-123); **validação manual numa sessão real e fixture de payload real pendentes** (roteiro em `~/projects/ai/CECI/statusline-manual/`, pasta local do mantenedor, não versionada) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
@@ -110,14 +110,17 @@ Os instrumentos estão prontos; as medições, não.
 ## Pendências conhecidas, fora das medições
 
 - **Barra de status: validação manual e fixture real (D-123).** O mantenedor roda o roteiro
-  `~/projects/ai/CECI/statusline-manual/ROTEIRO.md` (instalar, prompt, edição, fim de turno,
+  `~/projects/ai/CECI/statusline-manual/ROTEIRO.md` (pasta local do mantenedor, não versionada; instalar, prompt, edição, fim de turno,
   `#ripwire-off`/`#ripwire-on`, comparando a barra com `hook-log` e o snapshot; anotar a versão do
   Claude Code). O `capture.sh` da pasta grava o payload real do `statusLine`; falta transformá-lo em
   `tests/fixtures/statusline/claude_code.json` (com `__WORKSPACE__`) e conferir `effort.level`,
   `workspace.project_dir` e `agent`. Até lá os testes usam JSON sintético.
 - **Defeito existente que a barra torna visível:** quando o `local::launch` falha, `hook::run` retorna
-  antes de `handle`, e o `#ripwire-on` desse prompt não é processado. Com o ripwire ausente a barra
-  mostra `hooks off` até um prompt com o ripwire de pé. Não corrigido (D-123).
+  antes de `handle`, e **nem `#ripwire-on` nem `#ripwire-off`** desse prompt são processados. Com o
+  ripwire ausente a barra mostra `hooks off` (se a sessão já estava pausada) até um prompt com o ripwire
+  de pé. Não corrigido (D-123).
+- **Barra: `write_private` e links.** O endurecimento contra symlink/hardlink do arquivo temporário
+  continua pendência (D-123, "Revisão final").
 - **Barra: sessão só de falhas de launch.** Agora deixa um arquivo de sessão com contadores zerados, e o
   `hook-stats` conta mais uma sessão (consequência do D4 do §24.13).
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.

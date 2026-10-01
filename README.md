@@ -336,6 +336,15 @@ rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
   `statusline/` directory of the state dir) and written atomically by the hooks, after the session state.
 - **Migration:** the bar's counters start at the first projection bound to the workspace, so a session that
   began before the bar existed shows zero, while `hook-stats` keeps counting everything.
+- **Hand-written configs** must pass the same `--workspace` to the hooks and to `statusline`: without it the
+  hooks fall back to the event's `cwd` and the bar to `workspace.project_dir`, and they differ if the working
+  directory changes mid-session (`install` always writes the same one to both).
+- **`--agent`:** when the main session runs with `--agent`, the host sends an `agent` object; the bar shows
+  the usual segments, hook data included, plus `agente: <name>` right after the model (at most 24 columns).
+  Subagents have their own `subagentStatusLine`, which this bar does not configure.
+- **Shadowing:** if your user settings gain a `statusLine` of their own, a re-run of
+  `install --statusline` removes the broker's bar from the project settings (and says so) so it does not
+  shadow yours.
 - Only the Claude Code hooks publish. Cost: one process per refresh, a few milliseconds
   (measured in [D-123](spec/changelog.md#d-123--a-barra-de-status-é-implementada)).
 

@@ -49,7 +49,7 @@ indicadas. **Execução:** subagent-driven (`superpowers:subagent-driven-develop
 | D3 | quais hooks publicam | **só os do Claude Code.** A barra só existe lá; o host entra na chave do arquivo e no snapshot, então publicar para o Codex depois é uma linha | 7 |
 | D4 | falha do `local::launch` | a análise vira `erro` e o estado é salvo e publicado. **Os contadores não mudam:** hoje esse caminho não conta evento, e mudar isso mudaria o `hook-stats` | 7 |
 | D5 | barra alheia herdada (§7) | barra alheia **no settings do usuário**: a do broker não é escrita no projeto, porque a sombrearia; vira nota com o trecho manual. Barra alheia **no `settings.local.json`**: a do broker é escrita, com nota de que a local prevalece. Settings do usuário ilegível: nada é escrito, nota com trecho manual | 8 |
-| D6 | payload de agente (§8) | presença de `agent` (objeto) no JSON do host: mostra só os segmentos do host e `agente`, sem ler snapshot | 2, 5 |
+| D6 | payload de agente (§8) | presença de `agent` (objeto) no JSON do host: mostra só os segmentos do host e `agente`, sem ler snapshot. **Revisada no D-123:** `agent` só acrescenta o segmento `agente: <nome>`; o snapshot é lido | 2, 5 |
 
 **Defeito existente, fora do escopo, registrado aqui porque a barra o torna visível:** quando o
 `local::launch` falha, `hook::run` retorna antes de `handle`, e o `#ripwire-on` desse prompt não é
@@ -2040,6 +2040,8 @@ if args.hooks || bar_wanted {
   t.sort(); print(f"p50 {t[149]:.1f} ms  p95 {t[284]:.1f} ms  max {t[-1]:.1f} ms")
   EOF
   ```
+  Nota: o script como está escrito mede o caminho sem snapshot (nenhuma projeção é publicada no
+  `--state-dir`); ver o D-123, que mediu com a projeção publicada antes.
   Repetir com uma projeção de 16 KiB no lugar (gerar com `publish` num teste `#[ignore]`, ou
   escrevê-la à mão com `stats` grandes e `event` longo). Meta: p95 < 100 ms ponta a ponta. Registrar
   os números, a máquina e o sistema no D-123. Se o p95 passar da meta, parar e reportar antes de

@@ -1384,9 +1384,10 @@ barra de produto, que dependem da escolha dos repositórios. Destaques:
 - projeção por sessão e workspace, privada e atômica;
 - registro opcional pelo instalador (`install claude-code --statusline`).
 
-**Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)); validação manual numa sessão real e fixture de payload real pendentes ([plano](plan/status-bar-plan.md), §24). Vem antes da Fase 6 por
-ser pequena, local e independente dela, e por tornar visível o uso dos hooks que a medição do §21.3
-precisa.
+**Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)); validação
+manual numa sessão real e fixture de payload real pendentes ([plano](plan/status-bar-plan.md), §24).
+Vem antes da Fase 6 por ser pequena, local e independente dela, e por tornar visível o uso dos hooks
+que a medição do §21.3 precisa.
 
 ### Fase 6 — Times e CI
 
@@ -2412,7 +2413,7 @@ exige nova decisão:
 
 **Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)); validação
 manual numa sessão real do Claude Code e fixture de payload real pendentes (roteiro pronto fora do
-repositório, em `~/projects/ai/CECI/statusline-manual/`). Plano em
+repositório, em `~/projects/ai/CECI/statusline-manual/`, a pasta local do mantenedor, não versionada). Plano em
 [status-bar-plan.md](plan/status-bar-plan.md), executado por subagentes, uma tarefa por vez com
 revisão. Vem antes da Fase 6 (§19).
 
@@ -2714,7 +2715,7 @@ O Graft usa um helper que carrega o pacote JavaScript. Sua barra lê estatístic
 | [Estado](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/state.ts), [hooks](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/hooks.ts) | Projetar dados por sessão; broker já dispõe de contadores para os hooks |
 | [Economia](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/context/savings.ts), [preços](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/context/price.ts) | Estimativas dependem de baseline; não reutilizar fórmulas sem medição equivalente |
 
-Cuidados específicos: no commit examinado, o renderizador não exibe `% enriched`. O fallback de `statusline.ts` para `wiring.json` preenche defaults sem sinal de drift e pode resultar em `synced`. Não reproduzir esse significado no broker. Quando há `agent.name`, o Graft usa uma renderização própria para o agente; no broker, payloads de agente devem mostrar apenas os segmentos do host e indicar `agente`, sem herdar contadores da sessão principal na primeira versão.
+Cuidados específicos: no commit examinado, o renderizador não exibe `% enriched`. O fallback de `statusline.ts` para `wiring.json` preenche defaults sem sinal de drift e pode resultar em `synced`. Não reproduzir esse significado no broker. Quando há `agent.name`, o Graft usa uma renderização própria para o agente. ~~No broker, payloads de agente devem mostrar apenas os segmentos do host e indicar `agente`, sem herdar contadores da sessão principal na primeira versão.~~ **D6 revisada** ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)): a documentação do Claude Code diz que o objeto `agent` aparece quando a sessão principal roda com `--agent` ou configurações de agente, e que subagentes usam um `subagentStatusLine` separado. Logo `agent` não muda o que é lido: a barra mostra os segmentos normais, com os dados dos hooks, mais `agente: <nome>` logo depois do modelo.
 
 ### 24.9 Requisitos não funcionais
 
@@ -2739,7 +2740,7 @@ Cuidados específicos: no commit examinado, o renderizador não exibe `% enriche
 1. `statusline` recebe JSON válido, imprime uma linha e retorna 0; `serve` mantém stdout exclusivamente MCP. Usar upstream falso que falha caso seja executado para comprovar isolamento.
 2. Campos ausentes, nulos, desconhecidos, Unicode, stdin vazio/inválido/excedente e snapshot ausente/corrompido/incompatível não causam panic ou logs extensos.
 3. Zero de contexto é exibido como `0%`; ausência não vira zero. Sem denominador, não exibir taxa fictícia.
-4. Sessões, hosts e workspaces distintos não compartilham projeção; verificar worktree, mudança de cwd e identidade ausente. Payload de agente não reutiliza métricas da conversa principal.
+4. Sessões, hosts e workspaces distintos não compartilham projeção; verificar worktree, mudança de cwd e identidade ausente. Payload de agente (sessão principal com `--agent`) mostra os dados dos hooks da própria sessão e o segmento `agente: <nome>`.
 5. `#ripwire-off` aparece como pausa; `#ripwire-on` reativa. `Stop` com `ready` silencioso substitui a última análise de atenção; evento sem análise preserva o resumo.
 6. Falha de upstream aparece como última análise com erro; gravação de projeção recusada não muda a saída esperada do hook. Crash entre gravações não duplica totais no evento seguinte.
 7. Leitura concorrente durante publicação vê somente versões completas e não espera lock. Totais reproduzem `SessionTally` descontado do baseline, sem outro acumulador.
@@ -2792,9 +2793,10 @@ que registra o que o código mudou em cada uma.
 | D2 | O que sobra sob largura extrema (§24.5.3) | Essenciais: `rw-brkr`, `ctx N%`, `hooks off`, `última: atenção`, `última: erro`. `hooks on`, `hooks sem dados`, `última: pronta` e `última: incerta` não são pausa nem alerta, e saem depois do modelo |
 | D3 | Quais hooks publicam (§24.6.3) | Só os do Claude Code. O host já entra na chave do arquivo e no snapshot, então publicar para o Codex depois é uma linha |
 | D4 | Falha do `local::launch` (§24.3.1) | A análise vira `erro` e o estado é salvo e publicado. Os contadores não mudam: esse caminho não conta evento hoje, e mudá-lo mudaria o `hook-stats` |
-| D5 | Barra alheia herdada (§24.7) | No settings do usuário: a do broker não é escrita, porque a sombrearia, e sai nota com o trecho manual. No `settings.local.json`: a do broker é escrita, com nota de que a local prevalece. Settings do usuário ilegível: nada é escrito, nota com o trecho manual |
-| D6 | Payload de agente (§24.8) | Presença de `agent` (objeto) no JSON do host: só os segmentos do host e `agente`, sem ler snapshot |
+| D5 | Barra alheia herdada (§24.7) | No settings do usuário: a do broker não é escrita, porque a sombrearia, e sai nota com o trecho manual. No `settings.local.json`: a do broker é escrita, com nota de que a local prevalece. Settings do usuário ilegível: nada é escrito, nota com o trecho manual. Se o usuário passa a ter barra alheia e o settings do projeto tem a barra do broker (reconhecida pela estrutura), um novo `install --statusline` remove a do projeto, com nota, para não sombrear a do usuário (revisão final, D-123). `"statusLine": null` conta como ausente |
+| D6 | Payload de agente (§24.8) | **Revisada** (D-123): presença de `agent` (objeto) no JSON do host não muda o que é lido nem mostrado; a barra traz os segmentos normais, com os dados dos hooks, mais um segmento `agente: <nome>` logo depois do modelo (nome saneado, no máximo 24 colunas; sem nome usável, `agente`). ~~Original: só os segmentos do host e `agente`, sem ler snapshot.~~ Motivo: a documentação do Claude Code contradiz a premissa (o objeto `agent` descreve a sessão principal rodando com `--agent`; subagentes usam `subagentStatusLine`), e com a regra original quem usa `--agent` nunca veria os dados dos hooks |
 
 **Defeito existente, fora do escopo:** quando o `local::launch` falha, `hook::run` retorna antes de
-`handle`, e o `#ripwire-on` desse prompt não é processado. Com o ripwire ausente, a barra mostraria
-`hooks off` até um prompt com o ripwire de pé. Registrado, não corrigido nesta entrega (D-123).
+`handle`, e nem `#ripwire-on` nem `#ripwire-off` desse prompt são processados (o opt-out não
+vale e o opt-in não reativa). Com o ripwire ausente, a barra mostra `hooks off` (se a sessão já
+estava pausada) até um prompt com o ripwire de pé. Registrado, não corrigido nesta entrega (D-123).
