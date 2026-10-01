@@ -1,8 +1,8 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-01, até o
-[D-120](spec/changelog.md#d-120--o-cancelamento-sob-http2-ganha-teste). Para quem pega o projeto
-agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
+[D-121](spec/changelog.md#d-121--três-mecanismos-que-reproduzem-as-falhas-de-validação-do-d-117).
+Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
 
@@ -57,7 +57,7 @@ cargo fmt --check
   `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-120, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-121, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -73,14 +73,18 @@ Os instrumentos estão prontos; as medições, não.
   `broker-online`) com Claude Code headless isolado, reduz cada transcript a contagens, pontua
   contra o commit de referência e julga as barras. Uso no [README](README.md#ab-evaluation).
 - **Corpus:** 32 tarefas de commits reais em três repositórios (dois privados, A e B, e este). Mora
-  **fora deste repositório**, em `~/projects/ai/CECI/ab-eval/` na máquina do mantenedor, com o
-  próprio `README.md` e uma `SPEC.md` de como as tarefas foram escritas. Nunca versionar aqui:
-  descreve código privado.
+  **fora deste repositório**, em `~/projects/ai/CECI/ab-eval/` **noutra máquina** do mantenedor,
+  com o próprio `README.md` e uma `SPEC.md` de como as tarefas foram escritas. Nunca versionar aqui:
+  descreve código privado. Nesta máquina há só o corpus de diagnóstico do D-121, em
+  `~/projects/ai/CECI/ab-eval-diag/`, que não serve ao A/B.
 - **Validação:** 30 tarefas têm `check` validado (falha no base, passa no fix); 2 só medem custo.
 - **Falta, nesta ordem:**
   1. o mantenedor revisar os enunciados (ressalvas no D-117: alguns nomeiam interfaces, um entrega
      o diagnóstico);
-  2. revalidar no dia (`ripwire-eval validate`; os testes do repositório A dependem da data);
+  2. dar a cada tarefa do repositório A uma porta própria e o relógio congelado no `env` (D-121), e
+     revalidar (`ripwire-eval validate`). A porta vale para todas: a configuração de teste do A sobe
+     o servidor em todo `mix test`. O relógio só importa nas tarefas cujos testes leem a data, mas
+     congelá-lo nas outras é inofensivo e evita decidir tarefa por tarefa;
   3. **piloto pago**: 3 tarefas × 3 braços, teto de US$ 3 por execução, para medir custo real e
      gravar um transcript real (a fixture de `stream-json` dos testes é sintética);
   4. a rodada: 32 tarefas × 3 braços × 3 repetições. O braço `broker-online` só com a chave e
@@ -105,9 +109,6 @@ Os instrumentos estão prontos; as medições, não.
   essa linha na mesma decisão.
 - **Diagrama:** `spec/diagrams/` não se atualiza sozinho. Quem mudar a topologia edita o JSON e roda
   `deliver` de novo (D-115).
-- **Uma validação do corpus falhou sem causa provada:** 9 tarefas do repositório A falharam no fix
-  e passaram de novo com a máquina parada (D-117). Suspeitas: carga, ou outra sessão no mesmo
-  Postgres. Hoje o `validate` grava logs; se repetir, eles dizem por quê.
 
 ## Armadilhas já pisadas
 
@@ -126,6 +127,10 @@ Cada uma custou uma conclusão errada antes de ser achada. O changelog conta sei
   #29.
 - **O repositório é público.** Detalhes dos repositórios privados do corpus não entram em commit,
   changelog nem PR.
+- **A suíte do repositório A abre uma porta fixa, e parte dos testes lê a data.** A porta é da
+  configuração de teste, então vale para toda execução: duas suítes ao mesmo tempo, e a segunda morre
+  com `eaddrinuse` e o `check` conta como falha. A data é de alguns testes: num `fix` antigo, eles
+  envelhecem com o calendário. Medido no corpus de diagnóstico (D-121).
 - **O corpus usa um Postgres compartilhado.** As migrações do repositório A têm efeitos globais no
   cluster: rodar uma validação ou rodada por vez, e sem outra sessão trabalhando no A.
 

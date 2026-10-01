@@ -355,8 +355,12 @@ cargo build --release
   the fix, where it must pass. A check that passes at the base measures nothing. The output of every setup
   and check goes to `validate-logs/` next to the corpus; a run's check output goes next to its transcript.
 - **Run on an idle machine.** A check run under heavy load can fail for reasons that have nothing to do with
-  the agent (database timeouts), and then counts as a wrong answer for that arm. Validate again just before a
-  paid run: real test suites depend on the date.
+  the agent (tests with short timing windows), and then counts as a wrong answer for that arm. Validate again
+  just before a paid run.
+- **Pin what the suite reads from the machine.** A check taken from an old commit ages: its tests may read
+  today's date, or bind a fixed port that a second suite on the same machine already holds. Put a frozen clock
+  (the day the change was written, not the merge date) and a port of its own in the task's `env`, when the
+  suite offers them (D-121).
 - **Arms:** `none`, `ripwire` (ripwire's MCP directly), `broker`, `broker-online`. The online arm needs
   `RIPWIRE_BROKER_JEV_API_KEY` and sends eligible source of the corpus repositories to the provider.
 - **Isolation:** each run gets a fresh repository holding the base and its ancestors only. The fix, a later
