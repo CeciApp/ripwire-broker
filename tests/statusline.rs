@@ -1,6 +1,7 @@
 //! The status line (PRD §24): rendering, the `statusline` command and its projection.
 use ripwire_broker::statusline::{HostInput, Options, model_label, parse_input, render, width};
 use ripwire_broker::statusline_state::*;
+use std::path::Path;
 
 const WIDE: Options = Options {
     detail: false,
@@ -40,6 +41,13 @@ fn snap(opted_out: bool, injections: u64, hits: u64, last: Option<AnalysisStatus
 
 const SONNET: &str = r#"{"session_id":"s","model":{"display_name":"Sonnet","id":"claude-sonnet-4-6"},
   "effort":{"level":"high"},"context_window":{"used_percentage":32}}"#;
+
+fn valid(root: &Path) -> Snapshot {
+    Snapshot {
+        workspace_key: workspace_key(root),
+        ..snap(false, 2, 3, Some(AnalysisStatus::Ready))
+    }
+}
 
 #[test]
 fn the_spec_examples_render_as_written() {
@@ -275,19 +283,46 @@ fn drop_order_model_before_soft_and_d2_rules() {
     // Model dropped, soft kept: Model omitted, soft segments (hooks on, última: pronta) visible.
     // Verify: width 60 (threshold: model drops at 60, fits at 61).
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
-    let line = render(&host(SONNET), Some(&s), &Options { detail: false, width: 60, color: false }, 1_020);
+    let line = render(
+        &host(SONNET),
+        Some(&s),
+        &Options {
+            detail: false,
+            width: 60,
+            color: false,
+        },
+        1_020,
+    );
     assert_eq!(line, "rw-brkr · ctx 32% · hooks on · última: pronta");
 
     // D2 rule: soft drops but essential alerts survive (não é pausa nem alerta, saem).
     // With Error status, hooks off and última: erro are alerts, not soft.
     // At width 40, soft drops but alerts stay.
     let alert_snap = snap(false, 7, 18, Some(AnalysisStatus::Error));
-    let alert_line = render(&host(SONNET), Some(&alert_snap), &Options { detail: true, width: 40, color: false }, 1_020);
+    let alert_line = render(
+        &host(SONNET),
+        Some(&alert_snap),
+        &Options {
+            detail: true,
+            width: 40,
+            color: false,
+        },
+        1_020,
+    );
     assert_eq!(alert_line, "rw-brkr · ctx 32% · última: erro");
 
     // At width 30, soft also drops with Ready (hooks on and última: pronta are soft).
     let wide_ready = snap(false, 7, 18, Some(AnalysisStatus::Ready));
-    let ready_line = render(&host(SONNET), Some(&wide_ready), &Options { detail: true, width: 30, color: false }, 1_020);
+    let ready_line = render(
+        &host(SONNET),
+        Some(&wide_ready),
+        &Options {
+            detail: true,
+            width: 30,
+            color: false,
+        },
+        1_020,
+    );
     assert_eq!(ready_line, "rw-brkr · ctx 32%");
 }
 
@@ -421,4 +456,159 @@ fn color_never_has_no_escape_and_alerts_are_colored_when_asked() {
         .replace("\x1b[31m", "")
         .replace("\x1b[0m", "");
     assert_eq!(stripped, plain);
+}
+
+#[test]
+fn a_published_snapshot_reads_back_and_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/repo/a");
+    publish(state.path(), "s-1", root, &valid(root)).unwrap();
+    assert_eq!(
+        read(state.path(), HOST, "s-1", root),
+        Read::Valid(valid(root))
+    );
+    let file = path(state.path(), HOST, "s-1", root);
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(file.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        !text.contains("s-1") && !text.contains("/repo/a"),
+        "no plain id or path: {text}"
+    );
+}
+
+#[test]
+fn sessions_hosts_and_workspaces_do_not_share_a_projection() {
+    let state = tempfile::tempdir().unwrap();
+    let (a, b) = (Path::new("/repo/a"), Path::new("/repo/a-worktree"));
+    publish(state.path(), "s-1", a, &valid(a)).unwrap();
+    assert_eq!(
+        read(state.path(), HOST, "s-2", a),
+        Read::Missing,
+        "another window"
+    );
+    assert_eq!(
+        read(state.path(), HOST, "s-1", b),
+        Read::Missing,
+        "another worktree"
+    );
+    assert_eq!(
+        read(state.path(), "codex", "s-1", a),
+        Read::Missing,
+        "another host"
+    );
+    assert_ne!(
+        path(state.path(), "a", "bc", a),
+        path(state.path(), "ab", "c", a)
+    );
+}
+
+#[test]
+fn hostile_session_ids_stay_inside_the_directory() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    for id in ["../../etc/passwd", "a/b", &"x".repeat(10_000)] {
+        let p = path(state.path(), HOST, id, root);
+        assert_eq!(p.parent().unwrap(), state.path().join("statusline"), "{id}");
+        publish(state.path(), id, root, &valid(root)).unwrap();
+    }
+}
+
+#[test]
+fn absence_corruption_and_size_are_told_apart() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    assert_eq!(read(state.path(), HOST, "s", root), Read::Missing);
+    publish(state.path(), "s", root, &valid(root)).unwrap();
+    let file = path(state.path(), HOST, "s", root);
+    std::fs::write(&file, "{not json").unwrap();
+    assert_eq!(read(state.path(), HOST, "s", root), Read::Corrupt);
+    std::fs::write(&file, " ".repeat(MAX_SNAPSHOT_BYTES as usize + 1)).unwrap();
+    assert_eq!(
+        read(state.path(), HOST, "s", root),
+        Read::Corrupt,
+        "over the limit"
+    );
+}
+
+#[test]
+fn a_newer_schema_reads_as_incompatible() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    publish(state.path(), "s", root, &valid(root)).unwrap();
+    let file = path(state.path(), HOST, "s", root);
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    v["schema_version"] = 2.into();
+    v["stats"] = "reshaped".into();
+    std::fs::write(&file, v.to_string()).unwrap();
+    assert_eq!(read(state.path(), HOST, "s", root), Read::Incompatible);
+}
+
+#[test]
+fn a_snapshot_for_another_workspace_key_is_incompatible() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let wrong = Snapshot {
+        workspace_key: workspace_key(Path::new("/other")),
+        ..valid(root)
+    };
+    publish(state.path(), "s", root, &wrong).unwrap();
+    assert_eq!(read(state.path(), HOST, "s", root), Read::Incompatible);
+}
+
+#[test]
+fn symlinks_and_directories_read_as_missing() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let file = path(state.path(), HOST, "s", root);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let target = state.path().join("elsewhere.json");
+    std::fs::write(&target, serde_json::to_string(&valid(root)).unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &file).unwrap();
+    assert_eq!(read(state.path(), HOST, "s", root), Read::Missing);
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    assert_eq!(read(state.path(), HOST, "s", root), Read::Missing);
+}
+
+#[test]
+fn reading_creates_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let missing = state.path().join("never");
+    assert_eq!(read(&missing, HOST, "s", Path::new("/r")), Read::Missing);
+    assert!(!missing.exists());
+}
+
+#[test]
+fn concurrent_readers_see_whole_versions_only() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    publish(state.path(), "s", root, &valid(root)).unwrap();
+    let dir = state.path().to_path_buf();
+    let writer = std::thread::spawn(move || {
+        for i in 0..300 {
+            let mut s = valid(Path::new("/r"));
+            s.stats.injections = i;
+            publish(&dir, "s", Path::new("/r"), &s).unwrap();
+        }
+    });
+    for _ in 0..300 {
+        assert!(matches!(
+            read(state.path(), HOST, "s", root),
+            Read::Valid(_)
+        ));
+    }
+    writer.join().unwrap();
 }

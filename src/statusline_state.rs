@@ -3,8 +3,15 @@
 //! lock. Counts and kinds only: no prompt, code, plain path, symbol or fingerprint.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::Read as _;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
+pub const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024;
+/// The only host that renders a status line today (D3).
+pub const HOST: &str = "claude-code";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -49,4 +56,84 @@ pub enum AnalysisStatus {
 pub struct Delivery {
     pub at: u64,
     pub estimated_tokens: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Read {
+    Missing,
+    Corrupt,
+    Incompatible,
+    Valid(Snapshot),
+}
+
+fn hex(bytes: impl AsRef<[u8]>) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+pub fn workspace_key(root: &Path) -> String {
+    hex(root.as_os_str().as_bytes())
+}
+
+/// sha256 over a length-prefixed tuple: no two (host, session, root) share an encoding, and no
+/// session id ever becomes part of a path.
+pub fn path(state_dir: &Path, host: &str, session_id: &str, root: &Path) -> PathBuf {
+    let mut h = Sha256::new();
+    for part in [
+        b"ripwire-broker/statusline/v1".as_slice(),
+        host.as_bytes(),
+        session_id.as_bytes(),
+        root.as_os_str().as_bytes(),
+    ] {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part);
+    }
+    state_dir
+        .join("statusline")
+        .join(format!("{:x}.json", h.finalize()))
+}
+
+pub fn publish(
+    state_dir: &Path,
+    session_id: &str,
+    root: &Path,
+    snapshot: &Snapshot,
+) -> std::io::Result<()> {
+    let file = path(state_dir, &snapshot.host, session_id, root);
+    let dir = file.parent().expect("statusline dir");
+    crate::state::write_private(dir, &file, serde_json::to_string(snapshot)?.as_bytes())
+}
+
+/// Never waits for the hooks' lock and never creates anything.
+pub fn read(state_dir: &Path, host: &str, session_id: &str, root: &Path) -> Read {
+    let file = path(state_dir, host, session_id, root);
+    match std::fs::symlink_metadata(&file) {
+        Ok(m) if m.file_type().is_file() => {}
+        _ => return Read::Missing,
+    }
+    let Ok(f) = std::fs::File::open(&file) else {
+        return Read::Missing;
+    };
+    let mut text = String::new();
+    if f.take(MAX_SNAPSHOT_BYTES + 1)
+        .read_to_string(&mut text)
+        .is_err()
+        || text.len() as u64 > MAX_SNAPSHOT_BYTES
+    {
+        return Read::Corrupt;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Read::Corrupt;
+    };
+    if v.get("schema_version").and_then(serde_json::Value::as_u64)
+        != Some(u64::from(SCHEMA_VERSION))
+    {
+        return Read::Incompatible;
+    }
+    let Ok(s) = serde_json::from_value::<Snapshot>(v) else {
+        return Read::Corrupt;
+    };
+    if s.host != host || s.workspace_key != workspace_key(root) {
+        return Read::Incompatible;
+    }
+    Read::Valid(s)
 }
