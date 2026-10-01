@@ -26,7 +26,7 @@ pub struct JevClient {
 
 impl JevClient {
     pub fn new(key: Credential, model: &str, timeout: Duration) -> Result<Self, String> {
-        Self::build(ENDPOINT.into(), true, key, model, timeout)
+        Self::build(ENDPOINT.into(), true, false, key, model, timeout)
     }
 
     /// Test fixtures only: plain HTTP to `127.0.0.1`. No command line option reaches it.
@@ -38,17 +38,35 @@ impl JevClient {
         timeout: Duration,
     ) -> Result<Self, String> {
         let endpoint = format!("http://127.0.0.1:{port}/v1/systemone");
-        Self::build(endpoint, false, key, model, timeout)
+        Self::build(endpoint, false, false, key, model, timeout)
+    }
+
+    /// Test fixtures only: like [`Self::loopback`], but HTTP/2 from the first byte (h2c),
+    /// since a plain-HTTP fixture has no ALPN to negotiate it.
+    #[doc(hidden)]
+    pub fn loopback_h2(
+        port: u16,
+        key: Credential,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let endpoint = format!("http://127.0.0.1:{port}/v1/systemone");
+        Self::build(endpoint, false, true, key, model, timeout)
     }
 
     fn build(
         endpoint: String,
         https_only: bool,
+        h2c: bool,
         key: Credential,
         model: &str,
         timeout: Duration,
     ) -> Result<Self, String> {
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder();
+        if h2c {
+            http = http.http2_prior_knowledge();
+        }
+        let http = http
             .https_only(https_only)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()

@@ -31,5 +31,8 @@ online = ["dep:secrecy", "dep:reqwest"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+# The HTTP/2 fixture of tests/online_protocol.rs. Already in the graph through reqwest's
+# `http2`; a dev-dependency never reaches the default build (CA-10 checks `-e normal`).
+h2 = "0.4"
 tempfile = "3"
 proptest = "1.11.0"

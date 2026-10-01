@@ -1,9 +1,9 @@
 //! Seam 4: the real `JevClient` against a local HTTP/1.1 fixture server (PRD §23.14). Needs
 //! `--features online`; the fixture only listens on 127.0.0.1.
 //!
-//! Known gap: production speaks HTTPS and may negotiate HTTP/2, where a cancel resets a stream
-//! instead of closing a TCP connection. Plain-HTTP fixtures cannot show that; the live tests
-//! (tests/online_live.rs) exercise TLS and ALPN, but not cancellation.
+//! Production speaks HTTPS and may negotiate HTTP/2, where a cancel resets a stream instead of
+//! closing a TCP connection. The cancel is also checked against an HTTP/2 fixture (h2c: HTTP/2
+//! without TLS, so without ALPN); the live tests (tests/online_live.rs) exercise TLS and ALPN.
 #![cfg(feature = "online")]
 
 use ripwire_broker::online::SemanticStage;
@@ -484,11 +484,48 @@ async fn silent() -> (u16, Arc<Mutex<usize>>, Arc<std::sync::atomic::AtomicUsize
     (port, seen, closed)
 }
 
-#[tokio::test]
-async fn an_mcp_cancel_aborts_http_requests_in_flight() {
+/// The same provider over HTTP/2: it accepts each stream and never answers; `reset` counts
+/// streams the client reset with `CANCEL`. A client that spoke HTTP/1.1 would fail the
+/// handshake and never reach `seen`.
+async fn silent_h2() -> (u16, Arc<Mutex<usize>>, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(0));
+    let reset = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (log, cancelled) = (seen.clone(), reset.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let (log, cancelled) = (log.clone(), cancelled.clone());
+            tokio::spawn(async move {
+                let Ok(mut conn) = h2::server::handshake(sock).await else {
+                    return;
+                };
+                // `accept` also drives the connection, so resets are read while it waits.
+                while let Some(Ok((_request, mut respond))) = conn.accept().await {
+                    *log.lock().unwrap() += 1;
+                    let cancelled = cancelled.clone();
+                    tokio::spawn(async move {
+                        let why = std::future::poll_fn(|cx| respond.poll_reset(cx)).await;
+                        if matches!(why, Ok(h2::Reason::CANCEL)) {
+                            cancelled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                }
+            });
+        }
+    });
+    (port, seen, reset)
+}
+
+/// Starts a task whose online stage asks `client`, waits for the first request to reach the
+/// provider, then aborts the call the way the MCP handler does on `notifications/cancelled`
+/// (RF-14). Returns how many requests had reached the provider.
+async fn cancel_a_task_in_flight(client: JevClient, seen: &Mutex<usize>) -> usize {
     use ripwire_broker::broker::{Broker, BrokerConfig, TaskRequest};
     use ripwire_broker::online::OnlineConfig;
-    use std::sync::atomic::Ordering::SeqCst;
 
     let ws = tempfile::tempdir().unwrap();
     for (path, body) in [
@@ -498,12 +535,8 @@ async fn an_mcp_cancel_aborts_http_requests_in_flight() {
     ] {
         common::write(ws.path(), path, body);
     }
-    let (port, seen, closed) = silent().await;
     let mut config = BrokerConfig::new(ws.path());
-    config.online = Some(OnlineConfig::new(Arc::new(client(
-        port,
-        Duration::from_secs(30),
-    ))));
+    config.online = Some(OnlineConfig::new(Arc::new(client)));
     let upstream =
         Arc::new(common::fake::FakeUpstream::new().answer("explore", "explore_export_auth"));
     let broker = Arc::new(Broker::connect(upstream, config).await.unwrap());
@@ -521,20 +554,60 @@ async fn an_mcp_cancel_aborts_http_requests_in_flight() {
     }
     assert!(*seen.lock().unwrap() > 0, "a request reached the provider");
 
-    call.abort(); // what the MCP handler does on notifications/cancelled (RF-14)
+    call.abort();
     let _ = call.await;
-    let sent = *seen.lock().unwrap();
-    // Generous on purpose: the 250 ms bound of v0.1 §20.1 is proven with controlled time in
-    // tests/online_scheduler.rs; here the point is that the TCP connection is closed at all.
+    *seen.lock().unwrap()
+}
+
+/// Waits until `count` reaches `want`, for at most two seconds. Generous on purpose: the
+/// 250 ms bound of v0.1 §20.1 is proven with controlled time in tests/online_scheduler.rs;
+/// here the point is that the abort reaches the wire at all.
+async fn settle(count: &std::sync::atomic::AtomicUsize, want: usize) {
     let until = tokio::time::Instant::now() + Duration::from_secs(2);
-    while closed.load(SeqCst) < sent && tokio::time::Instant::now() < until {
+    while count.load(std::sync::atomic::Ordering::SeqCst) < want
+        && tokio::time::Instant::now() < until
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+#[tokio::test]
+async fn an_mcp_cancel_aborts_http_requests_in_flight() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let (port, seen, closed) = silent().await;
+    let sent = cancel_a_task_in_flight(client(port, Duration::from_secs(30)), &seen).await;
+    settle(&closed, sent).await;
 
     assert_eq!(
         closed.load(SeqCst),
         sent,
         "every HTTP request in flight was aborted"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        sent,
+        "no retry or new request after the cancel"
+    );
+}
+
+#[tokio::test]
+async fn an_mcp_cancel_resets_http2_streams_in_flight() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let (port, seen, reset) = silent_h2().await;
+    let key = Credential::from_env_value(Some("tok-123")).unwrap();
+    let h2 = JevClient::loopback_h2(port, key, "jev-1.13.0", Duration::from_secs(30)).unwrap();
+    let sent = cancel_a_task_in_flight(h2, &seen).await;
+    settle(&reset, sent).await;
+
+    // Over HTTP/2 the connection is shared and stays open: closing it is not the signal, a
+    // RST_STREAM per request is.
+    assert_eq!(
+        reset.load(SeqCst),
+        sent,
+        "every HTTP/2 stream in flight was reset with CANCEL"
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
