@@ -4,7 +4,7 @@
 use crate::statusline_state::{AnalysisStatus, Snapshot};
 use serde_json::Value;
 use std::path::PathBuf;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const PREFIX: &str = "rw-brkr";
 pub const SEPARATOR: &str = " · ";
@@ -12,6 +12,8 @@ pub const SEPARATOR: &str = " · ";
 pub const STALE_SECS: u64 = 300;
 const MAX_MODEL_CHARS: usize = 32;
 const MAX_AGENT_COLS: usize = 24;
+/// Bounds the work on a hostile name before it is measured.
+const MAX_AGENT_CHARS: usize = 64;
 pub const MAX_STDIN_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -207,7 +209,12 @@ pub fn segments(
         let name = input
             .agent_name
             .as_deref()
-            .map(|n| truncate(sanitize(n.trim()).trim(), MAX_AGENT_COLS))
+            .map(|n| {
+                let bounded: String = sanitize(n.trim()).chars().take(MAX_AGENT_CHARS).collect();
+                truncate(bounded.trim(), MAX_AGENT_COLS)
+                    .trim_end()
+                    .to_string()
+            })
             .filter(|n| !n.is_empty());
         out.push(seg(
             name.map_or("agente".into(), |n| format!("agente: {n}")),
@@ -298,9 +305,10 @@ fn joined(segs: &[Segment]) -> String {
 
 /// The first `cols` columns of `text`, cut on a character boundary.
 fn truncate(text: &str, cols: usize) -> String {
-    let mut out = String::new();
+    let (mut out, mut used) = (String::new(), 0);
     for c in text.chars() {
-        if width(&out) + width(c.encode_utf8(&mut [0; 4])) > cols {
+        used += UnicodeWidthChar::width(c).unwrap_or(0);
+        if used > cols {
             break;
         }
         out.push(c);

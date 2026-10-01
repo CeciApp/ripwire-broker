@@ -52,8 +52,8 @@ indicadas. **Execução:** subagent-driven (`superpowers:subagent-driven-develop
 | D6 | payload de agente (§8) | presença de `agent` (objeto) no JSON do host: mostra só os segmentos do host e `agente`, sem ler snapshot. **Revisada no D-123:** `agent` só acrescenta o segmento `agente: <nome>`; o snapshot é lido | 2, 5 |
 
 **Defeito existente, fora do escopo, registrado aqui porque a barra o torna visível:** quando o
-`local::launch` falha, `hook::run` retorna antes de `handle`, e o `#ripwire-on` desse prompt não é
-processado. Com o ripwire ausente, a barra mostraria `hooks off` até um prompt com o ripwire de pé.
+`local::launch` falha, `hook::run` retorna antes de `handle`, e nem `#ripwire-on` nem `#ripwire-off` desse
+prompt são processados. Com o ripwire ausente, a barra mostraria `hooks off` até um prompt com o ripwire de pé.
 Não corrigir nesta entrega; anotar no D-123 e no handoff.
 
 ## Restrições globais
@@ -2064,7 +2064,7 @@ if args.hooks || bar_wanted {
   decrescente) e seção no fim:
   - o que entrou, comando por comando;
   - as decisões D1 a D6 deste plano, cada uma com o motivo;
-  - o defeito existente do `#ripwire-on` sob falha de launch, registrado e não corrigido;
+  - o defeito existente de `#ripwire-on` e `#ripwire-off` sob falha de launch, registrado e não corrigido;
   - a ordem save → publish garantida por leitura, não por teste (Tarefa 7, passo 5);
   - as mutações de cada tarefa;
   - a medição e a validação manual;

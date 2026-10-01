@@ -4798,7 +4798,8 @@ por caso, processo novo a cada uma, stdin com `session_id`, `workspace.project_d
 
 - **Máquina:** Apple M3; macOS 27.0.1 (build 26A434).
 - **Comando:** `target/release/ripwire-broker statusline --workspace WS --state-dir SD --detail --width 200`.
-- (O script do plano, Tarefa 9 passo 2, como escrito mede o caminho sem snapshot.) A projeção foi publicada **antes** de medir e conferida pela saída: nos casos com snapshot, a linha
+- (O script do plano, Tarefa 9 passo 2, como escrito mede o caminho sem
+  snapshot.) A projeção foi publicada **antes** de medir e conferida pela saída: nos casos com snapshot, a linha
   traz `hooks on · última: atenção · inj 7 · não reenviados 18 · entregues 25 · reuso 42% · último
   contexto ~1,2k tok · há 0s`. Sem o snapshot, `hooks sem dados`. Um snapshot não lido mediria o
   caminho errado, e o primeiro roteiro do plano (`--state-dir` sem projeção) mediria só o "sem snapshot".
@@ -4859,34 +4860,45 @@ filtrado por `reqwest|secrecy|rustls|hyper` sai vazio.
 Uma revisão do branch inteiro pediu oito correções; todas feitas, cada mudança de comportamento com
 teste primeiro (vermelho visto) e mutação (reverter o conserto e ver o teste falhar).
 
-- **D6 revisada (F1).** A documentação do Claude Code (`code.claude.com/docs/en/statusline`) diz que o
-  objeto `agent` (`agent.name`) aparece quando a sessão **principal** roda com `--agent` ou configurações
-  de agente, e que subagentes usam um `subagentStatusLine` separado. A premissa da D6 original (o payload
-  com `agent` é de um subagente e não descreve a sessão dos hooks) era falsa, e com a regra antiga quem
-  usa `--agent` nunca via os dados dos hooks. *Decisão do mantenedor:* `agent` não muda o que é lido nem
-  mostrado; a barra mostra os segmentos normais mais um segmento macio `agente: <nome>` logo depois do
-  modelo (nome saneado, no máximo 24 colunas; sem nome usável, `agente`). A guarda `(Some(session), false)`
-  de `main.rs` foi removida; `HostInput` guarda `agent_name`. A decisão original continua visível, riscada,
-  no §24.13 e na tabela acima.
-- **Teste de ponta a ponta sem ripwire (F2).** `installed_hook_and_bar_agree_through_a_symlinked_workspace`
-  roda `install --hooks --statusline --write` por um symlink, executa por `sh -c` o comando do hook e o da
-  barra que o install escreveu (mais `--ripwire /nonexistent/ripwire` e `--state-dir`) e confere
-  `última: erro`. O install grava a raiz canônica, então o symlink não é discriminante sozinho: a mutação
-  que bate é desligar a publicação do hook. Os helpers que rodam o binário agora removem `XDG_STATE_HOME`.
+- **D6 revisada (F1).** A documentação do Claude Code (`code.claude.com/docs/en/statusline`) diz que
+  o objeto `agent` (`agent.name`) aparece quando a sessão **principal** roda com `--agent` ou
+  configurações de agente, e que subagentes usam um `subagentStatusLine` separado. A premissa da D6
+  original (o payload com `agent` é de um subagente e não descreve a sessão dos hooks) era falsa, e
+  com a regra antiga quem usa `--agent` nunca via os dados dos hooks. *Decisão do mantenedor:*
+  `agent` não muda o que é lido nem mostrado; a barra mostra os segmentos normais mais um segmento
+  macio `agente: <nome>` logo depois do modelo (nome saneado, no máximo 24 colunas; sem nome usável,
+  `agente`). A guarda `(Some(session), false)` de `main.rs` foi removida; `HostInput` guarda
+  `agent_name`. A decisão original continua visível, riscada, no §24.13 e na tabela acima.
+- **Teste de ponta a ponta sem ripwire (F2).**
+  `installed_hook_and_bar_agree_through_a_symlinked_workspace` roda `install --hooks --statusline
+  --write` por um symlink, executa por `sh -c` o comando do hook e o da barra que o install escreveu
+  (mais `--ripwire /nonexistent/ripwire` e `--state-dir`) e confere `última: erro`. O install grava
+  a raiz canônica, então o symlink não é discriminante sozinho: a mutação que bate é desligar a
+  publicação do hook. Os helpers que rodam o binário agora removem `XDG_STATE_HOME`.
 - **Defeito conhecido (F3):** documentado acima (`#ripwire-off` também fica sem processar).
-- **`install` (F4, ruling).** Se o settings do usuário passou a ter barra alheia e o do projeto tem a
-  **nossa** (identificada pela estrutura, como `bar()` já faz), a do projeto é removida e sai uma nota
-  ("removing the broker's statusLine ... so it does not shadow ..."), no dry run e no `--write`;
-  reexecutar é idempotente. Uma barra alheia no projeto nunca é removida.
+- **`install` (F4, ruling).** Se o settings do usuário passou a ter barra alheia e o do projeto tem
+  a **nossa** (identificada pela estrutura, como `bar()` já faz), a do projeto é removida e sai uma
+  nota ("removing the broker's statusLine ... so it does not shadow ..."), no dry run e no
+  `--write`; reexecutar é idempotente. Uma barra alheia no projeto nunca é removida.
 - **`"statusLine": null` (F5)** lê como ausente em `bar()`, não como alheia.
-- **Saída da barra (F6):** `let _ = writeln!(stdout, ..)` no lugar de `println!`, que entra em pânico (101)
-  com stdout fechado (EPIPE). Teste: `a_closed_stdout_never_makes_the_bar_fail`.
-- **Docs (F7, F8):** README (mesmo `--workspace` nos hooks e na barra; `--agent`; sombreamento), §19 do
-  PRD reformatado, e a pasta `statusline-manual/` marcada como local e não versionada.
+- **Saída da barra (F6):** `let _ = writeln!(stdout, ..)` no lugar de `println!`, que entra em
+  pânico (101) com stdout fechado (EPIPE). Teste: `a_closed_stdout_never_makes_the_bar_fail`.
+- **Docs (F7, F8):** README (mesmo `--workspace` nos hooks e na barra; `--agent`; sombreamento), §19
+  do PRD reformatado, e a pasta `statusline-manual/` marcada como local e não versionada.
 - **Continua pendência:** o endurecimento de `write_private` contra links (e os itens da lista de
   pendências menores acima), a validação manual e a fixture real.
-- **Contagem depois da revisão** (`cargo test --all-targets --locked`): padrão **391 passados, 2 ignorados**
-  (+7); com `online` **405 passados, 4 ignorados** (+7). `tests/statusline.rs` 34 -> 36 (o teste de
-  agente foi substituído, +1 de nome do agente, +1 de stdout fechado); `tests/cli.rs` 62 -> 67 (+5: `null`,
-  remoção da barra nossa em dois cenários, barra alheia do projeto preservada, e o ponta a ponta). Gate
-  completo (fmt, clippy nas duas features, as duas suítes) OK; `cargo tree` filtrado sai vazio.
+- **Contagem depois da revisão** (`cargo test --all-targets --locked`): padrão **391 passados, 2
+  ignorados** (+7); com `online` **405 passados, 4 ignorados** (+7). `tests/statusline.rs` 34 -> 36
+  (o teste de agente foi substituído, +1 de nome do agente, +1 de stdout fechado); `tests/cli.rs` 62
+  -> 67 (+5: `null`, remoção da barra nossa em dois cenários, barra alheia do projeto preservada, e
+  o ponta a ponta). Gate completo (fmt, clippy nas duas features, as duas suítes) OK; `cargo tree`
+  filtrado sai vazio.
+- **Segunda rodada.** O corte do nome do agente era quadrático e sem limite de bytes: `truncate`
+  recalculava a largura da saída a cada caractere e só parava ao passar do limite, então marcas
+  combinantes (largura zero) nunca o paravam (um nome de 240 KB levou 190 s e imprimiu 240 KB).
+  Agora o nome é limitado a 64 caracteres antes de medir (`MAX_AGENT_CHARS`) e `truncate` mantém a
+  largura corrida; o corte é aparado no fim, sem espaço sobrando. Testes novos:
+  `a_zero_width_heavy_agent_name_is_bounded_and_fast`,
+  `a_cut_after_a_space_leaves_no_trailing_space` e
+  `the_agent_segment_is_soft_and_goes_before_the_alert_and_ctx` (larguras 40 e 80). Contagem final:
+  padrão **394 passados, 2 ignorados**; com `online` **408 passados, 4 ignorados**.

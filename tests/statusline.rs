@@ -898,3 +898,35 @@ fn a_closed_stdout_never_makes_the_bar_fail() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn a_zero_width_heavy_agent_name_is_bounded_and_fast() {
+    let name = format!("a{}", "\u{301}".repeat(120_000));
+    let json = format!(r#"{{"agent":{{"name":"{name}"}}}}"#);
+    let line = render(&host(&json), None, &WIDE, 0);
+    assert!(line.len() < 300, "{} bytes", line.len());
+    assert!(line.contains("agente: a"), "{line:?}");
+}
+
+#[test]
+fn a_cut_after_a_space_leaves_no_trailing_space() {
+    // 23 letters, a space, then more: the 24-column cut lands just after the space.
+    let json = format!(r#"{{"agent":{{"name":"{} tail"}}}}"#, "x".repeat(23));
+    let line = render(&host(&json), None, &WIDE, 0);
+    assert_eq!(
+        line,
+        format!("rw-brkr · agente: {} · hooks sem dados", "x".repeat(23))
+    );
+}
+
+#[test]
+fn the_agent_segment_is_soft_and_goes_before_the_alert_and_ctx() {
+    let json = r#"{"session_id":"s","agent":{"name":"reviewer"},"model":{"display_name":"Opus 5.5"},"context_window":{"used_percentage":12}}"#;
+    let s = snap(false, 7, 18, Some(AnalysisStatus::AttentionRequired));
+    let at = |w| render(&host(json), Some(&s), &opts(w), 1_000);
+    assert_eq!(at(40), "rw-brkr · ctx 12% · última: atenção");
+    assert_eq!(
+        at(80),
+        "rw-brkr · Opus 5.5 · agente: reviewer · ctx 12% · hooks on · última: atenção"
+    );
+}

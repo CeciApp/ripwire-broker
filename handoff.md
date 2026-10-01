@@ -31,8 +31,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 384 testes, 2 ignorados (opt-in)
-cargo test --all-targets --features online  # 398 testes, 4 ignorados
+cargo test --all-targets                    # 394 testes, 2 ignorados (opt-in)
+cargo test --all-targets --features online  # 408 testes, 4 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -110,7 +110,8 @@ Os instrumentos estão prontos; as medições, não.
 ## Pendências conhecidas, fora das medições
 
 - **Barra de status: validação manual e fixture real (D-123).** O mantenedor roda o roteiro
-  `~/projects/ai/CECI/statusline-manual/ROTEIRO.md` (pasta local do mantenedor, não versionada; instalar, prompt, edição, fim de turno,
+  `~/projects/ai/CECI/statusline-manual/ROTEIRO.md` (pasta local do mantenedor, não
+  versionada; instalar, prompt, edição, fim de turno,
   `#ripwire-off`/`#ripwire-on`, comparando a barra com `hook-log` e o snapshot; anotar a versão do
   Claude Code). O `capture.sh` da pasta grava o payload real do `statusLine`; falta transformá-lo em
   `tests/fixtures/statusline/claude_code.json` (com `__WORKSPACE__`) e conferir `effort.level`,
