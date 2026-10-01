@@ -277,8 +277,16 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
         {
             return Err(format!("setup failed (see {})", setup_log.display()));
         }
-        // What setup left in the tree (builds, caches) is not the agent's edit.
-        let before_agent = score::modified_files(&work);
+        // What setup left in the tree (builds, caches) is not the agent's edit, unless the agent
+        // then changed it again: each such file is remembered by its content.
+        let before_agent: std::collections::HashMap<String, Option<Vec<u8>>> =
+            score::modified_files(&work)
+                .into_iter()
+                .map(|f| {
+                    let state = score::state(&work, &f);
+                    (f, state)
+                })
+                .collect();
         let config = dir.join("mcp.json");
         std::fs::write(&config, arm.mcp_config(&cfg.tools, &work).to_string())
             .map_err(|e| e.to_string())?;
@@ -308,7 +316,11 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
         }
         let modified: Vec<String> = score::modified_files(&work)
             .into_iter()
-            .filter(|f| !before_agent.contains(f))
+            .filter(|f| {
+                before_agent
+                    .get(f)
+                    .is_none_or(|was| *was != score::state(&work, f))
+            })
             .collect();
         let correct = task.check.as_deref().map(|c| {
             score::passes(

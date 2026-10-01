@@ -100,11 +100,19 @@ impl Corpus {
             }
             if !git_ok(&t.repo, &["rev-parse", "--git-dir"]) {
                 errors.push(format!("{}: not a git repository", t.id));
-            } else if !git_ok(
-                &t.repo,
-                &["cat-file", "-e", &format!("{}^{{commit}}", t.base)],
-            ) {
-                errors.push(format!("{}: base {} is not a commit", t.id, t.base));
+            } else {
+                if !git_ok(
+                    &t.repo,
+                    &["cat-file", "-e", &format!("{}^{{commit}}", t.base)],
+                ) {
+                    errors.push(format!("{}: base {} is not a commit", t.id, t.base));
+                }
+                // A mistyped fix would only show at run time, as a wrong answer in every arm.
+                if let Some(fix) = &t.fix
+                    && !git_ok(&t.repo, &["cat-file", "-e", &format!("{fix}^{{commit}}")])
+                {
+                    errors.push(format!("{}: fix {fix} is not a commit", t.id));
+                }
             }
         }
         if errors.is_empty() {

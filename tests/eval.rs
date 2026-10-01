@@ -890,3 +890,112 @@ fn a_context_tool_run_from_the_shell_is_contamination_too() {
     // `rg ripwire` searches for the word; it does not run the tool.
     assert_eq!(Arm::None.contamination(&session("rg -n ripwire src")), None);
 }
+
+// --- PR #29 review: the shell guard, the fix commit, and setup files the agent edits too ---
+
+#[test]
+fn the_shell_guard_sees_through_assignments_wrappers_and_quotes() {
+    let bash = |command: &str| {
+        let init = json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []});
+        let call = json!({"type": "assistant", "message": {"id": "b", "content": [
+            {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": command}}]}});
+        let result = json!({"type": "result", "is_error": false, "usage": {}});
+        transcript::summarize(&[(0, init), (1, call), (2, result)])
+    };
+    for hidden in [
+        "env graft ask \"where is login\"",
+        "FOO=bar ripwire . --for=login",
+        "env -i PATH=/usr/bin graft grep login",
+        "cd /work && command graft ask x",
+        "bash -c \"graft ask 'where is login'\"",
+        "sh -c 'cd src; ripwire . --for=x'",
+        "time nohup ripwire .",
+    ] {
+        assert!(
+            Arm::None.contamination(&bash(hidden)).is_some(),
+            "missed: {hidden}"
+        );
+    }
+    for innocent in [
+        "rg \"foo|graft ask\" src",
+        "grep -n 'a; ripwire .' notes.txt",
+        "echo 'graft && ripwire' > /dev/null",
+        "FOO=graft cargo test",
+    ] {
+        assert_eq!(
+            Arm::None.contamination(&bash(innocent)),
+            None,
+            "false alarm: {innocent}"
+        );
+    }
+}
+
+#[test]
+fn a_fix_that_is_not_a_commit_is_refused_before_anything_runs() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corpus.json");
+    std::fs::write(
+        &path,
+        json!({"tasks": [{"id": "typo", "repo": repo.path(), "base": head,
+                          "fix": "0000000000000000000000000000000000000000", "prompt": "p",
+                          "reference": {"files": ["src/auth.py"]}}]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let errors = Corpus::load(&path).unwrap().validate().unwrap_err();
+    assert!(errors.join("\n").contains("typo: fix"), "{errors:?}");
+}
+
+#[test]
+fn an_agent_edit_to_a_file_setup_touched_still_counts() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let agent = fake_agent(work.path()); // appends a line to src/auth.py
+    let corpus = work.path().join("corpus.json");
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [{"id": "t", "repo": repo.path(), "base": head, "prompt": "p",
+                          "reference": {"files": ["src/auth.py"]},
+                          // Setup touches the very file the agent will edit, and another one.
+                          "setup": "echo '# setup' >> src/auth.py && echo x >> tests/test_auth.py"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let out = work.path().join("out");
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+
+    let (code, _, err) = eval(
+        &[
+            "run",
+            "--corpus",
+            corpus.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--arms",
+            "none",
+            "--agent-cmd",
+            &agent_cmd,
+        ],
+        &work.path().join("runs"),
+    );
+
+    assert_eq!(code, 0, "{err}");
+    let r: Value = serde_json::from_str(
+        std::fs::read_to_string(out.join("results.jsonl"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        r["file_recall"], 1.0,
+        "the agent's edit to src/auth.py is kept: {r}"
+    );
+    assert_eq!(
+        r["file_precision"], 1.0,
+        "setup's own edit is not the agent's: {r}"
+    );
+}

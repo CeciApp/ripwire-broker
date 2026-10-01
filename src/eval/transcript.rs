@@ -111,19 +111,115 @@ enum Class {
     Other,
 }
 
-/// The program each segment of a shell line runs: split on `&&`, `||`, `;` and `|`.
-fn programs(command: &str) -> Vec<String> {
-    command
-        .split(['|', ';', '&'])
-        .filter_map(|seg| {
-            let mut words = seg.split_whitespace();
-            let first = words.next()?;
-            // `git grep` and `git ls-files` search; other git subcommands do not.
-            if first == "git" {
-                return words.next().map(|w| format!("git {w}"));
+/// A shell line split into commands (on `|`, `;`, `&`, newlines and parentheses outside quotes),
+/// each split into words with the quotes removed. Enough shell to find the program a command runs,
+/// not a shell: a `$(...)` inside double quotes is not looked into.
+fn commands(line: &str) -> Vec<Vec<String>> {
+    let (mut all, mut words, mut word) = (vec![], vec![], String::new());
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    let flush = |word: &mut String, in_word: &mut bool, words: &mut Vec<String>| {
+        if *in_word {
+            words.push(std::mem::take(word));
+            *in_word = false;
+        }
+    };
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => word.extend(chars.next()),
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
             }
-            Some(first.rsplit('/').next().unwrap_or(first).to_string())
-        })
+            (None, '\\') => {
+                word.extend(chars.next());
+                in_word = true;
+            }
+            (None, '|' | ';' | '&' | '\n' | '(' | ')' | '`') => {
+                flush(&mut word, &mut in_word, &mut words);
+                if !words.is_empty() {
+                    all.push(std::mem::take(&mut words));
+                }
+            }
+            (None, c) if c.is_whitespace() => flush(&mut word, &mut in_word, &mut words),
+            (None, c) => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    flush(&mut word, &mut in_word, &mut words);
+    if !words.is_empty() {
+        all.push(words);
+    }
+    all
+}
+
+/// `NAME=value`, a variable set for the command that follows.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Commands that run the next word as the program.
+const WRAPPERS: &[&str] = &[
+    "env", "command", "exec", "nohup", "time", "nice", "sudo", "builtin",
+];
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash"];
+
+/// The program one command runs, past assignments and wrappers, and into `sh -c '...'`.
+fn executables(words: &[String]) -> Vec<String> {
+    let mut rest = words;
+    while let Some((first, tail)) = rest.split_first() {
+        if is_assignment(first) {
+            rest = tail;
+            continue;
+        }
+        let name = first.rsplit('/').next().unwrap_or(first);
+        if WRAPPERS.contains(&name) {
+            rest = tail;
+            while let Some((w, t)) = rest.split_first() {
+                if w.starts_with('-') || is_assignment(w) {
+                    rest = t;
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+        if SHELLS.contains(&name)
+            && let Some(script) = tail
+                .iter()
+                .position(|w| w == "-c")
+                .and_then(|p| tail.get(p + 1))
+        {
+            return programs(script);
+        }
+        // `git grep` and `git ls-files` search; other git subcommands do not.
+        if name == "git" {
+            return tail
+                .first()
+                .map(|w| format!("git {w}"))
+                .into_iter()
+                .collect();
+        }
+        return vec![name.to_string()];
+    }
+    vec![]
+}
+
+/// The programs a shell line runs, one per command.
+fn programs(command: &str) -> Vec<String> {
+    commands(command)
+        .iter()
+        .flat_map(|c| executables(c))
         .collect()
 }
 

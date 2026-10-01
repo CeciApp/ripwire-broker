@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 07:50 | Revisão do PR #29: a guarda de shell enxerga atribuições, invólucros, `sh -c` e aspas; `fix` validado como commit; edição do agente num arquivo que o `setup` tocou volta a contar. E o `handoff.md` | [D-118](#d-118--revisão-do-pr-29-e-handoff) |
 | 2026-10-01 01:06 | Corpus real (32 tarefas em três repositórios, dois privados, fora deste repositório) e o que montá-lo ensinou: hooks e índice de outra ferramenta versionados num repositório, `setup`/`env`/`teardown`, `validate`, e um `check` que falha sem causa provada | [D-117](#d-117--o-corpus-real-três-repositórios-e-duas-falhas-de-isolamento) |
 | 2026-09-30 23:36 | Plano e instrumentos dos itens 1 e 2: `ripwire-eval` (A/B do §16.2, §17 e §23.15) e `hook-stats` (§21.3); o `session_hits` dos hooks morria com o processo, e o clone do A/B vazava a resposta das tarefas tiradas do histórico | [D-116](#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real) |
 | 2026-09-29 09:01 | Diagrama de arquitetura versionado em `spec/diagrams/`: fonte JSON do archify (a fonte da verdade) e HTML entregue, com fontes fixadas no commit `5daaf27` | [D-115](#d-115--diagrama-de-arquitetura-versionado) |
@@ -4380,4 +4381,64 @@ falha.
 **320** testes no padrão e **333** com `online` (eram 315 e 328 no D-116; 5 novos no A/B).
 `fmt` e clippy limpos nas duas features. O eval passa sem identidade git configurada
 (`GIT_CONFIG_GLOBAL=/dev/null`), e `cargo tree -e normal` continua idêntico ao de antes do D-116.
+
+## D-118 — Revisão do PR #29, e handoff
+
+O usuário pediu o `handoff.md` publicado no `master`. O `master` é protegido (checks obrigatórios,
+`enforce_admins`), então ele entra pelo PR #29, que leva o D-117, e o #29 é mesclado. Antes disso,
+os três apontamentos do CodeRabbit no #29 foram conferidos contra o código. **Os três procediam.**
+
+### 1. A guarda de shell era fácil de contornar, e acusava inocentes
+
+O `programs()` do D-116 dividia a linha em `|`, `;` e `&` sem olhar aspas e tomava a primeira palavra
+de cada pedaço. Isso dava dois tipos de erro:
+
+- **Contaminação que passava.** `env graft ask`, `FOO=bar ripwire .`, `bash -c "graft ask"`,
+  `command graft …` e `time nohup ripwire .`: o programa visto era `env`, `FOO=bar` ou `bash`, e a
+  execução contaminada contava como limpa.
+- **Falso alarme.** `rg "foo|graft ask"` virava um comando `graft`, e uma execução limpa seria
+  invalidada.
+
+Agora há um mínimo de análise de shell: os comandos são divididos só fora de aspas, as atribuições
+`VAR=x` e os invólucros (`env`, `command`, `exec`, `nohup`, `time`, `nice`, `sudo`) são pulados, e o
+`sh`/`bash`/`zsh -c '…'` é examinado por dentro. **Limite declarado no código:** uma substituição
+`$(…)` dentro de aspas duplas não é examinada. A mesma análise serve à classificação de busca e
+leitura, que também ganhou com as aspas.
+
+### 2. Um `fix` que não é commit só aparecia na rodada
+
+O `Corpus::validate` conferia o `base`, mas não o `fix`. Com um SHA errado, o `{fix}` do teste oculto
+falharia em todos os braços, e a falha seria lida como resposta errada. Agora é recusado antes de
+qualquer execução. As 32 tarefas do corpus real passam.
+
+### 3. A edição do agente num arquivo que o `setup` tocou sumia
+
+O D-117 subtraía das edições do agente todo arquivo que o `setup` deixara modificado. Se o agente
+editasse esse mesmo arquivo, a edição sumia do recall. Agora cada arquivo que o `setup` mexeu é
+lembrado pelo sha256 do conteúdo (ou como ausente), e só é descontado se o agente não o mudou de
+novo.
+
+### Testes e mutação
+
+- **Testes vermelhos primeiro.** Três novos, vermelhos antes e verdes depois.
+- **Mutações:** as seis foram pegas — atribuições, invólucros, `sh -c`, separador entre aspas,
+  comparação de conteúdo e validação do `fix`.
+
+### O handoff
+
+[`handoff.md`](../handoff.md), na raiz:
+
+- estado por fase e como verificar;
+- onde está cada coisa;
+- as duas medições em andamento, com os passos na ordem;
+- as pendências fora delas;
+- as armadilhas já pisadas;
+- as convenções.
+
+Ele nomeia os repositórios privados do corpus só como A e B.
+
+### Verificação
+
+**323** testes no padrão e **336** com `online` (eram 320 e 333). `fmt` e clippy limpos nas duas
+features. `ripwire-eval check` passa no corpus real com a validação nova do `fix`.
 

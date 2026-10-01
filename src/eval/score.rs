@@ -58,6 +58,15 @@ pub fn score(task: &Task, s: &Summary, modified: &[String], correct: Option<bool
     }
 }
 
+/// A file's state, to tell later whether it changed: the sha256 of its content, or `None` when it
+/// does not exist.
+pub fn state(workdir: &Path, file: &str) -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    std::fs::read(workdir.join(file))
+        .ok()
+        .map(|bytes| Sha256::digest(bytes).to_vec())
+}
+
 /// Files changed in the working tree against `HEAD`, new ones included, relative to the root.
 pub fn modified_files(workdir: &Path) -> Vec<String> {
     let Ok(out) = Command::new("git")
