@@ -548,6 +548,13 @@ impl Broker {
         self.next_request.fetch_max(next, Ordering::Relaxed);
     }
 
+    /// How many items, tests, risks and notes this process left out or reduced to a reference
+    /// because the session already had them. Hooks add it to the saved session, which outlives
+    /// the process (§21.3).
+    pub fn session_hits(&self) -> u64 {
+        self.metrics.lock().unwrap().session_hits
+    }
+
     /// What this session was already shown, to persist between processes (hooks).
     pub fn session_snapshot(&self) -> SessionMemory {
         self.session.lock().unwrap().clone()

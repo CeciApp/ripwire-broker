@@ -1593,3 +1593,123 @@ fn a_swapped_ripwire_is_read_again() {
         "a ripwire whose bytes changed has to be asked again, not answered from the state file"
     );
 }
+
+// --- §21.3: `hook-stats` turns the saved sessions into the measurement ---
+
+/// Two sessions saved as the hooks save them. `older` was delivered fp-alpha..gamma; `newer`
+/// started later and got fp-beta, fp-gamma again plus two fingerprints of its own.
+fn two_sessions(dir: &std::path::Path) {
+    use ripwire_broker::hook::SessionState;
+    use ripwire_broker::state::StateStore;
+    let store = StateStore::new(dir.to_path_buf());
+    let state = |seen: &[&str], started: u64, events: u64, inj: u64, del: u64, hits: u64| {
+        serde_json::from_value::<SessionState>(serde_json::json!({
+            "memory": {"seen": seen},
+            "prompts_seen": 1,
+            "opted_out": false,
+            "stats": {"started_at": started, "events": events, "injections": inj,
+                      "delivered": del, "session_hits": hits}
+        }))
+        .unwrap()
+    };
+    // Saved newest first, so that file order cannot pass for chronological order.
+    store
+        .save(
+            "sess-newer",
+            &state(
+                &["fp-beta", "fp-gamma", "fp-delta", "fp-epsilon"],
+                200,
+                3,
+                1,
+                4,
+                3,
+            ),
+        )
+        .unwrap();
+    store
+        .save(
+            "sess-older",
+            &state(&["fp-alpha", "fp-beta", "fp-gamma"], 100, 4, 2, 3, 1),
+        )
+        .unwrap();
+    // Neither a lock nor a damaged file is a session.
+    std::fs::write(dir.join("junk.json"), "{not json").unwrap();
+    std::fs::write(dir.join("whatever.lock"), "").unwrap();
+}
+
+#[test]
+fn hook_stats_aggregates_sessions_without_content() {
+    let state = tempfile::tempdir().unwrap();
+    two_sessions(state.path());
+    let dir = state.path().to_str().unwrap();
+
+    let (code, out, err) = run(&["hook-stats", "--state-dir", dir, "--json"], "");
+    assert_eq!(code, 0, "{err}");
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(r["sessions"], 2, "{r}");
+    assert_eq!(r["events"], 7, "{r}");
+    assert_eq!(r["injections"], 3, "{r}");
+    assert_eq!(r["delivered"], 7, "{r}");
+    assert_eq!(r["session_hits"], 4, "{r}");
+    let rate = r["hit_rate"].as_f64().unwrap();
+    assert!((rate - 4.0 / 11.0).abs() < 1e-9, "{r}");
+
+    let (code, text, _) = run(&["hook-stats", "--state-dir", dir], "");
+    assert_eq!(code, 0);
+    assert!(text.contains("2 sessions"), "{text}");
+    for leak in [
+        "fp-",
+        "sess-",
+        &format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(b"sess-older")
+        )[..12],
+    ] {
+        assert!(
+            !out.contains(leak) && !text.contains(leak),
+            "{leak}: {out}\n{text}"
+        );
+    }
+}
+
+#[test]
+fn hook_stats_estimates_what_a_persistent_cache_would_add() {
+    let state = tempfile::tempdir().unwrap();
+    two_sessions(state.path());
+
+    let (_, out, _) = run(
+        &[
+            "hook-stats",
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--json",
+        ],
+        "",
+    );
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // Only sessions after the first can repeat an earlier one: the newer one delivered 4,
+    // 2 of which the older one had already delivered.
+    let cross = &r["cross_session"];
+    assert_eq!(cross["fingerprints"], 4, "{r}");
+    assert_eq!(cross["repeated"], 2, "{r}");
+    assert!((cross["rate"].as_f64().unwrap() - 0.5).abs() < 1e-9, "{r}");
+
+    let empty = tempfile::tempdir().unwrap();
+    let (code, none, _) = run(
+        &["hook-stats", "--state-dir", empty.path().to_str().unwrap()],
+        "",
+    );
+    assert_eq!(code, 0);
+    assert!(none.contains("no sessions"), "{none}");
+}
+
+#[test]
+fn hook_stats_parses() {
+    assert_eq!(
+        parse(&["hook-stats", "--state-dir", "/s", "--json"]),
+        Ok(Command::HookStats {
+            state_dir: Some(PathBuf::from("/s")),
+            json: true
+        })
+    );
+}

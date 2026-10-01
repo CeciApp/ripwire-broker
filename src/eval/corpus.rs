@@ -1,0 +1,109 @@
+//! The corpus: tasks, each with a repository at a base commit, a prompt and the reference
+//! patch it is scored against.
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Corpus {
+    pub tasks: Vec<Task>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    /// A local git repository; relative to the corpus file.
+    pub repo: PathBuf,
+    /// The commit the agent starts from.
+    pub base: String,
+    pub prompt: String,
+    /// The task's words differ from the code's: the cases §23.15's recall bar is about.
+    #[serde(default)]
+    pub vocabulary_diverges: bool,
+    pub reference: Reference,
+    /// A shell command run in the agent's clone after it finishes; exit 0 is a correct task.
+    #[serde(default)]
+    pub check: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reference {
+    /// Files the reference patch modifies, relative to the repository root.
+    pub files: Vec<String>,
+    /// Tests that exercise the change.
+    #[serde(default)]
+    pub tests: Vec<String>,
+}
+
+impl Task {
+    /// The repository's short name: what the report groups by, never a full path.
+    pub fn repo_name(&self) -> String {
+        self.repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.repo.display().to_string())
+    }
+}
+
+fn git_ok(repo: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+impl Corpus {
+    /// Reads a corpus file and resolves relative repositories against its directory.
+    pub fn load(path: &Path) -> Result<Corpus, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut corpus: Corpus =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        for t in &mut corpus.tasks {
+            if t.repo.is_relative() {
+                t.repo = dir.join(&t.repo);
+            }
+        }
+        Ok(corpus)
+    }
+
+    /// Every problem, one line each, prefixed with the task id; checked before any run.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = vec![];
+        let mut ids = BTreeSet::new();
+        for t in &self.tasks {
+            if !ids.insert(&t.id) {
+                errors.push(format!("{}: duplicate id", t.id));
+            }
+            if t.reference.files.is_empty() {
+                errors.push(format!("{}: the reference names no files", t.id));
+            }
+            if !git_ok(&t.repo, &["rev-parse", "--git-dir"]) {
+                errors.push(format!("{}: not a git repository", t.id));
+            } else if !git_ok(
+                &t.repo,
+                &["cat-file", "-e", &format!("{}^{{commit}}", t.base)],
+            ) {
+                errors.push(format!("{}: base {} is not a commit", t.id, t.base));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Distinct repositories, by name.
+    pub fn repos(&self) -> usize {
+        self.tasks
+            .iter()
+            .map(Task::repo_name)
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+}

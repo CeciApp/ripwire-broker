@@ -33,6 +33,7 @@ commands; `ripwire-broker --help` lists them all:
 | --- | --- |
 | `hook <claude-code\|codex> <event>` | Automatic context from a host hook ([below](#automatic-mode-hooks)) |
 | `hook-log --session ID` | What the hooks injected in a session (counts only) |
+| `hook-stats [--json]` | Every saved hook session reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
 | `prompt --workspace DIR TASK...` | Prints the task followed by its context, for clients without hooks |
 | `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
 | `install <claude-code\|codex> --workspace DIR [--hooks] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`) |
@@ -277,6 +278,20 @@ hook contract, so the same command serves both:
 - **Cost:** each hook starts ripwire for one event (about 0.1–0.5 s on a small repository). `doctor` shows the
   timing of a smoke call.
 
+### Measuring the session cache
+
+Each hook event is a new process, so the broker's own `session_hits` dies with it. The session file keeps a
+running tally instead (events, injections, items delivered whole, items not resent), and
+`ripwire-broker hook-stats` adds every saved session up:
+
+- **within a session:** what the per-session dedup already saves (`hit_rate`);
+- **across sessions:** how many fingerprints a session received that an earlier session had already received.
+  That is what a persistent cache would add, and it is the measurement
+  [PRD §21.3](spec/ripwire-broker-mcp.md#213-cache-próprio) waits for before building one.
+
+Counts only: no path, symbol, prompt, fingerprint or session id. Sessions saved before this tally existed
+count as zero events but still contribute their fingerprints.
+
 ## Agent integration
 
 The simplest way is `install`, which is a **dry run** unless you pass `--write`:
@@ -312,10 +327,44 @@ Manual setup, if you prefer:
   followed by its context inside `<ripwire-broker-context untrusted="true">`. `<` and `>` in the
   payload are escaped (`\u003c`), so repository text cannot close that block.
 
+## A/B evaluation
+
+`ripwire-eval` is the instrument for [PRD §16.2](spec/ripwire-broker-mcp.md#162-avaliação-ab),
+[§17](spec/ripwire-broker-mcp.md#17-critérios-de-sucesso) and
+[§23.15](spec/ripwire-broker-mcp.md#2315-avaliação-e-barras-de-merge). It is a second binary and adds
+nothing to the broker's own command line. Plan and decisions in
+[spec/plan/plano-ab-e-session-hits.md](spec/plan/plano-ab-e-session-hits.md).
+
+```sh
+cargo build --release
+./target/release/ripwire-eval check  --corpus corpus.json
+./target/release/ripwire-eval run    --corpus corpus.json --out ab/ [--arms none,ripwire,broker] [--repeats 3]
+./target/release/ripwire-eval report --out ab/ [--json]
+```
+
+- **Corpus:** JSON, `{"tasks": [{"id", "repo", "base", "prompt", "vocabulary_diverges", "reference":
+  {"files", "tests"}, "check"}]}`. `repo` is a local git repository (relative to the corpus file), `base` the
+  commit the agent starts from, `reference.files` what the reference patch modifies, and `check` a shell
+  command whose exit 0 means the task was solved. Tasks taken from real commits get their reference for free.
+- **Arms:** `none`, `ripwire` (ripwire's MCP directly), `broker`, `broker-online`. The online arm needs
+  `RIPWIRE_BROKER_JEV_API_KEY` and sends eligible source of the corpus repositories to the provider.
+- **Isolation:** each run gets a fresh repository holding the base and its ancestors only. The fix, a later
+  commit, cannot leak through `git log`, and the source repository is never written to. The default agent is
+  Claude Code headless with `--strict-mcp-config --setting-sources project`, so your own hooks and MCP
+  servers stay out. A run whose session shows an MCP server the arm did not declare is recorded as invalid
+  and left out of the averages.
+- **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped), and
+  `transcripts/`, which holds the agent's full session, repository code included. Keep it local.
+- **Bars:** each one reads `passa`, `falha` or `insuficiente`. They stay `insuficiente` below 30 tasks in 3
+  repositories.
+- **Cost:** every run is a paid agent session. `--agent-cmd` replaces the whole agent command (split on
+  whitespace, never through a shell); to cap each Claude Code run, pass the default command with
+  `--max-budget-usd N` added. `ripwire-eval --help` prints the default.
+
 ## Tests
 
 ```sh
-cargo test                 # core, hooks, notes and CLI (fixtures), MCP e2e and upstream against the real ripwire
+cargo test                 # core, hooks, notes, CLI and the A/B instrument (fixtures), MCP e2e and upstream against the real ripwire
 cargo test --features online   # also the HTTP client against a local fixture server
 RIPWIRE_BROKER_TEST_MODEL="ollama run --nowordwrap phi4" cargo test -- --ignored   # a real local model
 RIPWIRE_BROKER_JEV_API_KEY=... cargo test --features online --test online_live -- --ignored   # the real classifier, synthetic content only

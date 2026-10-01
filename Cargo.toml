@@ -3,6 +3,8 @@ name = "ripwire-broker"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+# Two binaries since D-116: the broker, and `ripwire-eval`, the A/B instrument.
+default-run = "ripwire-broker"
 
 [dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

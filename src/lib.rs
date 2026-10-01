@@ -13,6 +13,8 @@ mod budget;
 pub mod cli;
 mod dedup;
 pub mod doctor;
+/// The A/B instrument behind the `ripwire-eval` binary (D-116). Nothing in the broker calls it.
+pub mod eval;
 pub mod hook;
 pub mod install;
 pub mod local;
@@ -32,4 +34,5 @@ pub mod state;
 pub mod summarizer;
 pub mod supervise;
 pub mod upstream;
+pub mod usage;
 pub mod workspace;
