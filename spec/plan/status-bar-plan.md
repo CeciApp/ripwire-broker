@@ -36,10 +36,11 @@ argumenta a partir dele: leia os dois. **Onde este plano diz "spec §N", leia §
 - **A Fase 6 é grande e ainda não tem desenho.** Começar por ela adiaria a barra por semanas sem
   ganho.
 
-## Decisões para a revisão do mantenedor
+## Decisões
 
-A spec deixa estes pontos em aberto, ou os resolve de um jeito que o código revelou ser ambíguo. O
-plano segue a recomendação de cada um; se alguma mudar, as tarefas afetadas estão indicadas.
+A spec deixava estes pontos em aberto, ou os resolvia de um jeito que o código revelou ser ambíguo.
+**O mantenedor aceitou as seis recomendações** (D-122, PRD §24.13): são requisitos das tarefas
+indicadas. **Execução:** subagent-driven (`superpowers:subagent-driven-development`).
 
 | # | ponto | recomendação seguida | tarefas |
 | --- | --- | --- | --- |

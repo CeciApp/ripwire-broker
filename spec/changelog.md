@@ -4640,3 +4640,9 @@ inline e 60 números da spec; **zero ausentes** no §24, e as três frases reesc
 forma nova. O script morde: com uma linha de tabela apagada, um número trocado e um link trocado no
 §24, ele acusou os três. Depois da remoção, todos os links e âncoras relativos de PRD, changelog,
 handoff e plano resolvem.
+
+### Decisões D1 a D6 aceitas
+
+Depois da fusão, o mantenedor aceitou as seis recomendações do §24.13 e escolheu a execução do plano
+por subagentes (uma tarefa por vez, com revisão antes da seguinte). O §24.13 passou de "Decisões em
+aberto" a "Decisões", e o §21.6 e o §19 dizem o mesmo.

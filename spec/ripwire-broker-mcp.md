@@ -1384,7 +1384,7 @@ barra de produto, que dependem da escolha dos repositórios. Destaques:
 - projeção por sessão e workspace, privada e atômica;
 - registro opcional pelo instalador (`install claude-code --statusline`).
 
-Estado: proposta, com plano pronto ([plano](plan/status-bar-plan.md), §24). Vem antes da Fase 6 por
+Estado: plano pronto e decisões tomadas ([plano](plan/status-bar-plan.md), §24). Vem antes da Fase 6 por
 ser pequena, local e independente dela, e por tornar visível o uso dos hooks que a medição do §21.3
 precisa.
 
@@ -1496,7 +1496,7 @@ do roadmap sem texto na v0.1 estão marcados como lacunas
 
 ### 21.6 Barra de status
 
-As decisões D1 a D6 da barra estão no §24.13, cada uma com a recomendação que o plano segue.
+Decididas: o mantenedor aceitou as recomendações D1 a D6 do §24.13.
 
 ---
 
@@ -2410,9 +2410,9 @@ exige nova decisão:
 
 ## 24. Barra de status do Claude Code
 
-**Estado:** proposta com plano pronto, não implementada. Plano em
-[status-bar-plan.md](plan/status-bar-plan.md); decisões abertas no §24.13. Deve vir antes da
-Fase 6 (§19).
+**Estado:** plano pronto e decisões tomadas (§24.13), não implementada. Plano em
+[status-bar-plan.md](plan/status-bar-plan.md), a executar por subagentes, uma tarefa por vez com
+revisão. Deve vir antes da Fase 6 (§19).
 
 **Fonte.** Este capítulo transporta a spec `spec/status-bar.md`, escrita pelo mantenedor e fundida
 aqui no [D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd), que depois a removeu. A seção
@@ -2777,12 +2777,13 @@ Para exibir economia, primeiro medir uma referência comparável e o contexto en
 
 Consulta atual de documentação feita via Context7 (`/websites/code_claude`) e páginas oficiais em 01/10/2026. O Graft foi comparado pelo commit fixado, sem assumir que sua branch atual tem o mesmo comportamento.
 
-### 24.13 Decisões em aberto
+### 24.13 Decisões
 
-Pontos que a spec deixava em aberto, ou que o código revelou ambíguos, levantados pelo plano. Cada um
-tem uma recomendação, que o plano segue até o mantenedor decidir.
+Pontos que a spec deixava em aberto, ou que o código revelou ambíguos, levantados pelo plano. O
+mantenedor aceitou as seis recomendações em 2026-10-01
+([D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd)); elas são requisitos da implementação.
 
-| # | ponto | recomendação |
+| # | ponto | decisão |
 | --- | --- | --- |
 | D1 | Largura Unicode (§24.5.3) | Dependência nova `unicode-width = "0.2"`: crate fora do grafo atual, sem dependências e sem rede, o mesmo que o rustc usa. A alternativa é uma tabela Unicode escrita à mão |
 | D2 | O que sobra sob largura extrema (§24.5.3) | Essenciais: `rw-brkr`, `ctx N%`, `hooks off`, `última: atenção`, `última: erro`. `hooks on`, `hooks sem dados`, `última: pronta` e `última: incerta` não são pausa nem alerta, e saem depois do modelo |
