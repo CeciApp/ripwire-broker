@@ -2290,3 +2290,96 @@ fn without_a_home_the_user_settings_cannot_be_located_and_no_bar_is_written() {
         "no bar written"
     );
 }
+
+#[test]
+fn a_null_status_line_is_no_bar_at_all() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::write(user.path().join("settings.json"), r#"{"statusLine":null}"#).unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"statusLine":null,"x":1}"#,
+    )
+    .unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("keeping"), "null is not a foreign bar: {out}");
+    let s = read_json(&root.join(".claude/settings.json"));
+    assert!(
+        s["statusLine"]["command"]
+            .as_str()
+            .is_some_and(|c| c.contains(" statusline ")),
+        "{s}"
+    );
+    assert_eq!(s["x"], 1);
+}
+
+#[test]
+fn our_project_bar_is_removed_when_the_user_now_has_a_foreign_one() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(read_json(&settings).get("statusLine").is_some());
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+
+    let (code, dry, err) = install_bar(&root, user.path(), &["--hooks"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(dry.contains("remov") && dry.contains("shadow"), "{dry}");
+    assert!(
+        read_json(&settings).get("statusLine").is_some(),
+        "a dry run writes nothing"
+    );
+
+    let (code, out, err) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("remov") && out.contains("shadow"), "{out}");
+    let s = read_json(&settings);
+    assert!(s.get("statusLine").is_none(), "{s}");
+    assert_eq!(commands(&s, "Stop").len(), 1, "the hooks stay");
+
+    let (_, again, _) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(again.contains("unchanged"), "{again}");
+    assert!(!again.contains("remov"), "nothing left to remove: {again}");
+    assert!(read_json(&settings).get("statusLine").is_none());
+}
+
+#[test]
+fn a_foreign_project_bar_is_not_removed_when_the_user_has_one_too() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, r#"{"statusLine":{"type":"command","command":"mine"}}"#).unwrap();
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(read_json(&settings)["statusLine"]["command"], "mine");
+}
+
+#[test]
+fn our_project_bar_is_removed_even_when_no_hooks_are_installed_in_the_same_run() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    install_bar(&root, user.path(), &["--write"]);
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    install_bar(&root, user.path(), &["--write"]);
+    assert!(read_json(&settings).get("statusLine").is_none());
+}

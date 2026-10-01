@@ -173,7 +173,8 @@ enum Bar {
 
 /// Ours: the program is a `ripwire-broker` executable and its first argument is `statusline`.
 fn bar(settings: &Value) -> Bar {
-    let Some(line) = settings.get("statusLine") else {
+    // `null` is no bar at all, as far as the host is concerned.
+    let Some(line) = settings.get("statusLine").filter(|l| !l.is_null()) else {
         return Bar::Absent;
     };
     let words = line
@@ -317,6 +318,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 pretty(&json!({"statusLine": {"type": "command", "command": command}}))
             );
             let mut bar_wanted = args.statusline;
+            let mut shadowing = false;
             if args.statusline {
                 // D5: an inherited user bar would be shadowed by ours; an unreadable one leaves the
                 // effective bar unknown. Either way, nothing is written and the snippet is shown.
@@ -341,6 +343,17 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                                 "{} has its own statusLine; keeping it. To use the broker's:\n{manual}",
                                 p.display()
                             ));
+                            // A bar of ours left in the project from before would shadow it.
+                            shadowing = read(&settings_path)
+                                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                                .is_some_and(|v| matches!(bar(&v), Bar::Ours));
+                            if shadowing {
+                                plan.notes.push(format!(
+                                    "removing the broker's statusLine from {} so it does not shadow the one in {}",
+                                    settings_path.display(),
+                                    p.display()
+                                ));
+                            }
                         }
                         Ok(_) => {}
                     },
@@ -362,11 +375,14 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                     plan.notes.push("statusLine without --hooks: the bar shows `hooks sem dados` until hooks are installed.".into());
                 }
             }
-            if args.hooks || bar_wanted {
+            if args.hooks || bar_wanted || shadowing {
                 let mut foreign = false;
                 plan.changes.push(change(settings_path.clone(), |mut v| {
                     if args.hooks {
                         v = merge_hooks(v, Host::ClaudeCode, binary, Some(&workspace));
+                    }
+                    if shadowing && let Some(o) = v.as_object_mut() {
+                        o.remove("statusLine");
                     }
                     if bar_wanted {
                         foreign = matches!(bar(&v), Bar::Foreign);
