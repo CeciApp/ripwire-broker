@@ -208,8 +208,8 @@ async fn main() -> ExitCode {
         Ok(Command::Statusline(a)) => {
             // Status line mode (PRD §24): local reads only, always exit 0, one line.
             use ripwire_broker::statusline::{self, MAX_STDIN_BYTES, Options};
-            use std::io::Write;
             use ripwire_broker::statusline_state::{self as projection, HOST, Read};
+            use std::io::Write;
             let mut raw = Vec::new();
             let _ = std::io::stdin()
                 .take(MAX_STDIN_BYTES + 1)

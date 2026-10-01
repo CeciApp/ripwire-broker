@@ -736,8 +736,7 @@ fn it_reads_the_projection_of_this_session_and_workspace() {
     );
     // An agent payload is the main session run with `--agent` (D6 revised, D-123): same data, one
     // more segment.
-    let agent_input =
-        r#"{"session_id":"s-1","agent":{"name":"re\u001b[31mviewer"},"model":{"display_name":"Opus 5.5"}}"#;
+    let agent_input = r#"{"session_id":"s-1","agent":{"name":"re\u001b[31mviewer"},"model":{"display_name":"Opus 5.5"}}"#;
     let (_, agent_out, _) = run_bar(
         &[
             "--workspace",

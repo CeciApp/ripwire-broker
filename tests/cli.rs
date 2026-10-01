@@ -2359,7 +2359,11 @@ fn a_foreign_project_bar_is_not_removed_when_the_user_has_one_too() {
     let root = ws.path().canonicalize().unwrap();
     let settings = root.join(".claude/settings.json");
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    std::fs::write(&settings, r#"{"statusLine":{"type":"command","command":"mine"}}"#).unwrap();
+    std::fs::write(
+        &settings,
+        r#"{"statusLine":{"type":"command","command":"mine"}}"#,
+    )
+    .unwrap();
     std::fs::write(
         user.path().join("settings.json"),
         r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
