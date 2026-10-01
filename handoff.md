@@ -31,8 +31,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 416 testes, 2 ignorados (opt-in)
-cargo test --all-targets --features online  # 430 testes, 4 ignorados
+cargo test --all-targets                    # 419 testes, 2 ignorados (opt-in)
+cargo test --all-targets --features online  # 433 testes, 4 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -102,7 +102,7 @@ Os instrumentos estão prontos; as medições, não.
   repetição dentro de cada sessão e **entre** sessões. A segunda é o que um cache persistente de
   notas (S3.15) acrescentaria.
 - **Falta:** usar os hooks (`ripwire-broker install <host> --workspace … --hooks --write`) em
-  trabalho real por alguns dias, ≥ 20 sessões, e rodar `hook-stats`. Na máquina do mantenedor,
+  trabalho real por alguns dias, ≥ 20 sessões, e rodar `hook-stats` (que ignora a sessão sem evento e sem fingerprint, só de falhas de launch). Na máquina do mantenedor,
   em 2026-10-01, não havia nenhuma sessão.
 - **Regra proposta (o mantenedor decide):** repetição entre sessões < 15% recusa o S3.15;
   ≥ 30% o põe no plano.

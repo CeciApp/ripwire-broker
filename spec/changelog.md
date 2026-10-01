@@ -97,7 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
-| 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos (416 padrão, 430 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
+| 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
 | 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
 | 2026-10-01 18:10 | Com `--color always`, `hooks off` fica vermelho e `hooks on` azul claro (`38;5;117`); `hooks sem dados` segue sem cor; 1 teste novo (395 padrão, 409 com `online`) | [D-124](#d-124--cores-do-estado-dos-hooks-na-barra) |
@@ -4998,7 +4998,7 @@ teste novo (reverter ou inverter a correção, ver o teste falhar, restaurar e d
 | 3 | `reuso`: `session_hits.saturating_add(delivered)` | `counters_near_the_limit_do_not_overflow_the_reuse_rate` (`u64::MAX`; entrava em pânico em debug) | voltar ao `+` |
 | 4 | `fit` acha o `ctx` pelo campo `Segment::ctx`, não pelo prefixo do texto; ordem do D2 intacta | refatoração pura: os testes de largura existentes, sem alteração | `retain` invertido e `ctx` nunca marcado: 3 e 2 testes de largura falham |
 | 5 | `statusline_state::read` abre uma vez, com `O_NOFOLLOW` e `O_NONBLOCK`, e verifica o arquivo aberto (regular, tamanho); sem `symlink_metadata` | `symlinks_and_directories_read_as_missing`, `a_fifo_reads_as_missing_without_blocking` (novo; falha por timeout, sem travar) | tirar `O_NOFOLLOW`; tirar `O_NONBLOCK` |
-| 6 | `write_private`: temporário com `O_EXCL` e `O_NOFOLLOW`, nome `<arquivo>.tmp<pid>-<n>` com contador atômico do processo (até 8 tentativas em colisão), remoção do temporário em qualquer falha, e `0700` aplicado a diretório já existente mais frouxo | `writers_of_one_file_do_not_share_a_temporary`, `a_failed_write_removes_its_temporary`, `a_symlink_planted_at_a_temporary_name_is_never_written_through`, `a_looser_existing_directory_is_tightened_and_a_shared_one_is_left_alone`, `the_session_store_tightens_its_directory_too` (vermelhos antes: o das threads, com `NotFound`; o do temporário que sobrava; os dois do diretório `0755` mantido) | nome sem contador; sem a remoção; `create(true).truncate(true)` sem `O_NOFOLLOW`; sem apertar o diretório externo e o interno; sem a guarda de `sticky` |
+| 6 | `write_private`: temporário com `O_EXCL` e `O_NOFOLLOW`, nome `<hash>.tmp<pid>-<n>` (o `with_extension` troca o `.json`) com contador atômico do processo (até 8 tentativas em colisão), remoção do temporário em qualquer falha, e diretório criado `0700` (a regra do diretório existente foi revista, ver a Revisão) | `writers_of_one_file_do_not_share_a_temporary`, `a_failed_write_removes_its_temporary`, `a_symlink_planted_at_a_temporary_name_is_never_written_through`, `a_looser_existing_directory_is_tightened_and_a_shared_one_is_left_alone`, `the_session_store_tightens_its_directory_too` (vermelhos antes: o das threads, com `NotFound`; o do temporário que sobrava; os dois do diretório `0755` mantido) | nome sem contador; sem a remoção; `create(true).truncate(true)` sem `O_NOFOLLOW`; sem apertar o diretório externo e o interno; sem a guarda de `sticky` |
 | 7 | `hook-stats` ignora a sessão sem evento e sem fingerprint (a que só teve falhas de launch) | `hook_stats_skips_sessions_whose_events_all_failed_to_launch` | filtro desligado; só `events > 0`; só fingerprints |
 | 8 | `hook::run` lê `session_id` uma vez | refatoração pura (testes de hook existentes) | n/a |
 | 9 | `install`: a nota `hooks sem dados` só sai com a barra escrita; programa cujo nome começa por `ripwire-broker` e primeiro argumento `statusline` é nosso | `the_hooks_note_is_printed_only_when_our_bar_is_written`, `a_renamed_or_versioned_binary_still_owns_its_bar` | nota sem `bar_wanted`; voltar à igualdade do nome; `ends_with` em vez de `starts_with` (pega em `ownership_is_structural_not_a_substring`) |
@@ -5008,9 +5008,8 @@ Escolhas que o pedido deixava em aberto:
 - **`libc`:** a constante `O_NOFOLLOW`/`O_NONBLOCK` vem do `libc`, que já estava no grafo normal
   (`tokio`, `sha2`) e no `Cargo.lock`. Virou dependência direta (uma linha no `Cargo.toml`, uma linha
   no `Cargo.lock`); nenhum crate novo, nenhum `unsafe` (o crate o proíbe).
-- **Que diretório é "nosso" (item 6):** só se aperta o diretório que tem o mesmo dono de um arquivo
-  recém-criado pelo processo e não tem o bit `sticky`; um `--state-dir /tmp` (`1777`) não é restringido.
-  O diretório de estado e o `statusline/` são apertados; o `statusline/` é criado `0700`.
+- **Diretório existente (item 6):** a primeira versão apertava para `0700` o diretório existente que
+  fosse do mesmo dono; revista abaixo (nunca se muda um diretório existente).
 - **`hook-stats` e sessões antigas (item 7):** só some a sessão sem eventos e sem nenhuma fingerprint.
   Uma salva antes dos contadores existirem (zero eventos, fingerprints reais) continua contando, como o
   README promete. A redação da saída não mudou.
@@ -5045,6 +5044,49 @@ testes de ordem de descarte corrigidos com os números reais (19: sem detalhes 9
 que um teste sem corrida veja; o teste do FIFO e o do symlink plantado já passavam antes e provam o
 código novo pelas mutações acima (o plantado cobre 5000 nomes `tmp<pid>-<n>`).
 
-**Contagem:** padrão **416 passados, 2 ignorados**; com `online` **430 passados, 4 ignorados** (eram 397
-e 411: 19 testes novos). `cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`
+**Contagem (antes da Revisão):** padrão **416 passados, 2 ignorados**; com `online` **430 passados,
+4 ignorados** (eram 397 e 411: 19 testes novos). `cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`
 (CA-10) sem saída.
+
+### Revisão
+
+Uma revisão independente deu "com ajustes"; tudo abaixo foi feito em commits novos, sem reescrever o
+histórico.
+
+**Decisões**
+
+- **Nunca mudar um diretório existente (1).** O `tighten` do item 6 dava `chmod 0700` em qualquer
+  diretório existente do mesmo dono e sem `sticky`. Um `--state-dir ~` ou `.` (o workspace) seria
+  alterado sem volta (e perderia setgid e bits de grupo), contra "nunca escreve no workspace". O
+  `tighten` foi removido: o diretório que o código cria (o de estado, se faltar, e o `statusline/`) nasce
+  `0700` desde o início, e um existente fica como está. Custo: um diretório de estado antigo e mais
+  aberto continua mais aberto (os arquivos dentro seguem `0600`), e o usuário o aperta à mão. Some
+  também a falha de `chmod` que derrubava a escrita inteira.
+- **Programa `ripwire-broker` exato ou versionado (4).** `starts_with("ripwire-broker")` reivindicava
+  `ripwire-brokerage` e `ripwire-broker-wrapper.sh`. Agora o nome é `ripwire-broker` ou
+  `ripwire-broker-` seguido de dígito (`ripwire-broker-0.2`). Custo: uma cópia renomeada de outro modo
+  (`ripwire-broker.old`) volta a ser tratada como barra alheia e fica como está.
+- **Temporários órfãos (11).** Com nomes únicos, o temporário deixado por um crash nunca é reaproveitado.
+  Aceito, sem código: é inofensivo para `sessions()`, que só lê `.json`, e `0600`.
+
+**Correções**
+
+| # | Mudança | Teste | Mutação (pega) |
+|---|---|---|---|
+| 1 | sem `tighten`; diretório criado `0700`, existente intacto (`0755`, `2770` setgid, `1777`) | `existing_directories_keep_their_mode_and_new_ones_are_private` (substitui os dois testes de aperto; vermelho: o diretório mudava) | `chmod 0700` do existente; criar com `0755` |
+| 2 | `write_private` recusa diretório de outro uid (compara com o dono do temporário recém-criado, sem `unsafe`; o temporário é removido) | `a_state_directory_owned_by_another_user_is_refused`: usa `/tmp` (do root, gravável por todos), e sai cedo se o dono for o próprio usuário | a comparação sempre aceita |
+| 3 | `StateStore::lock` abre com `O_NOFOLLOW` | `the_session_lock_does_not_follow_a_symlink` (vermelho: o alvo era criado) | tirar a flag |
+| 4 | o nome do programa é `ripwire-broker` ou `ripwire-broker-<dígito>` | `ownership_is_structural_not_a_substring` (`ripwire-brokerage`, `ripwire-broker-wrapper.sh`, `ripwire-broker-`) e `a_renamed_or_versioned_binary_still_owns_its_bar` (`-1.0.0`, exato) | `starts_with`; sem o nome exato |
+| 5 | `sanitize` descarta também U+00AD, U+034F, U+180E, U+2028, U+2029, U+FE00–U+FE0F, U+FFF9–U+FFFB, U+115F, U+1160, U+3164, U+FFA0 e U+E0000–U+E007F | `invisible_format_characters_are_dropped_like_controls` (tabela estendida e vizinhos que ficam; vermelho em U+00AD) | tirar U+2028–2029, as tags e os seletores de variação, um a um |
+| 6 | docs: README (tabela de comandos, medição, migração) e PRD (§21.3) dizem que a sessão sem evento e sem fingerprint é ignorada; o handoff, na regra das 20 sessões | n/a | n/a |
+| 7 | o teste "não cria nem muda nada" registra também o modo de cada entrada | `the_status_line_creates_and_changes_nothing_with_existing_state_either` | `chmod 0755` do `statusline/` dentro de `read` |
+| 8 | a nota `hooks sem dados` só sai se o settings do projeto, depois da mescla, não tem hooks nossos | `the_hooks_note_is_not_printed_when_the_project_already_has_our_hooks` (vermelho: a nota saía) | voltar à condição `!args.hooks` |
+| 9 | texto do D-127: `<hash>.tmp<pid>-<n>` | n/a | n/a |
+| 10 | `model_label`: `trim_end` antes das reticências | `a_model_name_cut_at_a_space_has_no_space_before_the_ellipsis` (vermelho: "aaa …") | tirar o `trim_end` |
+| 11 | aceito, ver acima | n/a | n/a |
+
+O PRD §24.13 D5 e o README documentam a regra do nome do programa.
+
+**Contagem:** padrão **419 passados, 2 ignorados**; com `online` **433 passados, 4 ignorados**.
+CA-10 sem saída.
+

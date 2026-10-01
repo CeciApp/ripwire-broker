@@ -33,7 +33,7 @@ commands; `ripwire-broker --help` lists them all:
 | --- | --- |
 | `hook <claude-code\|codex> <event>` | Automatic context from a host hook ([below](#automatic-mode-hooks)) |
 | `hook-log --session ID` | What the hooks injected in a session (counts only) |
-| `hook-stats [--json]` | Every saved hook session reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
+| `hook-stats [--json]` | Every saved hook session (one with no events and nothing remembered is skipped) reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
 | `prompt --workspace DIR TASK...` | Prints the task followed by its context, for clients without hooks |
 | `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
 | `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
@@ -284,7 +284,8 @@ hook contract, so the same command serves both:
 
 Each hook event is a new process, so the broker's own `session_hits` dies with it. The session file keeps a
 running tally instead (events, injections, items delivered whole, items not resent), and
-`ripwire-broker hook-stats` adds every saved session up:
+`ripwire-broker hook-stats` adds every saved session up (a session with no events and no fingerprints, one
+whose every event failed to launch ripwire, is skipped):
 
 - **within a session:** what the per-session dedup already saves (`hit_rate`);
 - **across sessions:** how many fingerprints a session received that an earlier session had already received.
@@ -331,12 +332,15 @@ rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
   hooks and `statusLine` into the same `.claude/settings.json` change. A bar that is not ours is never
   overwritten: one in your user settings is left to win (the install prints the snippet to add by hand), one in
   `settings.local.json` is reported because it takes precedence. Without `--hooks` the bar has no counters to
-  show.
+  show. A bar is recognized as the broker's only when the program is named exactly `ripwire-broker` or
+  `ripwire-broker-<digit>…` (a versioned copy such as `ripwire-broker-0.2`) and its first argument is
+  `statusline`; `ripwire-brokerage` or a wrapper script is someone else's bar and is kept.
+  The "no counters" note is skipped when the project settings already hold the broker's hooks.
 - **Privacy:** the projection holds counts and a few enums only: no prompt, code, path, symbol or fingerprint.
   The host's stdin is read (up to 256 KiB) and never stored. The file is private (`0600`, in a `0700`
   `statusline/` directory of the state dir) and written atomically by the hooks, after the session state.
 - **Migration:** the bar's counters start at the first projection bound to the workspace, so a session that
-  began before the bar existed shows zero, while `hook-stats` keeps counting everything.
+  began before the bar existed shows zero, while `hook-stats` keeps counting everything (except sessions that only ever failed to launch).
 - **Hand-written configs** must pass the same `--workspace` to the hooks and to `statusline`: without it the
   hooks fall back to the event's `cwd` and the bar to `workspace.project_dir`, and they differ if the working
   directory changes mid-session (`install` always writes the same one to both).
