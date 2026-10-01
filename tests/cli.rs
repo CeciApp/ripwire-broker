@@ -2254,6 +2254,9 @@ fn ownership_is_structural_not_a_substring() {
         "'/x/not-ripwire-broker' statusline",
         "'/x/ripwire-broker' hook claude-code stop",
         "'/x/ripwire-broker' hook statusline",
+        "'/x/ripwire-brokerage' statusline",
+        "'/x/ripwire-broker-wrapper.sh' statusline",
+        "'/x/ripwire-broker-' statusline",
     ] {
         std::fs::write(
             &settings,
@@ -2278,7 +2281,8 @@ fn a_renamed_or_versioned_binary_still_owns_its_bar() {
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
     for ours in [
         "'/x/ripwire-broker-0.2' statusline --workspace '/old' --color never",
-        "/opt/bin/ripwire-broker.old statusline --workspace /old",
+        "/opt/bin/ripwire-broker-1.0.0 statusline --workspace /old",
+        "/opt/bin/ripwire-broker statusline --workspace /old",
     ] {
         std::fs::write(
             &settings,
@@ -2367,6 +2371,28 @@ fn the_hooks_note_is_printed_only_when_our_bar_is_written() {
     let user = tempfile::tempdir().unwrap();
     let (_, out, _) = install_bar(&root, user.path(), &["--hooks", "--write"]);
     assert!(!out.contains(note), "{out}");
+}
+
+#[test]
+fn the_hooks_note_is_not_printed_when_the_project_already_has_our_hooks() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(!out.contains("hooks sem dados"), "{out}");
+    // The bar alone, now: the hooks written before are still there.
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("hooks sem dados"), "{out}");
+    assert!(
+        read_json(&root.join(".claude/settings.json"))["hooks"]["Stop"].is_array(),
+        "the hooks are still installed"
+    );
+    // Without hooks anywhere the note stays.
+    let ws2 = tempfile::tempdir().unwrap();
+    let root2 = ws2.path().canonicalize().unwrap();
+    let (_, out, _) = install_bar(&root2, user.path(), &["--write"]);
+    assert!(out.contains("hooks sem dados"), "{out}");
 }
 
 #[test]

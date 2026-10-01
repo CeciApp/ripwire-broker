@@ -75,17 +75,28 @@ pub fn resolve_root(flag: Option<&std::path::Path>, input: &HostInput) -> Option
     candidate.canonicalize().ok()
 }
 
-/// Format characters that draw nothing or reorder what follows: the Arabic letter mark, the
-/// zero-width and directional marks, the bidi embeddings and isolates, the invisible operators and
-/// the BOM. Not controls to Rust, but just as able to disguise what the bar shows.
+/// Format characters that draw nothing or reorder what follows: the soft hyphen, the combining
+/// grapheme joiner, the Arabic letter mark, the Hangul and Mongolian fillers, the zero-width and
+/// directional marks, the line and paragraph separators, the bidi embeddings and isolates, the
+/// invisible operators, the variation selectors, the interlinear annotation marks, the BOM and the
+/// tag characters. Not controls to Rust, but just as able to disguise what the bar shows.
 fn is_invisible_format(c: char) -> bool {
     matches!(c,
-        '\u{061C}'
+        '\u{00AD}'
+        | '\u{034F}'
+        | '\u{061C}'
+        | '\u{115F}'..='\u{1160}'
+        | '\u{180E}'
         | '\u{200B}'..='\u{200F}'
-        | '\u{202A}'..='\u{202E}'
+        | '\u{2028}'..='\u{202E}'
         | '\u{2060}'..='\u{2064}'
         | '\u{2066}'..='\u{2069}'
-        | '\u{FEFF}')
+        | '\u{3164}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}'
+        | '\u{FFA0}'
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{E0000}'..='\u{E007F}')
 }
 
 /// Drops control characters (ESC, newline, BEL...) and invisible format characters, so external
@@ -135,11 +146,8 @@ pub fn model_label(name: Option<&str>, id: Option<&str>, effort: Option<&str>) -
         label = format!("{name} {v}");
     }
     if label.chars().count() > MAX_MODEL_CHARS {
-        label = label
-            .chars()
-            .take(MAX_MODEL_CHARS - 1)
-            .chain(['…'])
-            .collect();
+        let cut: String = label.chars().take(MAX_MODEL_CHARS - 1).collect();
+        label = format!("{}…", cut.trim_end());
     }
     if let Some(e) = effort.and_then(effort_label) {
         label = format!("{label} {e}");

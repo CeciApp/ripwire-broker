@@ -425,18 +425,76 @@ fn model_labels_are_trimmed_after_the_control_characters_go() {
 }
 
 #[test]
+fn a_model_name_cut_at_a_space_has_no_space_before_the_ellipsis() {
+    // The cut keeps 31 characters: 30 letters and the space.
+    let name = format!("{} tail", "a".repeat(30));
+    assert_eq!(
+        model_label(Some(&name), None, None),
+        Some(format!("{}…", "a".repeat(30)))
+    );
+}
+
+#[test]
 fn invisible_format_characters_are_dropped_like_controls() {
     let hidden = [
-        '\u{061C}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}',
-        '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}', '\u{2061}', '\u{2062}',
-        '\u{2063}', '\u{2064}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{FEFF}',
+        '\u{061C}',
+        '\u{200B}',
+        '\u{200C}',
+        '\u{200D}',
+        '\u{200E}',
+        '\u{200F}',
+        '\u{202A}',
+        '\u{202B}',
+        '\u{202C}',
+        '\u{202D}',
+        '\u{202E}',
+        '\u{2060}',
+        '\u{2061}',
+        '\u{2062}',
+        '\u{2063}',
+        '\u{2064}',
+        '\u{2066}',
+        '\u{2067}',
+        '\u{2068}',
+        '\u{2069}',
+        '\u{FEFF}',
+        '\u{00AD}',
+        '\u{034F}',
+        '\u{180E}',
+        '\u{2028}',
+        '\u{2029}',
+        '\u{FE00}',
+        '\u{FE0F}',
+        '\u{FFF9}',
+        '\u{FFFA}',
+        '\u{FFFB}',
+        '\u{115F}',
+        '\u{1160}',
+        '\u{3164}',
+        '\u{FFA0}',
+        '\u{E0000}',
+        '\u{E0001}',
+        '\u{E007F}',
     ];
     for c in hidden {
         assert_eq!(sanitize(&format!("A{c}B")), "AB", "U+{:04X}", c as u32);
     }
     // Neighbours of the ranges, and ordinary non-ASCII text, stay.
     for kept in [
-        '\u{200A}', '\u{2010}', '\u{202F}', '\u{205F}', '\u{2065}', 'é', '日',
+        '\u{200A}',
+        '\u{2010}',
+        '\u{202F}',
+        '\u{205F}',
+        '\u{2065}',
+        '\u{00AC}',
+        '\u{00AE}',
+        '\u{0350}',
+        '\u{FE10}',
+        '\u{FFFC}',
+        '\u{1161}',
+        '\u{E0080}',
+        'é',
+        '日',
     ] {
         assert_eq!(
             sanitize(&format!("A{kept}B")),
@@ -861,41 +919,86 @@ fn a_symlink_planted_at_a_temporary_name_is_never_written_through() {
 }
 
 #[test]
-fn a_looser_existing_directory_is_tightened_and_a_shared_one_is_left_alone() {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
-    let state = tempfile::tempdir().unwrap();
-    let root = Path::new("/r");
-    let sub = state.path().join("statusline");
-    std::fs::create_dir(&sub).unwrap();
-    for d in [state.path(), sub.as_path()] {
-        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    publish(state.path(), "s", root, &valid(root)).unwrap();
-    assert_eq!(mode(state.path()), 0o700);
-    assert_eq!(mode(&sub), 0o700);
-    // A sticky, world-writable directory (a shared `/tmp`) is not ours to restrict.
-    let shared = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(shared.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
-    publish(shared.path(), "s", root, &valid(root)).unwrap();
-    assert_eq!(mode(shared.path()), 0o1777);
-    assert_eq!(mode(&shared.path().join("statusline")), 0o700);
-}
-
-#[test]
-fn the_session_store_tightens_its_directory_too() {
+fn existing_directories_keep_their_mode_and_new_ones_are_private() {
     use ripwire_broker::hook::SessionState;
     use ripwire_broker::state::StateStore;
     use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    let set = |p: &Path, m: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        assert_eq!(mode(p), m, "the fixture could not set {m:o}");
+    };
+    let root = Path::new("/r");
+    // A directory that was there before (the user's own, say) is never changed.
+    for existing in [0o755, 0o2770, 0o1777] {
+        let state = tempfile::tempdir().unwrap();
+        let sub = state.path().join("statusline");
+        std::fs::create_dir(&sub).unwrap();
+        set(state.path(), existing);
+        set(&sub, existing);
+        publish(state.path(), "s", root, &valid(root)).unwrap();
+        StateStore::new(state.path().to_path_buf())
+            .save("s", &SessionState::default())
+            .unwrap();
+        assert_eq!(mode(state.path()), existing, "state dir {existing:o}");
+        assert_eq!(mode(&sub), existing, "statusline dir {existing:o}");
+    }
+    // One this code creates is 0700 from the start, with the directories above it.
+    let base = tempfile::tempdir().unwrap();
+    let state = base.path().join("a/b");
+    publish(&state, "s", root, &valid(root)).unwrap();
+    for dir in [
+        base.path().join("a"),
+        state.clone(),
+        state.join("statusline"),
+    ] {
+        assert_eq!(mode(&dir), 0o700, "{}", dir.display());
+    }
+    let store_dir = base.path().join("c/d");
+    StateStore::new(store_dir.clone())
+        .save("s", &SessionState::default())
+        .unwrap();
+    assert_eq!(mode(&store_dir), 0o700);
+}
+
+#[test]
+fn a_state_directory_owned_by_another_user_is_refused() {
+    use ripwire_broker::hook::SessionState;
+    use ripwire_broker::state::StateStore;
+    use std::os::unix::fs::MetadataExt;
+    // `/tmp` belongs to root and anyone can write to it: the one such directory a test can reach.
+    let mine = tempfile::tempdir().unwrap();
+    let me = std::fs::metadata(mine.path()).unwrap().uid();
+    let shared = Path::new("/tmp");
+    if std::fs::metadata(shared).map(|m| m.uid()).unwrap_or(me) == me {
+        return; // running as that owner (root): nothing to refuse
+    }
+    let id = format!("owner-test-{}", std::process::id());
+    let store = StateStore::new(shared.to_path_buf());
+    let saved = store.save(&id, &SessionState::default());
+    store.remove(&id);
+    assert!(saved.is_err(), "wrote into another user's directory");
+    let left: Vec<_> = std::fs::read_dir(shared)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .filter(|e| e.metadata().is_ok_and(|m| m.uid() == me))
+        .collect();
+    assert!(left.is_empty(), "no temporary left behind: {left:?}");
+}
+
+#[test]
+fn the_session_lock_does_not_follow_a_symlink() {
+    use ripwire_broker::state::StateStore;
     let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-    let store = StateStore::new(dir.path().to_path_buf());
-    store.save("s", &SessionState::default()).unwrap();
-    assert_eq!(
-        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
-        0o700
-    );
-    assert_eq!(store.load("s"), SessionState::default());
+    let victim = dir.path().join("victim");
+    let lock = dir.path().join(format!(
+        "{:x}.lock",
+        <sha2::Sha256 as sha2::Digest>::digest(b"s")
+    ));
+    std::os::unix::fs::symlink(&victim, &lock).unwrap();
+    assert!(StateStore::new(dir.path().to_path_buf()).lock("s").is_err());
+    assert!(!victim.exists(), "the lock created a file through the link");
 }
 
 #[test]
@@ -1184,7 +1287,7 @@ fn the_status_line_creates_and_changes_nothing_with_existing_state_either() {
                 if m.is_dir() {
                     stack.push(p.clone());
                 }
-                out.push((p, m.len(), m.modified().unwrap()));
+                out.push((p, m.len(), m.modified().unwrap(), m.permissions().mode()));
             }
         }
         out.sort();

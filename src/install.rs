@@ -39,6 +39,22 @@ fn is_ours(hook: &Value) -> bool {
         .is_some_and(|c| c.contains("ripwire-broker") && c.contains(" hook "))
 }
 
+/// Whether `settings` holds hooks installed by this broker, whatever their event.
+fn has_our_hooks(settings: &Value) -> bool {
+    settings
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(|events| {
+            events
+                .values()
+                .filter_map(Value::as_array)
+                .flatten()
+                .filter_map(|g| g.get("hooks")?.as_array())
+                .flatten()
+                .any(is_ours)
+        })
+}
+
 /// A path a host config file can carry. Refused rather than mangled: `install` writes the
 /// path a host will later execute.
 fn utf8(path: &Path, what: &str) -> Result<String, String> {
@@ -171,8 +187,18 @@ enum Bar {
     Foreign,
 }
 
-/// Ours: the program's file name starts with `ripwire-broker` (a renamed or versioned copy, such
-/// as `ripwire-broker-0.2`, counts) and its first argument is `statusline`.
+/// A program name of ours: `ripwire-broker`, or a versioned copy, `ripwire-broker-` and a digit
+/// (`ripwire-broker-0.2`). Not `ripwire-brokerage` or a wrapper script that merely begins so.
+fn is_broker_name(name: &std::ffi::OsStr) -> bool {
+    let name = name.as_encoded_bytes();
+    name == b"ripwire-broker"
+        || name
+            .strip_prefix(b"ripwire-broker-")
+            .and_then(|rest| rest.first())
+            .is_some_and(u8::is_ascii_digit)
+}
+
+/// Ours: the program is a broker (see `is_broker_name`) and its first argument is `statusline`.
 fn bar(settings: &Value) -> Bar {
     // `null` is no bar at all, as far as the host is concerned.
     let Some(line) = settings.get("statusLine").filter(|l| !l.is_null()) else {
@@ -186,7 +212,7 @@ fn bar(settings: &Value) -> Bar {
     let ours = words
         .first()
         .and_then(|p| Path::new(p).file_name())
-        .is_some_and(|n| n.as_encoded_bytes().starts_with(b"ripwire-broker"))
+        .is_some_and(is_broker_name)
         && words.get(1).is_some_and(|w| w == "statusline");
     if ours { Bar::Ours } else { Bar::Foreign }
 }
@@ -374,7 +400,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 }
             }
             if args.hooks || bar_wanted || shadowing {
-                let mut foreign = false;
+                let (mut foreign, mut hooked) = (false, false);
                 plan.changes.push(change(settings_path.clone(), |mut v| {
                     if args.hooks {
                         v = merge_hooks(v, Host::ClaudeCode, binary, Some(&workspace));
@@ -386,13 +412,15 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                         foreign = matches!(bar(&v), Bar::Foreign);
                         v = merge_statusline(v, &command);
                     }
+                    hooked = has_our_hooks(&v);
                     v
                 })?);
                 if foreign {
                     plan.notes.push(format!("{} has a statusLine that is not the broker's; keeping it. To use the broker's:\n{manual}",
             settings_path.display()));
-                } else if bar_wanted && !args.hooks {
-                    // Only a bar that is written has anything to say about its data.
+                } else if bar_wanted && !hooked {
+                    // Only a bar that is written has anything to say about its data, and only when
+                    // the project has no hooks of ours to feed it.
                     plan.notes.push("statusLine without --hooks: the bar shows `hooks sem dados` until hooks are installed.".into());
                 }
             }

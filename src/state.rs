@@ -5,7 +5,7 @@ use crate::hook::SessionState;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,6 +49,7 @@ impl StateStore {
             .create(true)
             .truncate(false)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(self.path(session_id).with_extension("lock"))?;
         file.lock()?;
         Ok(file)
@@ -88,23 +89,10 @@ impl StateStore {
     pub fn save(&self, session_id: &str, state: &SessionState) -> std::io::Result<()> {
         write_private(
             &self.dir,
-            &self.dir,
             &self.path(session_id),
             serde_json::to_string(state)?.as_bytes(),
         )
     }
-}
-
-/// Tightens an existing directory that is looser than 0700. Only one we own is touched (`owner` is
-/// the uid of a file we just made), and never a sticky one: a shared `/tmp` given as the state
-/// directory is not ours to restrict.
-fn tighten(dir: &Path, owner: u32) -> std::io::Result<()> {
-    let meta = fs::symlink_metadata(dir)?;
-    let mode = meta.mode();
-    if meta.is_dir() && meta.uid() == owner && mode & 0o1000 == 0 && mode & 0o077 != 0 {
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }
 
 /// Process-wide: threads writing the same file never share a temporary.
@@ -133,15 +121,11 @@ fn create_temp(path: &Path) -> std::io::Result<(PathBuf, fs::File)> {
 }
 
 /// Writes `bytes` to `path` through a private temporary file in `dir` and a rename: readers see
-/// the old file or the new one, never half of it. `dir` is created as 0700 and, when it already
-/// exists looser and is ours, tightened to it; so is `outer`, the directory above it that this
-/// store also owns. The file is 0600. A failed write leaves no temporary behind.
-pub(crate) fn write_private(
-    outer: &Path,
-    dir: &Path,
-    path: &Path,
-    bytes: &[u8],
-) -> std::io::Result<()> {
+/// the old file or the new one, never half of it. A `dir` that is missing is created as 0700 (with
+/// the missing directories above it); one that exists is left exactly as it is, since it may be a
+/// directory the user owns for other reasons. A directory owned by another uid is refused. The
+/// file is 0600. A failed write leaves no temporary behind.
+pub(crate) fn write_private(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -149,10 +133,7 @@ pub(crate) fn write_private(
     let (tmp, mut file) = create_temp(path)?;
     let written = file
         .metadata()
-        .and_then(|m| {
-            tighten(outer, m.uid())?;
-            tighten(dir, m.uid())
-        })
+        .and_then(|m| same_owner(fs::metadata(dir)?.uid(), m.uid()))
         .and_then(|()| file.write_all(bytes))
         .and_then(|()| file.sync_all())
         .and_then(|()| fs::rename(&tmp, path));
@@ -160,4 +141,16 @@ pub(crate) fn write_private(
         let _ = fs::remove_file(&tmp);
     }
     written
+}
+
+/// `file_uid` is that of a file this process just created, which is how it learns its own uid
+/// without `unsafe`: state kept in another user's directory is not ours to write.
+fn same_owner(dir_uid: u32, file_uid: u32) -> std::io::Result<()> {
+    if dir_uid == file_uid {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "the state directory belongs to another user",
+    ))
 }

@@ -152,12 +152,7 @@ pub fn publish(
 ) -> std::io::Result<()> {
     let file = path(state_dir, &snapshot.host, session_id, root);
     let dir = file.parent().expect("statusline dir");
-    crate::state::write_private(
-        state_dir,
-        dir,
-        &file,
-        serde_json::to_string(snapshot)?.as_bytes(),
-    )
+    crate::state::write_private(dir, &file, serde_json::to_string(snapshot)?.as_bytes())
 }
 
 /// Never waits for the hooks' lock and never creates anything. The file is opened once, without
