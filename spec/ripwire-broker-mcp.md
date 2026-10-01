@@ -2803,4 +2803,7 @@ que registra o que o código mudou em cada uma.
 **Defeito existente, fora do escopo:** quando o `local::launch` falha, `hook::run` retorna antes de
 `handle`, e nem `#ripwire-on` nem `#ripwire-off` desse prompt são processados (o opt-out não
 vale e o opt-in não reativa). Com o ripwire ausente, a barra mostra `hooks off` (se a sessão já
-estava pausada) até um prompt com o ripwire de pé. Registrado, não corrigido nesta entrega (D-123).
+estava pausada) até um prompt com o ripwire de pé. Registrado, não corrigido nesta entrega (D-123). **Corrigido no
+[D-126](changelog.md#d-126--o-marcador-vale-mesmo-sem-ripwire):** o marcador do prompt é aplicado
+mesmo quando o ripwire não sobe; a pausa é confirmada e salva, e a retomada é salva antes de a falha
+ser reportada.

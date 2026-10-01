@@ -54,7 +54,7 @@ indicadas. **Execução:** subagent-driven (`superpowers:subagent-driven-develop
 **Defeito existente, fora do escopo, registrado aqui porque a barra o torna visível:** quando o
 `local::launch` falha, `hook::run` retorna antes de `handle`, e nem `#ripwire-on` nem `#ripwire-off` desse
 prompt são processados. Com o ripwire ausente, a barra mostraria `hooks off` até um prompt com o ripwire de pé.
-Não corrigir nesta entrega; anotar no D-123 e no handoff.
+Não corrigir nesta entrega; anotar no D-123 e no handoff. (Corrigido depois, no D-126.)
 
 ## Restrições globais
 
