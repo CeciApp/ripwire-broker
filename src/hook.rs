@@ -504,16 +504,34 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         .workspace
         .clone()
         .or_else(|| input.get("cwd").and_then(Value::as_str).map(PathBuf::from))?;
+    let real_session = input.get("session_id").and_then(Value::as_str).is_some();
     let session_id = input
         .get("session_id")
         .and_then(Value::as_str)
         .unwrap_or("default")
         .to_string();
+    // The status line only exists in Claude Code, and a projection belongs to a real session
+    // and a root that resolves (D3); the "default" fallback never publishes.
+    let root = workspace.canonicalize().ok();
+    let publishes = real_session && args.host == Host::ClaudeCode && root.is_some();
     let store = StateStore::new(args.state_dir.clone().or_else(StateStore::default_dir)?);
     // Held until this function returns: parallel hooks of the session wait their turn.
     // Without the lock (e.g. unwritable dir) the hook still runs; only turn-taking is lost.
     let _turn = store.lock(&session_id).ok();
     let mut state = store.load(&session_id);
+    if let Some(r) = &root {
+        crate::statusline_state::bind(&mut state, &crate::statusline_state::workspace_key(r));
+    }
+    let finish = |state: &SessionState| {
+        // Losing the state only costs a repeated injection; never fail the host for it. The
+        // projection follows a successful save and its errors are ignored.
+        if store.save(&session_id, state).is_ok()
+            && publishes
+            && let (Some(r), Some(snap)) = (&root, crate::statusline_state::project(state, now()))
+        {
+            let _ = crate::statusline_state::publish(store.dir(), &session_id, r, &snap);
+        }
+    };
     let default = Policy::default();
     let policy = Policy {
         every_prompt: args.every_prompt,
@@ -559,10 +577,13 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         Ok(b) => b,
         // Opted-out sessions stay silent even when ripwire is missing.
         Err(_) if state.opted_out => return None,
-        Err(e) => return Some(failure(&e)),
+        Err(e) => {
+            analysed(&mut state, args.event, AnalysisStatus::Error, Some(e.error));
+            finish(&state);
+            return Some(failure(&e));
+        }
     };
     let out = handle(args.host, args.event, &input, &broker, &mut state, &policy).await;
-    // Losing the state only costs a repeated injection; never fail the host for it.
-    let _ = store.save(&session_id, &state);
+    finish(&state);
     out
 }

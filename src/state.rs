@@ -25,6 +25,10 @@ impl StateStore {
         Some(base.join("ripwire-broker"))
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// The session id is named by its hash, so the file name reveals nothing.
     fn path(&self, session_id: &str) -> PathBuf {
         let name = format!("{:x}", Sha256::digest(session_id.as_bytes()));

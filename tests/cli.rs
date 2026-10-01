@@ -1781,3 +1781,143 @@ fn hook_stats_parses() {
         })
     );
 }
+
+// --- the hooks publish the status line projection (spec §24.6.4) ---
+
+use ripwire_broker::statusline_state::{self as projection, AnalysisStatus, HOST, Read};
+
+fn bar_snapshot(state: &std::path::Path, session: &str, ws: &std::path::Path) -> Read {
+    projection::read(state, HOST, session, &ws.canonicalize().unwrap())
+}
+
+#[test]
+fn a_launch_failure_is_published_as_an_error_and_the_hook_still_answers() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--ripwire",
+        "/nonexistent/ripwire",
+    ];
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-1", "hello"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "same answer as before: {out}");
+    let Read::Valid(s) = bar_snapshot(state.path(), "s-1", ws.path()) else {
+        panic!("published")
+    };
+    let a = s.last_analysis.unwrap();
+    assert_eq!(a.status, AnalysisStatus::Error);
+    assert_eq!(
+        s.stats.events, 0,
+        "D4: counters unchanged by a launch failure"
+    );
+}
+
+#[test]
+fn no_session_id_or_codex_publishes_nothing() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let base = |host: &'static str| {
+        vec![
+            "hook",
+            host,
+            "user-prompt-submit",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--ripwire",
+            "/nonexistent/ripwire",
+        ]
+    };
+    let no_id =
+        json!({"cwd": ws.path(), "hook_event_name": "UserPromptSubmit", "prompt": "x"}).to_string();
+    run(&base("claude-code"), &no_id);
+    run(&base("codex"), &prompt_event(ws.path(), "s-1", "x"));
+    assert!(
+        !state.path().join("statusline").exists()
+            || std::fs::read_dir(state.path().join("statusline"))
+                .unwrap()
+                .count()
+                == 0
+    );
+}
+
+#[test]
+fn a_failed_publication_changes_nothing_and_the_next_event_repairs_it() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(state.path().join("statusline"), "not a dir").unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--ripwire",
+        "/nonexistent/ripwire",
+    ];
+    let (code, blocked, _) = run(&args, &prompt_event(ws.path(), "s-1", "hello"));
+    std::fs::remove_file(state.path().join("statusline")).unwrap();
+    let (_, again, _) = run(&args, &prompt_event(ws.path(), "s-1", "hello"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        blocked, again,
+        "the hook's answer does not depend on the projection"
+    );
+    assert!(
+        matches!(bar_snapshot(state.path(), "s-1", ws.path()), Read::Valid(_)),
+        "republished"
+    );
+}
+
+#[test]
+fn the_published_totals_reproduce_the_session_tally_with_the_real_ripwire() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    let state = tempfile::tempdir().unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--state-dir",
+        state.path().to_str().unwrap(),
+    ];
+    let (code, _, err) = run(
+        &args,
+        &prompt_event(repo.path(), "s-1", "how is login validated?"),
+    );
+    assert_eq!(code, 0, "{err}");
+    let Read::Valid(s) = bar_snapshot(state.path(), "s-1", repo.path()) else {
+        panic!("published")
+    };
+    assert_eq!(s.stats.injections, 1);
+    assert!(!s.opted_out);
+    let tally = ripwire_broker::state::StateStore::new(state.path().to_path_buf())
+        .load("s-1")
+        .stats;
+    assert_eq!(s.stats.events, tally.events);
+    assert_eq!(s.stats.injections, tally.injections);
+    assert_eq!(s.stats.delivered, tally.delivered);
+    assert_eq!(s.stats.session_hits, tally.session_hits);
+
+    run(&args, &prompt_event(repo.path(), "s-1", "#ripwire-off"));
+    let Read::Valid(s) = bar_snapshot(state.path(), "s-1", repo.path()) else {
+        panic!("published")
+    };
+    assert!(s.opted_out);
+    assert_eq!(s.stats.injections, 1);
+    let tally = ripwire_broker::state::StateStore::new(state.path().to_path_buf())
+        .load("s-1")
+        .stats;
+    assert_eq!(s.stats.events, tally.events);
+    assert_eq!(s.stats.injections, tally.injections);
+}
