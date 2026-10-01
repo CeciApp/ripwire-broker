@@ -769,6 +769,30 @@ fn bad_stdin_degrades_and_still_exits_zero() {
         assert_eq!(out, "rw-brkr · hooks sem dados\n");
         assert!(err.len() < 200, "no long logs: {err}");
     }
+
+    // Stdin size limit is enforced: valid JSON padded past MAX_STDIN_BYTES is rejected.
+    let base = br#"{"model":{"display_name":"X"}}"#;
+    let padding_needed = ripwire_broker::statusline::MAX_STDIN_BYTES as usize + 1 - base.len();
+    let mut oversized = base.to_vec();
+    oversized.extend(vec![b' '; padding_needed]);
+    let (code, out, err) = run_bar(&["--state-dir", sd], &oversized, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out, "rw-brkr · hooks sem dados\n",
+        "model must not appear when over limit"
+    );
+    assert!(err.len() < 200, "no long logs: {err}");
+
+    // At exactly the limit, the input is accepted.
+    let mut at_limit = base.to_vec();
+    at_limit.extend(vec![b' '; padding_needed - 1]);
+    let (code, out, err) = run_bar(&["--state-dir", sd], &at_limit, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out, "rw-brkr · X · hooks sem dados\n",
+        "model appears at limit"
+    );
+    assert!(err.len() < 200, "no long logs: {err}");
 }
 
 #[test]
