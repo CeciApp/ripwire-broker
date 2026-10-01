@@ -1773,6 +1773,42 @@ fn hook_stats_estimates_what_a_persistent_cache_would_add() {
 }
 
 #[test]
+fn hook_stats_skips_sessions_whose_events_all_failed_to_launch() {
+    use ripwire_broker::hook::SessionState;
+    use ripwire_broker::state::StateStore;
+    let state = tempfile::tempdir().unwrap();
+    two_sessions(state.path());
+    let dir = state.path().to_str().unwrap();
+    // What a session whose every event failed to launch leaves behind: a bound summary and
+    // all-zero counters.
+    StateStore::new(state.path().to_path_buf())
+        .save("sess-never-ran", &SessionState::default())
+        .unwrap();
+    let (code, out, err) = run(&["hook-stats", "--state-dir", dir, "--json"], "");
+    assert_eq!(code, 0, "{err}");
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(r["sessions"], 2, "{r}");
+    assert_eq!(r["cross_session"]["fingerprints"], 4, "{r}");
+    assert!(
+        (r["cross_session"]["rate"].as_f64().unwrap() - 0.5).abs() < 1e-9,
+        "an empty session is not the 'earliest' one: {r}"
+    );
+    let (_, text, _) = run(&["hook-stats", "--state-dir", dir], "");
+    assert!(text.contains("2 sessions"), "{text}");
+
+    // Only such sessions: nothing was measured.
+    let alone = tempfile::tempdir().unwrap();
+    StateStore::new(alone.path().to_path_buf())
+        .save("sess-never-ran", &SessionState::default())
+        .unwrap();
+    let (_, none, _) = run(
+        &["hook-stats", "--state-dir", alone.path().to_str().unwrap()],
+        "",
+    );
+    assert!(none.contains("no sessions"), "{none}");
+}
+
+#[test]
 fn hook_stats_parses() {
     assert_eq!(
         parse(&["hook-stats", "--state-dir", "/s", "--json"]),
@@ -1888,17 +1924,39 @@ fn no_session_id_or_codex_publishes_nothing() {
             "/nonexistent/ripwire",
         ]
     };
+    let published = || {
+        std::fs::read_dir(state.path().join("statusline"))
+            .map(Iterator::count)
+            .unwrap_or(0)
+    };
+    // Each run must have happened: the launch failure is answered, and the session is saved.
     let no_id =
         json!({"cwd": ws.path(), "hook_event_name": "UserPromptSubmit", "prompt": "x"}).to_string();
-    run(&base("claude-code"), &no_id);
-    run(&base("codex"), &prompt_event(ws.path(), "s-1", "x"));
-    assert!(
-        !state.path().join("statusline").exists()
-            || std::fs::read_dir(state.path().join("statusline"))
-                .unwrap()
-                .count()
-                == 0
-    );
+    let (code, out, _) = run(&base("claude-code"), &no_id);
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "the hook ran: {out}");
+    let (code, out, _) = run(&base("codex"), &prompt_event(ws.path(), "s-1", "x"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "the hook ran: {out}");
+    let saved = std::fs::read_dir(state.path())
+        .unwrap()
+        .filter(|e| {
+            let p = e.as_ref().unwrap().path();
+            p.extension().is_some_and(|x| x == "json")
+        })
+        .count();
+    assert_eq!(saved, 2, "both sessions were saved");
+    assert_eq!(published(), 0, "and neither was published");
+
+    // Positive control, same setup: a claude-code run with an id does publish.
+    let (code, out, _) = run(&base("claude-code"), &prompt_event(ws.path(), "s-1", "x"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "{out}");
+    assert_eq!(published(), 1, "the control publishes");
+    assert!(matches!(
+        bar_snapshot(state.path(), "s-1", ws.path()),
+        Read::Valid(_)
+    ));
 }
 
 #[test]
@@ -1976,6 +2034,7 @@ fn the_published_totals_reproduce_the_session_tally_with_the_real_ripwire() {
 
 #[test]
 fn a_launch_failure_does_not_cache_the_unrunnable_ripwire_version() {
+    use ripwire_broker::hook::CachedVersion;
     use std::os::unix::fs::PermissionsExt;
     let ws = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
@@ -2001,6 +2060,25 @@ fn a_launch_failure_does_not_cache_the_unrunnable_ripwire_version() {
         saved.ripwire.is_none(),
         "no cached version: {:?}",
         saved.ripwire
+    );
+    // A version cached for another binary survives the failure as it was.
+    let seeded = CachedVersion {
+        binary: "/elsewhere/ripwire".into(),
+        size: 4,
+        mtime: 5,
+        version: "9.9.9".into(),
+    };
+    let store = ripwire_broker::state::StateStore::new(state.path().to_path_buf());
+    let mut seed = store.load("s-2");
+    seed.ripwire = Some(seeded.clone());
+    store.save("s-2", &seed).unwrap();
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-2", "hello"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "{out}");
+    assert_eq!(
+        store.load("s-2").ripwire,
+        Some(seeded),
+        "the previous reading is preserved, not replaced by the unrunnable binary"
     );
     // A pause honoured during the failure saves the session too, and caches nothing either.
     run(&args, &prompt_event(ws.path(), "s-1", "#ripwire-off"));

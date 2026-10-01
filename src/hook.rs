@@ -539,12 +539,9 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         .workspace
         .clone()
         .or_else(|| input.get("cwd").and_then(Value::as_str).map(PathBuf::from))?;
-    let real_session = input.get("session_id").and_then(Value::as_str).is_some();
-    let session_id = input
-        .get("session_id")
-        .and_then(Value::as_str)
-        .unwrap_or("default")
-        .to_string();
+    let reported_id = input.get("session_id").and_then(Value::as_str);
+    let real_session = reported_id.is_some();
+    let session_id = reported_id.unwrap_or("default").to_string();
     // The status line only exists in Claude Code, and a projection belongs to a real session
     // and a root that resolves (D3); the "default" fallback never publishes.
     let root = workspace.canonicalize().ok();
