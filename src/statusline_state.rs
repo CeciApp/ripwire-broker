@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read as _;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -154,16 +155,26 @@ pub fn publish(
     crate::state::write_private(dir, &file, serde_json::to_string(snapshot)?.as_bytes())
 }
 
-/// Never waits for the hooks' lock and never creates anything.
+/// Never waits for the hooks' lock and never creates anything. The file is opened once, without
+/// following a link and without blocking on a FIFO, and every check is made on what was opened:
+/// nothing can be swapped in between a check and the read.
 pub fn read(state_dir: &Path, host: &str, session_id: &str, root: &Path) -> Read {
     let file = path(state_dir, host, session_id, root);
-    match std::fs::symlink_metadata(&file) {
-        Ok(m) if m.file_type().is_file() => {}
-        _ => return Read::Missing,
-    }
-    let Ok(f) = std::fs::File::open(&file) else {
+    let Ok(f) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&file)
+    else {
         return Read::Missing;
     };
+    match f.metadata() {
+        Ok(m) if m.file_type().is_file() => {
+            if m.len() > MAX_SNAPSHOT_BYTES {
+                return Read::Corrupt;
+            }
+        }
+        _ => return Read::Missing,
+    }
     let mut text = String::new();
     if f.take(MAX_SNAPSHOT_BYTES + 1)
         .read_to_string(&mut text)

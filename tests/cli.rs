@@ -1773,6 +1773,76 @@ fn hook_stats_estimates_what_a_persistent_cache_would_add() {
 }
 
 #[test]
+fn hook_stats_skips_sessions_whose_events_all_failed_to_launch() {
+    use ripwire_broker::hook::SessionState;
+    use ripwire_broker::state::StateStore;
+    let state = tempfile::tempdir().unwrap();
+    two_sessions(state.path());
+    let dir = state.path().to_str().unwrap();
+    // What a session whose every event failed to launch leaves behind: a bound summary and
+    // all-zero counters.
+    StateStore::new(state.path().to_path_buf())
+        .save("sess-never-ran", &SessionState::default())
+        .unwrap();
+    // One that ran but delivered nothing yet (no fingerprints) is a session.
+    let quiet: SessionState = serde_json::from_value(serde_json::json!({
+        "memory": {"seen": []}, "prompts_seen": 1, "opted_out": false,
+        "stats": {"started_at": 300, "events": 2, "injections": 0,
+                  "delivered": 0, "session_hits": 0}
+    }))
+    .unwrap();
+    StateStore::new(state.path().to_path_buf())
+        .save("sess-quiet", &quiet)
+        .unwrap();
+    let (code, out, err) = run(&["hook-stats", "--state-dir", dir, "--json"], "");
+    assert_eq!(code, 0, "{err}");
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(r["sessions"], 3, "{r}");
+    assert_eq!(r["events"], 9, "{r}");
+    assert_eq!(r["cross_session"]["fingerprints"], 4, "{r}");
+    assert!(
+        (r["cross_session"]["rate"].as_f64().unwrap() - 0.5).abs() < 1e-9,
+        "an empty session is not the 'earliest' one: {r}"
+    );
+    let (_, text, _) = run(&["hook-stats", "--state-dir", dir], "");
+    assert!(text.contains("3 sessions"), "{text}");
+
+    // A session saved before the tally existed has zero events but real fingerprints: it stays.
+    let legacy: SessionState = serde_json::from_value(serde_json::json!({
+        "memory": {"seen": ["fp-legacy"]}, "prompts_seen": 1, "opted_out": false
+    }))
+    .unwrap();
+    StateStore::new(state.path().to_path_buf())
+        .save("sess-legacy", &legacy)
+        .unwrap();
+    let (_, out, _) = run(&["hook-stats", "--state-dir", dir, "--json"], "");
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(r["sessions"], 4, "{r}");
+    std::fs::remove_file(
+        std::fs::read_dir(state.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.extension().is_some_and(|x| x == "json")
+                    && std::fs::read_to_string(p).is_ok_and(|t| t.contains("fp-legacy"))
+            })
+            .unwrap(),
+    )
+    .unwrap();
+
+    // Only such sessions: nothing was measured.
+    let alone = tempfile::tempdir().unwrap();
+    StateStore::new(alone.path().to_path_buf())
+        .save("sess-never-ran", &SessionState::default())
+        .unwrap();
+    let (_, none, _) = run(
+        &["hook-stats", "--state-dir", alone.path().to_str().unwrap()],
+        "",
+    );
+    assert!(none.contains("no sessions"), "{none}");
+}
+
+#[test]
 fn hook_stats_parses() {
     assert_eq!(
         parse(&["hook-stats", "--state-dir", "/s", "--json"]),
@@ -1888,17 +1958,39 @@ fn no_session_id_or_codex_publishes_nothing() {
             "/nonexistent/ripwire",
         ]
     };
+    let published = || {
+        std::fs::read_dir(state.path().join("statusline"))
+            .map(Iterator::count)
+            .unwrap_or(0)
+    };
+    // Each run must have happened: the launch failure is answered, and the session is saved.
     let no_id =
         json!({"cwd": ws.path(), "hook_event_name": "UserPromptSubmit", "prompt": "x"}).to_string();
-    run(&base("claude-code"), &no_id);
-    run(&base("codex"), &prompt_event(ws.path(), "s-1", "x"));
-    assert!(
-        !state.path().join("statusline").exists()
-            || std::fs::read_dir(state.path().join("statusline"))
-                .unwrap()
-                .count()
-                == 0
-    );
+    let (code, out, _) = run(&base("claude-code"), &no_id);
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "the hook ran: {out}");
+    let (code, out, _) = run(&base("codex"), &prompt_event(ws.path(), "s-1", "x"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "the hook ran: {out}");
+    let saved = std::fs::read_dir(state.path())
+        .unwrap()
+        .filter(|e| {
+            let p = e.as_ref().unwrap().path();
+            p.extension().is_some_and(|x| x == "json")
+        })
+        .count();
+    assert_eq!(saved, 2, "both sessions were saved");
+    assert_eq!(published(), 0, "and neither was published");
+
+    // Positive control, same setup: a claude-code run with an id does publish.
+    let (code, out, _) = run(&base("claude-code"), &prompt_event(ws.path(), "s-1", "x"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "{out}");
+    assert_eq!(published(), 1, "the control publishes");
+    assert!(matches!(
+        bar_snapshot(state.path(), "s-1", ws.path()),
+        Read::Valid(_)
+    ));
 }
 
 #[test]
@@ -1976,6 +2068,7 @@ fn the_published_totals_reproduce_the_session_tally_with_the_real_ripwire() {
 
 #[test]
 fn a_launch_failure_does_not_cache_the_unrunnable_ripwire_version() {
+    use ripwire_broker::hook::CachedVersion;
     use std::os::unix::fs::PermissionsExt;
     let ws = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
@@ -2001,6 +2094,25 @@ fn a_launch_failure_does_not_cache_the_unrunnable_ripwire_version() {
         saved.ripwire.is_none(),
         "no cached version: {:?}",
         saved.ripwire
+    );
+    // A version cached for another binary survives the failure as it was.
+    let seeded = CachedVersion {
+        binary: "/elsewhere/ripwire".into(),
+        size: 4,
+        mtime: 5,
+        version: "9.9.9".into(),
+    };
+    let store = ripwire_broker::state::StateStore::new(state.path().to_path_buf());
+    let mut seed = store.load("s-2");
+    seed.ripwire = Some(seeded.clone());
+    store.save("s-2", &seed).unwrap();
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-2", "hello"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "{out}");
+    assert_eq!(
+        store.load("s-2").ripwire,
+        Some(seeded),
+        "the previous reading is preserved, not replaced by the unrunnable binary"
     );
     // A pause honoured during the failure saves the session too, and caches nothing either.
     run(&args, &prompt_event(ws.path(), "s-1", "#ripwire-off"));
@@ -2142,6 +2254,9 @@ fn ownership_is_structural_not_a_substring() {
         "'/x/not-ripwire-broker' statusline",
         "'/x/ripwire-broker' hook claude-code stop",
         "'/x/ripwire-broker' hook statusline",
+        "'/x/ripwire-brokerage' statusline",
+        "'/x/ripwire-broker-wrapper.sh' statusline",
+        "'/x/ripwire-broker-' statusline",
     ] {
         std::fs::write(
             &settings,
@@ -2155,6 +2270,149 @@ fn ownership_is_structural_not_a_substring() {
             "kept: {foreign}"
         );
     }
+}
+
+#[test]
+fn a_renamed_or_versioned_binary_still_owns_its_bar() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    for ours in [
+        "'/x/ripwire-broker-0.2' statusline --workspace '/old' --color never",
+        "/opt/bin/ripwire-broker-1.0.0 statusline --workspace /old",
+        "/opt/bin/ripwire-broker statusline --workspace /old",
+    ] {
+        std::fs::write(
+            &settings,
+            json!({"statusLine": {"type": "command", "command": ours, "padding": 3}}).to_string(),
+        )
+        .unwrap();
+        let (code, out, _) = install_bar(&root, user.path(), &["--write"]);
+        assert_eq!(code, 0);
+        assert!(!out.contains("keeping"), "not reported as foreign: {out}");
+        let s = read_json(&settings);
+        let command = s["statusLine"]["command"].as_str().unwrap();
+        assert!(
+            command.contains(&root.display().to_string()) && command != ours,
+            "updated, not kept: {command}"
+        );
+        assert_eq!(s["statusLine"]["padding"], 3, "its options are kept");
+    }
+}
+
+#[test]
+fn the_hooks_note_is_printed_only_when_our_bar_is_written() {
+    let root_of = || {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path().canonicalize().unwrap();
+        (ws, root)
+    };
+    let note = "hooks sem dados";
+
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(out.contains(note), "our bar is written: {out}");
+
+    // An inherited user bar: ours is not written.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(out.contains("keeping it") && !out.contains(note), "{out}");
+
+    // An unreadable user settings file: ours is not written.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(user.path().join("settings.json"), "{broken").unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(
+        out.contains("not valid JSON") && !out.contains(note),
+        "{out}"
+    );
+
+    // A foreign bar already in the project's settings: kept.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"statusLine":{"type":"command","command":"graft-bar"}}"#,
+    )
+    .unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(out.contains("keeping it") && !out.contains(note), "{out}");
+
+    // Our old bar is removed because the user's own would be shadowed: nothing is written.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"statusLine":{"type":"command","command":"'/old/ripwire-broker' statusline"}}"#,
+    )
+    .unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(out.contains("removing") && !out.contains(note), "{out}");
+
+    // With --hooks there is no note either way.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(!out.contains(note), "{out}");
+}
+
+#[test]
+fn the_hooks_note_is_not_printed_when_the_project_already_has_our_hooks() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(!out.contains("hooks sem dados"), "{out}");
+    // The bar alone, now: the hooks written before are still there.
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("hooks sem dados"), "{out}");
+    assert!(
+        read_json(&root.join(".claude/settings.json"))["hooks"]["Stop"].is_array(),
+        "the hooks are still installed"
+    );
+    // Without hooks anywhere the note stays.
+    let ws2 = tempfile::tempdir().unwrap();
+    let root2 = ws2.path().canonicalize().unwrap();
+    let (_, out, _) = install_bar(&root2, user.path(), &["--write"]);
+    assert!(out.contains("hooks sem dados"), "{out}");
+}
+
+#[test]
+fn a_settings_local_that_is_a_directory_still_gets_our_bar_with_a_note() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".claude/settings.local.json")).unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("settings.local.json") && out.contains("could not be read"),
+        "{out}"
+    );
+    assert!(
+        read_json(&root.join(".claude/settings.json"))
+            .get("statusLine")
+            .is_some(),
+        "the bar is written"
+    );
 }
 
 #[test]

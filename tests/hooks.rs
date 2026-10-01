@@ -1116,6 +1116,7 @@ async fn opt_out_and_opt_in_show_in_the_projection() {
     )
     .await;
     assert!(projection::project(&state, 0).unwrap().opted_out);
+    assert!(last(&state).is_none(), "a pause analyses nothing");
     input["prompt"] = "back #ripwire-on".into();
     hook::handle(
         Host::ClaudeCode,
@@ -1234,4 +1235,101 @@ async fn an_edit_without_news_still_updates_the_last_analysis() {
         delivery,
         "nothing delivered"
     );
+}
+
+/// A summary whose last analysis is a sentinel no hook would write: any run that analyses
+/// something replaces it.
+fn with_sentinel() -> (SessionState, projection::Analysis) {
+    let mut state = bound();
+    let sentinel = projection::Analysis {
+        at: 1,
+        event: "Sentinel".into(),
+        status: AnalysisStatus::Unknown,
+        error_kind: None,
+    };
+    state.statusline.as_mut().unwrap().last_analysis = Some(sentinel.clone());
+    (state, sentinel)
+}
+
+fn sentinel_left(state: &SessionState, sentinel: &projection::Analysis, path: &str) {
+    assert_eq!(
+        state.statusline.as_ref().unwrap().last_analysis.as_ref(),
+        Some(sentinel),
+        "{path} analysed nothing, so it leaves the last analysis alone"
+    );
+}
+
+#[tokio::test]
+async fn paths_that_run_no_analysis_leave_the_last_analysis_untouched() {
+    let (b, fake, ws) = hook_broker(edit_fake()).await;
+    std::fs::write(ws.path().join("a.txt"), "x").unwrap();
+
+    // Opted out: edits and the stop are silent.
+    let (mut state, sentinel) = with_sentinel();
+    state.opted_out = true;
+    let edit = event("claude_code_post_tool_use", ws.path());
+    assert!(
+        post_tool_use(Host::ClaudeCode, &edit, &b, &mut state)
+            .await
+            .is_none()
+    );
+    let stop_event = event("claude_code_stop", ws.path());
+    let policy = Policy::default();
+    let stopped = hook::handle(
+        Host::ClaudeCode,
+        Event::Stop,
+        &stop_event,
+        &b,
+        &mut state,
+        &policy,
+    );
+    assert!(stopped.await.is_none());
+    sentinel_left(&state, &sentinel, "an opted-out edit");
+
+    // An edit outside the workspace never reaches the broker.
+    let (mut state, sentinel) = with_sentinel();
+    let mut outside = event("claude_code_post_tool_use", ws.path());
+    outside["tool_input"]["file_path"] = "/etc/hosts".into();
+    assert!(
+        post_tool_use(Host::ClaudeCode, &outside, &b, &mut state)
+            .await
+            .is_none()
+    );
+    sentinel_left(&state, &sentinel, "an edit outside the workspace");
+    assert!(fake.called().is_empty());
+
+    // The second edit of a burst is held back, not analysed.
+    let (mut state, sentinel) = with_sentinel();
+    assert!(
+        post_tool_use_at(&edit, &b, &mut state, &at(10_000))
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        state
+            .statusline
+            .as_ref()
+            .unwrap()
+            .last_analysis
+            .as_ref()
+            .unwrap()
+            .event,
+        "PostToolUse",
+        "the first edit was analysed"
+    );
+    state.statusline.as_mut().unwrap().last_analysis = Some(sentinel.clone());
+    assert!(
+        post_tool_use_at(&edit, &b, &mut state, &at(10_100))
+            .await
+            .is_none()
+    );
+    sentinel_left(&state, &sentinel, "a coalesced edit");
+}
+
+#[test]
+fn a_state_that_was_never_bound_serializes_without_the_status_line_field() {
+    let plain = serde_json::to_value(SessionState::default()).unwrap();
+    assert!(plain.get("statusline").is_none(), "{plain}");
+    let bound = serde_json::to_value(bound()).unwrap();
+    assert!(bound.get("statusline").is_some(), "{bound}");
 }

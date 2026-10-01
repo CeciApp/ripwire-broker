@@ -1,7 +1,11 @@
 //! The status line (PRD §24): rendering, the `statusline` command and its projection.
-use ripwire_broker::statusline::{HostInput, Options, model_label, parse_input, render, width};
+use ripwire_broker::statusline::{
+    HostInput, Options, model_label, parse_input, render, resolve_root, sanitize, width,
+};
 use ripwire_broker::statusline_state::*;
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command as Proc, Stdio};
 
 const WIDE: Options = Options {
     detail: false,
@@ -270,7 +274,8 @@ fn opts(w: usize) -> Options {
 fn drop_order_detail_before_counter() {
     // Detail dropped, counters kept: Detail segments omitted, others present.
     // Input: snap(false, 7, 18, Ready), SONNET, detail: true, width 90.
-    // Full line would include details; at width 90, details drop but counters stay.
+    // Without the details the line is 7 + 14 + 7 + 8 + 14 + 5 + 17 = 72 columns of text plus six
+    // separators of 3 = 90, so it fits from 90 up and the counters go below that.
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let line = render(&host(SONNET), Some(&s), &opts(90), 1_020);
     assert_eq!(
@@ -283,7 +288,8 @@ fn drop_order_detail_before_counter() {
 fn drop_order_counter_before_model() {
     // Counter dropped, model kept: Model visible, counters omitted.
     // Input: snap(false, 7, 18, Ready), SONNET, detail: false, width 70.
-    // At width 70 (in range 62..=72), counters drop but model stays.
+    // Without the two counters (5 + 17 columns and their separators) the line is 90 - 28 = 62
+    // columns: width 70 is inside the range 62..=89 where the counters drop and the model stays.
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let no_counter_opts = Options {
         detail: false,
@@ -300,7 +306,8 @@ fn drop_order_counter_before_model() {
 #[test]
 fn drop_order_model_before_soft_and_d2_rules() {
     // Model dropped, soft kept: Model omitted, soft segments (hooks on, última: pronta) visible.
-    // Verify: width 60 (threshold: model drops at 60, fits at 61).
+    // Without the model (14 columns and a separator) the line is 62 - 17 = 45 columns: width 60 is
+    // inside the range 45..=61 where the model drops and the soft segments stay.
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let line = render(
         &host(SONNET),
@@ -315,8 +322,10 @@ fn drop_order_model_before_soft_and_d2_rules() {
     assert_eq!(line, "rw-brkr · ctx 32% · hooks on · última: pronta");
 
     // D2 rule: soft drops but essential alerts survive (não é pausa nem alerta, saem).
-    // With Error status, hooks off and última: erro are alerts, not soft.
-    // At width 40, soft drops but alerts stay.
+    // With Error status, última: erro is an alert, not soft.
+    // With `hooks on` and no model the line is 7 + 7 + 8 + 12 + 3 separators of 3 = 43 columns; at
+    // width 40 `hooks on` drops and the alerts stay: 7 + 7 + 12 + 2 separators = 32 columns, which
+    // is what fits in 32..=42.
     let alert_snap = snap(false, 7, 18, Some(AnalysisStatus::Error));
     let alert_line = render(
         &host(SONNET),
@@ -330,7 +339,8 @@ fn drop_order_model_before_soft_and_d2_rules() {
     );
     assert_eq!(alert_line, "rw-brkr · ctx 32% · última: erro");
 
-    // At width 30, soft also drops with Ready (hooks on and última: pronta are soft).
+    // At width 30, soft also drops with Ready (hooks on and última: pronta are soft): only the
+    // prefix and ctx remain, 7 + 3 + 7 = 17 columns, for 17..=44.
     let wide_ready = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let ready_line = render(
         &host(SONNET),
@@ -367,7 +377,7 @@ fn lines_fit_40_80_and_120_columns_and_shed_in_order() {
 #[test]
 fn extreme_widths_keep_alerts_then_the_prefix() {
     let s = snap(true, 7, 18, Some(AnalysisStatus::Error));
-    // 7 + 3 + 7 + 3 + 7 + 3 + 9 + 3 + 12 = 44 columns: the essentials exactly.
+    // 7 + 3 + 7 + 3 + 9 + 3 + 12 = 44 columns: the essentials exactly.
     let line = render(&host(SONNET), Some(&s), &opts(44), 1_020);
     assert_eq!(line, "rw-brkr · ctx 32% · hooks off · última: erro");
     assert_eq!(
@@ -380,6 +390,187 @@ fn extreme_widths_keep_alerts_then_the_prefix() {
     );
     assert_eq!(render(&host(SONNET), Some(&s), &opts(10), 1_020), "rw-brkr");
     assert_eq!(render(&host(SONNET), Some(&s), &opts(3), 1_020), "rw-");
+}
+
+#[test]
+fn tiny_widths_cut_the_prefix_on_a_column() {
+    let s = snap(true, 7, 18, Some(AnalysisStatus::Error));
+    for (w, expected) in [
+        (0, ""),
+        (1, "r"),
+        (4, "rw-b"),
+        (5, "rw-br"),
+        (6, "rw-brk"),
+        (7, "rw-brkr"),
+    ] {
+        assert_eq!(
+            render(&host(SONNET), Some(&s), &opts(w), 1_020),
+            expected,
+            "width {w}"
+        );
+    }
+}
+
+#[test]
+fn model_labels_are_trimmed_after_the_control_characters_go() {
+    assert_eq!(
+        model_label(Some("Son \u{7}"), None, None).as_deref(),
+        Some("Son")
+    );
+    assert_eq!(
+        model_label(Some("\u{1b} Son"), None, None).as_deref(),
+        Some("Son")
+    );
+    assert_eq!(model_label(Some(" \u{7} "), None, None), None);
+}
+
+#[test]
+fn a_model_name_cut_at_a_space_has_no_space_before_the_ellipsis() {
+    // The cut keeps 31 characters: 30 letters and the space.
+    let name = format!("{} tail", "a".repeat(30));
+    assert_eq!(
+        model_label(Some(&name), None, None),
+        Some(format!("{}…", "a".repeat(30)))
+    );
+}
+
+#[test]
+fn invisible_format_characters_are_dropped_like_controls() {
+    let hidden = [
+        '\u{061C}',
+        '\u{200B}',
+        '\u{200C}',
+        '\u{200D}',
+        '\u{200E}',
+        '\u{200F}',
+        '\u{202A}',
+        '\u{202B}',
+        '\u{202C}',
+        '\u{202D}',
+        '\u{202E}',
+        '\u{2060}',
+        '\u{2061}',
+        '\u{2062}',
+        '\u{2063}',
+        '\u{2064}',
+        '\u{2066}',
+        '\u{2067}',
+        '\u{2068}',
+        '\u{2069}',
+        '\u{FEFF}',
+        '\u{00AD}',
+        '\u{034F}',
+        '\u{180E}',
+        '\u{2028}',
+        '\u{2029}',
+        '\u{FE00}',
+        '\u{FE0F}',
+        '\u{FFF9}',
+        '\u{FFFA}',
+        '\u{FFFB}',
+        '\u{115F}',
+        '\u{1160}',
+        '\u{3164}',
+        '\u{FFA0}',
+        '\u{E0000}',
+        '\u{E0001}',
+        '\u{E007F}',
+    ];
+    for c in hidden {
+        assert_eq!(sanitize(&format!("A{c}B")), "AB", "U+{:04X}", c as u32);
+    }
+    // Neighbours of the ranges, and ordinary non-ASCII text, stay.
+    for kept in [
+        '\u{200A}',
+        '\u{2010}',
+        '\u{202F}',
+        '\u{205F}',
+        '\u{2065}',
+        '\u{00AC}',
+        '\u{00AE}',
+        '\u{0350}',
+        '\u{FE10}',
+        '\u{FFFC}',
+        '\u{1161}',
+        '\u{E0080}',
+        'é',
+        '日',
+    ] {
+        assert_eq!(
+            sanitize(&format!("A{kept}B")),
+            format!("A{kept}B"),
+            "{kept:?}"
+        );
+    }
+    let line = render(
+        &host(r#"{"model":{"display_name":"Op\u202Eus\u200B"}}"#),
+        None,
+        &WIDE,
+        0,
+    );
+    assert_eq!(line, "rw-brkr · Opus · hooks sem dados");
+}
+
+fn detail_line(s: &Snapshot, now: u64) -> String {
+    render(&host(SONNET), Some(s), &opts(1_000), now)
+}
+
+#[test]
+fn token_counts_show_whole_below_a_thousand_and_drop_a_zero_decimal() {
+    let at = |tokens: u32| {
+        let mut s = snap(false, 1, 1, None);
+        s.last_delivery = Some(Delivery {
+            at: 1,
+            estimated_tokens: tokens,
+        });
+        detail_line(&s, 1_000)
+    };
+    for (tokens, shown) in [
+        (0, "~0 tok"),
+        (999, "~999 tok"),
+        (1_000, "~1k tok"),
+        (1_240, "~1,2k tok"),
+        (10_000, "~10k tok"),
+        (10_500, "~10,5k tok"),
+    ] {
+        assert!(
+            at(tokens).contains(&format!("último contexto {shown} ·")),
+            "{tokens}: {}",
+            at(tokens)
+        );
+    }
+}
+
+#[test]
+fn age_counts_seconds_minutes_and_hours_and_a_future_stamp_is_zero() {
+    let s = snap(false, 1, 1, None);
+    for (now, shown) in [
+        (1_000, "há 0s"),
+        (1_059, "há 59s"),
+        (1_060, "há 1min"),
+        (1_000 + 3_599, "há 59min"),
+        (1_000 + 3_600, "há 1h"),
+        (1_000 + 7_300, "há 2h"),
+    ] {
+        let line = detail_line(&s, now);
+        assert!(line.contains(&format!(" · {shown}")), "{now}: {line}");
+    }
+    // `updated_at` ahead of the clock (a skew, or a hand-written file): no panic, no "old" mark.
+    let future = detail_line(&s, 500);
+    assert!(
+        future.ends_with("· há 0s") && !future.contains("dados antigos"),
+        "{future}"
+    );
+}
+
+#[test]
+fn counters_near_the_limit_do_not_overflow_the_reuse_rate() {
+    let mut s = snap(false, 1, u64::MAX, None);
+    s.stats.delivered = u64::MAX;
+    let line = detail_line(&s, 1_000);
+    assert!(line.contains("reuso 100%"), "{line}");
+    s.stats.delivered = 0;
+    assert!(detail_line(&s, 1_000).contains("reuso 100%"));
 }
 
 #[test]
@@ -626,6 +817,190 @@ fn reading_creates_nothing() {
     let missing = state.path().join("never");
     assert_eq!(read(&missing, HOST, "s", Path::new("/r")), Read::Missing);
     assert!(!missing.exists());
+    // A state dir that exists but has no `statusline/` yet stays as it is.
+    assert_eq!(
+        read(state.path(), HOST, "s", Path::new("/r")),
+        Read::Missing
+    );
+    assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_fifo_reads_as_missing_without_blocking() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let file = path(state.path(), HOST, "s", root);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    assert!(Proc::new("mkfifo").arg(&file).status().unwrap().success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir = state.path().to_path_buf();
+    // Detached on purpose: a read that blocks on the FIFO must fail the test, not hang it.
+    std::thread::spawn(move || {
+        let _ = tx.send(read(&dir, HOST, "s", Path::new("/r")));
+    });
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("read blocked on a FIFO"),
+        Read::Missing
+    );
+}
+
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn writers_of_one_file_do_not_share_a_temporary() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let dir = state.path().to_path_buf();
+    let writers: Vec<_> = (0..8)
+        .map(|t| {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                for i in 0..50 {
+                    let mut s = valid(Path::new("/r"));
+                    s.stats.injections = t * 100 + i;
+                    publish(&dir, "s", Path::new("/r"), &s).expect("a concurrent write failed");
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().unwrap();
+    }
+    assert!(matches!(
+        read(state.path(), HOST, "s", root),
+        Read::Valid(_)
+    ));
+    assert_eq!(
+        entries(&state.path().join("statusline")).len(),
+        1,
+        "no temporary is left behind"
+    );
+}
+
+#[test]
+fn a_failed_write_removes_its_temporary() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let file = path(state.path(), HOST, "s", root);
+    // A non-empty directory where the file goes: the rename cannot succeed.
+    std::fs::create_dir_all(file.join("inside")).unwrap();
+    assert!(publish(state.path(), "s", root, &valid(root)).is_err());
+    assert_eq!(
+        entries(file.parent().unwrap()),
+        vec![file.file_name().unwrap().to_string_lossy().into_owned()],
+        "only the directory that was already there"
+    );
+}
+
+#[test]
+fn a_symlink_planted_at_a_temporary_name_is_never_written_through() {
+    let state = tempfile::tempdir().unwrap();
+    let root = Path::new("/r");
+    let file = path(state.path(), HOST, "s", root);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let victim = state.path().join("victim");
+    std::fs::write(&victim, "precious").unwrap();
+    // The temporary is `<file>.tmp<pid>-<n>` with a process-wide counter: plant every name this
+    // process can reach in this test binary.
+    for n in 0..5_000 {
+        let name = file.with_extension(format!("tmp{}-{n}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, name).unwrap();
+    }
+    let _ = publish(state.path(), "s", root, &valid(root));
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+}
+
+#[test]
+fn existing_directories_keep_their_mode_and_new_ones_are_private() {
+    use ripwire_broker::hook::SessionState;
+    use ripwire_broker::state::StateStore;
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    let set = |p: &Path, m: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        assert_eq!(mode(p), m, "the fixture could not set {m:o}");
+    };
+    let root = Path::new("/r");
+    // A directory that was there before (the user's own, say) is never changed.
+    for existing in [0o755, 0o2770, 0o1777] {
+        let state = tempfile::tempdir().unwrap();
+        let sub = state.path().join("statusline");
+        std::fs::create_dir(&sub).unwrap();
+        set(state.path(), existing);
+        set(&sub, existing);
+        publish(state.path(), "s", root, &valid(root)).unwrap();
+        StateStore::new(state.path().to_path_buf())
+            .save("s", &SessionState::default())
+            .unwrap();
+        assert_eq!(mode(state.path()), existing, "state dir {existing:o}");
+        assert_eq!(mode(&sub), existing, "statusline dir {existing:o}");
+    }
+    // One this code creates is 0700 from the start, with the directories above it.
+    let base = tempfile::tempdir().unwrap();
+    let state = base.path().join("a/b");
+    publish(&state, "s", root, &valid(root)).unwrap();
+    for dir in [
+        base.path().join("a"),
+        state.clone(),
+        state.join("statusline"),
+    ] {
+        assert_eq!(mode(&dir), 0o700, "{}", dir.display());
+    }
+    let store_dir = base.path().join("c/d");
+    StateStore::new(store_dir.clone())
+        .save("s", &SessionState::default())
+        .unwrap();
+    assert_eq!(mode(&store_dir), 0o700);
+}
+
+#[test]
+fn a_state_directory_owned_by_another_user_is_refused() {
+    use ripwire_broker::hook::SessionState;
+    use ripwire_broker::state::StateStore;
+    use std::os::unix::fs::MetadataExt;
+    // `/tmp` belongs to root and anyone can write to it: the one such directory a test can reach.
+    let mine = tempfile::tempdir().unwrap();
+    let me = std::fs::metadata(mine.path()).unwrap().uid();
+    let shared = Path::new("/tmp");
+    if std::fs::metadata(shared).map(|m| m.uid()).unwrap_or(me) == me {
+        return; // running as that owner (root): nothing to refuse
+    }
+    let id = format!("owner-test-{}", std::process::id());
+    let store = StateStore::new(shared.to_path_buf());
+    let saved = store.save(&id, &SessionState::default());
+    store.remove(&id);
+    assert!(saved.is_err(), "wrote into another user's directory");
+    // Only this process's temporaries (`<hash>.tmp<pid>-<n>`): other tests' temp dirs also live in
+    // `/tmp` on Linux, as `.tmpXXXXXX`.
+    let ours = format!(".tmp{}-", std::process::id());
+    let left: Vec<_> = std::fs::read_dir(shared)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(&ours))
+        .collect();
+    assert!(left.is_empty(), "no temporary left behind: {left:?}");
+}
+
+#[test]
+fn the_session_lock_does_not_follow_a_symlink() {
+    use ripwire_broker::state::StateStore;
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    let lock = dir.path().join(format!(
+        "{:x}.lock",
+        <sha2::Sha256 as sha2::Digest>::digest(b"s")
+    ));
+    std::os::unix::fs::symlink(&victim, &lock).unwrap();
+    assert!(StateStore::new(dir.path().to_path_buf()).lock("s").is_err());
+    assert!(!victim.exists(), "the lock created a file through the link");
 }
 
 #[test]
@@ -651,10 +1026,6 @@ fn concurrent_readers_see_whole_versions_only() {
 }
 
 // Binary-level tests: Command::Statusline dispatch (Task 5).
-use ripwire_broker::statusline::resolve_root;
-use std::io::Write;
-use std::process::{Command as Proc, Stdio};
-
 fn run_bar(args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"));
     cmd.arg("statusline")
@@ -890,6 +1261,63 @@ fn the_status_line_never_starts_ripwire() {
         std::fs::read_dir(ws.path()).unwrap().count(),
         0,
         "and must not create files"
+    );
+}
+
+#[test]
+fn the_status_line_creates_and_changes_nothing_with_existing_state_either() {
+    let bin = tempfile::tempdir().unwrap();
+    let marker = bin.path().join("ran");
+    let fake = bin.path().join("ripwire");
+    std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    publish(state.path(), "s", &root, &valid(&root)).unwrap();
+    // The state as the hooks left it: a projection, a lock and a session file beside it.
+    std::fs::write(state.path().join("abc.json"), "{}").unwrap();
+    std::fs::write(state.path().join("abc.lock"), "").unwrap();
+    let tree = |dir: &Path| {
+        let mut out = vec![];
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                let m = std::fs::symlink_metadata(&p).unwrap();
+                if m.is_dir() {
+                    stack.push(p.clone());
+                }
+                out.push((p, m.len(), m.modified().unwrap(), m.permissions().mode()));
+            }
+        }
+        out.sort();
+        out
+    };
+    let before = (tree(state.path()), tree(ws.path()));
+    let path = format!("{}:/usr/bin:/bin", bin.path().display());
+    let input = format!(r#"{{"session_id":"s","cwd":"{}"}}"#, root.display());
+    // Both a session that has a projection and one that has none.
+    for session in ["s", "other"] {
+        let input = input.replace(r#""s""#, &format!("\"{session}\""));
+        let (code, _, _) = run_bar(
+            &[
+                "--workspace",
+                ws.path().to_str().unwrap(),
+                "--state-dir",
+                state.path().to_str().unwrap(),
+            ],
+            input.as_bytes(),
+            &[("PATH", &path), ("HOME", ws.path().to_str().unwrap())],
+        );
+        assert_eq!(code, 0);
+    }
+    assert!(!marker.exists(), "statusline must not start ripwire");
+    assert_eq!(
+        before,
+        (tree(state.path()), tree(ws.path())),
+        "no file created, removed, resized or touched"
     );
 }
 

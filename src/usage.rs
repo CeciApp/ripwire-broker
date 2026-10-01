@@ -36,11 +36,18 @@ fn ratio(part: u64, whole: u64) -> Option<f64> {
 }
 
 pub fn report(sessions: &[SessionState]) -> UsageReport {
+    // A session whose every event failed to launch ripwire saved a file with all-zero counters and
+    // nothing remembered: nothing was measured in it, and it would only count as an extra, empty
+    // "earliest" session. One saved before the tally existed has no events but real fingerprints.
+    let sessions: Vec<&SessionState> = sessions
+        .iter()
+        .filter(|s| s.stats.events > 0 || s.memory.fingerprints().next().is_some())
+        .collect();
     let mut r = UsageReport {
         sessions: sessions.len(),
         ..UsageReport::default()
     };
-    for s in sessions {
+    for s in &sessions {
         r.events += s.stats.events;
         r.injections += s.stats.injections;
         r.delivered += s.stats.delivered;
@@ -49,7 +56,7 @@ pub fn report(sessions: &[SessionState]) -> UsageReport {
     r.hit_rate = ratio(r.session_hits, r.session_hits + r.delivered);
 
     // In the order the sessions started, never the order of the files.
-    let mut ordered: Vec<&SessionState> = sessions.iter().collect();
+    let mut ordered = sessions.clone();
     ordered.sort_by_key(|s| s.stats.started_at);
     let mut earlier: HashSet<&str> = HashSet::new();
     for (n, s) in ordered.iter().enumerate() {

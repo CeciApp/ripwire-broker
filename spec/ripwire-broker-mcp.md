@@ -1470,7 +1470,7 @@ continua pendente dessa medição em uso real.
 Até o [D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real), essa medição
 era impossível, não só pendente. Cada evento de hook é um processo novo, e `session_hits` morria
 com ele. Agora o estado da sessão acumula o contador, e `ripwire-broker hook-stats` soma todas as
-sessões salvas. Ele reporta a taxa dentro da sessão e a repetição **entre** sessões, que é o que
+sessões salvas (menos as sem evento e sem fingerprint, que só tiveram falhas de launch; D-127). Ele reporta a taxa dentro da sessão e a repetição **entre** sessões, que é o que
 um cache persistente acrescentaria. Proposta de regra (o usuário decide), depois de ao menos 20
 sessões reais: abaixo de 15% de repetição entre sessões, S3.15 é recusado; a partir de 30%, entra.
 
@@ -2645,7 +2645,7 @@ Isso evita atribuir contadores antigos a outro projeto sem alterar a semântica 
 5. Se a sessão terminou sem publicação, os dados antigos permanecem identificados pelo timestamp. Não inferir liveness pelo mero arquivo existente.
 6. A barra lê somente o arquivo correspondente, sem lock e sem `sessions()`, sem desserializar toda a memória de fingerprints.
 7. Limites propostos: stdin de até 256 KiB; snapshot de até 16 KiB; leitura até limite + 1 para detectar excesso. JSON inválido/excedente gera degradação. Não persistir o payload do host.
-8. Diretórios Unix `0700`, arquivos `0600`; recusar snapshots que não sejam arquivos regulares e tratar symlinks inesperados como ausência. Reutilizar o padrão de segurança existente, sem prometer suporte Windows nesta entrega.
+8. Diretórios Unix `0700`, arquivos `0600`; recusar snapshots que não sejam arquivos regulares e tratar symlinks inesperados como ausência: o arquivo é aberto uma vez, com `O_NOFOLLOW` e `O_NONBLOCK`, e as verificações (regular, tamanho) valem para o arquivo aberto (D-127). Reutilizar o padrão de segurança existente, sem prometer suporte Windows nesta entrega.
 
 ### 24.7 Instalação e coexistência
 
@@ -2797,7 +2797,7 @@ que registra o que o código mudou em cada uma.
 | D2 | O que sobra sob largura extrema (§24.5.3) | Essenciais: `rw-brkr`, `ctx N%`, `hooks off`, `última: atenção`, `última: erro`. `hooks on`, `hooks sem dados`, `última: pronta` e `última: incerta` não são pausa nem alerta, e saem depois do modelo |
 | D3 | Quais hooks publicam (§24.6.3) | Só os do Claude Code. O host já entra na chave do arquivo e no snapshot, então publicar para o Codex depois é uma linha |
 | D4 | Falha do `local::launch` (§24.3.1) | A análise vira `erro` e o estado é salvo e publicado. Os contadores não mudam: esse caminho não conta evento hoje, e mudá-lo mudaria o `hook-stats` |
-| D5 | Barra alheia herdada (§24.7) | No settings do usuário: a do broker não é escrita, porque a sombrearia, e sai nota com o trecho manual. No `settings.local.json`: a do broker é escrita, com nota de que a local prevalece. Settings do usuário ilegível: nada é escrito, nota com o trecho manual. Se o usuário passa a ter barra alheia e o settings do projeto tem a barra do broker (reconhecida pela estrutura), um novo `install --statusline` remove a do projeto, com nota, para não sombrear a do usuário (revisão final, D-123). `"statusLine": null` conta como ausente |
+| D5 | Barra alheia herdada (§24.7) | No settings do usuário: a do broker não é escrita, porque a sombrearia, e sai nota com o trecho manual. No `settings.local.json`: a do broker é escrita, com nota de que a local prevalece. Settings do usuário ilegível: nada é escrito, nota com o trecho manual. Se o usuário passa a ter barra alheia e o settings do projeto tem a barra do broker (reconhecida pela estrutura: o programa se chama exatamente `ripwire-broker` ou `ripwire-broker-` seguido de dígito, como `ripwire-broker-0.2`, e o primeiro argumento é `statusline`; D-127), um novo `install --statusline` remove a do projeto, com nota, para não sombrear a do usuário (revisão final, D-123). `"statusLine": null` conta como ausente |
 | D6 | Payload de agente (§24.8) | **Revisada** (D-123): presença de `agent` (objeto) no JSON do host não muda o que é lido nem mostrado; a barra traz os segmentos normais, com os dados dos hooks, mais um segmento `agente: <nome>` logo depois do modelo (nome saneado, no máximo 24 colunas; sem nome usável, `agente`). ~~Original: só os segmentos do host e `agente`, sem ler snapshot.~~ Motivo: a documentação do Claude Code contradiz a premissa (o objeto `agent` descreve a sessão principal rodando com `--agent`; subagentes usam `subagentStatusLine`), e com a regra original quem usa `--agent` nunca veria os dados dos hooks |
 
 **Defeito existente, fora do escopo:** quando o `local::launch` falha, `hook::run` retorna antes de
