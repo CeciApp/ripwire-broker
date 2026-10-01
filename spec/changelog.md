@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
 | 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
 | 2026-10-01 18:10 | Com `--color always`, `hooks off` fica vermelho e `hooks on` azul claro (`38;5;117`); `hooks sem dados` segue sem cor; 1 teste novo (395 padrão, 409 com `online`) | [D-124](#d-124--cores-do-estado-dos-hooks-na-barra) |
 | 2026-10-01 16:40 | A barra de status do Claude Code (`statusline`, projeção publicada pelos hooks, `install --statusline`) é implementada em 9 tarefas por subagentes; 61 testes novos (384 padrão, 398 com `online`); p95 de 2,8 ms medido em release; **validação manual e fixture de payload real pendentes** | [D-123](#d-123--a-barra-de-status-é-implementada) |
@@ -4954,3 +4955,27 @@ Com `--color always`, o segmento de estado dos hooks ganha cor, como o `ctx`:
   **410 passados, 4 ignorados**.
 - **Não muda:** o defeito do D-123 continua (com falha de launch, o marcador da borda também não é
   processado).
+
+## D-126 — O marcador vale mesmo sem ripwire
+
+**Data:** 2026-10-01. **Pedido do mantenedor.** Fecha o defeito registrado no D-123 (e lembrado no
+D-125).
+
+- **Defeito:** `hook::run` só chegava a `handle`, onde o marcador do prompt é lido, depois de
+  `local::launch`. Com o ripwire ausente ou quebrado, o `#ripwire-off` não pausava (o host recebia a
+  mensagem de falha) e o `#ripwire-on` não reativava (a sessão pausada continuava muda). A barra
+  mostrava o estado errado até um prompt com o ripwire de pé.
+- **Correção:** no braço de falha do launch, um `UserPromptSubmit` tem o marcador aplicado antes de
+  tudo, pela mesma função (`toggle`) que o caminho normal usa:
+  - **`#ripwire-off`:** a sessão é pausada, salva e publicada, e o host recebe a mesma confirmação do
+    caminho normal, não a falha. Nada é analisado, então a `última` análise não muda.
+  - **`#ripwire-on`:** a sessão é reativada e segue o caminho de falha do D4 (análise `erro`, salva e
+    publicada, contadores sem mudança), então a retomada fica gravada.
+  - **Sem marcador:** igual a antes (sessão pausada fica muda; ativa recebe a falha).
+- **Cache da versão (D-105):** na pausa, o estado volta à versão do ripwire carregada, como no caminho
+  de falha, para não gravar a leitura de um binário que não roda.
+- **Testes:** `a_marker_is_honoured_even_when_ripwire_cannot_launch` (falhou antes da correção: a pausa
+  era respondida como falha) e uma extensão de `a_launch_failure_does_not_cache_the_unrunnable_ripwire_version`
+  para a pausa. Mutações pegas: ignorar o marcador no braço de falha; não salvar a pausa; não restaurar
+  a versão carregada. Contagem: padrão **397 passados, 2 ignorados**; com `online` **411 passados,
+  4 ignorados**.

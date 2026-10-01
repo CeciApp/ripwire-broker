@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-01, até o
-[D-125](spec/changelog.md#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt).
+[D-126](spec/changelog.md#d-126--o-marcador-vale-mesmo-sem-ripwire).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -31,8 +31,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 396 testes, 2 ignorados (opt-in)
-cargo test --all-targets --features online  # 410 testes, 4 ignorados
+cargo test --all-targets                    # 397 testes, 2 ignorados (opt-in)
+cargo test --all-targets --features online  # 411 testes, 4 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -62,7 +62,7 @@ cargo fmt --check
   `online*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-125, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-126, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -116,10 +116,6 @@ Os instrumentos estão prontos; as medições, não.
   Claude Code). O `capture.sh` da pasta grava o payload real do `statusLine`; falta transformá-lo em
   `tests/fixtures/statusline/claude_code.json` (com `__WORKSPACE__`) e conferir `effort.level`,
   `workspace.project_dir` e `agent`. Até lá os testes usam JSON sintético.
-- **Defeito existente que a barra torna visível:** quando o `local::launch` falha, `hook::run` retorna
-  antes de `handle`, e **nem `#ripwire-on` nem `#ripwire-off`** desse prompt são processados. Com o
-  ripwire ausente a barra mostra `hooks off` (se a sessão já estava pausada) até um prompt com o ripwire
-  de pé. Não corrigido (D-123).
 - **Barra: `write_private` e links.** O endurecimento contra symlink/hardlink do arquivo temporário
   continua pendência (D-123, "Revisão final").
 - **Barra: sessão só de falhas de launch.** Agora deixa um arquivo de sessão com contadores zerados, e o

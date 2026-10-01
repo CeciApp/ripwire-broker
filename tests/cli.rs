@@ -1821,6 +1821,57 @@ fn a_launch_failure_is_published_as_an_error_and_the_hook_still_answers() {
 }
 
 #[test]
+fn a_marker_is_honoured_even_when_ripwire_cannot_launch() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--ripwire",
+        "/nonexistent/ripwire",
+    ];
+    let snapshot = || {
+        let Read::Valid(s) = bar_snapshot(state.path(), "s-1", ws.path()) else {
+            panic!("published")
+        };
+        s
+    };
+
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-1", "pause #ripwire-off"));
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("off") && out.contains("#ripwire-on"),
+        "the opt-out is acknowledged, not reported as a failure: {out}"
+    );
+    let s = snapshot();
+    assert!(s.opted_out, "the pause is saved and published");
+    assert!(s.last_analysis.is_none(), "nothing was analysed");
+
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-1", "a question"));
+    assert_eq!(code, 0);
+    assert_eq!(out, "", "a paused session stays silent without ripwire");
+
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-1", "#ripwire-on resume"));
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("no context"),
+        "resumed, then the launch failure is reported: {out}"
+    );
+    let s = snapshot();
+    assert!(!s.opted_out, "the resume is saved");
+    assert_eq!(s.last_analysis.unwrap().status, AnalysisStatus::Error);
+    assert_eq!(
+        s.stats.events, 0,
+        "D4: counters unchanged by a launch failure"
+    );
+}
+
+#[test]
 fn no_session_id_or_codex_publishes_nothing() {
     let ws = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
@@ -1949,6 +2000,15 @@ fn a_launch_failure_does_not_cache_the_unrunnable_ripwire_version() {
     assert!(
         saved.ripwire.is_none(),
         "no cached version: {:?}",
+        saved.ripwire
+    );
+    // A pause honoured during the failure saves the session too, and caches nothing either.
+    run(&args, &prompt_event(ws.path(), "s-1", "#ripwire-off"));
+    let saved = ripwire_broker::state::StateStore::new(state.path().to_path_buf()).load("s-1");
+    assert!(saved.opted_out);
+    assert!(
+        saved.ripwire.is_none(),
+        "no cached version after the pause: {:?}",
         saved.ripwire
     );
 }

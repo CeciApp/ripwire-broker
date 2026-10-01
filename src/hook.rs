@@ -410,6 +410,24 @@ fn marker(prompt: &str) -> (Option<&'static str>, &str) {
     (None, text)
 }
 
+/// Applies a prompt's marker to the session: `Some` acknowledgement when it pauses. It needs no
+/// ripwire, so a session can be paused or resumed while ripwire cannot launch (D-126).
+fn toggle(state: &mut SessionState, marker: Option<&str>) -> Option<Value> {
+    match marker {
+        Some(OPT_OUT) => {
+            state.opted_out = true;
+            Some(json!({"systemMessage": format!(
+                "ripwire-broker: automatic context is off for this session; type {OPT_IN} to resume"
+            )}))
+        }
+        Some(OPT_IN) => {
+            state.opted_out = false;
+            None
+        }
+        _ => None,
+    }
+}
+
 async fn respond(
     event: Event,
     input: &Value,
@@ -425,14 +443,8 @@ async fn respond(
             let first = state.prompts_seen == 0;
             state.prompts_seen += 1;
             let (marker, task) = marker(prompt);
-            if marker == Some(OPT_OUT) {
-                state.opted_out = true;
-                return Ok(Some(json!({"systemMessage": format!(
-                    "ripwire-broker: automatic context is off for this session; type {OPT_IN} to resume"
-                )})));
-            }
-            if marker == Some(OPT_IN) {
-                state.opted_out = false;
+            if let Some(paused) = toggle(state, marker) {
+                return Ok(Some(paused));
             }
             if state.opted_out || (!first && !policy.every_prompt) {
                 return Ok(None);
@@ -599,9 +611,21 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     }
     let broker = match crate::local::launch(&workspace, &args.upstream, true, Some(version)).await {
         Ok(b) => b,
-        // Opted-out sessions stay silent even when ripwire is missing.
-        Err(_) if state.opted_out => return None,
         Err(e) => {
+            // The marker of this prompt needs no ripwire: honour it before reporting (D-126).
+            let prompt = input.get("prompt").and_then(Value::as_str);
+            let marker = prompt
+                .filter(|_| args.event == Event::UserPromptSubmit)
+                .and_then(|p| marker(p).0);
+            if let Some(paused) = toggle(&mut state, marker) {
+                state.ripwire = loaded_ripwire;
+                finish(&state);
+                return Some(paused);
+            }
+            // Opted-out sessions stay silent even when ripwire is missing.
+            if state.opted_out {
+                return None;
+            }
             // A binary that exists but cannot run must not be cached as "unavailable" (D-105).
             state.ripwire = loaded_ripwire;
             analysed(&mut state, args.event, AnalysisStatus::Error, Some(e.error));
