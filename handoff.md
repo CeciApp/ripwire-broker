@@ -1,8 +1,8 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-01, até o
-[D-121](spec/changelog.md#d-121--as-três-causas-das-falhas-de-validação-do-d-117). Para quem
-pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
+[D-121](spec/changelog.md#d-121--três-mecanismos-que-reproduzem-as-falhas-de-validação-do-d-117).
+Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
 
@@ -81,8 +81,10 @@ Os instrumentos estão prontos; as medições, não.
 - **Falta, nesta ordem:**
   1. o mantenedor revisar os enunciados (ressalvas no D-117: alguns nomeiam interfaces, um entrega
      o diagnóstico);
-  2. dar a cada tarefa do repositório A o relógio congelado e uma porta própria no `env` (D-121), e
-     revalidar (`ripwire-eval validate`);
+  2. dar a cada tarefa do repositório A uma porta própria e o relógio congelado no `env` (D-121), e
+     revalidar (`ripwire-eval validate`). A porta vale para todas: a configuração de teste do A sobe
+     o servidor em todo `mix test`. O relógio só importa nas tarefas cujos testes leem a data, mas
+     congelá-lo nas outras é inofensivo e evita decidir tarefa por tarefa;
   3. **piloto pago**: 3 tarefas × 3 braços, teto de US$ 3 por execução, para medir custo real e
      gravar um transcript real (a fixture de `stream-json` dos testes é sintética);
   4. a rodada: 32 tarefas × 3 braços × 3 repetições. O braço `broker-online` só com a chave e
@@ -125,9 +127,10 @@ Cada uma custou uma conclusão errada antes de ser achada. O changelog conta sei
   #29.
 - **O repositório é público.** Detalhes dos repositórios privados do corpus não entram em commit,
   changelog nem PR.
-- **A suíte do repositório A abre uma porta fixa e lê a data.** Duas suítes ao mesmo tempo: a segunda
-  morre com `eaddrinuse` e o `check` conta como falha. Um `fix` antigo: o teste envelhece com o
-  calendário. O `env` de cada tarefa fixa os dois (D-121).
+- **A suíte do repositório A abre uma porta fixa, e parte dos testes lê a data.** A porta é da
+  configuração de teste, então vale para toda execução: duas suítes ao mesmo tempo, e a segunda morre
+  com `eaddrinuse` e o `check` conta como falha. A data é de alguns testes: num `fix` antigo, eles
+  envelhecem com o calendário. Medido no corpus de diagnóstico (D-121).
 - **O corpus usa um Postgres compartilhado.** As migrações do repositório A têm efeitos globais no
   cluster: rodar uma validação ou rodada por vez, e sem outra sessão trabalhando no A.
 

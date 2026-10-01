@@ -97,7 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
-| 2026-10-01 13:28 | As falhas de validação do D-117 têm três mecanismos, medidos num corpus de diagnóstico: a porta fixa do endpoint de teste do repositório A (`eaddrinuse`), a data (provada com o relógio congelado) e, fraca, a carga. O Postgres disputado sozinho não derrubou nada. Regra nova: cada tarefa do A fixa relógio e porta no `env` | [D-121](#d-121--as-três-causas-das-falhas-de-validação-do-d-117) |
+| 2026-10-01 13:28 | Três mecanismos reproduzem o sintoma do D-117 num corpus de diagnóstico (a causa daquela rodada segue sem prova): a porta fixa do endpoint de teste do repositório A (`eaddrinuse`), a data (provada com o relógio congelado) e, fraca, a carga. O Postgres disputado sozinho não derrubou nada. Regra nova: cada tarefa do A fixa relógio e porta no `env` | [D-121](#d-121--três-mecanismos-que-reproduzem-as-falhas-de-validação-do-d-117) |
 | 2026-10-01 08:46 | O cancelamento sob HTTP/2 ganha teste: um fixture `h2` (h2c) mostra que cada stream em voo recebe `RST_STREAM(CANCEL)`; `h2` entra como dev-dependency, já presente no grafo pelo `reqwest` | [D-120](#d-120--o-cancelamento-sob-http2-ganha-teste) |
 | 2026-10-01 08:14 | Duas pendências do handoff fechadas: o `sha2` >= 0.11 vai para o `ignore` do dependabot, e os links dos planos no PRD, no changelog e nos próprios planos passam a apontar para `spec/plan/` | [D-119](#d-119--pendências-do-handoff-sha2-no-dependabot-e-links-dos-planos) |
 | 2026-10-01 07:50 | Revisão do PR #29: a guarda de shell enxerga atribuições, invólucros, `sh -c` e aspas; `fix` validado como commit; edição do agente num arquivo que o `setup` tocou volta a contar. E o `handoff.md` | [D-118](#d-118--revisão-do-pr-29-e-handoff) |
@@ -4520,7 +4520,7 @@ Rodado 20 vezes seguidas, sem falha.
 **323** testes no padrão (sem mudança) e **337** com `online` (eram 336). `fmt` e clippy limpos nas
 duas features, e o gate do CA-10 continua limpo.
 
-## D-121 — As três causas das falhas de validação do D-117
+## D-121 — Três mecanismos que reproduzem as falhas de validação do D-117
 
 O D-117 registrou nove tarefas do repositório A falhando **no fix** na primeira validação do corpus,
 e passando de novo depois, com duas suspeitas não provadas: carga e outra sessão no mesmo Postgres.
@@ -4543,7 +4543,7 @@ Duas tarefas ficaram fora da conta: uma cujo `check` passa no base, e outra que 
 todas as condições, com o relógio congelado inclusive. A causa dessa última não foi achada, e ela
 não é o sintoma do D-117.
 
-### As três causas, por força
+### Os três mecanismos, por força
 
 1. **A porta do endpoint de teste.** A suíte do A sobe o servidor HTTP numa porta fixa, a menos que
    uma variável de ambiente diga outra. Duas suítes do A ao mesmo tempo na mesma máquina: a segunda
