@@ -2204,7 +2204,7 @@ fn reinstalling_without_statusline_keeps_the_bar() {
 }
 
 #[test]
-fn an_unreadable_user_settings_file_writes_no_bar_but_keeps_the_hooks() {
+fn invalid_user_settings_write_no_bar_but_keep_the_hooks() {
     let ws = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
     let root = ws.path().canonicalize().unwrap();
@@ -2218,4 +2218,75 @@ fn an_unreadable_user_settings_file_writes_no_bar_but_keeps_the_hooks() {
     let s = read_json(&root.join(".claude/settings.json"));
     assert!(s.get("statusLine").is_none(), "no bar written");
     assert_eq!(commands(&s, "Stop").len(), 1, "hooks are still written");
+}
+
+#[test]
+fn a_user_settings_path_that_cannot_be_read_writes_no_bar_but_keeps_the_hooks() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir(user.path().join("settings.json")).unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert_eq!(code, 0, "{err}");
+    let file = user.path().join("settings.json").display().to_string();
+    assert!(
+        out.contains(&file) && out.contains("statusLine"),
+        "a note naming the file: {out}"
+    );
+    let s = read_json(&root.join(".claude/settings.json"));
+    assert!(s.get("statusLine").is_none(), "no bar written");
+    assert_eq!(commands(&s, "Stop").len(), 1, "hooks are still written");
+}
+
+#[test]
+fn an_invalid_local_settings_file_still_gets_our_bar_with_a_note() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(root.join(".claude/settings.local.json"), "{broken").unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("settings.local.json") && out.contains("could not be read"),
+        "{out}"
+    );
+    assert!(
+        read_json(&root.join(".claude/settings.json"))
+            .get("statusLine")
+            .is_some()
+    );
+}
+
+#[test]
+fn without_a_home_the_user_settings_cannot_be_located_and_no_bar_is_written() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args([
+            "install",
+            "claude-code",
+            "--workspace",
+            root.to_str().unwrap(),
+            "--statusline",
+            "--write",
+        ])
+        .env_remove("HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("could not be located") && stdout.contains("statusLine"),
+        "{stdout}"
+    );
+    assert!(
+        !root.join(".claude/settings.json").exists(),
+        "no bar written"
+    );
 }

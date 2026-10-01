@@ -213,6 +213,15 @@ fn user_settings() -> Option<PathBuf> {
         .map(|d| d.join("settings.json"))
 }
 
+/// Missing is fine (`None`); any other failure means the file's content is undetermined.
+fn read_settings(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("unreadable ({e})")),
+    }
+}
+
 fn read(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
 }
@@ -311,31 +320,43 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
             if args.statusline {
                 // D5: an inherited user bar would be shadowed by ours; an unreadable one leaves the
                 // effective bar unknown. Either way, nothing is written and the snippet is shown.
-                match user_settings().map(|p| (parse(&read(&p)), p)) {
-                    Some((Err(e), p)) => {
+                match user_settings() {
+                    None => {
                         bar_wanted = false;
                         plan.notes.push(format!(
-                            "{}: {e}; add the bar by hand if it is free:\n{manual}",
-                            p.display()
+                            "the user settings file could not be located (no CLAUDE_CONFIG_DIR or HOME), so an inherited statusLine is unknown; add the bar by hand if it is free:\n{manual}"
                         ));
                     }
-                    Some((Ok(v), p)) if matches!(bar(&v), Bar::Foreign) => {
-                        bar_wanted = false;
-                        plan.notes.push(format!(
-                            "{} has its own statusLine; keeping it. To use the broker's:\n{manual}",
-                            p.display()
-                        ));
-                    }
-                    _ => {}
+                    Some(p) => match read_settings(&p).and_then(|t| parse(&t)) {
+                        Err(e) => {
+                            bar_wanted = false;
+                            plan.notes.push(format!(
+                                "{}: {e}; add the bar by hand if it is free:\n{manual}",
+                                p.display()
+                            ));
+                        }
+                        Ok(v) if matches!(bar(&v), Bar::Foreign) => {
+                            bar_wanted = false;
+                            plan.notes.push(format!(
+                                "{} has its own statusLine; keeping it. To use the broker's:\n{manual}",
+                                p.display()
+                            ));
+                        }
+                        Ok(_) => {}
+                    },
                 }
+                // Ours is written either way (the local file wins), but the user hears about it.
                 let local = workspace.join(".claude/settings.local.json");
-                if let Ok(v) = parse(&read(&local))
-                    && matches!(bar(&v), Bar::Foreign)
-                {
-                    plan.notes.push(format!(
+                match read_settings(&local).and_then(|t| parse(&t)) {
+                    Err(e) => plan.notes.push(format!(
+                        "{} could not be read ({e}); a statusLine there would win over the project's.",
+                        local.display()
+                    )),
+                    Ok(v) if matches!(bar(&v), Bar::Foreign) => plan.notes.push(format!(
                         "{} has its own statusLine, and it wins over the project's.",
                         local.display()
-                    ));
+                    )),
+                    Ok(_) => {}
                 }
                 if !args.hooks {
                     plan.notes.push("statusLine without --hooks: the bar shows `hooks sem dados` until hooks are installed.".into());
