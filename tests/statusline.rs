@@ -1,5 +1,5 @@
 //! The status line (PRD §24): rendering, the `statusline` command and its projection.
-use ripwire_broker::statusline::{HostInput, Options, model_label, parse_input, render};
+use ripwire_broker::statusline::{HostInput, Options, model_label, parse_input, render, width};
 use ripwire_broker::statusline_state::*;
 
 const WIDE: Options = Options {
@@ -229,4 +229,144 @@ fn detail_adds_delivered_reuse_last_context_and_age() {
         !line.contains("reuso") && !line.contains("contexto ~"),
         "no fictitious rate: {line}"
     );
+}
+
+fn opts(w: usize) -> Options {
+    Options {
+        detail: true,
+        width: w,
+        color: false,
+    }
+}
+
+#[test]
+fn lines_fit_40_80_and_120_columns_and_shed_in_order() {
+    let s = snap(true, 7, 18, Some(AnalysisStatus::AttentionRequired));
+    for w in [40, 80, 120] {
+        let line = render(&host(SONNET), Some(&s), &opts(w), 1_020);
+        assert!(width(&line) <= w, "{w}: {line}");
+        assert!(line.starts_with("rw-brkr"), "{line}");
+        assert!(
+            line.contains("hooks off") && line.contains("última: atenção"),
+            "alerts stay: {line}"
+        );
+    }
+    let line40 = render(&host(SONNET), Some(&s), &opts(40), 1_020);
+    assert!(
+        !line40.contains("entregues") && !line40.contains("inj "),
+        "details and counters go first: {line40}"
+    );
+}
+
+#[test]
+fn extreme_widths_keep_alerts_then_the_prefix() {
+    let s = snap(true, 7, 18, Some(AnalysisStatus::Error));
+    // 7 + 3 + 7 + 3 + 7 + 3 + 9 + 3 + 12 = 44 columns: the essentials exactly.
+    let line = render(&host(SONNET), Some(&s), &opts(44), 1_020);
+    assert_eq!(line, "rw-brkr · ctx 32% · hooks off · última: erro");
+    assert_eq!(
+        render(&host(SONNET), Some(&s), &opts(43), 1_020),
+        "rw-brkr · hooks off · última: erro"
+    );
+    assert_eq!(
+        render(&host(SONNET), Some(&s), &opts(34), 1_020),
+        "rw-brkr · hooks off · última: erro"
+    );
+    assert_eq!(render(&host(SONNET), Some(&s), &opts(10), 1_020), "rw-brkr");
+    assert_eq!(render(&host(SONNET), Some(&s), &opts(3), 1_020), "rw-");
+}
+
+#[test]
+fn width_is_visual_not_bytes() {
+    assert_eq!(width("não"), 3);
+    assert_eq!(width("日本"), 4);
+    let wide =
+        r#"{"model":{"display_name":"モデル名前テスト"},"context_window":{"used_percentage":5}}"#;
+    let line = render(
+        &host(wide),
+        None,
+        &Options {
+            detail: false,
+            width: 30,
+            color: false,
+        },
+        0,
+    );
+    assert!(width(&line) <= 30, "{line}");
+}
+
+fn ctx_line(pct: f64) -> String {
+    render(
+        &host(&format!(
+            r#"{{"context_window":{{"used_percentage":{pct}}}}}"#
+        )),
+        None,
+        &Options {
+            detail: false,
+            width: 100,
+            color: true,
+        },
+        0,
+    )
+}
+
+#[test]
+fn ctx_colors_follow_the_rounded_value_and_reset_after_the_segment() {
+    for (pct, code) in [
+        (0.0, "\x1b[38;5;250m"),
+        (39.0, "\x1b[38;5;250m"),
+        (39.4, "\x1b[38;5;250m"),
+        (39.5, "\x1b[97m"),
+        (40.0, "\x1b[97m"),
+        (59.0, "\x1b[97m"),
+        (60.0, "\x1b[33m"),
+        (80.0, "\x1b[33m"),
+        (80.4, "\x1b[33m"),
+        (80.5, "\x1b[31m"),
+        (81.0, "\x1b[31m"),
+        (100.0, "\x1b[31m"),
+    ] {
+        let line = ctx_line(pct);
+        let shown = pct.round() as u32;
+        assert!(
+            line.contains(&format!("{code}ctx {shown}%\x1b[0m")),
+            "{pct}: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn color_never_has_no_escape_and_alerts_are_colored_when_asked() {
+    let s = snap(false, 1, 1, Some(AnalysisStatus::Error));
+    let plain = render(
+        &host(SONNET),
+        Some(&s),
+        &Options {
+            detail: false,
+            width: 200,
+            color: false,
+        },
+        0,
+    );
+    assert!(!plain.contains('\x1b'), "{plain:?}");
+    let colored = render(
+        &host(SONNET),
+        Some(&s),
+        &Options {
+            detail: false,
+            width: 200,
+            color: true,
+        },
+        0,
+    );
+    assert!(
+        colored.contains("\x1b[31múltima: erro\x1b[0m"),
+        "{colored:?}"
+    );
+    // The fit is computed without escapes: same visible text either way.
+    let stripped = colored
+        .replace("\x1b[38;5;250m", "")
+        .replace("\x1b[31m", "")
+        .replace("\x1b[0m", "");
+    assert_eq!(stripped, plain);
 }

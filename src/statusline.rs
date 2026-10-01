@@ -4,6 +4,7 @@
 use crate::statusline_state::{AnalysisStatus, Snapshot};
 use serde_json::Value;
 use std::path::PathBuf;
+use unicode_width::UnicodeWidthStr;
 
 pub const PREFIX: &str = "rw-brkr";
 pub const SEPARATOR: &str = " · ";
@@ -260,16 +261,75 @@ pub struct Options {
     pub color: bool,
 }
 
-/// This task: join everything. Task 3 replaces the body with fit-then-color.
+pub fn width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn joined(segs: &[Segment]) -> String {
+    segs.iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(SEPARATOR)
+}
+
+/// The first `cols` columns of `text`, cut on a character boundary.
+fn truncate(text: &str, cols: usize) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if width(&out) + width(c.encode_utf8(&mut [0; 4])) > cols {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn fit(mut segs: Vec<Segment>, cols: usize) -> Vec<Segment> {
+    for level in [Keep::Detail, Keep::Counter, Keep::Model, Keep::Soft] {
+        if width(&joined(&segs)) <= cols {
+            return segs;
+        }
+        segs.retain(|s| s.keep != level);
+    }
+    if width(&joined(&segs)) <= cols {
+        return segs;
+    }
+    segs.retain(|s| s.text == PREFIX || !s.text.starts_with("ctx "));
+    if width(&joined(&segs)) <= cols {
+        return segs;
+    }
+    vec![seg(truncate(PREFIX, cols), Keep::Essential, Style::Plain)]
+}
+
+fn paint(s: &Segment) -> String {
+    let code = match s.style {
+        Style::Plain => return s.text.clone(),
+        Style::Gray => "\x1b[38;5;250m",
+        Style::White => "\x1b[97m",
+        Style::Yellow => "\x1b[33m",
+        Style::Red => "\x1b[31m",
+    };
+    format!("{code}{}\x1b[0m", s.text)
+}
+
 pub fn render(
     input: &HostInput,
     snapshot: Option<&Snapshot>,
     options: &Options,
     now: u64,
 ) -> String {
-    segments(input, snapshot, options.detail, now)
-        .into_iter()
-        .map(|s| s.text)
+    let segs = fit(
+        segments(input, snapshot, options.detail, now),
+        options.width,
+    );
+    segs.iter()
+        .map(|s| {
+            if options.color {
+                paint(s)
+            } else {
+                s.text.clone()
+            }
+        })
         .collect::<Vec<_>>()
         .join(SEPARATOR)
 }
