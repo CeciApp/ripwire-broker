@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct StateStore {
     dir: PathBuf,
@@ -23,6 +23,10 @@ impl StateStore {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
         Some(base.join("ripwire-broker"))
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// The session id is named by its hash, so the file name reveals nothing.
@@ -81,20 +85,29 @@ impl StateStore {
     /// Written to a private temporary file and renamed: readers never see half a state.
     /// Concurrent hooks of one session: the last writer wins.
     pub fn save(&self, session_id: &str, state: &SessionState) -> std::io::Result<()> {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.dir)?;
-        let path = self.path(session_id);
-        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        file.write_all(serde_json::to_string(state)?.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&tmp, &path)
+        write_private(
+            &self.dir,
+            &self.path(session_id),
+            serde_json::to_string(state)?.as_bytes(),
+        )
     }
+}
+
+/// Writes `bytes` to `path` through a private temporary file in `dir` and a rename: readers see
+/// the old file or the new one, never half of it. Creates `dir` as 0700; the file is 0600.
+pub(crate) fn write_private(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(&tmp, path)
 }

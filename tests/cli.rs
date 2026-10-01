@@ -1,5 +1,5 @@
 //! Seam 5: the binary's command line. `cli::parse` is pure; e2e runs of the binary follow.
-use ripwire_broker::cli::{self, Command, Event, Host};
+use ripwire_broker::cli::{self, Color, Command, Event, Host};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -126,6 +126,72 @@ fn each_subcommand_parses_its_flags() {
     assert_eq!(i.host, Host::Codex);
     assert!(i.hooks && i.write);
     assert_eq!(i.codex_home, Some(PathBuf::from("/c")));
+}
+
+#[test]
+fn statusline_parses_its_flags_and_defaults_to_no_color() {
+    let Ok(Command::Statusline(s)) = parse(&["statusline"]) else {
+        panic!()
+    };
+    assert_eq!(s.workspace, None);
+    assert_eq!(s.color, Color::Never);
+    assert!(!s.detail);
+    assert_eq!(s.width, None);
+
+    let Ok(Command::Statusline(s)) = parse(&[
+        "statusline",
+        "--workspace",
+        "/r",
+        "--state-dir",
+        "/s",
+        "--detail",
+        "--width",
+        "80",
+        "--color",
+        "always",
+    ]) else {
+        panic!()
+    };
+    assert_eq!(s.workspace, Some("/r".into()));
+    assert_eq!(s.state_dir, Some("/s".into()));
+    assert!(s.detail);
+    assert_eq!(s.width, Some(80));
+    assert_eq!(s.color, Color::Always);
+}
+
+#[test]
+fn statusline_refuses_bad_values_and_foreign_flags() {
+    for args in [
+        &["statusline", "--color", "auto"][..],
+        &["statusline", "--width", "wide"][..],
+        &["statusline", "--ripwire", "x"][..],
+        &["statusline", "extra"][..],
+    ] {
+        assert!(parse(args).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn install_takes_statusline_only_for_claude_code() {
+    let Ok(Command::Install(i)) = parse(&[
+        "install",
+        "claude-code",
+        "--workspace",
+        "/r",
+        "--statusline",
+    ]) else {
+        panic!()
+    };
+    assert!(i.statusline && !i.hooks);
+    assert!(parse(&["install", "codex", "--workspace", "/r", "--statusline"]).is_err());
+}
+
+#[test]
+fn statusline_help_does_not_read_stdin() {
+    // `run` writes nothing to stdin and would block on a reader; --help must return at once.
+    let (code, out, _) = run(&["statusline", "--help"], "");
+    assert_eq!(code, 0);
+    assert!(out.contains("statusline"), "{out}");
 }
 
 #[test]
@@ -311,6 +377,7 @@ macro_rules! require_ripwire {
 fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
     let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
         .args(args)
+        .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1462,6 +1529,7 @@ fn install_refuses_a_binary_path_that_is_not_utf8() {
             host,
             workspace: ws.path().to_path_buf(),
             hooks: false,
+            statusline: false,
             write: false,
             codex_home: Some(codex_home.path().to_path_buf()),
             online: false,
@@ -1487,6 +1555,7 @@ fn install_refuses_a_workspace_path_that_is_not_utf8() {
         host: Host::ClaudeCode,
         workspace,
         hooks: false,
+        statusline: false,
         write: false,
         codex_home: None,
         online: false,
@@ -1712,4 +1781,676 @@ fn hook_stats_parses() {
             json: true
         })
     );
+}
+
+// --- the hooks publish the status line projection (spec §24.6.4) ---
+
+use ripwire_broker::statusline_state::{self as projection, AnalysisStatus, HOST, Read};
+
+fn bar_snapshot(state: &std::path::Path, session: &str, ws: &std::path::Path) -> Read {
+    projection::read(state, HOST, session, &ws.canonicalize().unwrap())
+}
+
+#[test]
+fn a_launch_failure_is_published_as_an_error_and_the_hook_still_answers() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--ripwire",
+        "/nonexistent/ripwire",
+    ];
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-1", "hello"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "same answer as before: {out}");
+    let Read::Valid(s) = bar_snapshot(state.path(), "s-1", ws.path()) else {
+        panic!("published")
+    };
+    let a = s.last_analysis.unwrap();
+    assert_eq!(a.status, AnalysisStatus::Error);
+    assert_eq!(
+        s.stats.events, 0,
+        "D4: counters unchanged by a launch failure"
+    );
+}
+
+#[test]
+fn no_session_id_or_codex_publishes_nothing() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let base = |host: &'static str| {
+        vec![
+            "hook",
+            host,
+            "user-prompt-submit",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--ripwire",
+            "/nonexistent/ripwire",
+        ]
+    };
+    let no_id =
+        json!({"cwd": ws.path(), "hook_event_name": "UserPromptSubmit", "prompt": "x"}).to_string();
+    run(&base("claude-code"), &no_id);
+    run(&base("codex"), &prompt_event(ws.path(), "s-1", "x"));
+    assert!(
+        !state.path().join("statusline").exists()
+            || std::fs::read_dir(state.path().join("statusline"))
+                .unwrap()
+                .count()
+                == 0
+    );
+}
+
+#[test]
+fn a_failed_publication_changes_nothing_and_the_next_event_repairs_it() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(state.path().join("statusline"), "not a dir").unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--ripwire",
+        "/nonexistent/ripwire",
+    ];
+    let (code, blocked, _) = run(&args, &prompt_event(ws.path(), "s-1", "hello"));
+    std::fs::remove_file(state.path().join("statusline")).unwrap();
+    let (_, again, _) = run(&args, &prompt_event(ws.path(), "s-1", "hello"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        blocked, again,
+        "the hook's answer does not depend on the projection"
+    );
+    assert!(
+        matches!(bar_snapshot(state.path(), "s-1", ws.path()), Read::Valid(_)),
+        "republished"
+    );
+}
+
+#[test]
+fn the_published_totals_reproduce_the_session_tally_with_the_real_ripwire() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    let state = tempfile::tempdir().unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--state-dir",
+        state.path().to_str().unwrap(),
+    ];
+    let (code, _, err) = run(
+        &args,
+        &prompt_event(repo.path(), "s-1", "how is login validated?"),
+    );
+    assert_eq!(code, 0, "{err}");
+    let Read::Valid(s) = bar_snapshot(state.path(), "s-1", repo.path()) else {
+        panic!("published")
+    };
+    assert_eq!(s.stats.injections, 1);
+    assert!(!s.opted_out);
+    let tally = ripwire_broker::state::StateStore::new(state.path().to_path_buf())
+        .load("s-1")
+        .stats;
+    assert_eq!(s.stats.events, tally.events);
+    assert_eq!(s.stats.injections, tally.injections);
+    assert_eq!(s.stats.delivered, tally.delivered);
+    assert_eq!(s.stats.session_hits, tally.session_hits);
+
+    run(&args, &prompt_event(repo.path(), "s-1", "#ripwire-off"));
+    let Read::Valid(s) = bar_snapshot(state.path(), "s-1", repo.path()) else {
+        panic!("published")
+    };
+    assert!(s.opted_out);
+    assert_eq!(s.stats.injections, 1);
+    let tally = ripwire_broker::state::StateStore::new(state.path().to_path_buf())
+        .load("s-1")
+        .stats;
+    assert_eq!(s.stats.events, tally.events);
+    assert_eq!(s.stats.injections, tally.injections);
+}
+
+#[test]
+fn a_launch_failure_does_not_cache_the_unrunnable_ripwire_version() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let bin = ws.path().join("ripwire-not-executable");
+    std::fs::write(&bin, "not a program").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let args = [
+        "hook",
+        "claude-code",
+        "user-prompt-submit",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--ripwire",
+        bin.to_str().unwrap(),
+    ];
+    let (code, out, _) = run(&args, &prompt_event(ws.path(), "s-1", "hello"));
+    assert_eq!(code, 0);
+    assert!(out.contains("no context"), "same failure answer: {out}");
+    let saved = ripwire_broker::state::StateStore::new(state.path().to_path_buf()).load("s-1");
+    assert!(
+        saved.ripwire.is_none(),
+        "no cached version: {:?}",
+        saved.ripwire
+    );
+}
+
+fn run_env(args: &[&str], env: &[(&str, &std::path::Path)]) -> (i32, String, String) {
+    let mut cmd = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"));
+    cmd.args(args).env_remove("XDG_STATE_HOME");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn install_bar(
+    root: &std::path::Path,
+    user: &std::path::Path,
+    extra: &[&str],
+) -> (i32, String, String) {
+    let mut args = vec![
+        "install",
+        "claude-code",
+        "--workspace",
+        root.to_str().unwrap(),
+        "--statusline",
+    ];
+    args.extend_from_slice(extra);
+    run_env(&args, &[("CLAUDE_CONFIG_DIR", user)])
+}
+
+#[test]
+fn statusline_install_is_a_dry_run_then_one_merged_change_and_idempotent() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--hooks"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("dry run") && out.contains("statusLine"),
+        "{out}"
+    );
+    assert!(!root.join(".claude").exists(), "nothing written");
+
+    let (code, first, err) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        first.matches("settings.json").count(),
+        1,
+        "one change for settings: {first}"
+    );
+    let s = read_json(&root.join(".claude/settings.json"));
+    let cmd = s["statusLine"]["command"].as_str().unwrap();
+    assert!(
+        cmd.ends_with(&format!(
+            " statusline --workspace '{}' --color never",
+            root.display()
+        )),
+        "{cmd}"
+    );
+    assert_eq!(s["statusLine"]["type"], "command");
+    assert!(
+        s.get("statusLine")
+            .unwrap()
+            .get("refreshInterval")
+            .is_none()
+    );
+    assert_eq!(commands(&s, "Stop").len(), 1, "hooks are in the same file");
+
+    let (_, second, _) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(
+        second.contains("unchanged") && second.contains("settings.json"),
+        "{second}"
+    );
+}
+
+#[test]
+fn a_foreign_bar_is_kept_with_a_note_and_ours_is_updated_keeping_options() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let graft = r#"{"statusLine":{"type":"command","command":"node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""}}"#;
+    std::fs::write(&settings, graft).unwrap();
+    let (code, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("statusLine") && out.contains("keep"),
+        "a note: {out}"
+    );
+    assert!(
+        read_json(&settings)["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("graft")
+    );
+
+    let old = r#"{"statusLine":{"type":"command","command":"'/old/bin/ripwire-broker' statusline --workspace '/old' --color never","padding":2,"refreshInterval":5,"x-extra":true}}"#;
+    std::fs::write(&settings, old).unwrap();
+    install_bar(&root, user.path(), &["--write"]);
+    let s = read_json(&settings);
+    assert!(
+        s["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains(&root.display().to_string())
+    );
+    assert_eq!(
+        (
+            s["statusLine"]["padding"].clone(),
+            s["statusLine"]["refreshInterval"].clone(),
+            s["statusLine"]["x-extra"].clone()
+        ),
+        (json!(2), json!(5), json!(true))
+    );
+}
+
+#[test]
+fn ownership_is_structural_not_a_substring() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    for foreign in [
+        "echo ripwire-broker statusline",
+        "'/x/not-ripwire-broker' statusline",
+        "'/x/ripwire-broker' hook claude-code stop",
+        "'/x/ripwire-broker' hook statusline",
+    ] {
+        std::fs::write(
+            &settings,
+            json!({"statusLine": {"type": "command", "command": foreign}}).to_string(),
+        )
+        .unwrap();
+        install_bar(&root, user.path(), &["--write"]);
+        assert_eq!(
+            read_json(&settings)["statusLine"]["command"],
+            foreign,
+            "kept: {foreign}"
+        );
+    }
+}
+
+#[test]
+fn an_inherited_user_bar_is_not_shadowed_and_a_local_one_is_reported() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    let (code, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0);
+    let user_file = user.path().join("settings.json").display().to_string();
+    assert!(
+        out.contains(&user_file) && out.contains("keeping it"),
+        "a note naming the inherited bar's file: {out}"
+    );
+    assert!(
+        !root.join(".claude/settings.json").exists()
+            || read_json(&root.join(".claude/settings.json"))
+                .get("statusLine")
+                .is_none(),
+        "not shadowed"
+    );
+
+    std::fs::remove_file(user.path().join("settings.json")).unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(
+        root.join(".claude/settings.local.json"),
+        r#"{"statusLine":{"type":"command","command":"local-bar"}}"#,
+    )
+    .unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(
+        read_json(&root.join(".claude/settings.json"))["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("statusline")
+    );
+    assert!(
+        out.contains("settings.local.json"),
+        "the local bar wins, and the note says so: {out}"
+    );
+}
+
+#[test]
+fn statusline_alone_says_counters_need_hooks_and_paths_are_quoted() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let odd = ws.path().join("a b'c$(x)");
+    std::fs::create_dir(&odd).unwrap();
+    let root = odd.canonicalize().unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("--hooks"), "counters need hooks: {out}");
+    let cmd = read_json(&root.join(".claude/settings.json"))["statusLine"]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(cmd.contains("'\\''"), "single quotes escaped: {cmd}");
+    let (_, re, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(
+        re.contains("unchanged"),
+        "its own quoted command is recognized as ours: {re}"
+    );
+}
+
+#[test]
+fn invalid_settings_json_blocks_the_whole_file() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(root.join(".claude/settings.json"), "{broken").unwrap();
+    let (code, _, err) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert_ne!(code, 0);
+    assert!(err.contains("not valid JSON"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(root.join(".claude/settings.json")).unwrap(),
+        "{broken"
+    );
+}
+
+#[test]
+fn reinstalling_without_statusline_keeps_the_bar() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    install_bar(&root, user.path(), &["--hooks", "--write"]);
+    run_env(
+        &[
+            "install",
+            "claude-code",
+            "--workspace",
+            root.to_str().unwrap(),
+            "--hooks",
+            "--write",
+        ],
+        &[("CLAUDE_CONFIG_DIR", user.path())],
+    );
+    assert!(
+        read_json(&root.join(".claude/settings.json"))
+            .get("statusLine")
+            .is_some()
+    );
+}
+
+#[test]
+fn invalid_user_settings_write_no_bar_but_keep_the_hooks() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::write(user.path().join("settings.json"), "{broken").unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("not valid JSON") && out.contains("statusLine"),
+        "a note with the snippet: {out}"
+    );
+    let s = read_json(&root.join(".claude/settings.json"));
+    assert!(s.get("statusLine").is_none(), "no bar written");
+    assert_eq!(commands(&s, "Stop").len(), 1, "hooks are still written");
+}
+
+#[test]
+fn a_user_settings_path_that_cannot_be_read_writes_no_bar_but_keeps_the_hooks() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir(user.path().join("settings.json")).unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert_eq!(code, 0, "{err}");
+    let file = user.path().join("settings.json").display().to_string();
+    assert!(
+        out.contains(&file) && out.contains("statusLine"),
+        "a note naming the file: {out}"
+    );
+    let s = read_json(&root.join(".claude/settings.json"));
+    assert!(s.get("statusLine").is_none(), "no bar written");
+    assert_eq!(commands(&s, "Stop").len(), 1, "hooks are still written");
+}
+
+#[test]
+fn an_invalid_local_settings_file_still_gets_our_bar_with_a_note() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(root.join(".claude/settings.local.json"), "{broken").unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("settings.local.json") && out.contains("could not be read"),
+        "{out}"
+    );
+    assert!(
+        read_json(&root.join(".claude/settings.json"))
+            .get("statusLine")
+            .is_some()
+    );
+}
+
+#[test]
+fn without_a_home_the_user_settings_cannot_be_located_and_no_bar_is_written() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args([
+            "install",
+            "claude-code",
+            "--workspace",
+            root.to_str().unwrap(),
+            "--statusline",
+            "--write",
+        ])
+        .env_remove("HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("could not be located") && stdout.contains("statusLine"),
+        "{stdout}"
+    );
+    assert!(
+        !root.join(".claude/settings.json").exists(),
+        "no bar written"
+    );
+}
+
+#[test]
+fn a_null_status_line_is_no_bar_at_all() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::write(user.path().join("settings.json"), r#"{"statusLine":null}"#).unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"statusLine":null,"x":1}"#,
+    )
+    .unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("keeping"), "null is not a foreign bar: {out}");
+    let s = read_json(&root.join(".claude/settings.json"));
+    assert!(
+        s["statusLine"]["command"]
+            .as_str()
+            .is_some_and(|c| c.contains(" statusline ")),
+        "{s}"
+    );
+    assert_eq!(s["x"], 1);
+}
+
+#[test]
+fn our_project_bar_is_removed_when_the_user_now_has_a_foreign_one() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(read_json(&settings).get("statusLine").is_some());
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+
+    let (code, dry, err) = install_bar(&root, user.path(), &["--hooks"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(dry.contains("remov") && dry.contains("shadow"), "{dry}");
+    assert!(
+        read_json(&settings).get("statusLine").is_some(),
+        "a dry run writes nothing"
+    );
+
+    let (code, out, err) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("remov") && out.contains("shadow"), "{out}");
+    let s = read_json(&settings);
+    assert!(s.get("statusLine").is_none(), "{s}");
+    assert_eq!(commands(&s, "Stop").len(), 1, "the hooks stay");
+
+    let (_, again, _) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(again.contains("unchanged"), "{again}");
+    assert!(!again.contains("remov"), "nothing left to remove: {again}");
+    assert!(read_json(&settings).get("statusLine").is_none());
+}
+
+#[test]
+fn a_foreign_project_bar_is_not_removed_when_the_user_has_one_too() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings,
+        r#"{"statusLine":{"type":"command","command":"mine"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(read_json(&settings)["statusLine"]["command"], "mine");
+}
+
+#[test]
+fn our_project_bar_is_removed_even_when_no_hooks_are_installed_in_the_same_run() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    install_bar(&root, user.path(), &["--write"]);
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    install_bar(&root, user.path(), &["--write"]);
+    assert!(read_json(&settings).get("statusLine").is_none());
+}
+
+/// Runs `command` the way a host does (through `sh -c`), with `stdin`, and returns its stdout.
+fn host_runs(command: &str, stdin: &str, home: &std::path::Path) -> (i32, String) {
+    let mut child = Proc::new("sh")
+        .args(["-c", command])
+        .env("HOME", home)
+        .env("CLAUDE_CONFIG_DIR", home)
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("COLUMNS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// What install writes is what a host runs: through a symlinked workspace, a hook that cannot
+/// start ripwire still reaches the bar installed beside it (no ripwire needed, so CI runs it).
+#[test]
+fn installed_hook_and_bar_agree_through_a_symlinked_workspace() {
+    let ws = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let link = ws.path().join("link");
+    let real = ws.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let (code, _, err) = run_env(
+        &[
+            "install",
+            "claude-code",
+            "--workspace",
+            link.to_str().unwrap(),
+            "--hooks",
+            "--statusline",
+            "--write",
+        ],
+        &[("HOME", home.path()), ("CLAUDE_CONFIG_DIR", home.path())],
+    );
+    assert_eq!(code, 0, "{err}");
+    let settings = read_json(&real.canonicalize().unwrap().join(".claude/settings.json"));
+    let hook = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let bar = settings["statusLine"]["command"].as_str().unwrap();
+    let s = state.path().to_str().unwrap();
+
+    let prompt = json!({"session_id": "s", "prompt": "hello", "cwd": link}).to_string();
+    let (code, _) = host_runs(
+        &format!("{hook} --ripwire /nonexistent/ripwire --state-dir '{s}'"),
+        &prompt,
+        home.path(),
+    );
+    assert_eq!(code, 0, "a failed launch never fails the host");
+
+    let payload = json!({"session_id": "s", "workspace": {"project_dir": link}}).to_string();
+    let (code, out) = host_runs(&format!("{bar} --state-dir '{s}'"), &payload, home.path());
+    assert_eq!(code, 0);
+    assert!(out.contains("última: erro"), "{out}");
 }

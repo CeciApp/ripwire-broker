@@ -1,9 +1,15 @@
 //! Command line (D-028): `serve` (the default, also without a subcommand), `hook`, `hook-log`,
-//! `hook-stats`, `prompt`, `doctor` and `install`. Parsing is pure; nothing here touches the disk.
+//! `hook-stats`, `prompt`, `doctor`, `install` and `statusline`. Parsing is pure; nothing here touches the disk.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Color {
+    Never,
+    Always,
+}
 
 pub const USAGE: &str = "\
 usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [--redact-workspace] [--incremental]
@@ -22,7 +28,8 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--jev-probe [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
-       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--write] [--codex-home DIR] [--online]
+       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online]
+       ripwire-broker statusline [--workspace DIR] [--state-dir DIR] [--detail] [--width N] [--color never|always]
 
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
 Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
@@ -153,11 +160,21 @@ pub struct InstallArgs {
     pub host: Host,
     pub workspace: PathBuf,
     pub hooks: bool,
+    pub statusline: bool,
     pub write: bool,
     pub codex_home: Option<PathBuf>,
     /// Start the server with `--online`, the credential referenced from the host's
     /// environment, never written (D-064). Hooks stay offline.
     pub online: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatuslineArgs {
+    pub workspace: Option<PathBuf>,
+    pub state_dir: Option<PathBuf>,
+    pub detail: bool,
+    pub width: Option<usize>,
+    pub color: Color,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +193,8 @@ pub enum Command {
     Prompt(PromptArgs),
     Doctor(DoctorArgs),
     Install(InstallArgs),
+    /// Prints the Claude Code status line from the hooks' projection; never starts ripwire.
+    Statusline(StatuslineArgs),
     /// `--help` or `--version`: print and exit successfully.
     Info(String),
     /// Internal: run `argv` under a memory limit (how the server starts ripwire, D-050).
@@ -228,6 +247,8 @@ struct Flags {
     summarizer_timeout: Option<Duration>,
     max_rss_mb: Option<u64>,
     edit_interval_ms: Option<u64>,
+    width: Option<u64>,
+    color: Option<String>,
     jev: HashMap<&'static str, String>,
     switches: Vec<&'static str>,
     words: Vec<String>,
@@ -312,6 +333,8 @@ const SWITCHES: &[&str] = &[
     "--log-refs",
     "--json",
     "--hooks",
+    "--statusline",
+    "--detail",
     "--write",
     "--online",
     "--jev-no-cache",
@@ -375,6 +398,8 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             "--summarizer-timeout-ms" => {
                 f.summarizer_timeout = Some(Duration::from_millis(number(&value)?))
             }
+            "--width" => f.width = Some(number(&value)?),
+            "--color" => f.color = Some(value),
             jev if JEV.contains(&jev) => {
                 let key = JEV.iter().find(|k| **k == jev).unwrap();
                 f.jev.insert(key, value);
@@ -578,19 +603,53 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 &[
                     "--workspace",
                     "--hooks",
+                    "--statusline",
                     "--write",
                     "--codex-home",
                     "--online",
                 ],
             )?;
             no_words(&f)?;
+            if f.on("--statusline") && host != Host::ClaudeCode {
+                return Err(usage("--statusline is only available to claude-code"));
+            }
             Ok(Command::Install(InstallArgs {
                 host,
                 workspace: f.workspace()?,
                 hooks: f.on("--hooks"),
+                statusline: f.on("--statusline"),
                 write: f.on("--write"),
                 codex_home: f.codex_home.clone(),
                 online: f.on("--online"),
+            }))
+        }
+        Some("statusline") => {
+            let f = flags(
+                it,
+                &[
+                    "--workspace",
+                    "--state-dir",
+                    "--detail",
+                    "--width",
+                    "--color",
+                ],
+            )?;
+            no_words(&f)?;
+            let color = match f.color.as_deref() {
+                None | Some("never") => Color::Never,
+                Some("always") => Color::Always,
+                Some(other) => {
+                    return Err(usage(format_args!(
+                        "--color takes never or always, not '{other}'"
+                    )));
+                }
+            };
+            Ok(Command::Statusline(StatuslineArgs {
+                workspace: f.workspace.clone(),
+                state_dir: f.state_dir.clone(),
+                detail: f.on("--detail"),
+                width: f.width.map(|w| w as usize),
+                color,
             }))
         }
         Some(other) => Err(usage(format_args!("unknown command '{other}'"))),

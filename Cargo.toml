@@ -23,6 +23,8 @@ tokio-util = "0.7"
 secrecy = { version = "0.10", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util"] }
+# Visual width of the status line (PRD §24.5.3, D-123): no deps, no network.
+unicode-width = "0.2"
 
 [features]
 # The remote classifier's HTTP client (PRD §23, D-059). Off by default: the default build

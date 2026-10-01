@@ -7,6 +7,7 @@ use crate::cli::{Event, HookArgs, Host};
 use crate::model::{Envelope, Status};
 use crate::session::{self, SessionMemory};
 use crate::state::StateStore;
+use crate::statusline_state::{Analysis, AnalysisStatus, Delivery};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -55,6 +56,9 @@ pub struct SessionState {
     /// (§21.3). A state saved before they existed loads with zeros.
     #[serde(default)]
     pub stats: SessionTally,
+    /// What the status line shows (PRD §24.6.3); absent in states saved before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statusline: Option<crate::statusline_state::Summary>,
 }
 
 /// What one session's hooks did, in counts only (PRD 16.1).
@@ -128,6 +132,26 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Records what the last analysis said, when the session is bound to a workspace.
+fn analysed(state: &mut SessionState, event: Event, status: AnalysisStatus, kind: Option<&str>) {
+    if let Some(s) = state.statusline.as_mut() {
+        s.last_analysis = Some(Analysis {
+            at: now(),
+            event: event_name(event).into(),
+            status,
+            error_kind: kind.map(str::to_string),
+        });
+    }
+}
+
+fn status_of(s: Status) -> AnalysisStatus {
+    match s {
+        Status::Ready => AnalysisStatus::Ready,
+        Status::AttentionRequired => AnalysisStatus::AttentionRequired,
+        Status::Unknown => AnalysisStatus::Unknown,
+    }
+}
+
 /// Called exactly for the answers that reach the model, so it also keeps the tally of what
 /// was delivered whole.
 fn record(state: &mut SessionState, event: Event, env: &Envelope, policy: &Policy) {
@@ -165,6 +189,12 @@ fn record(state: &mut SessionState, event: Event, env: &Envelope, policy: &Polic
     });
     if state.log.len() > LOG_ENTRIES {
         state.log.remove(0);
+    }
+    if let Some(s) = state.statusline.as_mut() {
+        s.last_delivery = Some(Delivery {
+            at: now(),
+            estimated_tokens: env.budget.estimated_tokens,
+        });
     }
 }
 
@@ -338,7 +368,10 @@ pub async fn handle(
     state.stats.events += 1;
     let out = match respond(event, input, broker, state, policy).await {
         Ok(out) => out,
-        Err(e) => Some(failure(&e)),
+        Err(e) => {
+            analysed(state, event, AnalysisStatus::Error, Some(e.error));
+            Some(failure(&e))
+        }
     };
     // The model sees an answer only when it is injected (or sent as a block reason). A
     // user-facing notice (`systemMessage` alone) delivers nothing to it, so the session
@@ -384,6 +417,7 @@ async fn respond(
             let mut req = TaskRequest::new(task.trim());
             req.budget_tokens = capped(policy.prompt_budget);
             let env = broker.context_for_task(req).await?;
+            analysed(state, event, status_of(env.status), None);
             record(state, event, &env, policy);
             Ok(Some(inject(event, &env)))
         }
@@ -428,6 +462,7 @@ async fn respond(
                 ..EditRequest::default()
             };
             let env = broker.context_after_edit(req).await?;
+            analysed(state, event, status_of(env.status), None);
             if !has_news(&env, &state.memory) {
                 return Ok(None);
             }
@@ -443,6 +478,7 @@ async fn respond(
                 ..FinishRequest::default()
             };
             let env = broker.context_before_finish(req).await?;
+            analysed(state, event, status_of(env.status), None);
             let looping = input
                 .get("stop_hook_active")
                 .and_then(Value::as_bool)
@@ -468,16 +504,35 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         .workspace
         .clone()
         .or_else(|| input.get("cwd").and_then(Value::as_str).map(PathBuf::from))?;
+    let real_session = input.get("session_id").and_then(Value::as_str).is_some();
     let session_id = input
         .get("session_id")
         .and_then(Value::as_str)
         .unwrap_or("default")
         .to_string();
+    // The status line only exists in Claude Code, and a projection belongs to a real session
+    // and a root that resolves (D3); the "default" fallback never publishes.
+    let root = workspace.canonicalize().ok();
+    let publishes = real_session && args.host == Host::ClaudeCode && root.is_some();
     let store = StateStore::new(args.state_dir.clone().or_else(StateStore::default_dir)?);
     // Held until this function returns: parallel hooks of the session wait their turn.
     // Without the lock (e.g. unwritable dir) the hook still runs; only turn-taking is lost.
     let _turn = store.lock(&session_id).ok();
     let mut state = store.load(&session_id);
+    let loaded_ripwire = state.ripwire.clone();
+    if let Some(r) = &root {
+        crate::statusline_state::bind(&mut state, &crate::statusline_state::workspace_key(r));
+    }
+    let finish = |state: &SessionState| {
+        // Losing the state only costs a repeated injection; never fail the host for it. The
+        // projection follows a successful save and its errors are ignored.
+        if store.save(&session_id, state).is_ok()
+            && publishes
+            && let (Some(r), Some(snap)) = (&root, crate::statusline_state::project(state, now()))
+        {
+            let _ = crate::statusline_state::publish(store.dir(), &session_id, r, &snap);
+        }
+    };
     let default = Policy::default();
     let policy = Policy {
         every_prompt: args.every_prompt,
@@ -523,10 +578,15 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         Ok(b) => b,
         // Opted-out sessions stay silent even when ripwire is missing.
         Err(_) if state.opted_out => return None,
-        Err(e) => return Some(failure(&e)),
+        Err(e) => {
+            // A binary that exists but cannot run must not be cached as "unavailable" (D-105).
+            state.ripwire = loaded_ripwire;
+            analysed(&mut state, args.event, AnalysisStatus::Error, Some(e.error));
+            finish(&state);
+            return Some(failure(&e));
+        }
     };
     let out = handle(args.host, args.event, &input, &broker, &mut state, &policy).await;
-    // Losing the state only costs a repeated injection; never fail the host for it.
-    let _ = store.save(&session_id, &state);
+    finish(&state);
     out
 }
