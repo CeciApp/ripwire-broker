@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-01, até o
-[D-121](spec/changelog.md#d-121--três-mecanismos-que-reproduzem-as-falhas-de-validação-do-d-117).
+[D-122](spec/changelog.md#d-122--a-barra-de-status-entra-no-prd).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -22,6 +22,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 2 · hooks, contexto incremental, `install`, `doctor` | feita |
 | 3 · notas por modelo local | feita, com cache só em memória (o de disco espera a medição do §21.3) |
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
+| barra de status do Claude Code (§24) | **plano pronto**, aguardando decisões D1–D6 (§24.13); antes da Fase 6 |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
@@ -57,7 +58,7 @@ cargo fmt --check
   `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-121, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-122, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
