@@ -171,7 +171,8 @@ enum Bar {
     Foreign,
 }
 
-/// Ours: the program is a `ripwire-broker` executable and its first argument is `statusline`.
+/// Ours: the program's file name starts with `ripwire-broker` (a renamed or versioned copy, such
+/// as `ripwire-broker-0.2`, counts) and its first argument is `statusline`.
 fn bar(settings: &Value) -> Bar {
     // `null` is no bar at all, as far as the host is concerned.
     let Some(line) = settings.get("statusLine").filter(|l| !l.is_null()) else {
@@ -185,7 +186,7 @@ fn bar(settings: &Value) -> Bar {
     let ours = words
         .first()
         .and_then(|p| Path::new(p).file_name())
-        .is_some_and(|n| n == "ripwire-broker")
+        .is_some_and(|n| n.as_encoded_bytes().starts_with(b"ripwire-broker"))
         && words.get(1).is_some_and(|w| w == "statusline");
     if ours { Bar::Ours } else { Bar::Foreign }
 }
@@ -371,9 +372,6 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                     )),
                     Ok(_) => {}
                 }
-                if !args.hooks {
-                    plan.notes.push("statusLine without --hooks: the bar shows `hooks sem dados` until hooks are installed.".into());
-                }
             }
             if args.hooks || bar_wanted || shadowing {
                 let mut foreign = false;
@@ -393,6 +391,9 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 if foreign {
                     plan.notes.push(format!("{} has a statusLine that is not the broker's; keeping it. To use the broker's:\n{manual}",
             settings_path.display()));
+                } else if bar_wanted && !args.hooks {
+                    // Only a bar that is written has anything to say about its data.
+                    plan.notes.push("statusLine without --hooks: the bar shows `hooks sem dados` until hooks are installed.".into());
                 }
             }
         }

@@ -2236,6 +2236,126 @@ fn ownership_is_structural_not_a_substring() {
 }
 
 #[test]
+fn a_renamed_or_versioned_binary_still_owns_its_bar() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    for ours in [
+        "'/x/ripwire-broker-0.2' statusline --workspace '/old' --color never",
+        "/opt/bin/ripwire-broker.old statusline --workspace /old",
+    ] {
+        std::fs::write(
+            &settings,
+            json!({"statusLine": {"type": "command", "command": ours, "padding": 3}}).to_string(),
+        )
+        .unwrap();
+        let (code, out, _) = install_bar(&root, user.path(), &["--write"]);
+        assert_eq!(code, 0);
+        assert!(!out.contains("keeping"), "not reported as foreign: {out}");
+        let s = read_json(&settings);
+        let command = s["statusLine"]["command"].as_str().unwrap();
+        assert!(
+            command.contains(&root.display().to_string()) && command != ours,
+            "updated, not kept: {command}"
+        );
+        assert_eq!(s["statusLine"]["padding"], 3, "its options are kept");
+    }
+}
+
+#[test]
+fn the_hooks_note_is_printed_only_when_our_bar_is_written() {
+    let root_of = || {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path().canonicalize().unwrap();
+        (ws, root)
+    };
+    let note = "hooks sem dados";
+
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(out.contains(note), "our bar is written: {out}");
+
+    // An inherited user bar: ours is not written.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(out.contains("keeping it") && !out.contains(note), "{out}");
+
+    // An unreadable user settings file: ours is not written.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(user.path().join("settings.json"), "{broken").unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(
+        out.contains("not valid JSON") && !out.contains(note),
+        "{out}"
+    );
+
+    // A foreign bar already in the project's settings: kept.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"statusLine":{"type":"command","command":"graft-bar"}}"#,
+    )
+    .unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(out.contains("keeping it") && !out.contains(note), "{out}");
+
+    // Our old bar is removed because the user's own would be shadowed: nothing is written.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(
+        user.path().join("settings.json"),
+        r#"{"statusLine":{"type":"command","command":"my-bar"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"statusLine":{"type":"command","command":"'/old/ripwire-broker' statusline"}}"#,
+    )
+    .unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--write"]);
+    assert!(out.contains("removing") && !out.contains(note), "{out}");
+
+    // With --hooks there is no note either way.
+    let (_ws, root) = root_of();
+    let user = tempfile::tempdir().unwrap();
+    let (_, out, _) = install_bar(&root, user.path(), &["--hooks", "--write"]);
+    assert!(!out.contains(note), "{out}");
+}
+
+#[test]
+fn a_settings_local_that_is_a_directory_still_gets_our_bar_with_a_note() {
+    let ws = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".claude/settings.local.json")).unwrap();
+    let (code, out, err) = install_bar(&root, user.path(), &["--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("settings.local.json") && out.contains("could not be read"),
+        "{out}"
+    );
+    assert!(
+        read_json(&root.join(".claude/settings.json"))
+            .get("statusLine")
+            .is_some(),
+        "the bar is written"
+    );
+}
+
+#[test]
 fn an_inherited_user_bar_is_not_shadowed_and_a_local_one_is_reported() {
     let ws = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
