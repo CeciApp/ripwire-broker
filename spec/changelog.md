@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 15:20 | A barra de status entra no PRD como §24 (a spec `spec/status-bar.md`, fundida e removida), o plano vai para `spec/plan/`, e a barra entra no roadmap antes da Fase 6 | [D-122](#d-122--a-barra-de-status-entra-no-prd) |
 | 2026-10-01 13:28 | Três mecanismos reproduzem o sintoma do D-117 num corpus de diagnóstico (a causa daquela rodada segue sem prova): a porta fixa do endpoint de teste do repositório A (`eaddrinuse`), a data (provada com o relógio congelado) e, fraca, a carga. O Postgres disputado sozinho não derrubou nada. Regra nova: cada tarefa do A fixa relógio e porta no `env` | [D-121](#d-121--três-mecanismos-que-reproduzem-as-falhas-de-validação-do-d-117) |
 | 2026-10-01 08:46 | O cancelamento sob HTTP/2 ganha teste: um fixture `h2` (h2c) mostra que cada stream em voo recebe `RST_STREAM(CANCEL)`; `h2` entra como dev-dependency, já presente no grafo pelo `reqwest` | [D-120](#d-120--o-cancelamento-sob-http2-ganha-teste) |
 | 2026-10-01 08:14 | Duas pendências do handoff fechadas: o `sha2` >= 0.11 vai para o `ignore` do dependabot, e os links dos planos no PRD, no changelog e nos próprios planos passam a apontar para `spec/plan/` | [D-119](#d-119--pendências-do-handoff-sha2-no-dependabot-e-links-dos-planos) |
@@ -4595,3 +4596,53 @@ duas linhas de `env`, e o corpus é revalidado.
 ### Verificação
 
 Sem mudança de código. O script e os logs ficam no corpus de diagnóstico, fora do repositório.
+
+## D-122 — A barra de status entra no PRD
+
+O mantenedor escreveu uma spec da barra de status do Claude Code (`spec/status-bar.md`) e pediu um
+plano. Depois pediu a fusão da spec no PRD geral, o plano em `spec/plan/`, e a remoção da spec
+**só depois** de validar que todo o conteúdo foi transferido.
+
+### O que mudou no PRD
+
+- **§24 Barra de status do Claude Code**, novo. A seção `N` da spec é o §24.`N`, com o corpo
+  transportado literalmente: só os títulos foram renumerados, e três frases que falavam do próprio
+  documento passaram a falar do capítulo. Os dados de origem da spec (status, data, commit
+  analisado, referência do Graft) ficaram no início do capítulo.
+- **§24.13 Decisões em aberto**, novo, vindo do plano: D1 a D6, cada uma com a recomendação que o
+  plano segue até o mantenedor decidir, e o defeito do `#ripwire-on` sob falha de launch, registrado
+  e não corrigido.
+- **§19:** a entrada "Barra de status (antes da Fase 6)", com o motivo da ordem.
+- **§21.6:** aponta para o §24.13.
+- Cabeçalho (versão 0.4, data), sumário.
+
+### Por que fundir, e por que o plano não entra
+
+É o padrão do [D-056](#d-056--fusão-do-adaptador---online-no-prd): o PRD geral é a fonte do *quê*,
+e os planos ficam em `spec/plan/`. A diferença: lá o original foi para `spec/old/`; aqui o mantenedor
+pediu a remoção, condicionada à validação abaixo.
+
+### O plano
+
+[`spec/plan/status-bar-plan.md`](plan/status-bar-plan.md): 9 tarefas em TDD. O link de spec aponta
+para o §24, uma nota diz que "spec §N" é o §24.`N`, os comentários de código citam o PRD, e a
+implementação passa a ser o **D-123**.
+
+### Validação antes da remoção
+
+Um script comparou a spec com o §24, item por item: cada parágrafo, linha de tabela, item de lista e
+bloco de código da spec tem de aparecer literalmente no §24, salvo as três frases reescritas; cada
+link, cada trecho em código inline e cada número também. O resultado está no fim desta entrada. Só
+depois a spec foi removida.
+
+**Resultado:** 239 linhas de corpo, 23 títulos, 9 blocos de código, 28 links, 161 trechos em código
+inline e 60 números da spec; **zero ausentes** no §24, e as três frases reescritas presentes na
+forma nova. O script morde: com uma linha de tabela apagada, um número trocado e um link trocado no
+§24, ele acusou os três. Depois da remoção, todos os links e âncoras relativos de PRD, changelog,
+handoff e plano resolvem.
+
+### Decisões D1 a D6 aceitas
+
+Depois da fusão, o mantenedor aceitou as seis recomendações do §24.13 e escolheu a execução do plano
+por subagentes (uma tarefa por vez, com revisão antes da seguinte). O §24.13 passou de "Decisões em
+aberto" a "Decisões", e o §21.6 e o §19 dizem o mesmo.

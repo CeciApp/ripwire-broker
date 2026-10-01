@@ -3,13 +3,14 @@
 > **Produto:** `ripwire-broker`
 > **Categoria:** servidor MCP local de orquestração e enriquecimento de contexto de código
 > **Status:** Draft para validação
-> **Versão do PRD:** 0.3
-> **Data:** 2026-09-27
+> **Versão do PRD:** 0.4
+> **Data:** 2026-10-01
 > **Linguagem:** Rust
 > **SDK MCP:** [`rust-mcp-sdk` 2.0.0](https://crates.io/crates/rust-mcp-sdk)
 > **Dependência principal:** servidor MCP do [Ripwire](https://github.com/redhat-et/ripwire)
 > **Postura padrão:** local, offline, read-only e com orçamento explícito de contexto
 > **Adaptador opcional:** `--online`, classificador semântico remoto desligado por padrão ([§23](#23-adaptador-opcional---online))
+> **Barra de status:** `ripwire-broker statusline` para o Claude Code, proposta ([§24](#24-barra-de-status-do-claude-code))
 
 ---
 
@@ -38,6 +39,7 @@
 21. [Decisões em aberto](#21-decisões-em-aberto)
 22. [Referências](#22-referências)
 23. [Adaptador opcional `--online`](#23-adaptador-opcional---online)
+24. [Barra de status do Claude Code](#24-barra-de-status-do-claude-code)
 
 ---
 
@@ -1376,6 +1378,16 @@ barra de produto, que dependem da escolha dos repositórios. Destaques:
 - `doctor --jev-probe` e `install --online`, com a chave referenciada pelo nome;
 - testes live ignorados por padrão.
 
+### Barra de status (antes da Fase 6)
+
+- subcomando `statusline` que lê uma projeção local publicada pelos hooks;
+- projeção por sessão e workspace, privada e atômica;
+- registro opcional pelo instalador (`install claude-code --statusline`).
+
+Estado: plano pronto e decisões tomadas ([plano](plan/status-bar-plan.md), §24). Vem antes da Fase 6 por
+ser pequena, local e independente dela, e por tornar visível o uso dos hooks que a medição do §21.3
+precisa.
+
 ### Fase 6 — Times e CI
 
 - Streamable HTTP autenticado;
@@ -1481,6 +1493,10 @@ As decisões em aberto do adaptador estão no §23.17. A fonte normativa transpo
 a v0.1 da spec Jev. A v0.2.1 pedida para a fusão não estava disponível, e os itens
 do roadmap sem texto na v0.1 estão marcados como lacunas
 ([D-056](changelog.md#d-056--fusão-do-adaptador---online-no-prd)).
+
+### 21.6 Barra de status
+
+Decididas: o mantenedor aceitou as recomendações D1 a D6 do §24.13.
 
 ---
 
@@ -2389,3 +2405,393 @@ exige nova decisão:
 - [Tokio — task module](https://docs.rs/tokio/latest/tokio/task/)
 - [Tokio — I/O](https://docs.rs/tokio/latest/tokio/io/)
 - [`reqwest`](https://docs.rs/reqwest/latest/reqwest/)
+
+---
+
+## 24. Barra de status do Claude Code
+
+**Estado:** plano pronto e decisões tomadas (§24.13), não implementada. Plano em
+[status-bar-plan.md](plan/status-bar-plan.md), a executar por subagentes, uma tarefa por vez com
+revisão. Deve vir antes da Fase 6 (§19).
+
+**Fonte.** Este capítulo transporta a spec `spec/status-bar.md`, escrita pelo mantenedor e fundida
+aqui no [D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd), que depois a removeu. A seção
+`N` da spec é o §24.`N`; o §24.13 é novo e vem do plano. Os dados de origem da spec:
+
+**Status:** proposta para implementação.  
+**Data:** 01/10/2026.  
+**Base analisada:** commit `3d52dd16cf19d3d852c10f222859e3a723a1fba9`, versão `0.1.0`.  
+**Implementação:** Rust, no binário existente `ripwire-broker`.  
+**Referência:** estudo anexado pelo usuário e código do Graft no commit `fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad`.
+
+### 24.1 Problema e objetivo
+
+O usuário recebe avisos pontuais dos hooks, mas não tem uma visão persistente de quanto contexto foi injetado, quantas repetições foram evitadas e se o contexto automático está pausado. O recurso MCP de status já existe, porém não produz uma barra na interface do Claude Code.
+
+Implementar uma linha de status que ajude a responder: qual modelo estou usando, quanto contexto está ocupado, os hooks do broker estão ativos, o que ocorreu na última análise e quanto reaproveitamento houve nesta sessão?
+
+O resultado deve funcionar localmente, sem consultas a modelos, sem chamadas MCP durante a renderização e sem iniciar o processo upstream do ripwire. Este capítulo especifica a funcionalidade; os comandos e campos marcados como propostos ainda não existem.
+
+### 24.2 Contrato com o Claude Code
+
+O Claude Code executa um comando configurado em `statusLine`, fornece JSON da sessão por stdin e apresenta o texto recebido em stdout. Atualizações são disparadas por eventos; `refreshInterval` é opcional, com mínimo de um segundo. Uma atualização pode cancelar a execução anterior. A integração deve, portanto, ler dados locais pequenos e encerrar rapidamente. [Contrato oficial](https://code.claude.com/docs/en/statusline#how-status-lines-work).
+
+Usar `session_id` para selecionar os dados locais; `model.display_name` e `context_window.used_percentage` para os segmentos do host. Campos ausentes ou nulos devem ser tolerados. `COLUMNS` informa a largura disponível. [Dados disponíveis](https://code.claude.com/docs/en/statusline#available-data).
+
+Manter modos separados: `serve` atende MCP e `statusline` imprime a barra. No transporte MCP stdio, stdout é reservado às mensagens do protocolo; texto da barra nesse canal corromperia a comunicação. [Especificação MCP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#stdio).
+
+### 24.3 O que já existe no projeto
+
+| Componente | Implementação atual | Consequência para a barra |
+|---|---|---|
+| [Cargo.toml](../Cargo.toml) | Rust edition 2024; `serde`, `serde_json`, `sha2`, Tokio; rede opcional pela feature `online` | A primeira versão pode usar dependências existentes e permanecer offline |
+| [src/cli.rs](../src/cli.rs) | Parser próprio; `serve`, `hook`, `hook-log`, `hook-stats`, `prompt`, `doctor`, `install` | Acrescentar `statusline`; não introduzir outro CLI framework |
+| [src/main.rs](../src/main.rs) | Despacho dos comandos e inicialização do servidor | Despachar a barra antes de qualquer configuração ou lançamento do upstream |
+| [src/install.rs](../src/install.rs) | Plano sem escrita por padrão; `--write` aplica; configura `.mcp.json` e hooks; backup `.bak`; preserva entradas alheias | Estender o instalador e produzir uma única alteração final do arquivo de settings |
+| [src/hook.rs](../src/hook.rs) | `UserPromptSubmit`, `PostToolUse` para edições e `Stop`; controle `#ripwire-off`/`#ripwire-on`; coalescência de edições | Fonte dos indicadores de contexto automático e das análises dos hooks |
+| `SessionState` / `SessionTally` | Persistem `opted_out`, `events`, `injections`, `delivered`, `session_hits`, `started_at`; log das últimas cinco injeções | Contadores úteis já existem; faltam identidade do workspace e resumo completo da última análise |
+| [src/state.rs](../src/state.rs) | Arquivos por SHA-256 de `session_id`; diretório padrão `$XDG_STATE_HOME/ripwire-broker` ou `~/.local/state/ripwire-broker`; permissões Unix privadas; lock de escrita e rename atômico | Reutilizar armazenamento e convenções; barra deve ler sem esperar o lock dos hooks |
+| [src/usage.rs](../src/usage.rs) | `hook-stats` agrega sessões; taxa `session_hits / (session_hits + delivered)` | Reutilizar a fórmula, mas mostrar somente a sessão atual |
+| [src/metrics.rs](../src/metrics.rs) | Chamadas, erros, duração, tokens estimados e métricas por ferramenta, em memória | Indisponíveis diretamente para um processo independente de barra |
+| [src/broker.rs](../src/broker.rs), [src/mcp.rs](../src/mcp.rs) | Recurso `ripwire-broker://status`, disponibilidade upstream, versões, reinícios, modo online, métricas e chamadas em andamento | Uma fotografia da última análise dos hooks não equivale a esse estado operacional ao vivo |
+| [src/session.rs](../src/session.rs) | Memória incremental por fingerprints, limitada a 5.000 entradas | Não ler nem duplicar essa memória em cada renderização |
+
+#### 24.3.1 Lacunas e cuidados encontrados
+
+- Não há `statusline`, registro de `statusLine` ou snapshot específico da barra.
+- `StateStore::load` converte arquivo ausente, inválido ou ilegível em estado padrão. Isso é adequado para os hooks, mas a barra precisa distinguir falta de dados de contadores efetivamente zerados.
+- O estado é identificado somente pela sessão; não contém uma identidade persistida do workspace/host para validar o projeto exibido.
+- `record` registra injeções. Em `Stop`, uma análise `ready` retorna silêncio; outros resultados podem produzir somente `systemMessage`. Ler apenas `log.last()` deixaria a barra com um resultado antigo.
+- Falha em `local::launch` retorna antes de salvar o estado. A nova projeção precisa receber também esse erro para não continuar mostrando sucesso anterior.
+- Os hooks são offline mesmo quando o servidor MCP foi instalado com `--online`. A barra não pode inferir o modo do MCP a partir dos hooks.
+- A memória incremental do servidor MCP é separada daquela persistida pelos hooks. O README informa que o servidor não a habilita por padrão, porque subagentes compartilham o processo MCP. Não somar esses universos nem atribuir contadores dos hooks a todas as chamadas MCP.
+- Não existe um contrato próprio do broker com números de nós/arestas ou com a sincronização do grafo. O diretório `graft/` deste checkout não transforma o broker numa implementação do Graft.
+
+### 24.4 Escopo
+
+#### 24.4.1 Primeira versão
+
+1. Novo subcomando Rust de renderização.
+2. Snapshot compacto por sessão e workspace, publicado pelos hooks existentes.
+3. Registro opcional pelo instalador para Claude Code.
+4. Linha curta com degradação segura, suporte a largura e opção de cores.
+5. Documentação, fixtures e testes de integração do comando, armazenamento e instalação.
+
+#### 24.4.2 Fora da primeira versão
+
+Estado ao vivo do servidor MCP, IPC, daemon novo, reconstrução automática do grafo, varredura do repositório, leitura do transcript, preços por modelo, estimativa de economia monetária, barra para Codex ou Claude Desktop genérico e configuração automática de barra para subagentes.
+
+Git branch, nós/arestas e último arquivo editado ficam para expansão posterior. Branch exige fonte adicional; nomes de arquivos ampliam a exposição de dados; números do grafo exigem contrato upstream validado. A barra não deve iniciar trabalho para obter esses campos.
+
+### 24.5 Informações recomendadas
+
+#### 24.5.1 Conteúdo padrão
+
+| Segmento | Origem | Regra |
+|---|---|---|
+| `rw-brkr` | Identidade do produto | Prefixo fixo da barra; o executável continua sendo `ripwire-broker` |
+| `Sonnet 4.6 hig` | stdin: `model.display_name`, `model.id` e `effort.level` | Mostrar nome, versão disponível e effort abreviado; sanitizar e limitar comprimento |
+| `ctx 32%` | stdin: `context_window.used_percentage` | Arredondar; aceitar zero válido; omitir nulo ou valor fora de 0–100 |
+| `hooks on` / `hooks off` | Snapshot: `opted_out` | `off` significa contexto automático pausado, não MCP desligado |
+| `última: atenção` | Snapshot: última análise válida | Usar `pronta`, `atenção`, `incerta`, `erro`; omitir antes da primeira análise |
+| `inj 7` | `stats.injections` | Injeções e bloqueios contabilizados pelo contrato atual dos hooks |
+| `não reenviados 18` | `stats.session_hits` | Quantidade de itens lógicos, não tokens nem hits do cache de prompt da Anthropic |
+
+Exemplos ilustrativos da proposta, sem ANSI:
+
+```text
+rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · última: atenção · inj 7 · não reenviados 18
+rw-brkr · Opus 4.6 max · ctx 71% · hooks off · inj 7 · não reenviados 18
+rw-brkr · Sonnet 4.6 mid · ctx 12% · hooks sem dados
+rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
+```
+
+O segmento do modelo deve usar a versão já presente em `model.display_name`, sem duplicá-la. Se o nome não tiver versão, extrair de `model.id` apenas quando o identificador contiver uma versão inequívoca da mesma família: por exemplo, `claude-sonnet-4-6` → `Sonnet 4.6`. Sufixos de data não são versões. Não inferir a versão a partir de aliases, da versão do Claude Code ou de uma tabela de modelos atuais; se indisponível, mostrar somente o nome. Se o nome estiver ausente, omitir o segmento inteiro.
+
+O effort vem exclusivamente de `effort.level` do payload da execução, com este mapeamento de apresentação:
+
+| Valor recebido | Abreviação exibida |
+|---|---|
+| `low` | `low` |
+| `medium` | `mid` |
+| `high` | `hig` |
+| `xhigh` | `xtr` |
+| `max` | `max` |
+
+Omitir effort ausente, nulo ou desconhecido, sem assumir um padrão do modelo. As abreviações são rótulos da barra, não valores para configurar o Claude Code. Os nomes e versões dos exemplos são ilustrativos. [Campos de modelo e effort](https://code.claude.com/docs/en/statusline#available-data).
+
+`hooks sem dados` não prova que os hooks estão desinstalados. Pode ser uma sessão nova, ausência de snapshot, falha de persistência ou execução somente por MCP. Não usar `offline`, `MCP ok`, `synced` ou `grafo pronto` como substitutos.
+
+#### 24.5.2 Modo detalhado opcional
+
+`--detail` acrescenta, se couberem, `entregues N`, `reuso 42%`, `último contexto ~1,2k tok` e `há 20s`. A taxa usa `session_hits / (session_hits + delivered)`; denominador zero resulta em ausência do segmento.
+
+Tokens do último contexto vêm de `Envelope.budget.estimated_tokens`, atualmente estimados pelo tamanho do JSON serializado dividido por quatro e arredondado para cima. Rotular como estimativa e somente exibir quando houve entrega de contexto/bloqueio. Não interpretar `requested_tokens - estimated_tokens` como economia: o primeiro valor é orçamento, não uma leitura de referência.
+
+O resultado `ready` significa que aquela análise não detectou obrigação aberta; não certifica correção do código ou aprovação dos testes. Um resultado antigo sempre aparece como `última`, nunca como saúde atual. Depois de cinco minutos, no modo detalhado, acrescentar `dados antigos`; a idade indica o momento da observação, não drift do grafo.
+
+#### 24.5.3 Largura e cores
+
+Uma linha por padrão, sem quebra interna. Ordem de remoção quando exceder a largura: detalhes, contadores, modelo (incluindo versão e effort). Preservar prefixo, contexto quando presente, pausa dos hooks e alerta da última análise. Em largura extrema, produzir apenas `rw-brkr` ou um alerta abreviado que caiba.
+
+Usar `--width N`, depois `COLUMNS`, depois 100 colunas como fallback. Medir largura visual de Unicode; se uma dependência pequena for necessária, justificar sua inclusão. Não medir pelo número de bytes. Truncar rótulos em fronteiras de caracteres e incluir sequências ANSI somente depois de calcular a largura.
+
+`--color never` é o padrão. Quando `--color always` estiver presente, implementar cores ANSI em Rust, mesmo quando stdout não for TTY, pois o host captura a saída. A opção explícita `--color always` prevalece sobre `NO_COLOR`; `--color never` e a ausência de opção produzem texto sem ANSI. Atenção/erro em amarelo/vermelho; todo significado também precisa estar escrito.
+
+Colorir o segmento inteiro `ctx xx%` conforme o percentual inteiro exibido, depois do arredondamento. As faixas abaixo eliminam sobreposição: 40% é branco, 60% e 80% são amarelos; somente acima de 80% é vermelho.
+
+| Percentual exibido | Cor | Sequência ANSI em string Rust |
+|---|---|---|
+| `0 <= ctx < 40` | Cinza claro | `"\x1b[38;5;250m"` |
+| `40 <= ctx < 60` | Branco | `"\x1b[97m"` |
+| `60 <= ctx <= 80` | Amarelo | `"\x1b[33m"` |
+| `80 < ctx <= 100` | Vermelho | `"\x1b[31m"` |
+
+Usar `"\x1b[0m"` ao terminar cada segmento colorido, antes do separador, para impedir vazamento de cor aos campos seguintes. Aplicar ANSI somente após sanitização e cálculo de largura; os escapes gerados pelo renderizador não contam como colunas. Percentual ausente/inválido continua omitido, sem cor artificial. Essa paleta é um requisito de produto; a aparência exata depende da paleta do terminal.
+
+### 24.6 Arquitetura proposta em Rust
+
+```text
+Claude Code: UserPromptSubmit / PostToolUse / Stop
+             │
+             ▼
+ripwire-broker hook → SessionState + SessionTally existentes
+             │ publica projeção privada e atômica
+             ▼
+state-dir/statusline/<hash-da-sessão-e-workspace>.json
+             ▲
+             │ leitura sem lock e sem upstream
+Claude JSON → ripwire-broker statusline → texto em stdout → Claude Code
+
+ripwire-broker serve → protocolo MCP stdio (processo independente)
+```
+
+#### 24.6.1 CLI proposta
+
+```text
+ripwire-broker statusline [--workspace DIR] [--state-dir DIR]
+                         [--detail] [--width N] [--color never|always]
+ripwire-broker install claude-code --workspace DIR --hooks --statusline [--write]
+```
+
+Acrescentar `StatuslineArgs` e `Command::Statusline` em `cli.rs`. Esses flags são novos. Erros de argumentos continuam seguindo o contrato normal do CLI; falhas de dados no modo de renderização retornam sucesso com uma linha degradada. `statusline --help` não lê stdin.
+
+Resolver workspace por `--workspace`, `workspace.project_dir`, `workspace.current_dir`, `cwd`, nessa ordem. Não usar a mudança do diretório corrente para mudar silenciosamente a raiz fixa configurada pelo instalador. Canonicalizar a raiz quando possível, reutilizando o padrão de `Workspace`; se a resolução falhar, mostrar apenas segmentos do host e `hooks sem dados`. Não percorrer diretórios em busca de configuração. Worktrees diferentes têm identidades distintas.
+
+Sem `session_id` não consultar sessão `default`: a barra deve mostrar ausência de dados, evitando misturar sessões. Os hooks atuais podem manter seu fallback para compatibilidade, mas só publicam projeção com identidade de sessão válida. Se o usuário usa `hook --state-dir`, configurar o mesmo diretório na barra manualmente; a instalação inicial usa o diretório padrão em ambos.
+
+#### 24.6.2 Módulos e funções
+
+- `src/statusline.rs`: tipos mínimos do payload, normalização de campos opcionais, composição e função pura `render(input, snapshot, options, now) -> String`.
+- `src/statusline_state.rs`: snapshot, identidade, leitura tipada e escrita atômica. Retornar estados distintos de ausência, corrupção, versão incompatível e dados válidos.
+- `src/lib.rs`: exportar os novos módulos.
+- `src/main.rs`: ler stdin limitado, carregar a projeção e imprimir uma única linha; não chamar `settings`, `local::launch`, `Broker::connect` nem `Broker::status`.
+- `src/hook.rs`: registrar o resumo de cada análise e publicar a projeção após o evento, incluindo caminhos silenciosos e falhas de lançamento.
+- `src/state.rs`: extrair apenas os helpers de arquivo privado/rename que realmente sejam reutilizáveis; preservar o formato e a localização dos arquivos existentes.
+
+Usar `serde`/`serde_json` para os dados e `sha2` para nomes opacos. Não criar helper Node.js, script Python ou shell obrigatório. O runtime assíncrono já presente no binário pode permanecer; o caminho da barra deve realizar apenas I/O local limitado.
+
+#### 24.6.3 Snapshot compacto
+
+Formato proposto, sem prompts, código, caminhos em claro, símbolos ou fingerprints:
+
+```json
+{
+  "schema_version": 1,
+  "host": "claude-code",
+  "workspace_key": "<sha256-da-raiz-canônica>",
+  "updated_at": 1790865000,
+  "opted_out": false,
+  "stats": {
+    "events": 12,
+    "injections": 7,
+    "delivered": 25,
+    "session_hits": 18
+  },
+  "last_analysis": {
+    "at": 1790864990,
+    "event": "Stop",
+    "status": "attention_required",
+    "error_kind": null
+  },
+  "last_delivery": {
+    "at": 1790864970,
+    "estimated_tokens": 1240
+  }
+}
+```
+
+Separar `last_analysis` de `last_delivery`: análises silenciosas atualizam o primeiro; somente injeção ou bloqueio atualiza o segundo. Um evento sem análise não apaga o resultado anterior. Falha atualiza a análise para `error` com categoria permitida, sem mensagem arbitrária da exceção.
+
+Adicionar a `SessionState` um resumo opcional e `workspace_key`, com defaults de desserialização, para sobreviver entre processos. Contadores continuam tendo `SessionTally` como única fonte. O snapshot é uma projeção substituída integralmente; não é outro contador acumulativo.
+
+Chave do arquivo: SHA-256 de tupla versionada `(host, session_id, raiz_canônica)`, com codificação não ambígua. Validar `schema_version`, host e `workspace_key` na leitura. Nunca usar `session_id` bruto como caminho. Se um estado legado não possui workspace, preservar a memória existente, mas marcar o início da nova observabilidade: contadores visuais começam na primeira projeção vinculada, usando baseline persistido. Se a identidade mudar dentro da mesma sessão, iniciar novo baseline visual para essa raiz e limpar resumos da raiz anterior.
+
+Isso evita atribuir contadores antigos a outro projeto sem alterar a semântica histórica de `hook-stats`. A barra apresenta contadores desde o início da observação vinculada; a migração precisa estar explicada no README.
+
+#### 24.6.4 Escrita, leitura e falhas
+
+1. Hooks mantêm o lock existente durante load → análise → save → publicação.
+2. Gravar a sessão antes de publicar a projeção; se a gravação principal falhar, não publicar novos totais como se fossem duráveis.
+3. Publicar em arquivo temporário privado no mesmo diretório e renomear. Readers recebem a versão anterior ou a nova, nunca um JSON parcial.
+4. Falha de projeção não altera a resposta do hook nem impede o Claude de continuar. Após crash entre as duas gravações, o próximo evento republica os totais corretos.
+5. Se a sessão terminou sem publicação, os dados antigos permanecem identificados pelo timestamp. Não inferir liveness pelo mero arquivo existente.
+6. A barra lê somente o arquivo correspondente, sem lock e sem `sessions()`, sem desserializar toda a memória de fingerprints.
+7. Limites propostos: stdin de até 256 KiB; snapshot de até 16 KiB; leitura até limite + 1 para detectar excesso. JSON inválido/excedente gera degradação. Não persistir o payload do host.
+8. Diretórios Unix `0700`, arquivos `0600`; recusar snapshots que não sejam arquivos regulares e tratar symlinks inesperados como ausência. Reutilizar o padrão de segurança existente, sem prometer suporte Windows nesta entrega.
+
+### 24.7 Instalação e coexistência
+
+Acrescentar `--statusline` a `InstallArgs`, válido somente para `claude-code`. Sem ele, a instalação mantém o comportamento atual. `--statusline` não implica `--hooks`: instalação somente da barra é permitida e informa que contadores exigem hooks.
+
+Exemplo **proposto** para prévia e aplicação:
+
+```sh
+ripwire-broker install claude-code --workspace /repo --hooks --statusline
+ripwire-broker install claude-code --workspace /repo --hooks --statusline --write
+```
+
+Trecho que o instalador deve produzir em `.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "'/caminho/absoluto/ripwire-broker' statusline --workspace '/repo' --color never"
+  }
+}
+```
+
+O merge de hooks e barra deve ocorrer em memória antes de gerar um único `Change` para esse arquivo; duas alterações independentes baseadas no mesmo conteúdo poderiam sobrescrever uma à outra. Reutilizar o escape de shell de `install::quote` para todos os paths e manter recusa de UTF-8 inválido.
+
+Regras obrigatórias:
+
+- Ausência de barra: inserir somente quando solicitado.
+- Barra reconhecida como instalação anterior do broker: atualizar comando e preservar opções desconhecidas, `padding` e `refreshInterval` existentes.
+- Barra alheia, inclusive Graft: preservar e emitir nota no plano, inclusive com `--write`. Não executar o comando encontrado para identificá-lo.
+- Reconhecer propriedade por estrutura do comando gerado, executável e subcomando esperados; não copiar o teste frouxo de substring usado hoje para hooks.
+- Verificar configuração de usuário e local para evitar sombrear uma barra alheia herdada; respeitar `CLAUDE_CONFIG_DIR` quando presente. Se a origem efetiva não puder ser determinada, oferecer trecho manual no plano sem assumir que não há conflito.
+- Reinstalar sem `--statusline` não remove uma barra instalada. Desativação manual: remover apenas a chave do broker; restauração pelo backup requer conferir as demais alterações posteriores.
+- Não adicionar `refreshInterval` automaticamente. Quem precisar de atualização durante ociosidade pode configurá-lo, após verificar suporte da versão do host.
+- Preservar chaves alheias, hooks, backup e comportamento de prévia. JSON inválido deve impedir alteração desse arquivo, com erro claro.
+
+Os arquivos de usuário, projeto e configuração local têm escopos e precedência próprios. A validação manual precisa confirmar qual configuração foi carregada no Claude Code. [Documentação de settings](https://code.claude.com/docs/en/settings).
+
+Não compor automaticamente comandos de terceiros. Uma composição manual pode fornecer o mesmo JSON aos renderizadores e concatenar seus segmentos, mas exige limites de execução próprios e fica fora desta versão.
+
+### 24.8 Exemplo e lições do Graft
+
+O estudo usa o [Graft no commit fixado](https://github.com/trailhq/Graft/tree/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad). `format.ts`, `statusline.ts` e `settings-merge.ts` foram conferidos diretamente nesse commit; os demais links abaixo permitem aprofundar os componentes descritos no anexo.
+
+Configuração do exemplo Graft:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
+  }
+}
+```
+
+Exemplo ilustrativo do renderizador, com dados fictícios:
+
+```text
+◤ graft · 820 nodes / 2.140 edges · ✓ synced · ~12.000 tok saved · ~$0.04
+▸ ctx 32% · last: service.ts
+```
+
+O Graft usa um helper que carrega o pacote JavaScript. Sua barra lê estatísticas do projeto e estado da sessão, com fallback para o grafo. O broker deve aproveitar a separação entre produtor e renderizador, implementando o consumidor no próprio binário Rust.
+
+| Referência Graft | Aprendizado para ripwire-broker |
+|---|---|
+| [Instalação](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/init.ts), [helper](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/shim-template.ts) | Registro da barra separado do MCP; Rust elimina a necessidade do helper Node |
+| [Leitura da barra](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/statusline.ts) | Consumidor local sem subprocessos; broker deve usar somente a projeção pequena |
+| [Renderização](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/format.ts) | Segmentos condicionais; ausência de informação não deve fabricar valores |
+| [Merge](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/settings-merge.ts) | Preservar barra alheia e atualizar somente integração própria |
+| [Estado](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/state.ts), [hooks](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/claude/hooks.ts) | Projetar dados por sessão; broker já dispõe de contadores para os hooks |
+| [Economia](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/context/savings.ts), [preços](https://github.com/trailhq/Graft/blob/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad/src/context/price.ts) | Estimativas dependem de baseline; não reutilizar fórmulas sem medição equivalente |
+
+Cuidados específicos: no commit examinado, o renderizador não exibe `% enriched`. O fallback de `statusline.ts` para `wiring.json` preenche defaults sem sinal de drift e pode resultar em `synced`. Não reproduzir esse significado no broker. Quando há `agent.name`, o Graft usa uma renderização própria para o agente; no broker, payloads de agente devem mostrar apenas os segmentos do host e indicar `agente`, sem herdar contadores da sessão principal na primeira versão.
+
+### 24.9 Requisitos não funcionais
+
+- Meta de desempenho: p95 abaixo de 50 ms para renderização + leitura local e abaixo de 100 ms ponta a ponta em build release, medida no macOS Apple Silicon e Linux, com fixture de tamanho máximo e armazenamento local aquecido. São metas propostas, não medições já realizadas.
+- Nenhuma chamada de rede, modelo, MCP ou processo upstream; não varrer arquivos do workspace e não ler transcript.
+- Não reter stdin do Claude nem registrar session IDs, paths, prompts, tokens de autenticação ou respostas. Sanitizar controles, newline, ESC e sequências de terminal de todos os textos externos.
+- Snapshot limitado, por sessão/workspace; não usar configuração do servidor como prova de disponibilidade atual.
+- Ler não pode criar arquivos, diretórios ou backups. Toda mutação pertence aos hooks ou à instalação explicitamente solicitada.
+- Campos novos opcionais em `SessionState` devem preservar leitura de estados legados. Versão desconhecida do snapshot deve resultar em ausência de dados, não interpretação parcial insegura.
+
+### 24.10 Plano de implementação
+
+| Etapa | Entrega | Conclusão verificável |
+|---|---|---|
+| 1 | Tipos, função pura de renderização, CLI e despacho | Fixtures stdin geram saída determinística; servidor/upstream não é iniciado |
+| 2 | Resumo em `SessionState`, baseline visual e snapshot | Eventos silenciosos, pausa e falha de launch produzem projeção correta; estado legado continua carregando |
+| 3 | Merge opcional do instalador | Uma alteração por settings, prévia sem escrita, preservação de Graft e idempotência |
+| 4 | Testes, README e medição release | Critérios abaixo atendidos; demonstração em sessão real do Claude Code |
+
+#### 24.10.1 Critérios de aceitação e testes
+
+1. `statusline` recebe JSON válido, imprime uma linha e retorna 0; `serve` mantém stdout exclusivamente MCP. Usar upstream falso que falha caso seja executado para comprovar isolamento.
+2. Campos ausentes, nulos, desconhecidos, Unicode, stdin vazio/inválido/excedente e snapshot ausente/corrompido/incompatível não causam panic ou logs extensos.
+3. Zero de contexto é exibido como `0%`; ausência não vira zero. Sem denominador, não exibir taxa fictícia.
+4. Sessões, hosts e workspaces distintos não compartilham projeção; verificar worktree, mudança de cwd e identidade ausente. Payload de agente não reutiliza métricas da conversa principal.
+5. `#ripwire-off` aparece como pausa; `#ripwire-on` reativa. `Stop` com `ready` silencioso substitui a última análise de atenção; evento sem análise preserva o resumo.
+6. Falha de upstream aparece como última análise com erro; gravação de projeção recusada não muda a saída esperada do hook. Crash entre gravações não duplica totais no evento seguinte.
+7. Leitura concorrente durante publicação vê somente versões completas e não espera lock. Totais reproduzem `SessionTally` descontado do baseline, sem outro acumulador.
+8. Linhas cabem em 40, 80 e 120 colunas, inclusive Unicode; nenhuma sequência externa de controle chega ao terminal. `--color never` e a ausência de opção removem ANSI; `--color always` gera cores mesmo sem TTY e com `NO_COLOR`. Verificar cinza claro em 0/39%, branco em 40/59%, amarelo em 60/80% e vermelho em 81/100%, além de arredondamento nas fronteiras e reset após cada segmento.
+9. Instalar sem `--write` não altera arquivos; instalar duas vezes é idempotente. Hooks e statusLine convivem no mesmo plano. Preservar barras alheias em settings de projeto, usuário e local, além de opções desconhecidas do broker.
+10. Paths com espaços, aspas e caracteres shell são escapados; erro de UTF-8/JSON não produz configuração executável parcial.
+11. O mesmo binário funciona sem feature `online`; registrar desempenho observado e versão do Claude usada no teste manual.
+12. Prefixo exibido é sempre `rw-brkr`. Modelo inclui versão quando fornecida ou extraível com segurança, sem duplicação; testar identificadores com sufixos de data, aliases, versões ausentes e as cinco abreviações de effort (`low`, `mid`, `hig`, `xtr`, `max`), além de valores nulos/desconhecidos.
+
+Cobertura prevista: `tests/statusline.rs` para renderização/CLI/arquivos; `tests/hooks.rs` para produção e migração; `tests/cli.rs` para instalação; executar os testes MCP existentes para regressão de stdout. Após a implementação, executar os checks já usados pelo projeto: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, e os equivalentes com `--features online` quando o diff afetar caminhos compartilhados.
+
+Teste manual **após implementar**, sem snapshot (esperado: `hooks sem dados`):
+
+```sh
+printf '%s\n' '{"session_id":"demo","workspace":{"project_dir":"/repo"},"model":{"display_name":"Sonnet","id":"claude-sonnet-4-6"},"effort":{"level":"high"},"context_window":{"used_percentage":32}}' \
+  | ripwire-broker statusline --workspace /repo --color never
+```
+
+Saída esperada: `rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks sem dados`. Repetir com `--color always`: o segmento `ctx 32%` deve usar cinza claro e terminar com reset ANSI.
+
+Depois, instalar com hooks numa pasta de teste, enviar um prompt, editar um arquivo, encerrar o turno e alternar `#ripwire-off`/`#ripwire-on`. Comparar contadores da barra com o estado daquela sessão; não comparar com o agregado global de `hook-stats`.
+
+### 24.11 Evolução possível
+
+Para exibir saúde real do MCP, especificar separadamente um snapshot por instância do servidor, com workspace, identificador opaco, timestamp e heartbeat. Sem heartbeat recente, a interface deve informar estado desconhecido. Uma instância MCP compartilhada com subagentes não oferece atribuição segura por `session_id`; resolver essa correlação antes de incorporar contadores MCP à sessão do host.
+
+Para exibir economia, primeiro medir uma referência comparável e o contexto entregue, evitando dupla contagem entre hooks, MCP e CLI. Só então definir uma estimativa de tokens; dólares exigem outra especificação e rótulo explícito de estimativa. Para números/freshness do grafo, estabelecer e testar um contrato com o upstream antes de adicioná-los à barra.
+
+### 24.12 Referências
+
+- [Claude Code — status line](https://code.claude.com/docs/en/statusline): contrato, campos, exemplos, atualização e limites da interface.
+- [Claude Code — settings](https://code.claude.com/docs/en/settings): escopos, configuração local e precedência.
+- [Claude Code — hooks](https://code.claude.com/docs/en/hooks): referência para os eventos usados pela integração.
+- [MCP — stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#stdio): separação entre protocolo e saída visual.
+- [Graft — commit de referência](https://github.com/trailhq/Graft/tree/fe30ead39d5e6f0c921018d364da2bdbc9d4b3ad): exemplo externo; links dos componentes no §24.8.
+- Capítulos anteriores deste PRD e o [README do projeto](../README.md): contratos locais, privacidade e funcionamento incremental.
+
+Consulta atual de documentação feita via Context7 (`/websites/code_claude`) e páginas oficiais em 01/10/2026. O Graft foi comparado pelo commit fixado, sem assumir que sua branch atual tem o mesmo comportamento.
+
+### 24.13 Decisões
+
+Pontos que a spec deixava em aberto, ou que o código revelou ambíguos, levantados pelo plano. O
+mantenedor aceitou as seis recomendações em 2026-10-01
+([D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd)); elas são requisitos da implementação.
+
+| # | ponto | decisão |
+| --- | --- | --- |
+| D1 | Largura Unicode (§24.5.3) | Dependência nova `unicode-width = "0.2"`: crate fora do grafo atual, sem dependências e sem rede, o mesmo que o rustc usa. A alternativa é uma tabela Unicode escrita à mão |
+| D2 | O que sobra sob largura extrema (§24.5.3) | Essenciais: `rw-brkr`, `ctx N%`, `hooks off`, `última: atenção`, `última: erro`. `hooks on`, `hooks sem dados`, `última: pronta` e `última: incerta` não são pausa nem alerta, e saem depois do modelo |
+| D3 | Quais hooks publicam (§24.6.3) | Só os do Claude Code. O host já entra na chave do arquivo e no snapshot, então publicar para o Codex depois é uma linha |
+| D4 | Falha do `local::launch` (§24.3.1) | A análise vira `erro` e o estado é salvo e publicado. Os contadores não mudam: esse caminho não conta evento hoje, e mudá-lo mudaria o `hook-stats` |
+| D5 | Barra alheia herdada (§24.7) | No settings do usuário: a do broker não é escrita, porque a sombrearia, e sai nota com o trecho manual. No `settings.local.json`: a do broker é escrita, com nota de que a local prevalece. Settings do usuário ilegível: nada é escrito, nota com o trecho manual |
+| D6 | Payload de agente (§24.8) | Presença de `agent` (objeto) no JSON do host: só os segmentos do host e `agente`, sem ler snapshot |
+
+**Defeito existente, fora do escopo:** quando o `local::launch` falha, `hook::run` retorna antes de
+`handle`, e o `#ripwire-on` desse prompt não é processado. Com o ripwire ausente, a barra mostraria
+`hooks off` até um prompt com o ripwire de pé. Registrado, não corrigido nesta entrega.
