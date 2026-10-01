@@ -103,6 +103,116 @@ fn merge_hooks(mut settings: Value, host: Host, binary: &Path, workspace: Option
     settings
 }
 
+fn statusline_command(binary: &Path, workspace: &Path) -> String {
+    format!(
+        "{} statusline --workspace {} --color never",
+        quote(binary),
+        quote(workspace)
+    )
+}
+
+/// Just enough of POSIX shell words to read back a command `install` wrote: single quotes (with
+/// `'\''`), double quotes, backslashes and whitespace. Used only to recognize ownership.
+fn shell_words(cmd: &str) -> Vec<String> {
+    let (mut words, mut cur, mut any) = (vec![], String::new(), false);
+    let mut it = cmd.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\'' => {
+                any = true;
+                for c in it.by_ref() {
+                    if c == '\'' {
+                        break;
+                    }
+                    cur.push(c);
+                }
+            }
+            '"' => {
+                any = true;
+                while let Some(c) = it.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(n) = it.next() {
+                                cur.push(n)
+                            }
+                        }
+                        _ => cur.push(c),
+                    }
+                }
+            }
+            '\\' => {
+                any = true;
+                if let Some(n) = it.next() {
+                    cur.push(n)
+                }
+            }
+            c if c.is_whitespace() => {
+                if any {
+                    words.push(std::mem::take(&mut cur));
+                    any = false;
+                }
+            }
+            c => {
+                any = true;
+                cur.push(c)
+            }
+        }
+    }
+    if any {
+        words.push(cur);
+    }
+    words
+}
+
+enum Bar {
+    Absent,
+    Ours,
+    Foreign,
+}
+
+/// Ours: the program is a `ripwire-broker` executable and its first argument is `statusline`.
+fn bar(settings: &Value) -> Bar {
+    let Some(line) = settings.get("statusLine") else {
+        return Bar::Absent;
+    };
+    let words = line
+        .get("command")
+        .and_then(Value::as_str)
+        .map(shell_words)
+        .unwrap_or_default();
+    let ours = words
+        .first()
+        .and_then(|p| Path::new(p).file_name())
+        .is_some_and(|n| n == "ripwire-broker")
+        && words.get(1).is_some_and(|w| w == "statusline");
+    if ours { Bar::Ours } else { Bar::Foreign }
+}
+
+fn merge_statusline(mut settings: Value, command: &str) -> Value {
+    if !settings.is_object() {
+        settings = json!({});
+    }
+    match bar(&settings) {
+        Bar::Foreign => {}
+        Bar::Absent => {
+            settings["statusLine"] = json!({"type": "command", "command": command});
+        }
+        Bar::Ours => {
+            settings["statusLine"]["type"] = "command".into();
+            settings["statusLine"]["command"] = command.into();
+        }
+    }
+    settings
+}
+
+fn user_settings() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
+        .map(|d| d.join("settings.json"))
+}
+
 fn read(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
 }
@@ -190,11 +300,63 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                         .insert("ripwire-broker".into(), server);
                     v
                 })?);
-            if args.hooks {
-                plan.changes
-                    .push(change(workspace.join(".claude/settings.json"), |v| {
-                        merge_hooks(v, Host::ClaudeCode, binary, Some(&workspace))
-                    })?);
+            let settings_path = workspace.join(".claude/settings.json");
+            let command = statusline_command(binary, &workspace);
+            let manual = format!(
+                "statusLine for {}:\n{}",
+                settings_path.display(),
+                pretty(&json!({"statusLine": {"type": "command", "command": command}}))
+            );
+            let mut bar_wanted = args.statusline;
+            if args.statusline {
+                // D5: an inherited user bar would be shadowed by ours; an unreadable one leaves the
+                // effective bar unknown. Either way, nothing is written and the snippet is shown.
+                match user_settings().map(|p| (parse(&read(&p)), p)) {
+                    Some((Err(e), p)) => {
+                        bar_wanted = false;
+                        plan.notes.push(format!(
+                            "{}: {e}; add the bar by hand if it is free:\n{manual}",
+                            p.display()
+                        ));
+                    }
+                    Some((Ok(v), p)) if matches!(bar(&v), Bar::Foreign) => {
+                        bar_wanted = false;
+                        plan.notes.push(format!(
+                            "{} has its own statusLine; keeping it. To use the broker's:\n{manual}",
+                            p.display()
+                        ));
+                    }
+                    _ => {}
+                }
+                let local = workspace.join(".claude/settings.local.json");
+                if let Ok(v) = parse(&read(&local))
+                    && matches!(bar(&v), Bar::Foreign)
+                {
+                    plan.notes.push(format!(
+                        "{} has its own statusLine, and it wins over the project's.",
+                        local.display()
+                    ));
+                }
+                if !args.hooks {
+                    plan.notes.push("statusLine without --hooks: the bar shows `hooks sem dados` until hooks are installed.".into());
+                }
+            }
+            if args.hooks || bar_wanted {
+                let mut foreign = false;
+                plan.changes.push(change(settings_path.clone(), |mut v| {
+                    if args.hooks {
+                        v = merge_hooks(v, Host::ClaudeCode, binary, Some(&workspace));
+                    }
+                    if bar_wanted {
+                        foreign = matches!(bar(&v), Bar::Foreign);
+                        v = merge_statusline(v, &command);
+                    }
+                    v
+                })?);
+                if foreign {
+                    plan.notes.push(format!("{} has a statusLine that is not the broker's; keeping it. To use the broker's:\n{manual}",
+            settings_path.display()));
+                }
             }
         }
         Host::Codex => {
