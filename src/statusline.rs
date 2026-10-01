@@ -11,6 +11,7 @@ pub const SEPARATOR: &str = " · ";
 /// After this many seconds, `--detail` says the data is old (§5.2).
 pub const STALE_SECS: u64 = 300;
 const MAX_MODEL_CHARS: usize = 32;
+pub const MAX_STDIN_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostInput {
@@ -55,6 +56,17 @@ pub fn parse_input(text_in: &str) -> HostInput {
             .and_then(Value::as_f64),
         agent: v.get("agent").is_some_and(Value::is_object),
     }
+}
+
+/// `--workspace`, else the host's project dir, current dir, cwd (spec §6.1). Canonical; a root that
+/// does not resolve gives `None` and never falls through to the next candidate.
+pub fn resolve_root(flag: Option<&std::path::Path>, input: &HostInput) -> Option<PathBuf> {
+    let candidate = flag
+        .map(PathBuf::from)
+        .or_else(|| input.project_dir.clone())
+        .or_else(|| input.current_dir.clone())
+        .or_else(|| input.cwd.clone())?;
+    candidate.canonicalize().ok()
 }
 
 /// Drops control characters (ESC, newline, BEL...), so external text cannot steer the terminal.

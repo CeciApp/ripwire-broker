@@ -205,7 +205,50 @@ async fn main() -> ExitCode {
             }
             return ExitCode::SUCCESS;
         }
-        Ok(Command::Statusline(_)) => return ExitCode::SUCCESS,
+        Ok(Command::Statusline(a)) => {
+            // Status line mode (PRD §24): local reads only, always exit 0, one line.
+            use ripwire_broker::statusline::{self, MAX_STDIN_BYTES, Options};
+            use ripwire_broker::statusline_state::{self as projection, HOST, Read};
+            let mut raw = Vec::new();
+            let _ = std::io::stdin()
+                .take(MAX_STDIN_BYTES + 1)
+                .read_to_end(&mut raw);
+            let text = match raw.len() as u64 > MAX_STDIN_BYTES {
+                true => String::new(),
+                false => String::from_utf8(raw).unwrap_or_default(),
+            };
+            let input = statusline::parse_input(&text);
+            let snapshot = match (&input.session_id, input.agent) {
+                (Some(session), false) => {
+                    let root = statusline::resolve_root(a.workspace.as_deref(), &input);
+                    let dir = a.state_dir.clone().or_else(StateStore::default_dir);
+                    match (root, dir) {
+                        (Some(root), Some(dir)) => {
+                            match projection::read(&dir, HOST, session, &root) {
+                                Read::Valid(s) => Some(s),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let width = a
+                .width
+                .or_else(|| std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()))
+                .unwrap_or(100);
+            let options = Options {
+                detail: a.detail,
+                width,
+                color: a.color == cli::Color::Always,
+            };
+            println!(
+                "{}",
+                statusline::render(&input, snapshot.as_ref(), &options, hook::now())
+            );
+            return ExitCode::SUCCESS;
+        }
         Err(msg) => {
             eprintln!("{msg}");
             return ExitCode::from(2);

@@ -612,3 +612,218 @@ fn concurrent_readers_see_whole_versions_only() {
     }
     writer.join().unwrap();
 }
+
+// Binary-level tests: Command::Statusline dispatch (Task 5).
+use ripwire_broker::statusline::resolve_root;
+use std::io::Write;
+use std::process::{Command as Proc, Stdio};
+
+fn run_bar(args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"));
+    cmd.arg("statusline")
+        .args(args)
+        .env_remove("COLUMNS")
+        .env_remove("NO_COLOR");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(stdin);
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn the_manual_example_of_the_spec() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let input = format!(
+        r#"{{"session_id":"demo","workspace":{{"project_dir":"{}"}},"model":{{"display_name":"Sonnet","id":"claude-sonnet-4-6"}},"effort":{{"level":"high"}},"context_window":{{"used_percentage":32}}}}"#,
+        ws.path().display()
+    );
+    let (code, out, err) = run_bar(
+        &[
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+        ],
+        input.as_bytes(),
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks sem dados\n"
+    );
+    assert!(err.is_empty(), "{err}");
+    let (_, colored, _) = run_bar(
+        &[
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--color",
+            "always",
+        ],
+        input.as_bytes(),
+        &[("NO_COLOR", "1")],
+    );
+    assert!(
+        colored.contains("\x1b[38;5;250mctx 32%\x1b[0m"),
+        "{colored:?}"
+    );
+}
+
+#[test]
+fn it_reads_the_projection_of_this_session_and_workspace() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    publish(
+        state.path(),
+        "s-1",
+        &root,
+        &Snapshot {
+            workspace_key: workspace_key(&root),
+            ..snap(false, 7, 18, Some(AnalysisStatus::AttentionRequired))
+        },
+    )
+    .unwrap();
+    let input = r#"{"session_id":"s-1","model":{"display_name":"Opus 5.5"}}"#;
+    let (_, out, _) = run_bar(
+        &[
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+        ],
+        input.as_bytes(),
+        &[],
+    );
+    assert_eq!(
+        out.trim_end(),
+        "rw-brkr · Opus 5.5 · hooks on · última: atenção · inj 7 · não reenviados 18"
+    );
+    // Agent payloads show only host segments (D-121).
+    let agent_input =
+        r#"{"session_id":"s-1","agent":{"name":"reviewer"},"model":{"display_name":"Opus 5.5"}}"#;
+    let (_, agent_out, _) = run_bar(
+        &[
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+        ],
+        agent_input.as_bytes(),
+        &[],
+    );
+    assert_eq!(agent_out.trim_end(), "rw-brkr · Opus 5.5 · agente");
+}
+
+#[test]
+fn without_a_session_id_nothing_is_read() {
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    publish(
+        state.path(),
+        "default",
+        &root,
+        &Snapshot {
+            workspace_key: workspace_key(&root),
+            ..snap(false, 7, 18, None)
+        },
+    )
+    .unwrap();
+    let (_, out, _) = run_bar(
+        &[
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+        ],
+        br#"{"model":{"display_name":"Opus"}}"#,
+        &[],
+    );
+    assert!(out.contains("hooks sem dados"), "{out}");
+}
+
+#[test]
+fn bad_stdin_degrades_and_still_exits_zero() {
+    let state = tempfile::tempdir().unwrap();
+    let sd = state.path().to_str().unwrap();
+    let huge = vec![b' '; 256 * 1024 + 1];
+    for stdin in [&b""[..], b"{", b"\xff\xfe", &huge[..]] {
+        let (code, out, err) = run_bar(&["--state-dir", sd], stdin, &[]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, "rw-brkr · hooks sem dados\n");
+        assert!(err.len() < 200, "no long logs: {err}");
+    }
+}
+
+#[test]
+fn width_comes_from_the_flag_then_columns_then_100() {
+    let input = br#"{"model":{"display_name":"Sonnet"},"context_window":{"used_percentage":32}}"#;
+    let (_, by_flag, _) = run_bar(&["--width", "20"], input, &[("COLUMNS", "200")]);
+    assert_eq!(by_flag.trim_end(), "rw-brkr · ctx 32%");
+    let (_, by_env, _) = run_bar(&[], input, &[("COLUMNS", "20")]);
+    assert_eq!(by_env.trim_end(), "rw-brkr · ctx 32%");
+}
+
+#[test]
+fn the_workspace_order_is_flag_project_dir_current_dir_cwd() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let input = parse_input(&format!(
+        r#"{{"workspace":{{"project_dir":"{}","current_dir":"{}"}},"cwd":"{}"}}"#,
+        a.path().display(),
+        b.path().display(),
+        b.path().display()
+    ));
+    assert_eq!(
+        resolve_root(Some(b.path()), &input),
+        Some(b.path().canonicalize().unwrap())
+    );
+    assert_eq!(
+        resolve_root(None, &input),
+        Some(a.path().canonicalize().unwrap())
+    );
+    assert_eq!(
+        resolve_root(Some(Path::new("/does/not/exist")), &input),
+        None,
+        "no silent fallback"
+    );
+}
+
+#[test]
+fn the_status_line_never_starts_ripwire() {
+    let bin = tempfile::tempdir().unwrap();
+    let marker = bin.path().join("ran");
+    let fake = bin.path().join("ripwire");
+    std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.path().display());
+    let (code, _, _) = run_bar(
+        &["--workspace", ws.path().to_str().unwrap()],
+        br#"{"session_id":"s"}"#,
+        &[("PATH", &path), ("HOME", ws.path().to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
+    assert!(!marker.exists(), "statusline must not start ripwire");
+    assert_eq!(
+        std::fs::read_dir(ws.path()).unwrap().count(),
+        0,
+        "and must not create files"
+    );
+}
