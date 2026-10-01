@@ -2539,7 +2539,7 @@ Uma linha por padrão, sem quebra interna. Ordem de remoção quando exceder a l
 
 Usar `--width N`, depois `COLUMNS`, depois 100 colunas como fallback. Medir largura visual de Unicode; se uma dependência pequena for necessária, justificar sua inclusão. Não medir pelo número de bytes. Truncar rótulos em fronteiras de caracteres e incluir sequências ANSI somente depois de calcular a largura.
 
-`--color never` é o padrão. Quando `--color always` estiver presente, implementar cores ANSI em Rust, mesmo quando stdout não for TTY, pois o host captura a saída. A opção explícita `--color always` prevalece sobre `NO_COLOR`; `--color never` e a ausência de opção produzem texto sem ANSI. Atenção/erro em amarelo/vermelho; todo significado também precisa estar escrito.
+`--color never` é o padrão. Quando `--color always` estiver presente, implementar cores ANSI em Rust, mesmo quando stdout não for TTY, pois o host captura a saída. A opção explícita `--color always` prevalece sobre `NO_COLOR`; `--color never` e a ausência de opção produzem texto sem ANSI. Atenção/erro em amarelo/vermelho, `hooks off` em vermelho e `hooks on` em azul claro (D-124); todo significado também precisa estar escrito.
 
 Colorir o segmento inteiro `ctx xx%` conforme o percentual inteiro exibido, depois do arredondamento. As faixas abaixo eliminam sobreposição: 40% é branco, 60% e 80% são amarelos; somente acima de 80% é vermelho.
 
