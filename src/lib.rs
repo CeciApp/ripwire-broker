@@ -31,6 +31,8 @@ pub mod online;
 mod router;
 pub mod session;
 pub mod state;
+pub mod statusline;
+pub mod statusline_state;
 pub mod summarizer;
 pub mod supervise;
 pub mod upstream;
