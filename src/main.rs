@@ -205,6 +205,7 @@ async fn main() -> ExitCode {
             }
             return ExitCode::SUCCESS;
         }
+        Ok(Command::Statusline(_)) => return ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("{msg}");
             return ExitCode::from(2);

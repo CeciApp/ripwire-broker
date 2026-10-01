@@ -1,5 +1,5 @@
 //! Seam 5: the binary's command line. `cli::parse` is pure; e2e runs of the binary follow.
-use ripwire_broker::cli::{self, Command, Event, Host};
+use ripwire_broker::cli::{self, Color, Command, Event, Host};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -126,6 +126,72 @@ fn each_subcommand_parses_its_flags() {
     assert_eq!(i.host, Host::Codex);
     assert!(i.hooks && i.write);
     assert_eq!(i.codex_home, Some(PathBuf::from("/c")));
+}
+
+#[test]
+fn statusline_parses_its_flags_and_defaults_to_no_color() {
+    let Ok(Command::Statusline(s)) = parse(&["statusline"]) else {
+        panic!()
+    };
+    assert_eq!(s.workspace, None);
+    assert_eq!(s.color, Color::Never);
+    assert!(!s.detail);
+    assert_eq!(s.width, None);
+
+    let Ok(Command::Statusline(s)) = parse(&[
+        "statusline",
+        "--workspace",
+        "/r",
+        "--state-dir",
+        "/s",
+        "--detail",
+        "--width",
+        "80",
+        "--color",
+        "always",
+    ]) else {
+        panic!()
+    };
+    assert_eq!(s.workspace, Some("/r".into()));
+    assert_eq!(s.state_dir, Some("/s".into()));
+    assert!(s.detail);
+    assert_eq!(s.width, Some(80));
+    assert_eq!(s.color, Color::Always);
+}
+
+#[test]
+fn statusline_refuses_bad_values_and_foreign_flags() {
+    for args in [
+        &["statusline", "--color", "auto"][..],
+        &["statusline", "--width", "wide"][..],
+        &["statusline", "--ripwire", "x"][..],
+        &["statusline", "extra"][..],
+    ] {
+        assert!(parse(args).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn install_takes_statusline_only_for_claude_code() {
+    let Ok(Command::Install(i)) = parse(&[
+        "install",
+        "claude-code",
+        "--workspace",
+        "/r",
+        "--statusline",
+    ]) else {
+        panic!()
+    };
+    assert!(i.statusline && !i.hooks);
+    assert!(parse(&["install", "codex", "--workspace", "/r", "--statusline"]).is_err());
+}
+
+#[test]
+fn statusline_help_does_not_read_stdin() {
+    // `run` writes nothing to stdin and would block on a reader; --help must return at once.
+    let (code, out, _) = run(&["statusline", "--help"], "");
+    assert_eq!(code, 0);
+    assert!(out.contains("statusline"), "{out}");
 }
 
 #[test]
@@ -1462,6 +1528,7 @@ fn install_refuses_a_binary_path_that_is_not_utf8() {
             host,
             workspace: ws.path().to_path_buf(),
             hooks: false,
+            statusline: false,
             write: false,
             codex_home: Some(codex_home.path().to_path_buf()),
             online: false,
@@ -1487,6 +1554,7 @@ fn install_refuses_a_workspace_path_that_is_not_utf8() {
         host: Host::ClaudeCode,
         workspace,
         hooks: false,
+        statusline: false,
         write: false,
         codex_home: None,
         online: false,
