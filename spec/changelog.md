@@ -97,7 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
-| 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
+| 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (decisões pendentes; a 2 é um ponto cego, edições por Bash não chegam ao hook); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
 | 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
@@ -5128,10 +5128,17 @@ antes do primeiro `Stop`. Não explicado nem reproduzido; anotado para a próxim
 
 1. **`hook-log` não mostra a edição (3.2).** Ele só lista injeções; o roteiro esperava a edição ali.
    Ou o roteiro está errado, ou o PostToolUse deveria ser registrado.
-2. **`stats.events` sobe 2 por turno mesmo com edição (3.1, 3.2).** Contagem 2 → 4 → 6 → 8; um turno
-   com prompt, edição de `src/lib.rs` e `Stop` deveria somar 3. O PostToolUse não é contado ou não
-   chega ao broker; a rodada não distingue. Próximo passo: rodar o hook à mão com o payload de
-   PostToolUse da fixture de hooks, ou com `--log-refs`.
+2. **`stats.events` sobe 2 por turno mesmo com edição (3.1, 3.2): não é defeito da contagem;
+   é um ponto cego.** Contagem 2 → 4 → 6 → 8. O transcript da sessão mostra que o Claude editou
+   `src/lib.rs` pela ferramenta Bash (`echo '…' >> src/lib.rs`), não pelo Edit. O PostToolUse do
+   broker só casa `Edit|Write|MultiEdit|NotebookEdit` (`src/install.rs`), então o Claude Code nem o
+   chamou; os `PostToolUse:Bash` do transcript são de hooks globais do mantenedor. A contagem está
+   certa: as fixtures de `tests/fixtures/hooks/` reproduzidas num state-dir novo dão 1 → 2 → 3
+   (prompt, PostToolUse de Edit, `Stop`). **Questão aberta para o §24/hooks:** edição feita por shell
+   (`echo >>`, `sed -i`, formatadores, geradores) é invisível ao broker, e o Claude escolheu Bash
+   sozinho para uma edição trivial. Ou o matcher passa a incluir `Bash` (e a edição é detectada pela
+   árvore do git), ou o limite fica documentado. O roteiro (passo 3.2) passou a pedir o Edit
+   explicitamente.
 3. **`last_analysis.event` é `"Stop"`**, maiúsculo; o roteiro confere `"stop"`. Ajustar o roteiro ou
    o valor.
 4. **`hooks off` mantém `última: atenção` (3.4).** A análise é anterior ao opt-out e pode ser lida
