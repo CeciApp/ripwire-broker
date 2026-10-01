@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos (416 padrão, 430 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
 | 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
 | 2026-10-01 18:10 | Com `--color always`, `hooks off` fica vermelho e `hooks on` azul claro (`38;5;117`); `hooks sem dados` segue sem cor; 1 teste novo (395 padrão, 409 com `online`) | [D-124](#d-124--cores-do-estado-dos-hooks-na-barra) |
@@ -4793,6 +4794,8 @@ Nenhuma bloqueia; ficam aqui para quem mexer nos arquivos.
   (`ripwire-broker-0.2`) faz a própria barra antiga contar como alheia (propriedade estrutural pelo nome do programa).
 - A variante "diretório" do `settings.local.json` ilegível não tem teste (divide o ramo de JSON inválido).
 
+Resolvidas no D-127.
+
 ### Medição (spec §9)
 
 Binário de `cargo build --release --locked`; 300 execuções de `target/release/ripwire-broker statusline`
@@ -4979,3 +4982,69 @@ D-125).
   para a pausa. Mutações pegas: ignorar o marcador no braço de falha; não salvar a pausa; não restaurar
   a versão carregada. Contagem: padrão **397 passados, 2 ignorados**; com `online` **411 passados,
   4 ignorados**.
+
+## D-127 — Pendências menores da barra de status
+
+**Data:** 2026-10-01. **Pedido do mantenedor.** Fecha a lista "Pendências menores registradas nas
+revisões" do D-123 (item a item, abaixo), em TDD: teste vermelho, correção, verde, e uma mutação por
+teste novo (reverter ou inverter a correção, ver o teste falhar, restaurar e dar `touch`).
+
+**Correções de comportamento**
+
+| # | Mudança | Teste | Mutação (pega) |
+|---|---|---|---|
+| 1 | `model_label` apara depois de sanear (`"Son \u{7}"` deixava `"Son "`) | `model_labels_are_trimmed_after_the_control_characters_go` | voltar a aparar antes |
+| 2 | `sanitize` também descarta U+061C, U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+2066–U+2069 e U+FEFF | `invisible_format_characters_are_dropped_like_controls` (cada caractere, vizinhos da faixa que ficam, e o rótulo de ponta a ponta) | deslocar o U+FEFF |
+| 3 | `reuso`: `session_hits.saturating_add(delivered)` | `counters_near_the_limit_do_not_overflow_the_reuse_rate` (`u64::MAX`; entrava em pânico em debug) | voltar ao `+` |
+| 4 | `fit` acha o `ctx` pelo campo `Segment::ctx`, não pelo prefixo do texto; ordem do D2 intacta | refatoração pura: os testes de largura existentes, sem alteração | `retain` invertido e `ctx` nunca marcado: 3 e 2 testes de largura falham |
+| 5 | `statusline_state::read` abre uma vez, com `O_NOFOLLOW` e `O_NONBLOCK`, e verifica o arquivo aberto (regular, tamanho); sem `symlink_metadata` | `symlinks_and_directories_read_as_missing`, `a_fifo_reads_as_missing_without_blocking` (novo; falha por timeout, sem travar) | tirar `O_NOFOLLOW`; tirar `O_NONBLOCK` |
+| 6 | `write_private`: temporário com `O_EXCL` e `O_NOFOLLOW`, nome `<arquivo>.tmp<pid>-<n>` com contador atômico do processo (até 8 tentativas em colisão), remoção do temporário em qualquer falha, e `0700` aplicado a diretório já existente mais frouxo | `writers_of_one_file_do_not_share_a_temporary`, `a_failed_write_removes_its_temporary`, `a_symlink_planted_at_a_temporary_name_is_never_written_through`, `a_looser_existing_directory_is_tightened_and_a_shared_one_is_left_alone`, `the_session_store_tightens_its_directory_too` (vermelhos antes: o das threads, com `NotFound`; o do temporário que sobrava; os dois do diretório `0755` mantido) | nome sem contador; sem a remoção; `create(true).truncate(true)` sem `O_NOFOLLOW`; sem apertar o diretório externo e o interno; sem a guarda de `sticky` |
+| 7 | `hook-stats` ignora a sessão sem evento e sem fingerprint (a que só teve falhas de launch) | `hook_stats_skips_sessions_whose_events_all_failed_to_launch` | filtro desligado; só `events > 0`; só fingerprints |
+| 8 | `hook::run` lê `session_id` uma vez | refatoração pura (testes de hook existentes) | n/a |
+| 9 | `install`: a nota `hooks sem dados` só sai com a barra escrita; programa cujo nome começa por `ripwire-broker` e primeiro argumento `statusline` é nosso | `the_hooks_note_is_printed_only_when_our_bar_is_written`, `a_renamed_or_versioned_binary_still_owns_its_bar` | nota sem `bar_wanted`; voltar à igualdade do nome; `ends_with` em vez de `starts_with` (pega em `ownership_is_structural_not_a_substring`) |
+
+Escolhas que o pedido deixava em aberto:
+
+- **`libc`:** a constante `O_NOFOLLOW`/`O_NONBLOCK` vem do `libc`, que já estava no grafo normal
+  (`tokio`, `sha2`) e no `Cargo.lock`. Virou dependência direta (uma linha no `Cargo.toml`, uma linha
+  no `Cargo.lock`); nenhum crate novo, nenhum `unsafe` (o crate o proíbe).
+- **Que diretório é "nosso" (item 6):** só se aperta o diretório que tem o mesmo dono de um arquivo
+  recém-criado pelo processo e não tem o bit `sticky`; um `--state-dir /tmp` (`1777`) não é restringido.
+  O diretório de estado e o `statusline/` são apertados; o `statusline/` é criado `0700`.
+- **`hook-stats` e sessões antigas (item 7):** só some a sessão sem eventos e sem nenhuma fingerprint.
+  Uma salva antes dos contadores existirem (zero eventos, fingerprints reais) continua contando, como o
+  README promete. A redação da saída não mudou.
+
+**Testes que faltavam (10 a 17):** sem defeito achado; cada um foi mutado.
+
+- **10:** `token_counts_show_whole_below_a_thousand_and_drop_a_zero_decimal` (mutações: limite
+  `< 100`; sem o corte do `,0`) e `age_counts_seconds_minutes_and_hours_and_a_future_stamp_is_zero`
+  (faixa dos minutos deslocada; `wrapping_sub` no `updated_at` futuro). Futuro: `há 0s`, sem `dados antigos`.
+- **11:** `tiny_widths_cut_the_prefix_on_a_column` (larguras 0, 1, 4, 5, 6 e 7; mutação: `cols.max(7)`).
+- **12:** `reading_creates_nothing` ganhou o state-dir existente sem `statusline/`.
+- **13:** `paths_that_run_no_analysis_leave_the_last_analysis_untouched` (opt-out em edição e `Stop`, edição
+  fora do workspace, edição coalescida, com uma análise sentinela; uma mutação por caminho, chamando
+  `analysed`), `a_state_that_was_never_bound_serializes_without_the_status_line_field` (sem o
+  `skip_serializing_if`) e a checagem de `last_analysis` vazia em `opt_out_and_opt_in_show_in_the_projection`.
+- **14:** `no_session_id_or_codex_publishes_nothing` agora exige a saída `no context` e as duas sessões
+  salvas (o hook rodou), e tem o controle positivo (claude-code com id publica). Mutações: publicar para
+  Codex; publicar sem id; nunca publicar.
+- **15:** `a_launch_failure_does_not_cache_the_unrunnable_ripwire_version` ganhou a versão semeada para
+  outro binário, que sobrevive à falha (mutação: não restaurar `loaded_ripwire` quando havia uma).
+- **16:** `a_settings_local_that_is_a_directory_still_gets_our_bar_with_a_note` (mutação: um
+  `settings.local.json` diretório desliga a barra).
+- **17:** `the_status_line_creates_and_changes_nothing_with_existing_state_either` (árvore do state-dir
+  e do workspace com tamanho e mtime, antes e depois; sessão com e sem projeção; mutação: `read` cria um arquivo).
+
+**Limpezas:** doc do módulo de `src/cli.rs` quebrada em 110 colunas (18); comentários de largura dos
+testes de ordem de descarte corrigidos com os números reais (19: sem detalhes 90 colunas, sem contadores
+62, sem modelo 45, sem `hooks on` 32, só prefixo e `ctx` 17; essenciais 44); imports no topo de
+`tests/statusline.rs` (20).
+
+**Sem vermelho observável:** a abertura sem `symlink_metadata` (5) e o `O_EXCL` (6) não mudam nada
+que um teste sem corrida veja; o teste do FIFO e o do symlink plantado já passavam antes e provam o
+código novo pelas mutações acima (o plantado cobre 5000 nomes `tmp<pid>-<n>`).
+
+**Contagem:** padrão **416 passados, 2 ignorados**; com `online` **430 passados, 4 ignorados** (eram 397
+e 411: 19 testes novos). `cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`
+(CA-10) sem saída.

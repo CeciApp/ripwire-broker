@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-01, até o
-[D-126](spec/changelog.md#d-126--o-marcador-vale-mesmo-sem-ripwire).
+[D-127](spec/changelog.md#d-127--pendências-menores-da-barra-de-status).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -31,8 +31,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 397 testes, 2 ignorados (opt-in)
-cargo test --all-targets --features online  # 411 testes, 4 ignorados
+cargo test --all-targets                    # 416 testes, 2 ignorados (opt-in)
+cargo test --all-targets --features online  # 430 testes, 4 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -62,7 +62,7 @@ cargo fmt --check
   `online*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-126, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-127, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -116,10 +116,6 @@ Os instrumentos estão prontos; as medições, não.
   Claude Code). O `capture.sh` da pasta grava o payload real do `statusLine`; falta transformá-lo em
   `tests/fixtures/statusline/claude_code.json` (com `__WORKSPACE__`) e conferir `effort.level`,
   `workspace.project_dir` e `agent`. Até lá os testes usam JSON sintético.
-- **Barra: `write_private` e links.** O endurecimento contra symlink/hardlink do arquivo temporário
-  continua pendência (D-123, "Revisão final").
-- **Barra: sessão só de falhas de launch.** Agora deixa um arquivo de sessão com contadores zerados, e o
-  `hook-stats` conta mais uma sessão (consequência do D4 do §24.13).
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.
