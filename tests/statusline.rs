@@ -241,77 +241,54 @@ fn opts(w: usize) -> Options {
 
 #[test]
 fn drop_order_detail_before_counter() {
-    // detail: true with hooks on and última: pronta (both Soft).
-    // Full line with all segments:
-    // rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · última: pronta · inj 7 · não reenviados 18 ·
-    // entregues 25 · reuso 42% · último contexto ~1,2k tok · há 20s
+    // Detail dropped, counters kept: Detail segments omitted, others present.
+    // Input: snap(false, 7, 18, Ready), SONNET, detail: true, width 90.
+    // Full line would include details; at width 90, details drop but counters stay.
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
-    // Width that drops details but keeps counters: approximately 90-95
-    let line_no_detail = render(&host(SONNET), Some(&s), &opts(92), 1_020);
-    assert!(
-        line_no_detail.contains("inj 7") && line_no_detail.contains("não reenviados"),
-        "counters present: {line_no_detail}"
-    );
-    assert!(
-        !line_no_detail.contains("entregues")
-            && !line_no_detail.contains("reuso")
-            && !line_no_detail.contains("há 20s"),
-        "details absent: {line_no_detail}"
+    let line = render(&host(SONNET), Some(&s), &opts(90), 1_020);
+    assert_eq!(
+        line,
+        "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · última: pronta · inj 7 · não reenviados 18"
     );
 }
 
 #[test]
 fn drop_order_counter_before_model() {
-    // detail: false with hooks on and última: pronta (Soft).
-    // Expected segments:
-    // rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · última: pronta · inj 7 · não reenviados 18
-    // Width that keeps model but drops counters: ~70-75
+    // Counter dropped, model kept: Model visible, counters omitted.
+    // Input: snap(false, 7, 18, Ready), SONNET, detail: false, width 70.
+    // At width 70 (in range 62..=72), counters drop but model stays.
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let no_counter_opts = Options {
         detail: false,
-        width: 73,
+        width: 70,
         color: false,
     };
-    let line_no_counter = render(&host(SONNET), Some(&s), &no_counter_opts, 1_020);
-    assert!(
-        line_no_counter.contains("Sonnet 4.6 hig"),
-        "model present: {line_no_counter}"
-    );
-    assert!(
-        !line_no_counter.contains("inj ") && !line_no_counter.contains("não reenviados"),
-        "counters absent: {line_no_counter}"
+    let line = render(&host(SONNET), Some(&s), &no_counter_opts, 1_020);
+    assert_eq!(
+        line,
+        "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · última: pronta"
     );
 }
 
 #[test]
 fn drop_order_model_before_soft_and_d2_rules() {
-    // detail: false with opted_out: false and última: pronta (Soft, not an alert).
-    // At a width where model drops but essentials + soft + counter fit:
-    // rw-brkr · ctx 32% · hooks on · última: pronta · inj 7 · não reenviados 18 ≈ 60
+    // Model dropped, soft kept: Model omitted, soft segments (hooks on, última: pronta) visible.
+    // Verify: width 60 (threshold: model drops at 60, fits at 61).
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
-    let soft_only_opts = Options {
-        detail: false,
-        width: 60,
-        color: false,
-    };
-    let line_no_model = render(&host(SONNET), Some(&s), &soft_only_opts, 1_020);
-    assert!(
-        !line_no_model.contains("Sonnet"),
-        "model absent: {line_no_model}"
-    );
-    assert!(
-        line_no_model.contains("hooks on") && line_no_model.contains("última: pronta"),
-        "soft segments present (not alerts, so they stay): {line_no_model}"
-    );
+    let line = render(&host(SONNET), Some(&s), &Options { detail: false, width: 60, color: false }, 1_020);
+    assert_eq!(line, "rw-brkr · ctx 32% · hooks on · última: pronta");
 
-    // D2 rule: essential alerts (hooks off, última: erro) survive when soft doesn't.
-    // At the same width, with hooks off and última: erro (alerts, not soft):
-    let alert_snap = snap(true, 7, 18, Some(AnalysisStatus::Error));
-    let alert_line = render(&host(SONNET), Some(&alert_snap), &soft_only_opts, 1_020);
-    assert!(
-        alert_line.contains("hooks off") && alert_line.contains("última: erro"),
-        "essential alerts survive: {alert_line}"
-    );
+    // D2 rule: soft drops but essential alerts survive (não é pausa nem alerta, saem).
+    // With Error status, hooks off and última: erro are alerts, not soft.
+    // At width 40, soft drops but alerts stay.
+    let alert_snap = snap(false, 7, 18, Some(AnalysisStatus::Error));
+    let alert_line = render(&host(SONNET), Some(&alert_snap), &Options { detail: true, width: 40, color: false }, 1_020);
+    assert_eq!(alert_line, "rw-brkr · ctx 32% · última: erro");
+
+    // At width 30, soft also drops with Ready (hooks on and última: pronta are soft).
+    let wide_ready = snap(false, 7, 18, Some(AnalysisStatus::Ready));
+    let ready_line = render(&host(SONNET), Some(&wide_ready), &Options { detail: true, width: 30, color: false }, 1_020);
+    assert_eq!(ready_line, "rw-brkr · ctx 32%");
 }
 
 #[test]
