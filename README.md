@@ -36,7 +36,8 @@ commands; `ripwire-broker --help` lists them all:
 | `hook-stats [--json]` | Every saved hook session reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
 | `prompt --workspace DIR TASK...` | Prints the task followed by its context, for clients without hooks |
 | `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
-| `install <claude-code\|codex> --workspace DIR [--hooks] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`) |
+| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
+| `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
 return a structured error (`upstream_unavailable` / `incompatible_upstream`), and the next
@@ -291,6 +292,52 @@ running tally instead (events, injections, items delivered whole, items not rese
 
 Counts only: no path, symbol, prompt, fingerprint or session id. Sessions saved before this tally existed
 count as zero events but still contribute their fingerprints.
+
+## Status line
+
+Claude Code can run a command to draw its status bar. `ripwire-broker statusline` reads the JSON the host
+sends on stdin, adds what the hooks last published for the session, and prints **one line**
+([PRD §24](spec/ripwire-broker-mcp.md#24-barra-de-status-do-claude-code)). It never starts ripwire, never
+connects to the broker and never creates a file.
+
+```text
+rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · última: atenção · inj 7 · não reenviados 18
+rw-brkr · Opus 4.6 max · ctx 71% · hooks off · inj 7 · não reenviados 18
+rw-brkr · Sonnet 4.6 mid · ctx 12% · hooks sem dados
+rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
+```
+
+| Segment | Meaning |
+| --- | --- |
+| `rw-brkr` | Fixed prefix (the executable is still `ripwire-broker`) |
+| `Sonnet 4.6 hig` | Model name, version and effort (`low`, `mid`, `hig`, `xtr`, `max`) from the host; any other effort is omitted |
+| `ctx 32%` | Context window used, from the host. With `--color always` it is grey below 40, white below 60, yellow up to 80, red above |
+| `hooks on` / `hooks off` | `off` means the automatic context is paused (`#ripwire-off`); MCP is not affected |
+| `última: pronta\|atenção\|incerta\|erro` | Outcome of the last analysis, shown as "last", never as current health. `pronta` does not certify the code |
+| `inj 7` | Injections and blocks the hooks counted in this session |
+| `não reenviados 18` | Logical items not resent because the session already had them (not tokens, not Anthropic prompt-cache hits) |
+| `hooks sem dados` | No projection for this session |
+
+- **`hooks sem dados` does not prove the hooks are uninstalled.** It can be a new session, a failed write or a
+  session that only uses MCP.
+- **`--detail`** adds, if they fit, `entregues N`, `reuso 42%`, `último contexto ~1,2k tok` and `há 20s`
+  (`dados antigos` after five minutes).
+- **`--width N`**, then `COLUMNS`, then 100 columns. When the line is too wide, details go first, then the
+  counters, then the model, then the soft hook segments; the prefix, `ctx`, `hooks off` and an
+  `atenção`/`erro` alert are kept. **`--color never`** is the default; `--color always` emits ANSI even
+  without a TTY and even with `NO_COLOR`.
+- **Install:** `ripwire-broker install claude-code --workspace DIR --hooks --statusline --write` writes the
+  hooks and `statusLine` into the same `.claude/settings.json` change. A bar that is not ours is never
+  overwritten: one in your user settings is left to win (the install prints the snippet to add by hand), one in
+  `settings.local.json` is reported because it takes precedence. Without `--hooks` the bar has no counters to
+  show.
+- **Privacy:** the projection holds counts and a few enums only: no prompt, code, path, symbol or fingerprint.
+  The host's stdin is read (up to 256 KiB) and never stored. The file is private (`0600`, in a `0700`
+  `statusline/` directory of the state dir) and written atomically by the hooks, after the session state.
+- **Migration:** the bar's counters start at the first projection bound to the workspace, so a session that
+  began before the bar existed shows zero, while `hook-stats` keeps counting everything.
+- Only the Claude Code hooks publish. Cost: one process per refresh, a few milliseconds
+  (measured in [D-123](spec/changelog.md#d-123--a-barra-de-status-é-implementada)).
 
 ## Agent integration
 

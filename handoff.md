@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-01, até o
-[D-122](spec/changelog.md#d-122--a-barra-de-status-entra-no-prd).
+[D-123](spec/changelog.md#d-123--a-barra-de-status-é-implementada).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -22,7 +22,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 2 · hooks, contexto incremental, `install`, `doctor` | feita |
 | 3 · notas por modelo local | feita, com cache só em memória (o de disco espera a medição do §21.3) |
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
-| barra de status do Claude Code (§24) | **plano pronto, decisões tomadas** (§24.13); execução por subagentes; antes da Fase 6 |
+| barra de status do Claude Code (§24) | **implementada** (D-123); **validação manual numa sessão real e fixture de payload real pendentes** (roteiro em `~/projects/ai/CECI/statusline-manual/`) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
@@ -31,8 +31,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 323 testes, 2 ignorados (opt-in)
-cargo test --all-targets --features online  # 337 testes, 4 ignorados
+cargo test --all-targets                    # 384 testes, 2 ignorados (opt-in)
+cargo test --all-targets --features online  # 398 testes, 4 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -54,11 +54,15 @@ cargo fmt --check
 - **`src/eval/` e `src/bin/ripwire-eval.rs`:** o instrumento do A/B, um segundo binário que o broker
   nunca chama.
 - **`src/usage.rs`:** o `hook-stats`.
-- **`tests/`:** um arquivo por costura pública (`broker`, `mcp_surface`, `hooks`, `cli`, `online*`,
-  `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
+- **`src/statusline.rs` e `src/statusline_state.rs`:** a barra de status do Claude Code (§24). O primeiro
+  lê o JSON do host, monta e ajusta a linha; o segundo é a projeção que os hooks publicam por sessão
+  e workspace (`statusline/<hash>.json` no state-dir) e que o comando só lê. `src/hook.rs` publica,
+  `src/install.rs` registra com `--statusline`.
+- **`tests/`:** um arquivo por costura pública (`broker`, `mcp_surface`, `hooks`, `cli`, `statusline`,
+  `online*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-122, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-123, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -105,6 +109,17 @@ Os instrumentos estão prontos; as medições, não.
 
 ## Pendências conhecidas, fora das medições
 
+- **Barra de status: validação manual e fixture real (D-123).** O mantenedor roda o roteiro
+  `~/projects/ai/CECI/statusline-manual/ROTEIRO.md` (instalar, prompt, edição, fim de turno,
+  `#ripwire-off`/`#ripwire-on`, comparando a barra com `hook-log` e o snapshot; anotar a versão do
+  Claude Code). O `capture.sh` da pasta grava o payload real do `statusLine`; falta transformá-lo em
+  `tests/fixtures/statusline/claude_code.json` (com `__WORKSPACE__`) e conferir `effort.level`,
+  `workspace.project_dir` e `agent`. Até lá os testes usam JSON sintético.
+- **Defeito existente que a barra torna visível:** quando o `local::launch` falha, `hook::run` retorna
+  antes de `handle`, e o `#ripwire-on` desse prompt não é processado. Com o ripwire ausente a barra
+  mostra `hooks off` até um prompt com o ripwire de pé. Não corrigido (D-123).
+- **Barra: sessão só de falhas de launch.** Agora deixa um arquivo de sessão com contadores zerados, e o
+  `hook-stats` conta mais uma sessão (consequência do D4 do §24.13).
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.

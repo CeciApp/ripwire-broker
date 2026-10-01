@@ -10,7 +10,7 @@
 > **Dependência principal:** servidor MCP do [Ripwire](https://github.com/redhat-et/ripwire)
 > **Postura padrão:** local, offline, read-only e com orçamento explícito de contexto
 > **Adaptador opcional:** `--online`, classificador semântico remoto desligado por padrão ([§23](#23-adaptador-opcional---online))
-> **Barra de status:** `ripwire-broker statusline` para o Claude Code, proposta ([§24](#24-barra-de-status-do-claude-code))
+> **Barra de status:** `ripwire-broker statusline` para o Claude Code, implementada, com a validação manual pendente ([§24](#24-barra-de-status-do-claude-code))
 
 ---
 
@@ -1384,7 +1384,7 @@ barra de produto, que dependem da escolha dos repositórios. Destaques:
 - projeção por sessão e workspace, privada e atômica;
 - registro opcional pelo instalador (`install claude-code --statusline`).
 
-Estado: plano pronto e decisões tomadas ([plano](plan/status-bar-plan.md), §24). Vem antes da Fase 6 por
+**Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)); validação manual numa sessão real e fixture de payload real pendentes ([plano](plan/status-bar-plan.md), §24). Vem antes da Fase 6 por
 ser pequena, local e independente dela, e por tornar visível o uso dos hooks que a medição do §21.3
 precisa.
 
@@ -2410,9 +2410,11 @@ exige nova decisão:
 
 ## 24. Barra de status do Claude Code
 
-**Estado:** plano pronto e decisões tomadas (§24.13), não implementada. Plano em
-[status-bar-plan.md](plan/status-bar-plan.md), a executar por subagentes, uma tarefa por vez com
-revisão. Deve vir antes da Fase 6 (§19).
+**Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)); validação
+manual numa sessão real do Claude Code e fixture de payload real pendentes (roteiro pronto fora do
+repositório, em `~/projects/ai/CECI/statusline-manual/`). Plano em
+[status-bar-plan.md](plan/status-bar-plan.md), executado por subagentes, uma tarefa por vez com
+revisão. Vem antes da Fase 6 (§19).
 
 **Fonte.** Este capítulo transporta a spec `spec/status-bar.md`, escrita pelo mantenedor e fundida
 aqui no [D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd), que depois a removeu. A seção
@@ -2781,7 +2783,8 @@ Consulta atual de documentação feita via Context7 (`/websites/code_claude`) e 
 
 Pontos que a spec deixava em aberto, ou que o código revelou ambíguos, levantados pelo plano. O
 mantenedor aceitou as seis recomendações em 2026-10-01
-([D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd)); elas são requisitos da implementação.
+([D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd)); elas foram requisitos da implementação, entregue no [D-123](changelog.md#d-123--a-barra-de-status-é-implementada),
+que registra o que o código mudou em cada uma.
 
 | # | ponto | decisão |
 | --- | --- | --- |
@@ -2794,4 +2797,4 @@ mantenedor aceitou as seis recomendações em 2026-10-01
 
 **Defeito existente, fora do escopo:** quando o `local::launch` falha, `hook::run` retorna antes de
 `handle`, e o `#ripwire-on` desse prompt não é processado. Com o ripwire ausente, a barra mostraria
-`hooks off` até um prompt com o ripwire de pé. Registrado, não corrigido nesta entrega.
+`hooks off` até um prompt com o ripwire de pé. Registrado, não corrigido nesta entrega (D-123).

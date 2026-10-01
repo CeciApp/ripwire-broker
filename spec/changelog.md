@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 16:40 | A barra de status do Claude Code (`statusline`, projeção publicada pelos hooks, `install --statusline`) é implementada em 9 tarefas por subagentes; 61 testes novos (384 padrão, 398 com `online`); p95 de 2,8 ms medido em release; **validação manual e fixture de payload real pendentes** | [D-123](#d-123--a-barra-de-status-é-implementada) |
 | 2026-10-01 15:20 | A barra de status entra no PRD como §24 (a spec `spec/status-bar.md`, fundida e removida), o plano vai para `spec/plan/`, e a barra entra no roadmap antes da Fase 6 | [D-122](#d-122--a-barra-de-status-entra-no-prd) |
 | 2026-10-01 13:28 | Três mecanismos reproduzem o sintoma do D-117 num corpus de diagnóstico (a causa daquela rodada segue sem prova): a porta fixa do endpoint de teste do repositório A (`eaddrinuse`), a data (provada com o relógio congelado) e, fraca, a carga. O Postgres disputado sozinho não derrubou nada. Regra nova: cada tarefa do A fixa relógio e porta no `env` | [D-121](#d-121--três-mecanismos-que-reproduzem-as-falhas-de-validação-do-d-117) |
 | 2026-10-01 08:46 | O cancelamento sob HTTP/2 ganha teste: um fixture `h2` (h2c) mostra que cada stream em voo recebe `RST_STREAM(CANCEL)`; `h2` entra como dev-dependency, já presente no grafo pelo `reqwest` | [D-120](#d-120--o-cancelamento-sob-http2-ganha-teste) |
@@ -4646,3 +4647,208 @@ handoff e plano resolvem.
 Depois da fusão, o mantenedor aceitou as seis recomendações do §24.13 e escolheu a execução do plano
 por subagentes (uma tarefa por vez, com revisão antes da seguinte). O §24.13 passou de "Decisões em
 aberto" a "Decisões", e o §21.6 e o §19 dizem o mesmo.
+
+## D-123 — A barra de status é implementada
+
+O plano de [`spec/plan/status-bar-plan.md`](plan/status-bar-plan.md) foi executado por subagentes, uma
+tarefa por vez, cada uma com revisão antes da seguinte, no branch `status-bar` (base `3505e67`). O
+contrato é o §24 do PRD. **Duas coisas ficam pendentes e não foram feitas:** a validação manual numa
+sessão real do Claude Code e a fixture de um payload real do `statusLine` (seção própria abaixo).
+
+### O que entrou
+
+- **`ripwire-broker statusline [--workspace DIR] [--state-dir DIR] [--detail] [--width N] [--color never|always]`**
+  (`src/statusline.rs`, despacho em `src/main.rs`): lê o JSON do host no stdin (até 256 KiB), lê o
+  snapshot da sessão (até 16 KiB) e imprime uma linha. Sai sempre com 0. Nunca chama `settings`,
+  `local::launch`, `Broker::connect` nem `Broker::status`, e nunca cria arquivo ou diretório. Sem
+  `session_id`, nenhuma sessão é lida (nunca a `default`). Segmentos: `rw-brkr`, modelo com versão e
+  effort (`low`/`mid`/`hig`/`xtr`/`max`), `ctx N%`, `hooks on|off|sem dados`, `última: …`, `inj N`,
+  `não reenviados N`; `--detail` acrescenta `entregues`, `reuso`, `último contexto ~N tok`, idade e
+  `dados antigos`. Largura por `--width`, `COLUMNS`, 100; cor só com `--color always`, com as faixas
+  do §24.5.3.
+- **Projeção** (`src/statusline_state.rs`): `Snapshot` com `schema_version: 1`, publicado por
+  `publish` em `<state-dir>/statusline/<sha256>.json`, onde o hash cobre, com prefixo de
+  comprimento, (host, sessão, raiz canônica). O `session_id` nunca vira parte de um caminho.
+  Diretório `0700`, arquivo `0600`, escrita atômica (`write_private`, extraído de `StateStore::save`
+  sem mudar formato nem lugar). Leitura: não arquivo regular ou symlink conta como ausente;
+  `schema_version` diferente, `Incompatible` (`hooks sem dados`, nunca leitura parcial); host ou
+  chave de workspace diferentes, idem. O snapshot não tem prompt, código, caminho em claro, símbolo
+  nem fingerprint.
+- **Hooks** (`src/hook.rs`): o `SessionState` ganha `statusline` (`Summary`: chave do workspace,
+  linha de base dos contadores, última análise, última entrega). `bind` vincula a sessão ao
+  workspace; `analysed` registra a análise; `project` produz o snapshot como o contador da sessão
+  menos a linha de base. `hook::run` salva o estado e **só depois** publica.
+- **`install claude-code … --statusline`** (`src/install.rs`): o `statusLine` entra na mesma mudança
+  (`Change`) dos hooks. Comando `'<binário>' statusline --workspace '<raiz>' --color never`, sem
+  `refreshInterval`. Propriedade estrutural: é nossa a barra cujo programa se chama
+  `ripwire-broker` e cujo primeiro argumento é `statusline` (não por substring). `--statusline` sem
+  `--hooks` vira nota (a barra ficaria sem contadores).
+- **Dependência nova:** `unicode-width = "0.2"` (D1). O gate do CA-10
+  (`cargo tree -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`) sai vazio.
+
+### Decisões D1 a D6 do §24.13, como ficaram no código
+
+| # | decisão | motivo |
+| --- | --- | --- |
+| D1 | `unicode-width = "0.2"` | mede largura visual sem tabela escrita à mão; sem dependências nem rede |
+| D2 | sob largura extrema sobram `rw-brkr`, `ctx N%`, `hooks off`, `última: atenção`, `última: erro`; `hooks on`, `hooks sem dados`, `última: pronta`, `última: incerta` saem depois do modelo. Ordem de remoção: detalhe, contadores, modelo, os segmentos "macios" | a spec preserva "pausa dos hooks e alerta da última análise"; `hooks on` não é pausa, `pronta` não é alerta |
+| D3 | só os hooks do Claude Code publicam | a barra só existe lá; o host entra na chave e no snapshot, então publicar para o Codex depois é uma linha |
+| D4 | falha do `local::launch`: a análise vira `erro`, o estado é salvo e publicado; contadores intactos | esse caminho não conta evento hoje, e mudá-lo mudaria o `hook-stats` |
+| D5 | barra alheia no settings do usuário: a nossa não é escrita (sombrearia), nota com trecho manual; no `settings.local.json`: a nossa é escrita, com nota de que a local prevalece; settings do usuário ilegível ou sem como localizar: nada é escrito, nota | não pisar numa barra que o usuário escolheu |
+| D6 | `agent` (objeto) no JSON do host: só segmentos do host e `agente`, sem ler snapshot | o payload de um subagente não descreve a sessão dos hooks |
+
+### Decisões tomadas durante a execução (rulings do controlador)
+
+Cada uma resolve um defeito do plano ou da revisão, com o custo.
+
+- **`--width 0` é aceito** (T1). Uma barra de 0 colunas não mostra nada, que é o que cabe. *Custo:* uma
+  barra em branco se um host mandar `COLUMNS=0`.
+- **Mutação do plano substituída** (T5). "Remover `.take(MAX_STDIN_BYTES + 1)`" é um mutante equivalente
+  no nível da saída (só muda memória); passou a valer "remover a checagem `> MAX_STDIN_BYTES`", que um
+  teste com JSON válido preenchido até o limite e um byte além tem de pegar. *Custo:* o `take`, que
+  limita a leitura sem estourar a memória, continua sem teste.
+- **Guarda de agente em `main.rs` sem teste** (T5). `(Some(session), false)` é um mutante equivalente: o
+  `render` já ignora o snapshot com `agent`. A guarda fica como economia de leitura. *Custo:* um payload
+  de agente pode ler o snapshot sem efeito visível.
+- **Falha de launch não persiste a versão do ripwire** (T7). A revisão achou que o salvamento novo
+  guardaria `{carimbo, "unavailable"}` em `state.ripwire` para um binário que existe mas não roda, e
+  eventos seguintes confiariam nisso até o arquivo mudar (um `chmod +x` não muda tamanho nem mtime).
+  A correção restaura `state.ripwire` ao valor carregado nesse ramo, em vez de proibir o cache de
+  `unavailable` em geral (isso mexeria na semântica do D-105). *Custo:* uma leitura de versão numa
+  falha de launch é jogada fora e refeita no evento seguinte (um `ripwire --version` a mais).
+- **Leitura indeterminada vale também para o `settings.local.json`** (T8). `NotFound` é ausente, qualquer
+  outro erro de leitura é indeterminado; aplicado ao local também, com nota, por ser a mesma classe
+  ("origem não determinada", §24.7). *Custo:* uma nota a mais num caso raro.
+- **Evidência de testes pelo controlador** (T5). O suite no `89b0c50` foi rodado pelo controlador (361 /
+  2 ignorados padrão; 375 / 4 `online`); são os números de registro, no lugar dos 362/376 do implementador.
+- **`cargo fmt --check` quebrado no T3** foi corrigido pelo T4, que edita o mesmo arquivo; o gate
+  final passa em `cargo fmt --all --check`. *Custo:* um CI vermelho se o T4 pulasse.
+
+### Defeito existente, fora do escopo, registrado e não corrigido
+
+Quando o `local::launch` falha, `hook::run` retorna antes de `handle`, e o `#ripwire-on` desse prompt
+não é processado. Com o ripwire ausente, a barra mostra `hooks off` até um prompt com o ripwire de pé.
+Está no handoff. Consequência nova do D4: uma sessão cujos eventos todos falham no launch deixa um
+arquivo de sessão com contadores zerados, e o `hook-stats` passa a contar mais uma sessão.
+
+### A ordem save → publish vale por leitura, não por teste
+
+`hook::run` só publica se `store.save(..)` retornou `Ok` (curto-circuito na mesma expressão). Provar
+"publicar antes de salvar" exigiria injetar uma falha de `save` que o código não expõe, então a ordem
+foi verificada lendo o código, e o que o teste prova é a consequência: o teste da publicação que falha
+(diretório `statusline/` impossível de criar) vê a saída do hook inalterada, e o evento seguinte
+publica os totais certos.
+
+### Mutações por tarefa
+
+| T | mutação | resultado |
+| --- | --- | --- |
+| 1 | nenhuma registrada (só parse de CLI) | n/a |
+| 2 | `"hig"` -> `"hgh"` | pega (2 testes) |
+| 2 | `round()` -> `floor()` no `ctx` | pega (1 teste) |
+| 3 | `60..=80` -> `60..=79` nas faixas de cor | pega |
+| 3 | trocar `Counter`/`Model` na ordem de remoção | sobrevivia; três testes de ordem novos, agora pega |
+| 3 | trocar `Model`/`Soft` | sobrevivia; agora pega |
+| 3 | tirar `Soft` da lista | pega pelo teste novo |
+| 4 | tirar o prefixo de comprimento do hash do caminho | pega |
+| 4 | `is_file()` -> `!is_dir()` na leitura | pega (symlinks leem como ausentes) |
+| 5 | apagar a checagem `> MAX_STDIN_BYTES` | pega, depois que o teste passou a usar JSON válido |
+| 5 | `(Some(session), false)` -> `(Some(session), _)` | **equivalente** (ver rulings) |
+| 6 | `analysed` depois de `has_news` na edição | sobrevivia; teste de edição sem novidade, agora pega |
+| 6 | remover o `analysed` do ramo `Err` | pega |
+| 7 | tirar `real_session` de `publishes` | pega |
+| 7 | tirar a condição `Host::ClaudeCode` | pega |
+| 7 | publicar antes de salvar | **não observável** por teste (ver acima) |
+| 7 | apagar a restauração de `state.ripwire` | pega |
+| 8 | nome do programa por `contains("ripwire-broker")` | pega |
+| 8 | tirar `bar_wanted = false` (barra do usuário alheia) | pega |
+| 8 | primeiro argumento por "qualquer palavra contém `statusline`" | sobrevivia; comando alheio `'/x/ripwire-broker' hook statusline` adicionado, agora pega |
+| 8 | tirar `bar_wanted = false` (settings do usuário inválido) | sobrevivia; teste novo, agora pega |
+| 8 | `Err(_) => Ok(None)` na leitura de settings | pega |
+| 8 | tirar `bar_wanted = false` no ramo sem localização | pega |
+
+### Pendências menores registradas nas revisões
+
+Nenhuma bloqueia; ficam aqui para quem mexer nos arquivos.
+
+- `src/cli.rs`: a doc do módulo passa de 110 colunas.
+- `model_label` apara antes de sanear, e `"Son \n"` deixa um espaço final; aparar depois.
+- `sanitize` deixa passar caracteres Unicode de formato e bidi (U+202E, U+200B): só cosmético ou falsificação.
+- O denominador do `reuso` (`session_hits + delivered`) soma sem checar; usar `saturating_add`, já que vem de arquivo.
+- Sem teste: `tokens()` abaixo de 1000 e o corte do `,0`; `age()` em min/h; `updated_at` no futuro.
+- Largura 0 e 4 a 6 sem teste; o `fit` acha o `ctx` pelo prefixo do texto, não por uma variante de `Keep`.
+- Comentários de largura errados em testes do T3 (somas e faixas); as asserções estão certas.
+- `read()` tem uma janela TOCTOU entre `symlink_metadata` e `open` (o diretório é `0700`; `O_NOFOLLOW` fecharia).
+- `reading_creates_nothing` só cobre state-dir ausente, não um state-dir existente sem `statusline/`.
+- `write_private` deixa `.tmp<pid>` em caso de falha (já era assim), e threads do mesmo processo dividem o nome.
+- Imports no meio do arquivo em `tests/statusline.rs`; `never_starts_ripwire` prova a não-criação só sem estado prévio.
+- Sem teste: os caminhos de opt-out, fora do workspace e edição coalescida deixam `last_analysis`
+  intacta; `statusline: None` omitido na serialização; o teste de opt-out não checa `last_analysis` vazia.
+- `no_session_id_or_codex_publishes_nothing` passa de forma vazia se nada rodar; `session_id` é lido duas vezes em `run`.
+- O teste do binário não executável cobre "sem versão em cache", não "versão anterior preservada".
+- A nota `hooks sem dados` sai mesmo quando a barra não é escrita; um binário renomeado ou versionado
+  (`ripwire-broker-0.2`) faz a própria barra antiga contar como alheia (propriedade estrutural pelo nome do programa).
+- A variante "diretório" do `settings.local.json` ilegível não tem teste (divide o ramo de JSON inválido).
+
+### Medição (spec §9)
+
+Binário de `cargo build --release --locked`; 300 execuções de `target/release/ripwire-broker statusline`
+por caso, processo novo a cada uma, stdin com `session_id`, `workspace.project_dir`, modelo, effort e
+`context_window` (script Python com `subprocess`, tempo de ponta a ponta).
+
+- **Máquina:** Apple M3; macOS 27.0.1 (build 26A434).
+- **Comando:** `target/release/ripwire-broker statusline --workspace WS --state-dir SD --detail --width 200`.
+- A projeção foi publicada **antes** de medir e conferida pela saída: nos casos com snapshot, a linha
+  traz `hooks on · última: atenção · inj 7 · não reenviados 18 · entregues 25 · reuso 42% · último
+  contexto ~1,2k tok · há 0s`. Sem o snapshot, `hooks sem dados`. Um snapshot não lido mediria o
+  caminho errado, e o primeiro roteiro do plano (`--state-dir` sem projeção) mediria só o "sem snapshot".
+
+| caso | snapshot | p50 | p95 | max |
+| --- | --- | --- | --- | --- |
+| sem snapshot | nenhum | 2,5 ms | 2,8 ms | 3,2 ms |
+| pequeno | 423 bytes | 2,5 ms | 2,7 ms | 3,1 ms |
+| perto do limite | 16 376 bytes (limite 16 384) | 2,5 ms | 2,7 ms | 3,1 ms |
+
+Meta: p95 < 100 ms; passa por uma ordem de grandeza. Uma rodada anterior sem `--width 200` (a linha
+de detalhe não cabia em 100 colunas) deu 2,6/3,1/5,2, 2,5/2,8/29,3 (um pico isolado) e 2,6/2,9/3,5
+ms (p50/p95/max). A medição não inclui o tempo de o Claude Code desenhar a barra.
+
+### Validação manual e fixture de payload real: PENDENTES
+
+**Não foram feitas.** O mantenedor roda a validação (spec §10): instalar com
+`--hooks --statusline --write` numa pasta de teste, abrir o Claude Code, mandar um prompt, editar um
+arquivo, encerrar o turno, `#ripwire-off` e `#ripwire-on`, comparando a barra com
+`ripwire-broker hook-log --session ID` e com o snapshot, e registrar a versão do Claude Code. O
+roteiro está pronto em `~/projects/ai/CECI/statusline-manual/` (`ROTEIRO.md`, `capture.sh` e a pasta
+`ws/`); o `capture.sh` grava o payload real do `statusLine` em `payload-<epoch>-<pid>.json`.
+
+Também pendente: transformar um desses payloads em `tests/fixtures/statusline/claude_code.json` (com
+`__WORKSPACE__`), trocar por ele os JSONs sintéticos dos testes onde couber e conferir `effort.level`,
+`workspace.project_dir` e `agent` contra a spec; se algum divergir, parar e reportar. Até lá, os
+testes usam entrada sintética: **a leitura do payload do Claude Code real é a hipótese menos provada
+desta entrega.** A versão do Claude Code usada para escrever o código: não registrada; o agente que
+preparou o roteiro encontrou a 2.1.285.
+
+### Contagem de testes
+
+`cargo test --all-targets --locked`, antes (master `3505e67`, worktree temporário) e depois (`e3ced9b` mais
+esta entrega, que só mexe em docs):
+
+| alvo | antes | depois |
+| --- | --- | --- |
+| `tests/statusline.rs` (novo) | 0 | 34 |
+| `tests/cli.rs` | 42 | 62 |
+| `tests/hooks.rs` | 23 | 30 |
+| demais alvos | iguais | iguais |
+| **padrão** | **323 passados, 2 ignorados** | **384 passados, 2 ignorados** |
+| **`--features online`** | **337 passados, 4 ignorados** | **398 passados, 4 ignorados** |
+
+Mais 61 testes nas duas features (34 + 20 + 7); `mcp_surface` fica em 11 (13 com `online`) e os alvos
+`online*` não mudam. Os números de registro do T5 (`89b0c50`) eram 361/375 (padrão/`online`); o T6 somou 7, o T7 somou 5 e o
+T8 somou 11 (com as rodadas de correção), o que dá os 384/398 finais.
+
+### Verificação
+
+`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` (também com
+`--features online`) e as duas suítes: **OK**, sem falhas. Gate do CA-10: `cargo tree --locked -e normal`
+filtrado por `reqwest|secrecy|rustls|hyper` sai vazio.
