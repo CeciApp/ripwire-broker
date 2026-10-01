@@ -880,6 +880,7 @@ fn the_status_line_never_starts_ripwire() {
 fn a_closed_stdout_never_makes_the_bar_fail() {
     let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
         .arg("statusline")
+        .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

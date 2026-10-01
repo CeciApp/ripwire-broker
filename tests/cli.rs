@@ -377,6 +377,7 @@ macro_rules! require_ripwire {
 fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
     let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
         .args(args)
+        .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1954,7 +1955,7 @@ fn a_launch_failure_does_not_cache_the_unrunnable_ripwire_version() {
 
 fn run_env(args: &[&str], env: &[(&str, &std::path::Path)]) -> (i32, String, String) {
     let mut cmd = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"));
-    cmd.args(args);
+    cmd.args(args).env_remove("XDG_STATE_HOME");
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -2382,4 +2383,70 @@ fn our_project_bar_is_removed_even_when_no_hooks_are_installed_in_the_same_run()
     .unwrap();
     install_bar(&root, user.path(), &["--write"]);
     assert!(read_json(&settings).get("statusLine").is_none());
+}
+
+/// Runs `command` the way a host does (through `sh -c`), with `stdin`, and returns its stdout.
+fn host_runs(command: &str, stdin: &str, home: &std::path::Path) -> (i32, String) {
+    let mut child = Proc::new("sh")
+        .args(["-c", command])
+        .env("HOME", home)
+        .env("CLAUDE_CONFIG_DIR", home)
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("COLUMNS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// What install writes is what a host runs: through a symlinked workspace, a hook that cannot
+/// start ripwire still reaches the bar installed beside it (no ripwire needed, so CI runs it).
+#[test]
+fn installed_hook_and_bar_agree_through_a_symlinked_workspace() {
+    let ws = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let link = ws.path().join("link");
+    let real = ws.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let (code, _, err) = run_env(
+        &[
+            "install",
+            "claude-code",
+            "--workspace",
+            link.to_str().unwrap(),
+            "--hooks",
+            "--statusline",
+            "--write",
+        ],
+        &[("HOME", home.path()), ("CLAUDE_CONFIG_DIR", home.path())],
+    );
+    assert_eq!(code, 0, "{err}");
+    let settings = read_json(&real.canonicalize().unwrap().join(".claude/settings.json"));
+    let hook = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let bar = settings["statusLine"]["command"].as_str().unwrap();
+    let s = state.path().to_str().unwrap();
+
+    let prompt = json!({"session_id": "s", "prompt": "hello", "cwd": link}).to_string();
+    let (code, _) = host_runs(
+        &format!("{hook} --ripwire /nonexistent/ripwire --state-dir '{s}'"),
+        &prompt,
+        home.path(),
+    );
+    assert_eq!(code, 0, "a failed launch never fails the host");
+
+    let payload = json!({"session_id": "s", "workspace": {"project_dir": link}}).to_string();
+    let (code, out) = host_runs(&format!("{bar} --state-dir '{s}'"), &payload, home.path());
+    assert_eq!(code, 0);
+    assert!(out.contains("última: erro"), "{out}");
 }
