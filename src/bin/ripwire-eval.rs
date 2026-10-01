@@ -11,6 +11,7 @@ use std::time::Duration;
 
 const USAGE: &str = "\
 usage: ripwire-eval check --corpus FILE
+       ripwire-eval validate --corpus FILE [--check-timeout-s N]
        ripwire-eval run --corpus FILE --out DIR [--arms none,ripwire,broker[,broker-online]]
                     [--repeats N] [--agent-cmd CMD] [--broker BIN] [--ripwire BIN]
                     [--timeout-s N] [--check-timeout-s N]
@@ -99,6 +100,33 @@ fn run() -> Result<(), String> {
                     report::MIN_TASKS,
                     report::MIN_REPOS
                 );
+            }
+            Ok(())
+        }
+        "validate" => {
+            let path = required(&a, "--corpus")?;
+            let corpus = Corpus::load(&path)?;
+            corpus.validate().map_err(|e| e.join("\n"))?;
+            let timeout = Duration::from_secs(number(&a, "--check-timeout-s", 600)?);
+            // Next to the corpus: the logs explain the corpus, not this checkout.
+            let logs = path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("validate-logs");
+            let mut broken = 0;
+            for (id, verdict) in
+                runner::validate(&corpus, timeout, &logs, &mut |l| eprintln!("{l}"))
+            {
+                match verdict {
+                    Ok(()) => println!("{id}: ok"),
+                    Err(why) => {
+                        broken += usize::from(!why.starts_with("no check"));
+                        println!("{id}: {why}");
+                    }
+                }
+            }
+            if broken > 0 {
+                return Err(format!("{broken} task(s) broken"));
             }
             Ok(())
         }

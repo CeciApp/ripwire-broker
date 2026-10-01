@@ -94,8 +94,10 @@ A união do §16.2 com o §23.15:
 | `broker` | `ripwire-broker serve` |
 | `broker-online` | `ripwire-broker serve --online` (só com a chave no ambiente, por consentimento) |
 
-**Isolamento.** O agente de cada braço roda sem as configurações globais do usuário: o
-template padrão usa `--strict-mcp-config` e `--setting-sources project`. Hooks e MCPs
+**Isolamento.** O agente de cada braço roda sem configuração nenhuma: o template padrão usa
+`--strict-mcp-config` e `--setting-sources local` (era `project` até o
+[D-117](../changelog.md#d-117--o-corpus-real-três-repositórios-e-duas-falhas-de-isolamento), que achou
+hooks versionados num dos repositórios do corpus). Hooks e MCPs
 globais (este ambiente injeta ripwire e graft em toda sessão) contaminariam o braço `none`.
 Uma **guarda de contaminação** lê o evento `system/init` do transcript e invalida a execução
 se aparecer uma ferramenta MCP que o braço não declarou. Uma execução inválida não entra na
@@ -186,8 +188,10 @@ primeira rodada autorizada.
 
 ## 4. Depois do código: o que é do usuário
 
-1. Escolher os 3 repositórios e escrever (ou aprovar) as ≥ 30 tarefas com patch de
-   referência. Tarefas tiradas de commits reais do histórico dão a referência de graça.
+1. ~~Escolher os 3 repositórios e escrever (ou aprovar) as ≥ 30 tarefas.~~ Repositórios escolhidos
+   (dois privados e este); 32 tarefas montadas e validadas em
+   [D-117](../changelog.md#d-117--o-corpus-real-três-repositórios-e-duas-falhas-de-isolamento), fora deste
+   repositório. **Falta a revisão dos enunciados pelo usuário.**
 2. Autorizar o gasto. A estimativa é 30 tarefas × 3 ou 4 braços × repetições, com
    `--max-budget-usd` por execução.
 3. Para o braço `broker-online`, consentir com o envio de trechos dos repositórios escolhidos

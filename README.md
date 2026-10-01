@@ -337,22 +337,34 @@ nothing to the broker's own command line. Plan and decisions in
 
 ```sh
 cargo build --release
-./target/release/ripwire-eval check  --corpus corpus.json
-./target/release/ripwire-eval run    --corpus corpus.json --out ab/ [--arms none,ripwire,broker] [--repeats 3]
-./target/release/ripwire-eval report --out ab/ [--json]
+./target/release/ripwire-eval check    --corpus corpus.json
+./target/release/ripwire-eval validate --corpus corpus.json
+./target/release/ripwire-eval run      --corpus corpus.json --out ab/ [--arms none,ripwire,broker] [--repeats 3]
+./target/release/ripwire-eval report   --out ab/ [--json]
 ```
 
-- **Corpus:** JSON, `{"tasks": [{"id", "repo", "base", "prompt", "vocabulary_diverges", "reference":
-  {"files", "tests"}, "check"}]}`. `repo` is a local git repository (relative to the corpus file), `base` the
-  commit the agent starts from, `reference.files` what the reference patch modifies, and `check` a shell
-  command whose exit 0 means the task was solved. Tasks taken from real commits get their reference for free.
+- **Corpus:** JSON, `{"tasks": [{"id", "repo", "base", "fix", "prompt", "vocabulary_diverges", "reference":
+  {"files", "tests"}, "check", "setup", "teardown", "env"}]}`. `repo` is a local git repository (relative to
+  the corpus file), `base` the commit the agent starts from, `fix` the reference commit, `reference.files` what
+  it modifies, and `check` a shell command whose exit 0 means the task was solved. `setup` prepares the copy
+  (dependencies, build caches) and is not counted as the agent's edit; `teardown` cleans up after it; `env`
+  applies to all of them and to the agent. Commands and `env` values take `{repo}`, `{fix}` and `{run}`, a
+  per-run id safe for a database name. Tasks taken from real commits get their reference for free, and their
+  tests become hidden tests: `git -C {repo} show {fix}:test/x_test.exs > test/x_test.exs && mix test test/x_test.exs`.
+- **Validation:** `validate` runs each task's check on a copy at the base, where it must fail, and on one at
+  the fix, where it must pass. A check that passes at the base measures nothing. The output of every setup
+  and check goes to `validate-logs/` next to the corpus; a run's check output goes next to its transcript.
+- **Run on an idle machine.** A check run under heavy load can fail for reasons that have nothing to do with
+  the agent (database timeouts), and then counts as a wrong answer for that arm. Validate again just before a
+  paid run: real test suites depend on the date.
 - **Arms:** `none`, `ripwire` (ripwire's MCP directly), `broker`, `broker-online`. The online arm needs
   `RIPWIRE_BROKER_JEV_API_KEY` and sends eligible source of the corpus repositories to the provider.
 - **Isolation:** each run gets a fresh repository holding the base and its ancestors only. The fix, a later
   commit, cannot leak through `git log`, and the source repository is never written to. The default agent is
-  Claude Code headless with `--strict-mcp-config --setting-sources project`, so your own hooks and MCP
-  servers stay out. A run whose session shows an MCP server the arm did not declare is recorded as invalid
-  and left out of the averages.
+  Claude Code headless with `--strict-mcp-config --setting-sources local`: neither your own settings, hooks
+  and plugins nor the ones a repository commits load. A run whose session shows a hook that ran, an MCP
+  server the arm did not declare, or a context tool (`graft`, `ripwire`) run from the shell outside its arm,
+  is recorded as invalid and left out of the averages.
 - **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped), and
   `transcripts/`, which holds the agent's full session, repository code included. Keep it local.
 - **Bars:** each one reads `passa`, `falha` or `insuficiente`. They stay `insuficiente` below 30 tasks in 3

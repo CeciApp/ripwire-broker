@@ -4,7 +4,7 @@ use super::corpus::Task;
 use super::transcript::Summary;
 use serde::Serialize;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -58,6 +58,15 @@ pub fn score(task: &Task, s: &Summary, modified: &[String], correct: Option<bool
     }
 }
 
+/// A file's state, to tell later whether it changed: the sha256 of its content, or `None` when it
+/// does not exist.
+pub fn state(workdir: &Path, file: &str) -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    std::fs::read(workdir.join(file))
+        .ok()
+        .map(|bytes| Sha256::digest(bytes).to_vec())
+}
+
 /// Files changed in the working tree against `HEAD`, new ones included, relative to the root.
 pub fn modified_files(workdir: &Path) -> Vec<String> {
     let Ok(out) = Command::new("git")
@@ -75,16 +84,19 @@ pub fn modified_files(workdir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Runs a task's `check` in the clone: exit 0 within `timeout` is correct.
-pub fn run_check(workdir: &Path, check: &str, timeout: Duration) -> bool {
-    let Ok(mut child) = Command::new("sh")
-        .args(["-c", check])
-        .current_dir(workdir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
+/// Runs `command` (a task's `setup`, `check` or `teardown`, already pointed at the copy): exit 0
+/// within `timeout` passes, anything else, including a timeout, fails. Its stdout and stderr go
+/// to `log`, or nowhere.
+pub fn passes(mut command: Command, timeout: Duration, log: Option<&Path>) -> bool {
+    let file = log.and_then(|p| std::fs::File::create(p).ok());
+    let (out, err) = match file
+        .as_ref()
+        .and_then(|f| Some((f.try_clone().ok()?, f.try_clone().ok()?)))
+    {
+        Some((o, e)) => (Stdio::from(o), Stdio::from(e)),
+        None => (Stdio::null(), Stdio::null()),
+    };
+    let Ok(mut child) = command.stdout(out).stderr(err).spawn() else {
         return false;
     };
     let start = std::time::Instant::now();

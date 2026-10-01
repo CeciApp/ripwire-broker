@@ -97,6 +97,8 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 07:50 | Revisão do PR #29: a guarda de shell enxerga atribuições, invólucros, `sh -c` e aspas; `fix` validado como commit; edição do agente num arquivo que o `setup` tocou volta a contar. E o `handoff.md` | [D-118](#d-118--revisão-do-pr-29-e-handoff) |
+| 2026-10-01 01:06 | Corpus real (32 tarefas em três repositórios, dois privados, fora deste repositório) e o que montá-lo ensinou: hooks e índice de outra ferramenta versionados num repositório, `setup`/`env`/`teardown`, `validate`, e um `check` que falha sem causa provada | [D-117](#d-117--o-corpus-real-três-repositórios-e-duas-falhas-de-isolamento) |
 | 2026-09-30 23:36 | Plano e instrumentos dos itens 1 e 2: `ripwire-eval` (A/B do §16.2, §17 e §23.15) e `hook-stats` (§21.3); o `session_hits` dos hooks morria com o processo, e o clone do A/B vazava a resposta das tarefas tiradas do histórico | [D-116](#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real) |
 | 2026-09-29 09:01 | Diagrama de arquitetura versionado em `spec/diagrams/`: fonte JSON do archify (a fonte da verdade) e HTML entregue, com fontes fixadas no commit `5daaf27` | [D-115](#d-115--diagrama-de-arquitetura-versionado) |
 | 2026-09-29 00:29 | O `sha2` 0.11 é recusado: ele **não** muda o digest (premissa minha, errada), e subir o nosso direto apenas **duplica** o crate, porque o `rust-mcp-sdk` pinado traz o 0.10 | [D-114](#d-114--o-sha2-011-é-recusado-e-uma-premissa-minha-estava-errada) |
@@ -4272,4 +4274,171 @@ não faz commit e não precisa de identidade.
 **315** testes no padrão e **328** com `online` (eram 295 e 308; 20 novos: 4 de hooks, 3 de CLI e
 13 do A/B). Ignorados continuam 2 e 4. `fmt` limpo, clippy limpo com `-D warnings` nas duas
 features, conferido por `if cargo …; then`, sem pipe.
+
+## D-117 — O corpus real: três repositórios, e duas falhas de isolamento
+
+O usuário escolheu os três repositórios do A/B: dois privados, aqui chamados **A** (Elixir/Phoenix)
+e **B** (site Svelte/Vite), e este. O corpus tem **32 tarefas** tiradas de commits reais e mora
+**fora de qualquer repositório**: enunciados, SHAs e testes ocultos descrevem código privado. Este
+repositório, público, não recebe nada disso, e este registro chama os privados só de A e B.
+
+| repositório | tarefas | com `check` validado | `vocabulary_diverges` |
+| --- | --- | --- | --- |
+| A (Elixir/Phoenix) | 12 | 12 | 6 |
+| `ripwire-broker` (Rust) | 11 | 11 | 4 |
+| B (Svelte/Vite) | 9 | 7 | 4 |
+
+As 32 passam no `ripwire-eval check`. Das 30 com `check`, todas passam no `validate` com a
+máquina parada; as outras duas são visuais e só medem custo e recall. O trabalho foi distribuído
+entre três agentes, um por repositório, sob uma especificação comum (`ab-eval/SPEC.md`):
+repositório de origem só leitura, nenhum agente pago, enunciados como issues que não entregam a
+solução, e `check` que precisa distinguir base de fix.
+
+### Isolamento, primeira falha: hooks versionados
+
+O repositório A versiona `.claude/settings.json` com **hooks do graft** e plugins. O template padrão
+do D-116 usava `--setting-sources project` e os carregaria em todos os braços, inclusive no `none`.
+A guarda de MCP não perceberia, porque hook não é servidor MCP. Corrigido em três frentes:
+
+- o template passa a `--setting-sources local`, que só lê `.claude/settings.local.json` (uma cópia
+  nova nunca tem). Pela documentação, isso também deixa de fora o `CLAUDE.md` do projeto e o
+  `.mcp.json`; o agente ainda pode lê-los, mas ninguém os injeta;
+- `--include-hook-events` no template;
+- a guarda invalida qualquer execução em que um hook rodou.
+
+### Isolamento, segunda falha: outra ferramenta de contexto pelo shell
+
+Desde 2026-09-20 o repositório A versiona `graft/`: cerca de 700 resumos e um `INDEX.md` que manda
+rodar `graft ask`. O `graft` e o `ripwire` estão no PATH desta máquina, e pelo Bash nenhuma
+listagem MCP os mostra.
+
+- **A guarda nova** invalida uma execução que roda `graft` (em qualquer braço) ou `ripwire` (fora
+  do braço `ripwire`).
+- **O que não é pego:** o binário `ripwire-broker`, porque no próprio repositório rodá-lo é o
+  trabalho, e um `rg ripwire`, que procura a palavra e não roda a ferramenta.
+- **Prevenção:** as três tarefas cujo base tem `graft/` (app-10 a app-12) o removem no `setup`. A
+  remoção acontece antes do agente e não conta como edição dele.
+
+### O que o instrumento ganhou
+
+- **`setup`, `teardown` e `env` por tarefa.** O repositório A precisa de `deps`/`_build` e de um
+  banco por execução (`MIX_TEST_PARTITION=_{run}`). O que o `setup` deixa na árvore é subtraído das
+  edições do agente. O `teardown` roda sempre que a cópia existe, mesmo quando o agente nem
+  começou.
+- **`fix` e os marcadores `{repo}`, `{fix}` e `{run}`.** Permitem testes ocultos: o `check` traz os
+  testes do commit de referência depois que o agente termina.
+- **`ripwire-eval validate`.** Exige que cada `check` falhe no base e passe no fix, e grava a saída
+  de cada `setup` e `check` em `validate-logs/`. O `run` guarda a do `check` junto do transcript.
+- **Diretórios temporários.** Usavam `Instant::now().elapsed()` no nome, que é sempre perto de
+  zero; a unicidade dependia de um número do chamador, que no `validate` se repetia. Agora há um
+  contador do processo.
+
+### Um `check` que falha só por carga
+
+A primeira validação do corpus inteiro deu as nove tarefas app-01 a app-09 como **falhando no
+fix**. O agente que as montou tinha visto as doze passarem. Rodada à mão, app-01 passou (42
+testes). Repetidas com a máquina parada, **as nove passaram**. Durante a rodada que falhou, eu
+compilava e testava este crate em paralelo, e as tarefas que passaram (app-10 a app-12) rodaram
+depois disso.
+
+Há duas explicações, e **nenhuma está provada**, porque o `validate` daquela rodada descartava a
+saída do `check` (é a lacuna que os logs acima fecham):
+
+1. **Carga:** timeouts de conexão do Ecto sob CPU saturada.
+2. **Outra sessão no mesmo Postgres:** ao conferir depois que os repositórios de origem estavam
+   intactos, achei uma **outra sessão do Claude Code** ativa no repositório A havia mais de duas
+   horas, com trabalho próprio no working tree (nada deste trabalho, e não mexi em nada). Se ela
+   rodou a suíte durante a validação, as duas dividiram o mesmo Postgres, onde as migrações do A
+   têm efeitos globais no cluster e já colidiram entre dois agentes deste trabalho. Para a rodada paga, a consequência é concreta: um `check` derrubado por
+carga vira, em silêncio, "resposta errada" para aquele braço. Por isso a rodada roda em série, com
+a máquina parada, **sem nenhuma outra sessão usando o Postgres ou o working tree do repositório A**
+(o `setup` copia `deps` e `_build` de lá), e com os logs de `check` disponíveis para auditar cada
+falha.
+
+### Ressalvas do corpus, para a revisão dos enunciados
+
+- **Nomes de interface.** Alguns enunciados nomeiam funções, constantes ou campos (rb-02, rb-03,
+  rb-04, rb-07, app-10, app-12, land-01, land-02) porque os testes ocultos os importam. É contrato,
+  não solução, mas encurta a busca.
+- **Diagnóstico no enunciado.** rb-05 já entrega o diagnóstico. Isso vale igual para todos os
+  braços, mas encolhe a diferença que o A/B mede: quanto menos o agente precisa procurar, menos
+  importa quem o ajuda a procurar.
+- **Testes que dependem da data.** Os do repositório A usam a data de hoje e janelas de meses:
+  revalidar antes de rodar.
+- **Concorrência no Postgres.** As migrações do repositório A têm efeitos globais no cluster: duas
+  validações em paralelo já falharam com `tuple concurrently updated`. Uma execução por vez.
+
+### Provado que os testes mordem
+
+- **Mutações.** As oito mutações das partes novas foram pegas: a subtração do que o `setup` deixou,
+  a falha do `setup`, o id em minúsculas, o `{run}` no `env`, a guarda de hooks, a guarda de
+  ferramenta pelo shell, e o log do `check` no `validate` e no `run`.
+- **Testes escritos junto com o código.** Os testes dos logs foram escritos sem rodar antes do
+  código, então não houve vermelho; as mutações fizeram esse papel.
+
+### Verificação
+
+**320** testes no padrão e **333** com `online` (eram 315 e 328 no D-116; 5 novos no A/B).
+`fmt` e clippy limpos nas duas features. O eval passa sem identidade git configurada
+(`GIT_CONFIG_GLOBAL=/dev/null`), e `cargo tree -e normal` continua idêntico ao de antes do D-116.
+
+## D-118 — Revisão do PR #29, e handoff
+
+O usuário pediu o `handoff.md` publicado no `master`. O `master` é protegido (checks obrigatórios,
+`enforce_admins`), então ele entra pelo PR #29, que leva o D-117, e o #29 é mesclado. Antes disso,
+os três apontamentos do CodeRabbit no #29 foram conferidos contra o código. **Os três procediam.**
+
+### 1. A guarda de shell era fácil de contornar, e acusava inocentes
+
+O `programs()` do D-116 dividia a linha em `|`, `;` e `&` sem olhar aspas e tomava a primeira palavra
+de cada pedaço. Isso dava dois tipos de erro:
+
+- **Contaminação que passava.** `env graft ask`, `FOO=bar ripwire .`, `bash -c "graft ask"`,
+  `command graft …` e `time nohup ripwire .`: o programa visto era `env`, `FOO=bar` ou `bash`, e a
+  execução contaminada contava como limpa.
+- **Falso alarme.** `rg "foo|graft ask"` virava um comando `graft`, e uma execução limpa seria
+  invalidada.
+
+Agora há um mínimo de análise de shell: os comandos são divididos só fora de aspas, as atribuições
+`VAR=x` e os invólucros (`env`, `command`, `exec`, `nohup`, `time`, `nice`, `sudo`) são pulados, e o
+`sh`/`bash`/`zsh -c '…'` é examinado por dentro. **Limite declarado no código:** uma substituição
+`$(…)` dentro de aspas duplas não é examinada. A mesma análise serve à classificação de busca e
+leitura, que também ganhou com as aspas.
+
+### 2. Um `fix` que não é commit só aparecia na rodada
+
+O `Corpus::validate` conferia o `base`, mas não o `fix`. Com um SHA errado, o `{fix}` do teste oculto
+falharia em todos os braços, e a falha seria lida como resposta errada. Agora é recusado antes de
+qualquer execução. As 32 tarefas do corpus real passam.
+
+### 3. A edição do agente num arquivo que o `setup` tocou sumia
+
+O D-117 subtraía das edições do agente todo arquivo que o `setup` deixara modificado. Se o agente
+editasse esse mesmo arquivo, a edição sumia do recall. Agora cada arquivo que o `setup` mexeu é
+lembrado pelo sha256 do conteúdo (ou como ausente), e só é descontado se o agente não o mudou de
+novo.
+
+### Testes e mutação
+
+- **Testes vermelhos primeiro.** Três novos, vermelhos antes e verdes depois.
+- **Mutações:** as seis foram pegas — atribuições, invólucros, `sh -c`, separador entre aspas,
+  comparação de conteúdo e validação do `fix`.
+
+### O handoff
+
+[`handoff.md`](../handoff.md), na raiz:
+
+- estado por fase e como verificar;
+- onde está cada coisa;
+- as duas medições em andamento, com os passos na ordem;
+- as pendências fora delas;
+- as armadilhas já pisadas;
+- as convenções.
+
+Ele nomeia os repositórios privados do corpus só como A e B.
+
+### Verificação
+
+**323** testes no padrão e **336** com `online` (eram 320 e 333). `fmt` e clippy limpos nas duas
+features. `ripwire-eval check` passa no corpus real com a validação nova do `fix`.
 

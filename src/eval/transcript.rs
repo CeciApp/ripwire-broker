@@ -49,6 +49,12 @@ pub struct Summary {
     pub mcp_status: HashMap<String, String>,
     /// MCP tools the session offered (`mcp__server__tool`).
     pub mcp_tools: Vec<String>,
+    /// Hooks that ran in the session (`--include-hook-events`). A repository can commit hooks of
+    /// its own, and they inject context into every arm.
+    pub hooks: Vec<String>,
+    /// Context tools the agent ran from the shell (`graft`, `ripwire`), which no MCP listing
+    /// shows. A repository can ship another tool's index that tells the agent to run it.
+    pub shell_tools: Vec<String>,
     pub calls: Calls,
     pub tokens: Tokens,
     pub cost_usd: f64,
@@ -87,6 +93,10 @@ const SEARCH: &[&str] = &[
 const READ: &[&str] = &[
     "cat", "head", "tail", "sed", "less", "more", "bat", "nl", "awk", "wc",
 ];
+/// Context tools an agent could run from the shell. `ripwire-broker` is not one: in its own
+/// repository, running the binary under development is the work.
+pub const SHELL_TOOLS: &[&str] = &["graft", "ripwire"];
+
 const BROKER_TOOLS: &[&str] = &[
     "context_for_task",
     "context_after_edit",
@@ -101,19 +111,115 @@ enum Class {
     Other,
 }
 
-/// The program each segment of a shell line runs: split on `&&`, `||`, `;` and `|`.
-fn programs(command: &str) -> Vec<String> {
-    command
-        .split(['|', ';', '&'])
-        .filter_map(|seg| {
-            let mut words = seg.split_whitespace();
-            let first = words.next()?;
-            // `git grep` and `git ls-files` search; other git subcommands do not.
-            if first == "git" {
-                return words.next().map(|w| format!("git {w}"));
+/// A shell line split into commands (on `|`, `;`, `&`, newlines and parentheses outside quotes),
+/// each split into words with the quotes removed. Enough shell to find the program a command runs,
+/// not a shell: a `$(...)` inside double quotes is not looked into.
+fn commands(line: &str) -> Vec<Vec<String>> {
+    let (mut all, mut words, mut word) = (vec![], vec![], String::new());
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    let flush = |word: &mut String, in_word: &mut bool, words: &mut Vec<String>| {
+        if *in_word {
+            words.push(std::mem::take(word));
+            *in_word = false;
+        }
+    };
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => word.extend(chars.next()),
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
             }
-            Some(first.rsplit('/').next().unwrap_or(first).to_string())
-        })
+            (None, '\\') => {
+                word.extend(chars.next());
+                in_word = true;
+            }
+            (None, '|' | ';' | '&' | '\n' | '(' | ')' | '`') => {
+                flush(&mut word, &mut in_word, &mut words);
+                if !words.is_empty() {
+                    all.push(std::mem::take(&mut words));
+                }
+            }
+            (None, c) if c.is_whitespace() => flush(&mut word, &mut in_word, &mut words),
+            (None, c) => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    flush(&mut word, &mut in_word, &mut words);
+    if !words.is_empty() {
+        all.push(words);
+    }
+    all
+}
+
+/// `NAME=value`, a variable set for the command that follows.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Commands that run the next word as the program.
+const WRAPPERS: &[&str] = &[
+    "env", "command", "exec", "nohup", "time", "nice", "sudo", "builtin",
+];
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash"];
+
+/// The program one command runs, past assignments and wrappers, and into `sh -c '...'`.
+fn executables(words: &[String]) -> Vec<String> {
+    let mut rest = words;
+    while let Some((first, tail)) = rest.split_first() {
+        if is_assignment(first) {
+            rest = tail;
+            continue;
+        }
+        let name = first.rsplit('/').next().unwrap_or(first);
+        if WRAPPERS.contains(&name) {
+            rest = tail;
+            while let Some((w, t)) = rest.split_first() {
+                if w.starts_with('-') || is_assignment(w) {
+                    rest = t;
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+        if SHELLS.contains(&name)
+            && let Some(script) = tail
+                .iter()
+                .position(|w| w == "-c")
+                .and_then(|p| tail.get(p + 1))
+        {
+            return programs(script);
+        }
+        // `git grep` and `git ls-files` search; other git subcommands do not.
+        if name == "git" {
+            return tail
+                .first()
+                .map(|w| format!("git {w}"))
+                .into_iter()
+                .collect();
+        }
+        return vec![name.to_string()];
+    }
+    vec![]
+}
+
+/// The programs a shell line runs, one per command.
+fn programs(command: &str) -> Vec<String> {
+    commands(command)
+        .iter()
+        .flat_map(|c| executables(c))
         .collect()
 }
 
@@ -193,6 +299,11 @@ fn on_tool_use(s: &mut Summary, names: &mut HashMap<String, String>, at: u64, bl
     if name == "Bash"
         && let Some(c) = block["input"]["command"].as_str()
     {
+        for p in programs(c) {
+            if SHELL_TOOLS.contains(&p.as_str()) {
+                push_new(&mut s.shell_tools, &p);
+            }
+        }
         s.commands.push(c.to_string());
     }
 }
@@ -253,6 +364,13 @@ pub fn summarize(events: &[(u64, Value)]) -> Summary {
             Some("system") if e["subtype"] == "init" => {
                 saw_init = true;
                 on_init(&mut s, e);
+            }
+            Some("system") if e["subtype"].as_str().is_some_and(|t| t.contains("hook")) => {
+                let name = ["hook_name", "hook_event", "subtype"]
+                    .iter()
+                    .find_map(|k| e[*k].as_str())
+                    .unwrap_or("hook");
+                push_new(&mut s.hooks, name);
             }
             Some("assistant") => {
                 for block in blocks(e, "tool_use") {
