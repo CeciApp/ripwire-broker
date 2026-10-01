@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 08:46 | O cancelamento sob HTTP/2 ganha teste: um fixture `h2` (h2c) mostra que cada stream em voo recebe `RST_STREAM(CANCEL)`; `h2` entra como dev-dependency, já presente no grafo pelo `reqwest` | [D-120](#d-120--o-cancelamento-sob-http2-ganha-teste) |
 | 2026-10-01 08:14 | Duas pendências do handoff fechadas: o `sha2` >= 0.11 vai para o `ignore` do dependabot, e os links dos planos no PRD, no changelog e nos próprios planos passam a apontar para `spec/plan/` | [D-119](#d-119--pendências-do-handoff-sha2-no-dependabot-e-links-dos-planos) |
 | 2026-10-01 07:50 | Revisão do PR #29: a guarda de shell enxerga atribuições, invólucros, `sh -c` e aspas; `fix` validado como commit; edição do agente num arquivo que o `setup` tocou volta a contar. E o `handoff.md` | [D-118](#d-118--revisão-do-pr-29-e-handoff) |
 | 2026-10-01 01:06 | Corpus real (32 tarefas em três repositórios, dois privados, fora deste repositório) e o que montá-lo ensinou: hooks e índice de outra ferramenta versionados num repositório, `setup`/`env`/`teardown`, `validate`, e um `check` que falha sem causa provada | [D-117](#d-117--o-corpus-real-três-repositórios-e-duas-falhas-de-isolamento) |
@@ -4469,3 +4470,51 @@ como está.
 
 Sem mudança de código. A sintaxe do `ignore` com `versions` é a da documentação do dependabot; só a
 próxima execução semanal confirma que o PR não reabre.
+
+## D-120 — O cancelamento sob HTTP/2 ganha teste
+
+Pendência do [`handoff.md`](../handoff.md): o CA-ONLINE-12 (um cancelamento MCP chega ao pedido
+HTTP) só era provado em HTTP/1.1, onde abortar fecha a conexão TCP. Em produção, o `reqwest` pode
+negociar HTTP/2 por ALPN, e aí a conexão é compartilhada e continua aberta: o sinal de aborto é um
+`RST_STREAM` por pedido. Um cliente que só largasse o futuro sem resetar o stream deixaria o
+provedor processando, e o teste antigo não veria.
+
+### O teste
+
+`an_mcp_cancel_resets_http2_streams_in_flight`, em `tests/online_protocol.rs`:
+
+- **Fixture:** um servidor `h2` que aceita cada stream, nunca responde e conta os streams que o
+  cliente resetou com `CANCEL`. Um cliente que falasse HTTP/1.1 falharia no handshake e não chegaria
+  a contar um pedido.
+- **Cliente:** `JevClient::loopback_h2`, só para fixtures, como o `loopback`, mas com
+  `http2_prior_knowledge` (h2c). Sem TLS não há ALPN para negociar, e é a única diferença para o
+  cliente de produção.
+- **Cenário:** o mesmo do teste HTTP/1.1, agora num helper comum aos dois: uma tarefa com etapa
+  online, o primeiro pedido chega ao provedor, a chamada é abortada como no `notifications/cancelled`.
+  Todo stream em voo tem de ser resetado, e nenhum pedido novo pode sair depois.
+
+**Limite:** a negociação por ALPN sobre TLS continua só nos testes ao vivo (`tests/online_live.rs`),
+que não cancelam nada. O que o h2c prova é o comportamento do cliente depois que o HTTP/2 está de pé.
+
+### A dependência
+
+`h2 = "0.4"` em `[dev-dependencies]`. Não é crate novo: o `reqwest` com `http2` já o traz (0.4.19 no
+`Cargo.lock`). E dev-dependency não chega ao build padrão: o gate do CI e o
+`the_build_has_no_network_stack` olham `cargo tree -e normal`, e os dois continuam limpos.
+
+### O teste morde
+
+O código de produção já fazia certo, então o teste nasceu verde. Duas mutações provam que ele não é
+decorativo:
+
+- **o envio numa task destacada** (`tokio::spawn`), de modo que abortar a chamada não larga o pedido:
+  pega, e derruba também o teste HTTP/1.1;
+- **o `loopback_h2` sem `http2_prior_knowledge`**: pega, com nenhum pedido chegando ao provedor, em vez
+  de passar falando HTTP/1.1.
+
+Rodado 20 vezes seguidas, sem falha.
+
+### Verificação
+
+**323** testes no padrão (sem mudança) e **337** com `online` (eram 336). `fmt` e clippy limpos nas
+duas features, e o gate do CA-10 continua limpo.

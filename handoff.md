@@ -1,8 +1,8 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-01, até o
-[D-119](spec/changelog.md#d-119--pendências-do-handoff-sha2-no-dependabot-e-links-dos-planos). Para
-quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
+[D-120](spec/changelog.md#d-120--o-cancelamento-sob-http2-ganha-teste). Para quem pega o projeto
+agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
 
@@ -31,7 +31,7 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 
 ```sh
 cargo test --all-targets                    # 323 testes, 2 ignorados (opt-in)
-cargo test --all-targets --features online  # 336 testes, 4 ignorados
+cargo test --all-targets --features online  # 337 testes, 4 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -57,7 +57,7 @@ cargo fmt --check
   `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-119, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-120, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -101,8 +101,6 @@ Os instrumentos estão prontos; as medições, não.
 ## Pendências conhecidas, fora das medições
 
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
-- **Cancelamento sob HTTP/2** (reset de stream) não tem teste: os fixtures falam HTTP/1.1
-  (`tests/online_protocol.rs`).
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.
 - **Diagrama:** `spec/diagrams/` não se atualiza sozinho. Quem mudar a topologia edita o JSON e roda
