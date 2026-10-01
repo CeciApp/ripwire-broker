@@ -11,6 +11,7 @@ pub const SEPARATOR: &str = " · ";
 /// After this many seconds, `--detail` says the data is old (§5.2).
 pub const STALE_SECS: u64 = 300;
 const MAX_MODEL_CHARS: usize = 32;
+const MAX_AGENT_COLS: usize = 24;
 pub const MAX_STDIN_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -23,7 +24,9 @@ pub struct HostInput {
     pub model_id: Option<String>,
     pub effort: Option<String>,
     pub ctx_percent: Option<f64>,
+    /// The main session runs with `--agent` or agent settings (D6 revised, D-123).
     pub agent: bool,
+    pub agent_name: Option<String>,
 }
 
 fn text(v: &Value, path: &[&str]) -> Option<String> {
@@ -55,6 +58,7 @@ pub fn parse_input(text_in: &str) -> HostInput {
             .and_then(|c| c.get("used_percentage"))
             .and_then(Value::as_f64),
         agent: v.get("agent").is_some_and(Value::is_object),
+        agent_name: text(&v, &["agent", "name"]),
     }
 }
 
@@ -199,6 +203,18 @@ pub fn segments(
     ) {
         out.push(seg(m, Keep::Model, Style::Plain));
     }
+    if input.agent {
+        let name = input
+            .agent_name
+            .as_deref()
+            .map(|n| truncate(sanitize(n.trim()).trim(), MAX_AGENT_COLS))
+            .filter(|n| !n.is_empty());
+        out.push(seg(
+            name.map_or("agente".into(), |n| format!("agente: {n}")),
+            Keep::Soft,
+            Style::Plain,
+        ));
+    }
     if let Some(p) = input.ctx_percent.filter(|p| (0.0..=100.0).contains(p)) {
         let shown = p.round() as u32;
         out.push(seg(
@@ -206,10 +222,6 @@ pub fn segments(
             Keep::Essential,
             ctx_style(shown),
         ));
-    }
-    if input.agent {
-        out.push(seg("agente", Keep::Soft, Style::Plain));
-        return out;
     }
     let Some(s) = snapshot else {
         out.push(seg("hooks sem dados", Keep::Soft, Style::Plain));

@@ -208,6 +208,7 @@ async fn main() -> ExitCode {
         Ok(Command::Statusline(a)) => {
             // Status line mode (PRD §24): local reads only, always exit 0, one line.
             use ripwire_broker::statusline::{self, MAX_STDIN_BYTES, Options};
+            use std::io::Write;
             use ripwire_broker::statusline_state::{self as projection, HOST, Read};
             let mut raw = Vec::new();
             let _ = std::io::stdin()
@@ -218,8 +219,8 @@ async fn main() -> ExitCode {
                 false => String::from_utf8(raw).unwrap_or_default(),
             };
             let input = statusline::parse_input(&text);
-            let snapshot = match (&input.session_id, input.agent) {
-                (Some(session), false) => {
+            let snapshot = match &input.session_id {
+                Some(session) => {
                     let root = statusline::resolve_root(a.workspace.as_deref(), &input);
                     let dir = a.state_dir.clone().or_else(StateStore::default_dir);
                     match (root, dir) {
@@ -232,7 +233,7 @@ async fn main() -> ExitCode {
                         _ => None,
                     }
                 }
-                _ => None,
+                None => None,
             };
             let width = a
                 .width
@@ -243,7 +244,9 @@ async fn main() -> ExitCode {
                 width,
                 color: a.color == cli::Color::Always,
             };
-            println!(
+            // A closed stdout (EPIPE) must not turn the bar into a failure: `println!` would panic.
+            let _ = writeln!(
+                std::io::stdout(),
                 "{}",
                 statusline::render(&input, snapshot.as_ref(), &options, hook::now())
             );

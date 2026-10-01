@@ -204,13 +204,32 @@ fn external_text_cannot_reach_the_terminal_as_control() {
 }
 
 #[test]
-fn an_agent_payload_shows_host_segments_only() {
+fn an_agent_payload_shows_the_hook_data_and_the_agent_name_after_the_model() {
     let agent =
         r#"{"session_id":"s","agent":{"name":"reviewer"},"model":{"display_name":"Opus 5.5"}}"#;
     let s = snap(false, 7, 18, Some(AnalysisStatus::AttentionRequired));
     assert_eq!(
         render(&host(agent), Some(&s), &WIDE, 1_000),
-        "rw-brkr · Opus 5.5 · agente"
+        "rw-brkr · Opus 5.5 · agente: reviewer · hooks on · última: atenção · inj 7 · não reenviados 18"
+    );
+    let nameless = r#"{"session_id":"s","agent":{},"model":{"display_name":"Opus 5.5"}}"#;
+    assert_eq!(
+        render(&host(nameless), None, &WIDE, 1_000),
+        "rw-brkr · Opus 5.5 · agente · hooks sem dados"
+    );
+}
+
+#[test]
+fn the_agent_name_is_sanitized_and_cut_to_24_columns() {
+    let hostile = r#"{"agent":{"name":"re\u001b[31mviewer"}}"#;
+    let line = render(&host(hostile), None, &WIDE, 0);
+    assert!(!line.chars().any(|c| c.is_control()), "{line:?}");
+    assert!(line.contains("agente: re[31mviewer"), "{line:?}");
+    let long = format!(r#"{{"agent":{{"name":"{}"}}}}"#, "x".repeat(60));
+    let line = render(&host(&long), None, &WIDE, 0);
+    assert!(
+        line.contains(&format!("agente: {}", "x".repeat(24))) && !line.contains(&"x".repeat(25)),
+        "{line:?}"
     );
 }
 
@@ -623,7 +642,8 @@ fn run_bar(args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> (i32, String, S
     cmd.arg("statusline")
         .args(args)
         .env_remove("COLUMNS")
-        .env_remove("NO_COLOR");
+        .env_remove("NO_COLOR")
+        .env_remove("XDG_STATE_HOME");
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -714,9 +734,10 @@ fn it_reads_the_projection_of_this_session_and_workspace() {
         out.trim_end(),
         "rw-brkr · Opus 5.5 · hooks on · última: atenção · inj 7 · não reenviados 18"
     );
-    // Agent payloads show only host segments (D-121).
+    // An agent payload is the main session run with `--agent` (D6 revised, D-123): same data, one
+    // more segment.
     let agent_input =
-        r#"{"session_id":"s-1","agent":{"name":"reviewer"},"model":{"display_name":"Opus 5.5"}}"#;
+        r#"{"session_id":"s-1","agent":{"name":"re\u001b[31mviewer"},"model":{"display_name":"Opus 5.5"}}"#;
     let (_, agent_out, _) = run_bar(
         &[
             "--workspace",
@@ -727,7 +748,10 @@ fn it_reads_the_projection_of_this_session_and_workspace() {
         agent_input.as_bytes(),
         &[],
     );
-    assert_eq!(agent_out.trim_end(), "rw-brkr · Opus 5.5 · agente");
+    assert_eq!(
+        agent_out.trim_end(),
+        "rw-brkr · Opus 5.5 · agente: re[31mviewer · hooks on · última: atenção · inj 7 · não reenviados 18"
+    );
 }
 
 #[test]
@@ -849,5 +873,28 @@ fn the_status_line_never_starts_ripwire() {
         std::fs::read_dir(ws.path()).unwrap().count(),
         0,
         "and must not create files"
+    );
+}
+
+#[test]
+fn a_closed_stdout_never_makes_the_bar_fail() {
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .arg("statusline")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The reader goes away before the bar has anything to write: its write gets EPIPE.
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().unwrap();
+    let _ = stdin.write_all(b"{}");
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
