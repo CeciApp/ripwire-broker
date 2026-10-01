@@ -1784,17 +1784,51 @@ fn hook_stats_skips_sessions_whose_events_all_failed_to_launch() {
     StateStore::new(state.path().to_path_buf())
         .save("sess-never-ran", &SessionState::default())
         .unwrap();
+    // One that ran but delivered nothing yet (no fingerprints) is a session.
+    let quiet: SessionState = serde_json::from_value(serde_json::json!({
+        "memory": {"seen": []}, "prompts_seen": 1, "opted_out": false,
+        "stats": {"started_at": 300, "events": 2, "injections": 0,
+                  "delivered": 0, "session_hits": 0}
+    }))
+    .unwrap();
+    StateStore::new(state.path().to_path_buf())
+        .save("sess-quiet", &quiet)
+        .unwrap();
     let (code, out, err) = run(&["hook-stats", "--state-dir", dir, "--json"], "");
     assert_eq!(code, 0, "{err}");
     let r: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(r["sessions"], 2, "{r}");
+    assert_eq!(r["sessions"], 3, "{r}");
+    assert_eq!(r["events"], 9, "{r}");
     assert_eq!(r["cross_session"]["fingerprints"], 4, "{r}");
     assert!(
         (r["cross_session"]["rate"].as_f64().unwrap() - 0.5).abs() < 1e-9,
         "an empty session is not the 'earliest' one: {r}"
     );
     let (_, text, _) = run(&["hook-stats", "--state-dir", dir], "");
-    assert!(text.contains("2 sessions"), "{text}");
+    assert!(text.contains("3 sessions"), "{text}");
+
+    // A session saved before the tally existed has zero events but real fingerprints: it stays.
+    let legacy: SessionState = serde_json::from_value(serde_json::json!({
+        "memory": {"seen": ["fp-legacy"]}, "prompts_seen": 1, "opted_out": false
+    }))
+    .unwrap();
+    StateStore::new(state.path().to_path_buf())
+        .save("sess-legacy", &legacy)
+        .unwrap();
+    let (_, out, _) = run(&["hook-stats", "--state-dir", dir, "--json"], "");
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(r["sessions"], 4, "{r}");
+    std::fs::remove_file(
+        std::fs::read_dir(state.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.extension().is_some_and(|x| x == "json")
+                    && std::fs::read_to_string(p).is_ok_and(|t| t.contains("fp-legacy"))
+            })
+            .unwrap(),
+    )
+    .unwrap();
 
     // Only such sessions: nothing was measured.
     let alone = tempfile::tempdir().unwrap();

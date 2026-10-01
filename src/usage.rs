@@ -36,9 +36,13 @@ fn ratio(part: u64, whole: u64) -> Option<f64> {
 }
 
 pub fn report(sessions: &[SessionState]) -> UsageReport {
-    // A session whose every event failed to launch ripwire saved a file with all-zero counters:
-    // nothing was measured in it, and it would only count as an extra, empty "earliest" session.
-    let sessions: Vec<&SessionState> = sessions.iter().filter(|s| s.stats.events > 0).collect();
+    // A session whose every event failed to launch ripwire saved a file with all-zero counters and
+    // nothing remembered: nothing was measured in it, and it would only count as an extra, empty
+    // "earliest" session. One saved before the tally existed has no events but real fingerprints.
+    let sessions: Vec<&SessionState> = sessions
+        .iter()
+        .filter(|s| s.stats.events > 0 || s.memory.fingerprints().next().is_some())
+        .collect();
     let mut r = UsageReport {
         sessions: sessions.len(),
         ..UsageReport::default()

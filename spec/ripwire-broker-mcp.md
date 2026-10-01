@@ -2645,7 +2645,7 @@ Isso evita atribuir contadores antigos a outro projeto sem alterar a semântica 
 5. Se a sessão terminou sem publicação, os dados antigos permanecem identificados pelo timestamp. Não inferir liveness pelo mero arquivo existente.
 6. A barra lê somente o arquivo correspondente, sem lock e sem `sessions()`, sem desserializar toda a memória de fingerprints.
 7. Limites propostos: stdin de até 256 KiB; snapshot de até 16 KiB; leitura até limite + 1 para detectar excesso. JSON inválido/excedente gera degradação. Não persistir o payload do host.
-8. Diretórios Unix `0700`, arquivos `0600`; recusar snapshots que não sejam arquivos regulares e tratar symlinks inesperados como ausência. Reutilizar o padrão de segurança existente, sem prometer suporte Windows nesta entrega.
+8. Diretórios Unix `0700`, arquivos `0600`; recusar snapshots que não sejam arquivos regulares e tratar symlinks inesperados como ausência: o arquivo é aberto uma vez, com `O_NOFOLLOW` e `O_NONBLOCK`, e as verificações (regular, tamanho) valem para o arquivo aberto (D-127). Reutilizar o padrão de segurança existente, sem prometer suporte Windows nesta entrega.
 
 ### 24.7 Instalação e coexistência
 

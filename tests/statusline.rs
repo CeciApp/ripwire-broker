@@ -777,7 +777,9 @@ fn a_fifo_reads_as_missing_without_blocking() {
     let (tx, rx) = std::sync::mpsc::channel();
     let dir = state.path().to_path_buf();
     // Detached on purpose: a read that blocks on the FIFO must fail the test, not hang it.
-    std::thread::spawn(move || tx.send(read(&dir, HOST, "s", Path::new("/r"))));
+    std::thread::spawn(move || {
+        let _ = tx.send(read(&dir, HOST, "s", Path::new("/r")));
+    });
     assert_eq!(
         rx.recv_timeout(std::time::Duration::from_secs(10))
             .expect("read blocked on a FIFO"),
