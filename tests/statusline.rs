@@ -1158,6 +1158,63 @@ fn the_status_line_never_starts_ripwire() {
 }
 
 #[test]
+fn the_status_line_creates_and_changes_nothing_with_existing_state_either() {
+    let bin = tempfile::tempdir().unwrap();
+    let marker = bin.path().join("ran");
+    let fake = bin.path().join("ripwire");
+    std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    publish(state.path(), "s", &root, &valid(&root)).unwrap();
+    // The state as the hooks left it: a projection, a lock and a session file beside it.
+    std::fs::write(state.path().join("abc.json"), "{}").unwrap();
+    std::fs::write(state.path().join("abc.lock"), "").unwrap();
+    let tree = |dir: &Path| {
+        let mut out = vec![];
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                let m = std::fs::symlink_metadata(&p).unwrap();
+                if m.is_dir() {
+                    stack.push(p.clone());
+                }
+                out.push((p, m.len(), m.modified().unwrap()));
+            }
+        }
+        out.sort();
+        out
+    };
+    let before = (tree(state.path()), tree(ws.path()));
+    let path = format!("{}:/usr/bin:/bin", bin.path().display());
+    let input = format!(r#"{{"session_id":"s","cwd":"{}"}}"#, root.display());
+    // Both a session that has a projection and one that has none.
+    for session in ["s", "other"] {
+        let input = input.replace(r#""s""#, &format!("\"{session}\""));
+        let (code, _, _) = run_bar(
+            &[
+                "--workspace",
+                ws.path().to_str().unwrap(),
+                "--state-dir",
+                state.path().to_str().unwrap(),
+            ],
+            input.as_bytes(),
+            &[("PATH", &path), ("HOME", ws.path().to_str().unwrap())],
+        );
+        assert_eq!(code, 0);
+    }
+    assert!(!marker.exists(), "statusline must not start ripwire");
+    assert_eq!(
+        before,
+        (tree(state.path()), tree(ws.path())),
+        "no file created, removed, resized or touched"
+    );
+}
+
+#[test]
 fn a_closed_stdout_never_makes_the_bar_fail() {
     let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
         .arg("statusline")

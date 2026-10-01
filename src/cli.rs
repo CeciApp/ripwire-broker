@@ -1,5 +1,6 @@
 //! Command line (D-028): `serve` (the default, also without a subcommand), `hook`, `hook-log`,
-//! `hook-stats`, `prompt`, `doctor`, `install` and `statusline`. Parsing is pure; nothing here touches the disk.
+//! `hook-stats`, `prompt`, `doctor`, `install` and `statusline`. Parsing is pure; nothing here
+//! touches the disk.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
