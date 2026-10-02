@@ -97,7 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
-| 2026-10-01 21:50 | Edições feitas pelo shell chegam ao hook de edição: o `PostToolUse` do Claude Code casa `Bash`, e uma impressão digital do `git status` decide, antes de subir o ripwire, se o comando mudou arquivos; só leitura não sobe o ripwire; uma árvore lenta ou suja demais desliga a detecção pela sessão; fecha a divergência 2 do D-128; 32 testes novos (451 padrão, 465 com `online`) | [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição) |
+| 2026-10-01 21:50 | Edições feitas pelo shell chegam ao hook de edição: o `PostToolUse` do Claude Code casa `Bash`, e uma impressão digital do `git status` decide, antes de subir o ripwire, se o comando mudou arquivos; só leitura não sobe o ripwire; uma árvore lenta ou suja demais desliga a detecção pela sessão; fecha a divergência 2 do D-128; 32 testes novos (452 padrão, 466 com `online`) | [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição) |
 | 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (a 1 e a 3 eram erros do roteiro; a 2 é um ponto cego, edições por Bash não chegam ao hook; a 4 é conforme por desenho; a 5 é rótulo ambíguo; a 6 conta certo, mas injeta envelope só com limitações; decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
@@ -5208,8 +5208,7 @@ Os JSONs sintéticos existentes **não** foram trocados: `SONNET` e o de
 **Data:** 2026-10-01. **Pedido do mantenedor.** Desenho em
 [proposta-edicoes-por-shell.md](plan/proposta-edicoes-por-shell.md). Fecha a divergência 2 do
 [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real): um `echo >> arquivo` pelo Bash
-não chegava ao `context_after_edit`. (O D-128 está no PR #38, ainda não mergeado nesta branch; o link
-resolve depois do merge dele.) Em TDD, com uma mutação por teste novo, como no D-127.
+não chegava ao `context_after_edit`. Em TDD, com uma mutação por teste novo, como no D-127.
 
 **O que mudou**
 
@@ -5307,5 +5306,7 @@ pode substituir ou complementar a impressão, com atribuição exata e sem depen
 **Contagem:** `cargo test --all-targets --locked`: **451 passados, 2 ignorados**; com
 `--features online`: **465 passados, 4 ignorados** (D-127: 419 e 433; 32 testes novos, 7 deles da
 revisão final), somando todas as linhas `test result:`.
-O D-128, no PR #38, soma mais 1 teste que não está nesta branch. CA-10
+Com o D-128 (PR #38) mesclado no branch: **452 passados, 2 ignorados**; com `online` **466
+passados, 4 ignorados** (o teste do D-128; a correção pedida pelo CodeRabbit no teste dele não muda a
+contagem). CA-10
 (`cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`) sem saída.
