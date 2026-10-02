@@ -7,7 +7,7 @@
     "quality_profile": "showcase",
     "viewBox": [
       1270,
-      660
+      650
     ],
     "views": [
       {
@@ -30,9 +30,21 @@
           "host",
           "hook",
           "broker",
-          "state"
+          "state",
+          "git"
         ],
-        "note": "Host hooks run the broker in-process and keep per-session fingerprints on disk."
+        "note": "Host hooks run the broker in-process, write per-session fingerprints to disk and ask git whether a shell command changed files."
+      },
+      {
+        "id": "status-bar",
+        "label": "Status bar",
+        "focus": [
+          "host",
+          "statusline",
+          "state",
+          "hook"
+        ],
+        "note": "Hooks publish a per-session projection; the statusline command only reads it and never starts ripwire."
       },
       {
         "id": "optional",
@@ -48,7 +60,7 @@
     ],
     "repository": {
       "url": "https://github.com/CeciApp/ripwire-broker",
-      "revision": "5daaf271ecd2298d156edb3de18af3f37c162b15"
+      "revision": "db84cf359187cac55f3a11c9ad14b270dd3a284c"
     }
   },
   "components": [
@@ -59,7 +71,7 @@
       "sublabel": "Claude Code / Codex",
       "pos": [
         40,
-        300
+        330
       ],
       "size": [
         140,
@@ -73,7 +85,7 @@
       "sublabel": "3 tools + status",
       "pos": [
         250,
-        300
+        330
       ],
       "size": [
         140,
@@ -92,7 +104,7 @@
       "sublabel": "route · shape · budget",
       "pos": [
         460,
-        300
+        330
       ],
       "size": [
         140,
@@ -118,7 +130,7 @@
       "sublabel": "verb allowlist",
       "pos": [
         670,
-        300
+        330
       ],
       "size": [
         140,
@@ -127,7 +139,7 @@
       "sources": [
         {
           "path": "src/broker.rs",
-          "line": 708,
+          "line": 715,
           "label": "guarded_call"
         },
         {
@@ -143,7 +155,7 @@
       "sublabel": "child process",
       "pos": [
         880,
-        300
+        330
       ],
       "size": [
         140,
@@ -165,7 +177,7 @@
       "sublabel": "33 verbs",
       "pos": [
         1090,
-        300
+        330
       ],
       "size": [
         140,
@@ -179,7 +191,7 @@
       "sublabel": "one-shot commands",
       "pos": [
         460,
-        110
+        90
       ],
       "size": [
         140,
@@ -191,6 +203,10 @@
         },
         {
           "path": "src/local.rs"
+        },
+        {
+          "path": "src/worktree.rs",
+          "label": "git fingerprint"
         }
       ]
     },
@@ -198,10 +214,10 @@
       "id": "state",
       "type": "database",
       "label": "Hook session state",
-      "sublabel": "private file",
+      "sublabel": "private files",
       "pos": [
         670,
-        110
+        90
       ],
       "size": [
         140,
@@ -213,6 +229,10 @@
         },
         {
           "path": "src/session.rs"
+        },
+        {
+          "path": "src/statusline_state.rs",
+          "label": "status projection"
         }
       ]
     },
@@ -223,7 +243,7 @@
       "sublabel": "e.g. ollama",
       "pos": [
         460,
-        490
+        480
       ],
       "size": [
         140,
@@ -245,7 +265,7 @@
       "sublabel": "--online only",
       "pos": [
         670,
-        490
+        480
       ],
       "size": [
         140,
@@ -267,7 +287,7 @@
       "sublabel": "remote classifier",
       "pos": [
         880,
-        490
+        480
       ],
       "size": [
         140,
@@ -277,6 +297,42 @@
         {
           "path": "src/online/jev.rs"
         }
+      ]
+    },
+    {
+      "id": "statusline",
+      "type": "frontend",
+      "label": "Status line",
+      "sublabel": "read-only command",
+      "pos": [
+        880,
+        90
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/statusline.rs"
+        },
+        {
+          "path": "src/statusline_state.rs"
+        }
+      ]
+    },
+    {
+      "id": "git",
+      "type": "external",
+      "label": "git",
+      "sublabel": "status --porcelain",
+      "pos": [
+        670,
+        200
+      ],
+      "size": [
+        140,
+        64
       ]
     }
   ],
@@ -331,14 +387,14 @@
       "toSide": "top",
       "labelAt": [
         530,
-        237
+        300
       ]
     },
     {
       "id": "hook-to-state",
       "from": "hook",
       "to": "state",
-      "label": "fingerprints"
+      "label": "writes"
     },
     {
       "id": "broker-to-notes",
@@ -350,7 +406,7 @@
       "toSide": "top",
       "labelAt": [
         523,
-        427
+        437
       ]
     },
     {
@@ -368,6 +424,31 @@
       "to": "jev",
       "label": "HTTPS",
       "variant": "security"
+    },
+    {
+      "id": "host-to-statusline",
+      "from": "host",
+      "to": "statusline",
+      "label": "statusLine JSON",
+      "fromSide": "top",
+      "toSide": "top"
+    },
+    {
+      "id": "statusline-to-state",
+      "from": "statusline",
+      "to": "state",
+      "label": "reads",
+      "fromSide": "left",
+      "toSide": "right",
+      "variant": "dashed"
+    },
+    {
+      "id": "hook-to-git",
+      "from": "hook",
+      "to": "git",
+      "label": "shell edits?",
+      "fromSide": "bottom",
+      "toSide": "left"
     }
   ],
   "cards": [

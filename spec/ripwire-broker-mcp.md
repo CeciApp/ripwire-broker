@@ -10,7 +10,7 @@
 > **Dependência principal:** servidor MCP do [Ripwire](https://github.com/redhat-et/ripwire)
 > **Postura padrão:** local, offline, read-only e com orçamento explícito de contexto
 > **Adaptador opcional:** `--online`, classificador semântico remoto desligado por padrão ([§23](#23-adaptador-opcional---online))
-> **Barra de status:** `ripwire-broker statusline` para o Claude Code, implementada, com a validação manual pendente ([§24](#24-barra-de-status-do-claude-code))
+> **Barra de status:** `ripwire-broker statusline` para o Claude Code, implementada e validada numa sessão real ([§24](#24-barra-de-status-do-claude-code))
 
 ---
 
@@ -1411,8 +1411,10 @@ barra de produto, que dependem da escolha dos repositórios. Destaques:
 - projeção por sessão e workspace, privada e atômica;
 - registro opcional pelo instalador (`install claude-code --statusline`).
 
-**Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)); validação
-manual numa sessão real e fixture de payload real pendentes ([plano](plan/status-bar-plan.md), §24).
+**Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)) e validada
+à mão numa sessão real, com fixture de payload real
+([D-128](changelog.md#d-128--validação-manual-da-barra-e-fixture-de-payload-real)); as divergências da
+validação foram fechadas no D-129 a D-131 ([plano](plan/status-bar-plan.md), §24).
 Vem antes da Fase 6 por ser pequena, local e independente dela, e por tornar visível o uso dos hooks
 que a medição do §21.3 precisa.
 
@@ -2438,9 +2440,13 @@ exige nova decisão:
 
 ## 24. Barra de status do Claude Code
 
-**Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)); validação
-manual numa sessão real do Claude Code e fixture de payload real pendentes (roteiro pronto fora do
-repositório, em `~/projects/ai/CECI/statusline-manual/`, a pasta local do mantenedor, não versionada). Plano em
+**Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)) e validada
+à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real
+([D-128](changelog.md#d-128--validação-manual-da-barra-e-fixture-de-payload-real)); das seis
+divergências, a 2 foi fechada no D-129 e no D-131, e a 5 e a 6 no D-130 (a 1 e a 3 eram erros do
+roteiro, e a 4 é conforme por desenho). O campo `agent` (§24.8) ainda não foi visto num payload
+real. O roteiro mora fora do repositório, em `~/projects/ai/CECI/statusline-manual/`, a pasta local
+do mantenedor, não versionada. Plano em
 [status-bar-plan.md](plan/status-bar-plan.md), executado por subagentes, uma tarefa por vez com
 revisão. Vem antes da Fase 6 (§19).
 

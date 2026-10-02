@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 23:40 | Documentação alinhada ao D-131: o exemplo `integrations/claude-code/settings.json` ganha `Bash` no matcher do `PostToolUse` (como o `install` grava desde o D-129), o PRD deixa de dar a validação da barra como pendente, o `handoff.md` vai até o D-131, com o campo `agent` como pendência, e o diagrama ganha a barra de status e o `git` | [D-132](#d-132--documentação-alinhada-ao-d-131) |
 | 2026-10-01 23:16 | Fecha a pendência `bashEditDiff` do D-129: a lista de arquivos que o próprio Claude Code manda no `PostToolUse` do Bash substitui a impressão do git; depois do primeiro payload com o campo, a sessão não chama mais o `git`, e a impressão fica para versões que não o mandam | [D-131](#d-131--a-lista-do-próprio-claude-code-substitui-a-impressão-do-git) |
 | 2026-10-01 23:00 | Fecha as divergências 5 e 6 do D-128: no `--detail`, `último contexto` ganha a própria idade e a do snapshot vira `visto há`; no primeiro prompt, um envelope só com limitações não é injetado nem conta em `inj` | [D-130](#d-130--duas-idades-no-detalhe-e-o-primeiro-prompt-sem-conteúdo-não-é-injetado) |
 | 2026-10-01 21:50 | Edições feitas pelo shell chegam ao hook de edição: o `PostToolUse` do Claude Code casa `Bash`, e uma impressão digital do `git status` decide, antes de subir o ripwire, se o comando mudou arquivos; só leitura não sobe o ripwire; uma árvore lenta ou suja demais desliga a detecção pela sessão; fecha a divergência 2 do D-128; 32 testes novos (457 padrão, 471 com `online`) | [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição) |
@@ -5436,3 +5437,41 @@ arquivos, com `__WORKSPACE__`, `__TRANSCRIPT__` e `__SCRATCHPAD__`, sem dado pes
 **Contagem:** padrão **461 passados, 2 ignorados**; com `online` **475 passados, 4 ignorados** (eram 457
 e 471: 4 testes novos). Com o D-130 (PR #40) mesclado: **462 passados, 2 ignorados**; com `online`
 **476 passados, 4 ignorados**. CA-10 sem saída.
+
+## D-132 — Documentação alinhada ao D-131
+
+Revisão da documentação e do diagrama depois do D-128 a D-131. Nenhuma mudança de código.
+
+- **`integrations/claude-code/settings.json`:** o matcher do `PostToolUse` era
+  `Edit|Write|MultiEdit|NotebookEdit`. Desde o [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição)
+  o `install` grava `Edit|Write|MultiEdit|NotebookEdit|Bash`; quem copiasse o exemplo, que o README
+  indica, ficaria sem as edições feitas pelo shell. O exemplo agora é igual ao do `install`. O do
+  Codex já batia.
+- **PRD:** o cabeçalho, o roadmap (§19) e o §24 diziam que a validação manual e a fixture real
+  estavam pendentes. Agora apontam para o D-128 e dizem como cada divergência foi fechada. O campo
+  `agent` (§24.8) fica registrado como ainda não visto num payload real.
+- **`handoff.md`:** estado até o D-131, contagem de testes (462 e 476), o `src/worktree.rs` em
+  "Onde está o quê", e o campo `agent` como pendência nova.
+- **Diagrama (`spec/diagrams/`):** ele parou antes da barra de status
+  ([D-115](#d-115--diagrama-de-arquitetura-versionado)). Ganhou dois nós e três ligações:
+  - **Status line** (`src/statusline.rs`, `src/statusline_state.rs`): o host manda o JSON do
+    `statusLine`, e o comando só **lê** o estado que os hooks escrevem (tracejado: não chama o
+    broker nem o ripwire);
+  - **git** (`status --porcelain`): o hook pergunta se um comando do shell mudou arquivos (D-129).
+    A ligação omite o caminho do D-131, em que a lista vem do próprio host e o `git` não é chamado;
+  - o estado de sessão passa a citar `src/statusline_state.rs`, o hook cita `src/worktree.rs`, e a
+    ligação entre os dois vira `writes`;
+  - uma visão guiada nova, **Status bar**, e a do modo automático inclui o `git`.
+
+  As referências agora apontam para o commit `db84cf3` (o `guarded_call` desceu da linha 708 para a
+  715). Para caber em 1440×900 sem rolagem, as faixas foram aproximadas em vez de o texto encolher.
+  A primeira versão falhou nisso: com 110 px a mais de altura, a página rolava 73 px.
+
+  Verificação: `validate --quality showcase` com 9/9 checagens, 0 erros, 0 avisos e 0
+  cruzamentos. `deliver`: especificação sha256 `d9e3c1fd…` (9429 bytes), HTML `3e343a37…`
+  (725607 bytes), 21 referências de fonte verificadas. `visual-check` no Chrome, numa cópia com o
+  mesmo sha256: sem rolagem em 1440×900, 1600×1000, 1920×1080 e 2048×1320, menor texto projetado de
+  6,6 px a 1440 (mínimo 6). As capturas não foram versionadas, como no D-115.
+- **Correção de uma afirmação minha:** eu disse que o archify não estava instalado nesta máquina.
+  Estava, mas como skill em `~/.agents/skills/archify/`, fora do `PATH` e dos plugins onde procurei.
+- **Planos (`spec/plan/`) não foram mexidos:** são o registro do que foi planejado, não o estado.
