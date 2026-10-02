@@ -335,8 +335,9 @@ rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
 
 - **`hooks sem dados` does not prove the hooks are uninstalled.** It can be a new session, a failed write or a
   session that only uses MCP.
-- **`--detail`** adds, if they fit, `entregues N`, `reuso 42%`, `último contexto ~1,2k tok` and `há 20s`
-  (`dados antigos` after five minutes).
+- **`--detail`** adds, if they fit, `entregues N`, `reuso 42%`, `último contexto ~1,2k tok há 5min` (when the
+  last context reached the model) and `visto há 20s` (when a hook last wrote the snapshot; `dados antigos`
+  after five minutes).
 - **`--width N`**, then `COLUMNS`, then 100 columns. When the line is too wide, details go first, then the
   counters, then the model, then the soft hook segments; the prefix, `ctx`, `hooks off` and an
   `atenção`/`erro` alert are kept. **`--color never`** is the default; `--color always` emits ANSI even
