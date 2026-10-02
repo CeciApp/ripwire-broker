@@ -5496,7 +5496,8 @@ limitação e de `source.basis` citados no skill; as constantes de `src/hook.rs`
   [D-106](#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) uma edição dentro da
   janela (1000 ms) não pergunta nada e os arquivos vão com a próxima; só os 32 primeiros arquivos
   distintos da rajada são guardados, e os demais ficam para o `Stop` (o comentário de
-  `MAX_HELD_EDITS` diz "as mais recentes", mas o código guarda as primeiras). Os dois ganharam o parágrafo,
+  `MAX_HELD_EDITS` dizia "as mais recentes", mas o código guarda as primeiras; o comentário foi
+  corrigido no PR seguinte). Os dois ganharam o parágrafo,
   com os orçamentos dos hooks (1500 no prompt, 800 depois de uma edição), que também não estavam lá.
 - **README, fixtures:** dizia que as de `tests/fixtures/hooks/` vinham do Claude Code 2.1.283. As
   duas de `Bash` vêm da 2.1.285 (D-129, D-131), e não citava `tests/fixtures/statusline/` (D-128) nem

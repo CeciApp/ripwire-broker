@@ -245,7 +245,7 @@ pub struct Policy {
 }
 
 /// At most this many edited files are remembered while a burst is coalesced. A burst longer than
-/// this reports on the most recent ones; `Stop` still covers the whole tree.
+/// this keeps its first files and drops the rest; `Stop` still covers the whole tree.
 pub const MAX_HELD_EDITS: usize = 32;
 
 impl Default for Policy {
