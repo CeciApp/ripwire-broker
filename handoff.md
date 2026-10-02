@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-01, até o
-[D-127](spec/changelog.md#d-127--pendências-menores-da-barra-de-status).
+[D-131](spec/changelog.md#d-131--a-lista-do-próprio-claude-code-substitui-a-impressão-do-git).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -22,7 +22,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 2 · hooks, contexto incremental, `install`, `doctor` | feita |
 | 3 · notas por modelo local | feita, com cache só em memória (o de disco espera a medição do §21.3) |
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
-| barra de status do Claude Code (§24) | **implementada** (D-123); **validação manual numa sessão real e fixture de payload real pendentes** (roteiro em `~/projects/ai/CECI/statusline-manual/`, pasta local do mantenedor, não versionada) |
+| barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
@@ -31,8 +31,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 419 testes, 2 ignorados (opt-in)
-cargo test --all-targets --features online  # 433 testes, 4 ignorados
+cargo test --all-targets                    # 462 testes, 2 ignorados (opt-in)
+cargo test --all-targets --features online  # 476 testes, 4 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -50,6 +50,9 @@ cargo fmt --check
 - **`src/mcp.rs`:** a fachada MCP.
 - **`src/upstream.rs` e `src/supervise.rs`:** o cliente do ripwire e o limite de memória.
 - **`src/hook.rs` e `src/state.rs`:** os hooks e o estado de sessão em disco.
+- **`src/worktree.rs`:** a impressão digital do `git status` que diz ao hook se um comando do shell
+  mudou arquivos (D-129). Com prazo, teto de entradas e desligamento pela sessão; o hook a dispensa
+  quando o próprio Claude Code manda a lista de arquivos (`bashEditDiff`, D-131).
 - **`src/online/`:** o adaptador `--online`.
 - **`src/eval/` e `src/bin/ripwire-eval.rs`:** o instrumento do A/B, um segundo binário que o broker
   nunca chama.
@@ -62,7 +65,7 @@ cargo fmt --check
   `online*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-127, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-131, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -109,18 +112,17 @@ Os instrumentos estão prontos; as medições, não.
 
 ## Pendências conhecidas, fora das medições
 
-- **Barra de status: validação manual e fixture real (D-123).** O mantenedor roda o roteiro
-  `~/projects/ai/CECI/statusline-manual/ROTEIRO.md` (pasta local do mantenedor, não
-  versionada; instalar, prompt, edição, fim de turno,
-  `#ripwire-off`/`#ripwire-on`, comparando a barra com `hook-log` e o snapshot; anotar a versão do
-  Claude Code). O `capture.sh` da pasta grava o payload real do `statusLine`; falta transformá-lo em
-  `tests/fixtures/statusline/claude_code.json` (com `__WORKSPACE__`) e conferir `effort.level`,
-  `workspace.project_dir` e `agent`. Até lá os testes usam JSON sintético.
+- **Barra de status: o campo `agent` (§24.8) nunca foi visto num payload real.** A validação do
+  D-128 rodou sem `--agent`, e nenhum dos 121 payloads o trouxe. Uma sessão com `--agent`, gravada
+  pelo `capture.sh` do roteiro (`~/projects/ai/CECI/statusline-manual/`, pasta local do mantenedor,
+  não versionada), fecha isso.
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.
-- **Diagrama:** `spec/diagrams/` não se atualiza sozinho. Quem mudar a topologia edita o JSON e roda
-  `deliver` de novo (D-115).
+- **Diagrama desatualizado.** `spec/diagrams/` não se atualiza sozinho (D-115) e parou antes da
+  barra de status: faltam o comando `statusline` lendo a projeção que os hooks publicam (D-123) e
+  o hook chamando o `git` (D-129). Edita-se o JSON e roda-se `deliver` do archify, que não está
+  instalado em todas as máquinas do mantenedor; editar só o JSON deixaria fonte e HTML divergentes.
 
 ## Armadilhas já pisadas
 
@@ -132,6 +134,10 @@ Cada uma custou uma conclusão errada antes de ser achada. O changelog conta sei
   cargo como um argumento só.
 - **Restaurar um arquivo com mtime antigo engana o cargo.** Ele não recompila e o teste roda o
   binário velho. `touch` nos fontes depois de mutações.
+- **Teste que depende de tempo passa pelo motivo errado sob carga.** Com 100 ms de `sleep` no `git`
+  falso, o teste das duas impressões lentas seguidas (limite de 50 ms) passava em paralelo porque o
+  prazo de 500 ms estourava sob carga, não pela regra testada. Com 60 ms ele só passa pela regra
+  (D-129). Folga pequena acima do limite, e mutação para confirmar.
 - **O CI não tem identidade git.** Teste que faz commit passa `-c user.email=… -c user.name=…`, como
   o `common::sample_repo`.
 - **O `master` é protegido** (checks obrigatórios, `enforce_admins`). Tudo entra por PR, e os PRs
