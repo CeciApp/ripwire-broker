@@ -505,8 +505,9 @@ foi injetado.
   arquivos sujos) com a do hook anterior: só um comando que mudou arquivos segue para o
   `context_after_edit`, com no máximo 50 arquivos; um comando só de leitura não sobe o ripwire e não
   conta evento. Todo evento do Claude Code menos o `Stop` atualiza a impressão. Só contam os arquivos
-  mudados dentro do workspace, mesmo quando ele é um subdiretório do repositório. Limites: só em
-  workspace git (fora dele a edição pelo shell só é vista pelo gate do `Stop`); o `git` tem 500 ms
+  mudados dentro do workspace, mesmo quando ele é um subdiretório do repositório. Limites da impressão
+  (que só vale quando o host não manda a lista, ver abaixo): só em workspace git (fora dele, sem a lista
+  do host, a edição pelo shell só é vista pelo gate do `Stop`); o `git` tem 500 ms
   para as duas chamadas; mais lento que isso, ou com mais de 5000 entradas no `git status`, a detecção
   se desliga pelo resto da sessão (`SessionState.worktree_off`): nenhum hook da sessão chama o `git`
   de novo, um Bash fica sem linha de base e em silêncio, e o gate do `Stop` continua cobrindo; uma

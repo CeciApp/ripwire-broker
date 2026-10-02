@@ -264,20 +264,20 @@ hook contract, so the same command serves both:
 | Host event | What the broker does |
 | --- | --- |
 | `UserPromptSubmit` | First prompt of the session: `context_for_task` becomes `additionalContext`. Later prompts only with `--every-prompt` |
-| `PostToolUse` (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Bash` on Claude Code, `apply_patch` on Codex) | `context_after_edit` for the edited files inside the workspace; nothing if there is nothing new. A `Bash` command counts only if it changed files in a git workspace (see below) |
+| `PostToolUse` (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Bash` on Claude Code, `apply_patch` on Codex) | `context_after_edit` for the edited files inside the workspace; nothing if there is nothing new. A `Bash` command counts only if it changed files: as Claude Code reports them, or else as a git fingerprint finds them (see below) |
 | `Stop` | `context_before_finish`. With `--gate`, blocks once on `attention_required` and sends the evidence; otherwise a one-line notice |
 
-- **Shell edits (Claude Code, git workspaces):** before starting ripwire, the hook compares a fingerprint of the
+- **Shell edits (Claude Code):** when Claude Code reports the changed files itself (`tool_response.bashEditDiff`,
+  seen in 2.1.285), that list is used, in any workspace, and from the first such payload on the session runs no
+  `git` at all (D-131). Otherwise, as a fallback in git workspaces, before starting ripwire the hook compares a fingerprint of the
   dirty files (`git status`, plus each file's mtime and size) with the one from the previous hook. A `Bash`
   command that changed files gets `context_after_edit` for them (at most 50); a read-only one starts nothing and
   counts no event. Only changed files inside the workspace count, even when the workspace is a subdirectory of
-  the repository. Outside git it stays silent. `git` gets 500 ms; if it is slower, if `git status` lists more
+  the repository. Without the host's list, outside git it stays silent. `git` gets 500 ms; if it is slower, if `git status` lists more
   than 5,000 entries, or if two fingerprints in a row take over 50 ms (a Linux-sized tree takes ~240 ms),
   detection switches off for the rest of the session (no more `git` calls, and `Bash` edits are left to the
   `Stop` gate); a new session tries again. A change made by another process while the
-  command ran is blamed on the command. When Claude Code reports the changed files itself
-  (`tool_response.bashEditDiff`, seen in 2.1.285), that list is used instead, and from the first such
-  payload on the session runs no `git` at all (D-131). Codex is unchanged.
+  command ran is blamed on the command (the fallback only; the host's list is exact). Codex is unchanged.
 - **D-129:** edits made through the Bash tool now reach the edit hook in git workspaces. Re-run
   `ripwire-broker install claude-code --workspace DIR --hooks --write` to add `Bash` to the
   `PostToolUse` matcher; older installs keep working without it.
