@@ -350,6 +350,11 @@ fn edited_files(input: &Value) -> Vec<String> {
     files
 }
 
+/// Whether an answer has anything to act on: items, tests, risks or notes, not just limitations.
+fn carries_content(env: &Envelope) -> bool {
+    !env.items.is_empty() || !env.tests.is_empty() || !env.risks.is_empty() || !env.notes.is_empty()
+}
+
 /// Whether an after-edit answer tells the agent anything it was not already told.
 fn has_news(env: &Envelope, before: &SessionMemory) -> bool {
     env.items
@@ -491,6 +496,12 @@ async fn respond(
             req.budget_tokens = capped(policy.prompt_budget);
             let env = broker.context_for_task(req).await?;
             analysed(state, event, status_of(env.status), None);
+            // An envelope with only limitations ("found nothing, route uncertain") costs the model
+            // tokens and tells it nothing to act on; like an edit without news, it stays out
+            // (D-130). The analysis above still reaches the status line.
+            if !carries_content(&env) {
+                return Ok(None);
+            }
             record(state, event, &env, policy);
             Ok(Some(inject(event, &env)))
         }

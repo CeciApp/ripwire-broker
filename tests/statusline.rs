@@ -246,7 +246,9 @@ fn detail_adds_delivered_reuse_last_context_and_age() {
     let s = snap(false, 7, 18, Some(AnalysisStatus::Ready));
     let line = render(&host(SONNET), Some(&s), &opts, 1_020);
     assert!(
-        line.ends_with("· entregues 25 · reuso 42% · último contexto ~1,2k tok · há 20s"),
+        line.ends_with(
+            "· entregues 25 · reuso 42% · último contexto ~1,2k tok há 50s · visto há 20s"
+        ),
         "{line}"
     );
     let old = render(&host(SONNET), Some(&s), &opts, 1_000 + 301);
@@ -534,7 +536,7 @@ fn token_counts_show_whole_below_a_thousand_and_drop_a_zero_decimal() {
         (10_500, "~10,5k tok"),
     ] {
         assert!(
-            at(tokens).contains(&format!("último contexto {shown} ·")),
+            at(tokens).contains(&format!("último contexto {shown} há ")),
             "{tokens}: {}",
             at(tokens)
         );
@@ -553,12 +555,12 @@ fn age_counts_seconds_minutes_and_hours_and_a_future_stamp_is_zero() {
         (1_000 + 7_300, "há 2h"),
     ] {
         let line = detail_line(&s, now);
-        assert!(line.contains(&format!(" · {shown}")), "{now}: {line}");
+        assert!(line.contains(&format!(" · visto {shown}")), "{now}: {line}");
     }
     // `updated_at` ahead of the clock (a skew, or a hand-written file): no panic, no "old" mark.
     let future = detail_line(&s, 500);
     assert!(
-        future.ends_with("· há 0s") && !future.contains("dados antigos"),
+        future.ends_with("há 0s · visto há 0s") && !future.contains("dados antigos"),
         "{future}"
     );
 }

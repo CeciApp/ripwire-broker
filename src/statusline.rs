@@ -298,15 +298,25 @@ pub fn segments(
             let rate = (s.stats.session_hits as f64 * 100.0 / whole as f64).round() as u64;
             out.push(seg(format!("reuso {rate}%"), Keep::Detail, Style::Plain));
         }
+        // Two ages, each named: when the last context reached the model, and when a hook last
+        // wrote this snapshot (D-130). One bare `há` next to the context read as the first.
         if let Some(d) = &s.last_delivery {
             out.push(seg(
-                format!("último contexto {}", tokens(d.estimated_tokens)),
+                format!(
+                    "último contexto {} {}",
+                    tokens(d.estimated_tokens),
+                    age(now.saturating_sub(d.at))
+                ),
                 Keep::Detail,
                 Style::Plain,
             ));
         }
         let elapsed = now.saturating_sub(s.updated_at);
-        out.push(seg(age(elapsed), Keep::Detail, Style::Plain));
+        out.push(seg(
+            format!("visto {}", age(elapsed)),
+            Keep::Detail,
+            Style::Plain,
+        ));
         if elapsed > STALE_SECS {
             out.push(seg("dados antigos", Keep::Detail, Style::Plain));
         }
