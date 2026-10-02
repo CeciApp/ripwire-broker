@@ -5434,4 +5434,5 @@ arquivos, com `__WORKSPACE__`, `__TRANSCRIPT__` e `__SCRATCHPAD__`, sem dado pes
 
 
 **Contagem:** padrão **461 passados, 2 ignorados**; com `online` **475 passados, 4 ignorados** (eram 457
-e 471: 4 testes novos). CA-10 sem saída.
+e 471: 4 testes novos). Com o D-130 (PR #40) mesclado: **462 passados, 2 ignorados**; com `online`
+**476 passados, 4 ignorados**. CA-10 sem saída.
