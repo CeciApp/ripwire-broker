@@ -499,6 +499,25 @@ foi injetado.
   ([D-125](changelog.md#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt)).
 - Cada injeção mostra um `systemMessage`, e o `hook-log` mostra contagens.
 - `ripwire-broker prompt` é o wrapper.
+- **Edições pelo shell (D-129).** No Claude Code o PostToolUse também casa `Bash`. Antes de subir o
+  ripwire, o hook compara uma impressão digital da árvore do git (`git status` e `mtime`/`size` dos
+  arquivos sujos) com a do hook anterior: só um comando que mudou arquivos segue para o
+  `context_after_edit`, com no máximo 50 arquivos; um comando só de leitura não sobe o ripwire e não
+  conta evento. Todo evento do Claude Code menos o `Stop` atualiza a impressão. Só contam os arquivos
+  mudados dentro do workspace, mesmo quando ele é um subdiretório do repositório. Limites: só em
+  workspace git (fora dele a edição pelo shell só é vista pelo gate do `Stop`); o `git` tem 500 ms
+  para as duas chamadas; mais lento que isso, ou com mais de 5000 entradas no `git status`, a detecção
+  se desliga pelo resto da sessão (`SessionState.worktree_off`): nenhum hook da sessão chama o `git`
+  de novo, um Bash fica sem linha de base e em silêncio, e o gate do `Stop` continua cobrindo; uma
+  sessão nova tenta outra vez. O mesmo vale para duas impressões seguidas acima de 50 ms (o portão de
+  custo da proposta): a primeira ainda é usada, porque pode ser cache frio, e uma rápida zera a
+  contagem (`SessionState.slow_fingerprints`). Assim um repositório lento paga no máximo dois atrasos
+  por sessão. Uma mudança feita por outro processo durante o comando é atribuída a ele.
+  Custo medido (release, Apple M3, processo inteiro do hook para um Bash só de leitura, p50/p95):
+  21,7/24,8 ms num repositório médio (ceci_app, 2.503 arquivos rastreados) e 16,4/17,6 ms num sem
+  arquivos sujos, dos quais o `git status` responde por 13,5/14,7 ms e 6,3/6,7 ms. No kernel Linux
+  (96.049 arquivos rastreados) o `git status` leva ~235 ms: os dois primeiros hooks da sessão pagam a
+  impressão (641 e 252 ms), a detecção se desliga, e cada Bash só de leitura seguinte leva 2,7/3,3 ms.
 - Detalhes em [D-030](changelog.md#d-030--hooks-nos-dois-hosts-proposta),
   [D-031](changelog.md#d-031--granularidade-da-automação-proposta),
   [D-041](changelog.md#d-041--contratos-reais-dos-hooks-e-limite-de-saída) e

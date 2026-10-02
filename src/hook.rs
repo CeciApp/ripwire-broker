@@ -59,6 +59,24 @@ pub struct SessionState {
     /// What the status line shows (PRD §24.6.3); absent in states saved before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statusline: Option<crate::statusline_state::Summary>,
+    /// The working tree as the last hook saw it, so a shell command can be told which files it
+    /// changed (D-129); absent outside git and in states saved before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::worktree::Fingerprint>,
+    /// Set when git was too slow or the tree too dirty to fingerprint: the rest of the session
+    /// asks git nothing and a shell command has no baseline, so the cost is paid once (D-129).
+    /// A new session tries again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktree_off: bool,
+    /// Fingerprints in a row that took longer than `SLOW_FINGERPRINT`; at `SLOW_FINGERPRINTS_OFF`
+    /// the session switches detection off like a timeout. One slow answer is still used: it may
+    /// be a cold cache (D-129).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub slow_fingerprints: u8,
+    /// The files this event's shell command changed, found by `run` before ripwire starts.
+    /// Belongs to one event: never saved.
+    #[serde(skip)]
+    pub shell_edits: Vec<String>,
 }
 
 /// What one session's hooks did, in counts only (PRD 16.1).
@@ -277,6 +295,26 @@ fn inject(event: Event, env: &Envelope) -> Value {
     })
 }
 
+/// A shell command changing many files (a formatter, a generator) is asked about the first ones;
+/// the `Stop` gate sees them all (D-129).
+pub const MAX_BASH_EDIT_FILES: usize = 50;
+
+/// The spec's cost gate for a hook (§2.3): a fingerprint slower than this costs every hook more
+/// than the feature is worth. Measured: ~15 ms in a 2,500-file repo, ~240 ms in the Linux tree.
+pub const SLOW_FINGERPRINT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Slow fingerprints in a row that switch detection off for the session (D-129).
+pub const SLOW_FINGERPRINTS_OFF: u8 = 2;
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
+}
+
+/// Whether the event is Claude Code's Bash tool finishing.
+pub fn is_shell(event: Event, input: &Value) -> bool {
+    event == Event::PostToolUse && input.get("tool_name").and_then(Value::as_str) == Some("Bash")
+}
+
 /// Files named by an edit tool: `file_path` (Claude Code `Edit`/`Write`/`MultiEdit`),
 /// `notebook_path`, or the headers of a Codex `apply_patch`. In order, once each.
 fn edited_files(input: &Value) -> Vec<String> {
@@ -459,11 +497,20 @@ async fn respond(
         Event::PostToolUse | Event::Stop if state.opted_out => Ok(None),
         Event::PostToolUse => {
             let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
-            let files: Vec<String> = edited_files(input)
+            let shell = is_shell(event, input);
+            let named = if shell {
+                std::mem::take(&mut state.shell_edits)
+            } else {
+                edited_files(input)
+            };
+            let mut files: Vec<String> = named
                 .iter()
                 .map(|f| std::path::Path::new(cwd).join(f))
                 .filter_map(|p| broker.in_workspace(&p.to_string_lossy()))
                 .collect();
+            if shell {
+                files.truncate(MAX_BASH_EDIT_FILES);
+            }
             if files.is_empty() {
                 return Ok(None);
             }
@@ -472,7 +519,6 @@ async fn respond(
             // files named while the window is open are held and ride along with the next answer,
             // so holding an event back delays news by at most one edit and never drops it; the
             // `Stop` gate covers the tail of a turn in any case.
-            let mut files = files;
             if let (Some(now), true) = (policy.now_ms, policy.edit_interval_ms > 0) {
                 let waited = now.saturating_sub(state.last_edit_ms);
                 if state.last_edit_ms != 0 && waited < policy.edit_interval_ms {
@@ -565,6 +611,52 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
             let _ = crate::statusline_state::publish(store.dir(), &session_id, r, &snap);
         }
     };
+    // A shell command is an edit only if the working tree says so, and asking costs a `git
+    // status`, not a ripwire (D-129). Every Claude Code event but `Stop` moves the baseline, so a
+    // command is never blamed for an edit made before it. A tree that was too slow or too dirty
+    // switches this off for the session: no more git, and a shell command has no baseline.
+    if args.host == Host::ClaudeCode && args.event != Event::Stop {
+        let before = state.worktree.take();
+        let was = (state.worktree_off, state.slow_fingerprints);
+        if let (Some(r), false) = (root.as_deref(), state.worktree_off) {
+            let started = std::time::Instant::now();
+            match crate::worktree::fingerprint(r) {
+                Ok(print) => {
+                    // Over the gate but under the timeout (a Linux-sized tree): used, and counted;
+                    // a second one in a row switches off, so one cold cache is forgiven.
+                    state.slow_fingerprints = match started.elapsed() > SLOW_FINGERPRINT {
+                        true => state.slow_fingerprints.saturating_add(1),
+                        false => 0,
+                    };
+                    if state.slow_fingerprints >= SLOW_FINGERPRINTS_OFF {
+                        state.worktree_off = true;
+                    } else {
+                        state.worktree = Some(print);
+                    }
+                }
+                Err(why) => state.worktree_off = why.switches_off(),
+            }
+        }
+        if is_shell(args.event, &input) {
+            let mut changed = match (&before, &state.worktree) {
+                (Some(b), Some(a)) => crate::worktree::changed(b, a),
+                _ => vec![],
+            };
+            // The fingerprint covers the whole repository; a workspace in a subdirectory only
+            // cares about its own files, and a change elsewhere must not start ripwire.
+            if let Some(r) = &root {
+                changed.retain(|p| std::path::Path::new(p).starts_with(r));
+            }
+            if changed.is_empty() || state.opted_out {
+                if state.worktree != before || (state.worktree_off, state.slow_fingerprints) != was
+                {
+                    finish(&state);
+                }
+                return None;
+            }
+            state.shell_edits = changed;
+        }
+    }
     let default = Policy::default();
     let policy = Policy {
         every_prompt: args.every_prompt,

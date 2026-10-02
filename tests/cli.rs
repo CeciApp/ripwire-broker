@@ -375,9 +375,20 @@ macro_rules! require_ripwire {
 
 /// Runs the broker binary with `stdin`, returning (exit code, stdout, stderr).
 fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
+    run_with_env(args, stdin, &[])
+}
+
+/// `run`, with `env` set on the child only: the test process's own environment is shared by
+/// tests running in parallel and is never changed.
+fn run_with_env(
+    args: &[&str],
+    stdin: &str,
+    env: &[(&str, &std::ffi::OsStr)],
+) -> (i32, String, String) {
     let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
         .args(args)
         .env_remove("XDG_STATE_HOME")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -865,7 +876,7 @@ fn install_claude_code_merges_idempotently_and_keeps_foreign_keys() {
     }
     assert_eq!(
         s["hooks"]["PostToolUse"][0]["matcher"],
-        "Edit|Write|MultiEdit|NotebookEdit"
+        "Edit|Write|MultiEdit|NotebookEdit|Bash"
     );
     assert_eq!(
         std::fs::read_to_string(mcp.with_extension("json.bak")).unwrap(),
@@ -901,6 +912,37 @@ fn install_claude_code_merges_idempotently_and_keeps_foreign_keys() {
         std::fs::read_to_string(mcp.with_extension("json.bak")).unwrap(),
         foreign_mcp,
         "the backup keeps the user's original"
+    );
+}
+
+#[test]
+fn reinstalling_over_an_old_matcher_adds_bash() {
+    let ws = tempfile::tempdir().unwrap();
+    let settings = ws.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let old = serde_json::json!({"hooks": {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [{"type": "command", "command": "'/old/ripwire-broker' hook claude-code post-tool-use --workspace 'x'"}]}]}});
+    std::fs::write(&settings, old.to_string()).unwrap();
+
+    let (code, _, err) = run(
+        &[
+            "install",
+            "claude-code",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--hooks",
+            "--write",
+        ],
+        "",
+    );
+
+    assert_eq!(code, 0, "{err}");
+    let s = read_json(&settings);
+    let groups = s["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "ours replaced, not duplicated: {s}");
+    assert_eq!(
+        groups[0]["matcher"],
+        "Edit|Write|MultiEdit|NotebookEdit|Bash"
     );
 }
 
@@ -2771,4 +2813,636 @@ fn installed_hook_and_bar_agree_through_a_symlinked_workspace() {
     let (code, out) = host_runs(&format!("{bar} --state-dir '{s}'"), &payload, home.path());
     assert_eq!(code, 0);
     assert!(out.contains("última: erro"), "{out}");
+}
+
+mod shell_edits {
+    use super::{run, run_with_env};
+    use ripwire_broker::state::StateStore;
+    use serde_json::json;
+    use std::path::Path;
+
+    const NO_RIPWIRE: &str = "/nonexistent/ripwire";
+
+    fn git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "i",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(&args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        dir
+    }
+
+    fn hook(event: &str, ws: &Path, state: &Path, input: serde_json::Value) -> String {
+        let (code, out, err) = run(
+            &[
+                "hook",
+                "claude-code",
+                event,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--state-dir",
+                state.to_str().unwrap(),
+                "--ripwire",
+                NO_RIPWIRE,
+            ],
+            &input.to_string(),
+        );
+        assert_eq!(code, 0, "{err}");
+        out
+    }
+
+    fn prompt(ws: &Path, state: &Path, text: &str) -> String {
+        hook(
+            "user-prompt-submit",
+            ws,
+            state,
+            json!({"session_id": "s", "cwd": ws, "hook_event_name": "UserPromptSubmit", "prompt": text}),
+        )
+    }
+
+    fn shell(ws: &Path, state: &Path, command: &str) -> String {
+        hook(
+            "post-tool-use",
+            ws,
+            state,
+            json!({"session_id": "s", "cwd": ws, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_response": {}}),
+        )
+    }
+
+    fn edit(ws: &Path, state: &Path, file: &str) -> String {
+        hook(
+            "post-tool-use",
+            ws,
+            state,
+            json!({"session_id": "s", "cwd": ws, "hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": ws.join(file)}, "tool_response": {}}),
+        )
+    }
+
+    fn saved(state: &Path) -> ripwire_broker::hook::SessionState {
+        StateStore::new(state.to_path_buf()).load("s")
+    }
+
+    #[test]
+    fn a_read_only_command_never_starts_ripwire() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+        let events = saved(state.path()).stats.events;
+
+        let out = shell(ws.path(), state.path(), "cat a.txt");
+
+        assert!(out.is_empty(), "silent, no ripwire launch: {out}");
+        assert_eq!(saved(state.path()).stats.events, events, "not counted");
+    }
+
+    #[test]
+    fn a_command_that_changed_a_file_goes_on_to_ripwire() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+        std::fs::write(ws.path().join("a.txt"), "changed\n").unwrap();
+
+        let out = shell(ws.path(), state.path(), "echo changed > a.txt");
+
+        assert!(
+            out.contains("no context"),
+            "it tried to launch ripwire: {out}"
+        );
+    }
+
+    #[test]
+    fn an_edit_moves_the_baseline_so_the_next_command_is_not_blamed() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+        // A shell command takes a baseline even where only Bash would refresh it.
+        shell(ws.path(), state.path(), "ls");
+        std::fs::write(ws.path().join("a.txt"), "by edit\n").unwrap();
+        edit(ws.path(), state.path(), "a.txt");
+
+        let out = shell(ws.path(), state.path(), "ls");
+
+        assert!(out.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn without_a_baseline_nothing_is_blamed() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        std::fs::write(ws.path().join("a.txt"), "changed\n").unwrap();
+
+        let out = shell(ws.path(), state.path(), "echo changed > a.txt");
+
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            saved(state.path()).worktree.is_some(),
+            "the baseline is taken now"
+        );
+    }
+
+    #[test]
+    fn opted_out_commands_stay_silent_and_still_move_the_baseline() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "#ripwire-off");
+        std::fs::write(ws.path().join("a.txt"), "paused\n").unwrap();
+
+        let out = shell(ws.path(), state.path(), "echo paused > a.txt");
+
+        assert!(out.is_empty(), "{out}");
+        let print = saved(state.path()).worktree.unwrap();
+        assert!(
+            print.entries.iter().any(|e| e.path.ends_with("a.txt")),
+            "{print:?}"
+        );
+    }
+
+    #[test]
+    fn outside_git_a_command_is_silent() {
+        let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+        std::fs::write(ws.path().join("a.txt"), "x").unwrap();
+
+        let out = shell(ws.path(), state.path(), "echo x > a.txt");
+
+        assert!(out.is_empty(), "{out}");
+        assert_eq!(saved(state.path()).worktree, None);
+    }
+
+    /// A hook event for `host` with `env` on the child; the session is the one in `input`.
+    fn hook_env(
+        host: &str,
+        event: &str,
+        ws: &Path,
+        state: &Path,
+        input: serde_json::Value,
+        env: &[(&str, &std::ffi::OsStr)],
+    ) -> String {
+        let (code, out, err) = run_with_env(
+            &[
+                "hook",
+                host,
+                event,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--state-dir",
+                state.to_str().unwrap(),
+                "--ripwire",
+                NO_RIPWIRE,
+            ],
+            &input.to_string(),
+            env,
+        );
+        assert_eq!(code, 0, "{err}");
+        out
+    }
+
+    fn prompt_in(session: &str, ws: &Path) -> serde_json::Value {
+        json!({"session_id": session, "cwd": ws, "hook_event_name": "UserPromptSubmit", "prompt": "task"})
+    }
+
+    fn bash_in(session: &str, ws: &Path) -> serde_json::Value {
+        json!({"session_id": session, "cwd": ws, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": {}})
+    }
+
+    /// A `git` that appends a line to `calls` and then runs `then`, first on the returned PATH.
+    fn fake_git(dir: &Path, then: &str) -> (std::ffi::OsString, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let calls = dir.join("calls");
+        let script = bin.join("git");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho call >> '{}'\n{then}\n", calls.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut path = vec![bin];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        (std::env::join_paths(path).unwrap(), calls)
+    }
+
+    fn real_git() -> std::path::PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|d| d.join("git"))
+            .find(|p| p.is_file())
+            .expect("git on PATH")
+    }
+
+    fn calls(file: &Path) -> usize {
+        std::fs::read_to_string(file)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_git_that_leaves_its_output_open_cannot_hang_the_hook() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        // Exits at once, but a child it started keeps stdout open for 5 s.
+        let (path, _) = fake_git(tools.path(), "sleep 5 &\nexit 0");
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+
+        let started = std::time::Instant::now();
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "bounded by the git budget, not by the stray child: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            saved(st).worktree_off,
+            "an answer that never ends is too slow"
+        );
+    }
+
+    #[test]
+    fn a_slow_git_switches_detection_off_for_the_session() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (path, counter) = fake_git(tools.path(), "exec sleep 2");
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+        assert_eq!(calls(&counter), 1, "one git call, killed at the budget");
+        let first = saved(st);
+        assert!(first.worktree_off, "too slow switches detection off");
+        assert_eq!(first.worktree, None);
+
+        for _ in 0..2 {
+            let out = hook_env(
+                "claude-code",
+                "post-tool-use",
+                ws,
+                st,
+                bash_in("s", ws),
+                &env,
+            );
+            assert!(out.is_empty(), "no baseline: silent, no ripwire: {out}");
+        }
+        assert_eq!(calls(&counter), 1, "no more git in this session");
+        assert_eq!(saved(st).stats.events, first.stats.events, "not counted");
+
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s2", ws),
+            &env,
+        );
+        assert_eq!(calls(&counter), 2, "a new session tries again");
+    }
+
+    #[test]
+    fn a_slow_git_on_a_first_shell_command_is_remembered() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (path, counter) = fake_git(tools.path(), "exec sleep 2");
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+        // A silent shell command saves the state itself: no prompt came first to do it.
+        hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            bash_in("s", ws),
+            &env,
+        );
+        assert!(saved(st).worktree_off);
+        hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            bash_in("s", ws),
+            &env,
+        );
+        assert_eq!(calls(&counter), 1, "no more git in this session");
+    }
+
+    #[test]
+    fn a_too_dirty_tree_switches_detection_off_for_the_session() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let many = ws.path().join("many");
+        std::fs::create_dir(&many).unwrap();
+        for i in 0..=ripwire_broker::worktree::MAX_FINGERPRINT_ENTRIES {
+            std::fs::write(many.join(format!("{i}.txt")), "x").unwrap();
+        }
+        let then = format!("exec '{}' \"$@\"", real_git().display());
+        let (path, counter) = fake_git(tools.path(), &then);
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+        let after_prompt = calls(&counter);
+        assert!(after_prompt >= 1, "git was asked");
+        assert!(saved(st).worktree_off, "too dirty switches detection off");
+
+        std::fs::write(many.join("extra.txt"), "x").unwrap();
+        let out = hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            bash_in("s", ws),
+            &env,
+        );
+
+        assert!(out.is_empty(), "{out}");
+        assert_eq!(calls(&counter), after_prompt, "no more git in this session");
+    }
+
+    /// A `git` that answers right but takes ~60 ms per call: over the gate, far under the timeout.
+    fn slow_real_git(tools: &Path) -> (std::ffi::OsString, std::path::PathBuf) {
+        let then = format!("sleep 0.06\nexec '{}' \"$@\"", real_git().display());
+        fake_git(tools, &then)
+    }
+
+    #[test]
+    fn one_fingerprint_over_the_gate_is_still_used() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (path, _) = slow_real_git(tools.path());
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+
+        let first = saved(st);
+        assert!(!first.worktree_off, "one slow answer could be a cold cache");
+        assert!(first.worktree.is_some(), "and its fingerprint is kept");
+        assert_eq!(first.slow_fingerprints, 1);
+    }
+
+    #[test]
+    fn two_fingerprints_in_a_row_over_the_gate_switch_detection_off() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (path, counter) = slow_real_git(tools.path());
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+        hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            bash_in("s", ws),
+            &env,
+        );
+        let off = saved(st);
+        assert!(
+            off.worktree_off,
+            "a tree this slow costs every hook too much (§2.3)"
+        );
+        let asked = calls(&counter);
+
+        std::fs::write(ws.join("a.txt"), "changed\n").unwrap();
+        let out = hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            bash_in("s", ws),
+            &env,
+        );
+
+        assert!(out.is_empty(), "{out}");
+        assert_eq!(calls(&counter), asked, "no more git in this session");
+    }
+
+    #[test]
+    fn a_fast_fingerprint_resets_the_slow_count() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (slow, _) = slow_real_git(tools.path());
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &[("PATH", slow.as_os_str())],
+        );
+        assert_eq!(saved(st).slow_fingerprints, 1);
+
+        shell(ws, st, "ls");
+
+        let after = saved(st);
+        assert_eq!(
+            after.slow_fingerprints, 0,
+            "a fast answer clears the streak"
+        );
+        assert!(!after.worktree_off);
+    }
+
+    #[test]
+    fn a_change_outside_a_subdirectory_workspace_stays_silent() {
+        let (repo, state) = (git_repo(), tempfile::tempdir().unwrap());
+        let ws = repo.path().join("sub");
+        std::fs::create_dir(&ws).unwrap();
+        prompt(&ws, state.path(), "task");
+        let events = saved(state.path()).stats.events;
+        std::fs::write(repo.path().join("out.txt"), "outside\n").unwrap();
+
+        let out = shell(&ws, state.path(), "echo outside > ../out.txt");
+
+        assert!(
+            out.is_empty(),
+            "no ripwire launch for a file outside: {out}"
+        );
+        assert_eq!(saved(state.path()).stats.events, events, "not counted");
+
+        std::fs::write(ws.join("in.txt"), "inside\n").unwrap();
+        let out = shell(&ws, state.path(), "echo inside > in.txt");
+        assert!(out.contains("no context"), "inside still goes on: {out}");
+    }
+
+    #[test]
+    fn an_inherited_git_dir_does_not_redirect_the_fingerprint() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        // Each would point git at another repository or index than the workspace's.
+        let os = std::ffi::OsStr::new;
+        let env = [
+            ("GIT_DIR", os("/nonexistent/elsewhere/.git")),
+            ("GIT_WORK_TREE", os("/nonexistent/elsewhere")),
+            ("GIT_INDEX_FILE", os("/nonexistent/elsewhere/index")),
+            ("GIT_COMMON_DIR", os("/nonexistent/elsewhere/common")),
+        ];
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+        let print = saved(st).worktree.expect("the workspace's own repository");
+        assert!(print.entries.is_empty(), "its clean tree: {print:?}");
+    }
+
+    #[test]
+    fn codex_events_never_take_a_fingerprint() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "codex",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &[],
+        );
+        std::fs::write(ws.join("a.txt"), "changed\n").unwrap();
+        hook_env("codex", "post-tool-use", ws, st, bash_in("s", ws), &[]);
+        let state = saved(st);
+        assert_eq!(state.worktree, None);
+        assert!(!state.worktree_off);
+    }
+
+    #[test]
+    fn stop_does_not_take_a_fingerprint() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        hook(
+            "stop",
+            ws.path(),
+            state.path(),
+            json!({"session_id": "s", "cwd": ws.path(), "hook_event_name": "Stop", "stop_hook_active": false}),
+        );
+        assert_eq!(saved(state.path()).worktree, None);
+    }
+}
+
+#[test]
+fn a_real_bash_payload_after_a_shell_edit_injects_the_edit_context() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    let state = tempfile::tempdir().unwrap();
+    let dir = state.path().to_str().unwrap();
+    let ws = repo.path().to_str().unwrap();
+    let fixture = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/hooks/claude_code_post_tool_use_bash.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .replace("__WORKSPACE__", ws);
+    let session = serde_json::from_str::<serde_json::Value>(&fixture).unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    run(
+        &[
+            "hook",
+            "claude-code",
+            "user-prompt-submit",
+            "--state-dir",
+            dir,
+            "--workspace",
+            ws,
+        ],
+        &prompt_event(repo.path(), &session, "how is login validated?"),
+    );
+    let auth = repo.path().join("src/auth.py");
+    let text = std::fs::read_to_string(&auth).unwrap();
+    std::fs::write(&auth, text.replace("return user", "return user  # checked")).unwrap();
+
+    let (code, out, err) = run(
+        &[
+            "hook",
+            "claude-code",
+            "post-tool-use",
+            "--state-dir",
+            dir,
+            "--workspace",
+            ws,
+        ],
+        &fixture,
+    );
+
+    assert_eq!(code, 0, "{err}");
+    let out: serde_json::Value = serde_json::from_str(&out).expect("an answer");
+    let context = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("context_after_edit"), "{context}");
+    assert!(context.contains("auth.py"), "{context}");
 }

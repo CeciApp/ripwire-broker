@@ -22,7 +22,7 @@ pub struct Plan {
 
 fn events(host: Host) -> [(&'static str, &'static str, Option<&'static str>); 3] {
     let edits = match host {
-        Host::ClaudeCode => "Edit|Write|MultiEdit|NotebookEdit",
+        Host::ClaudeCode => "Edit|Write|MultiEdit|NotebookEdit|Bash",
         Host::Codex => "apply_patch|Edit|Write",
     };
     [

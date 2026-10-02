@@ -264,9 +264,21 @@ hook contract, so the same command serves both:
 | Host event | What the broker does |
 | --- | --- |
 | `UserPromptSubmit` | First prompt of the session: `context_for_task` becomes `additionalContext`. Later prompts only with `--every-prompt` |
-| `PostToolUse` (`Edit`/`Write`/`MultiEdit`, Codex `apply_patch`) | `context_after_edit` for the edited files inside the workspace; nothing if there is nothing new |
+| `PostToolUse` (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Bash` on Claude Code, `apply_patch` on Codex) | `context_after_edit` for the edited files inside the workspace; nothing if there is nothing new. A `Bash` command counts only if it changed files in a git workspace (see below) |
 | `Stop` | `context_before_finish`. With `--gate`, blocks once on `attention_required` and sends the evidence; otherwise a one-line notice |
 
+- **Shell edits (Claude Code, git workspaces):** before starting ripwire, the hook compares a fingerprint of the
+  dirty files (`git status`, plus each file's mtime and size) with the one from the previous hook. A `Bash`
+  command that changed files gets `context_after_edit` for them (at most 50); a read-only one starts nothing and
+  counts no event. Only changed files inside the workspace count, even when the workspace is a subdirectory of
+  the repository. Outside git it stays silent. `git` gets 500 ms; if it is slower, if `git status` lists more
+  than 5,000 entries, or if two fingerprints in a row take over 50 ms (a Linux-sized tree takes ~240 ms),
+  detection switches off for the rest of the session (no more `git` calls, and `Bash` edits are left to the
+  `Stop` gate); a new session tries again. A change made by another process while the
+  command ran is blamed on the command. Codex is unchanged.
+- **D-129:** edits made through the Bash tool now reach the edit hook in git workspaces. Re-run
+  `ripwire-broker install claude-code --workspace DIR --hooks --write` to add `Bash` to the
+  `PostToolUse` matcher; older installs keep working without it.
 - **Opt-out:** type `#ripwire-off` in a prompt to silence the session, and `#ripwire-on` to resume.
   The marker counts only as the whole last (or first) word of the prompt; one quoted mid-text does nothing.
 - **What was injected:** every injection shows a one-line `systemMessage`, and the full context sits in the
@@ -276,7 +288,8 @@ hook contract, so the same command serves both:
   context stays under 9,000 characters, because both hosts show only a preview beyond ~10,000.
 - **State:** one private file per session (`0600`, named by the sha256 of the session id) in `--state-dir`,
   by default `$XDG_STATE_HOME/ripwire-broker` or `~/.local/state/ripwire-broker`. It holds fingerprints and
-  counts, never prompts or code.
+  counts, never prompts or code. In a git workspace it can also hold the working-tree fingerprint: up to 5,000
+  entries, each an absolute path anywhere in the repository with its mtime and size.
 - **Cost:** each hook starts ripwire for one event (about 0.1–0.5 s on a small repository). `doctor` shows the
   timing of a smoke call.
 
