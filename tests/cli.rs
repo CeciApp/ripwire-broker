@@ -2986,3 +2986,58 @@ mod shell_edits {
         assert_eq!(saved(state.path()).worktree, None);
     }
 }
+
+#[test]
+fn a_real_bash_payload_after_a_shell_edit_injects_the_edit_context() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    let state = tempfile::tempdir().unwrap();
+    let dir = state.path().to_str().unwrap();
+    let ws = repo.path().to_str().unwrap();
+    let fixture = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/hooks/claude_code_post_tool_use_bash.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .replace("__WORKSPACE__", ws);
+    let session = serde_json::from_str::<serde_json::Value>(&fixture).unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    run(
+        &[
+            "hook",
+            "claude-code",
+            "user-prompt-submit",
+            "--state-dir",
+            dir,
+            "--workspace",
+            ws,
+        ],
+        &prompt_event(repo.path(), &session, "how is login validated?"),
+    );
+    let auth = repo.path().join("src/auth.py");
+    let text = std::fs::read_to_string(&auth).unwrap();
+    std::fs::write(&auth, text.replace("return user", "return user  # checked")).unwrap();
+
+    let (code, out, err) = run(
+        &[
+            "hook",
+            "claude-code",
+            "post-tool-use",
+            "--state-dir",
+            dir,
+            "--workspace",
+            ws,
+        ],
+        &fixture,
+    );
+
+    assert_eq!(code, 0, "{err}");
+    let out: serde_json::Value = serde_json::from_str(&out).expect("an answer");
+    let context = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("context_after_edit"), "{context}");
+    assert!(context.contains("auth.py"), "{context}");
+}

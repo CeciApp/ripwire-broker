@@ -1,0 +1,51 @@
+{
+ "session_id": "907cda3c-c8b0-46f0-9302-5dd057c8a510",
+ "transcript_path": "__TRANSCRIPT__",
+ "cwd": "__WORKSPACE__",
+ "scratchpad_dir": "__SCRATCHPAD__",
+ "prompt_id": "30776374-33f3-4c0c-891b-84fc9157d129",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "echo '// x' >> src/lib.rs && tail -n 3 src/lib.rs",
+  "description": "Append comment line to lib.rs and show tail"
+ },
+ "tool_response": {
+  "stdout": "pub fn sub(a: i32, b: i32) -> i32 { a - b }\npub fn mul(a: i32, b: i32) -> i32 { a * b }\n// x",
+  "stderr": "",
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false,
+  "bashEditDiff": {
+   "files": [
+    {
+     "filePath": "__WORKSPACE__/src/lib.rs",
+     "hunks": [
+      {
+       "oldStart": 1,
+       "oldLines": 3,
+       "newStart": 1,
+       "newLines": 4,
+       "lines": [
+        " pub fn add(a: i32, b: i32) -> i32 { a + b }",
+        " pub fn sub(a: i32, b: i32) -> i32 { a - b }",
+        " pub fn mul(a: i32, b: i32) -> i32 { a * b }",
+        "+// x"
+       ]
+      }
+     ]
+    }
+   ],
+   "moreFiles": 0,
+   "changedFiles": [
+    "__WORKSPACE__/src/lib.rs"
+   ]
+  }
+ },
+ "tool_use_id": "toolu_01McuBqixSEair7vJPmnZnGX",
+ "duration_ms": 1071
+}
