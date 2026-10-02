@@ -34,7 +34,7 @@ commands; `ripwire-broker --help` lists them all:
 | `hook <claude-code\|codex> <event>` | Automatic context from a host hook ([below](#automatic-mode-hooks)) |
 | `hook-log --session ID` | What the hooks injected in a session (counts only) |
 | `hook-stats [--json]` | Every saved hook session (one with no events and nothing remembered is skipped) reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
-| `prompt --workspace DIR TASK...` | Prints the task followed by its context, for clients without hooks |
+| `prompt --workspace DIR [--budget N] TASK...` | Prints the task followed by its context, for clients without hooks (`--budget` defaults to `context_for_task`'s 2500) |
 | `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
 | `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
@@ -242,8 +242,8 @@ say so (`semantic_skipped`).
 `--jev-timeout-ms 15000` per attempt, `--jev-deadline-ms 8000` for the whole discovery
 (`interrupted` after it), `--jev-max-candidates 16`, `--jev-lookahead-max 32` (0 turns the
 lookahead off), `--jev-max-source-bytes` (source rendered, not evaluated), `--jev-no-cache`,
-`--jev-model` (pinned; `jev-latest` is never a default). Transient failures are retried by
-stage, a 429 waits for its `Retry-After`, and a client cancel aborts the HTTP requests.
+`--jev-model` (pinned; `jev-latest` is never a default), `--jev-provider typesafe` (the only
+provider). Transient failures are retried by stage, a 429 waits for its `Retry-After`, and a client cancel aborts the HTTP requests.
 Decisions are cached in memory, keyed by digests only.
 
 **Status:** `online` in `ripwire-broker://status` carries the
@@ -278,6 +278,11 @@ hook contract, so the same command serves both:
   detection switches off for the rest of the session (no more `git` calls, and `Bash` edits are left to the
   `Stop` gate); a new session tries again. A change made by another process while the
   command ran is blamed on the command (the fallback only; the host's list is exact). Codex is unchanged.
+- **Bursts of edits:** an edit within `--edit-interval-ms` (default 1000) of the previous answer asks nothing;
+  its files are held and ride along with the next edit past the window, so news is delayed by one edit at most.
+  Only the first 32 distinct files of a burst are held; the rest are not forwarded, and `Stop` covers them and
+  the tail of the turn. `--edit-interval-ms 0` answers every edit (D-106).
+- **Budgets:** the hooks ask for 1500 tokens at the prompt and 800 after an edit.
 - **D-129:** edits made through the Bash tool now reach the edit hook in git workspaces. Re-run
   `ripwire-broker install claude-code --workspace DIR --hooks --write` to add `Bash` to the
   `PostToolUse` matcher; older installs keep working without it.
@@ -450,6 +455,9 @@ cargo build --release
   `transcripts/`, which holds the agent's full session, repository code included. Keep it local.
 - **Bars:** each one reads `passa`, `falha` or `insuficiente`. They stay `insuficiente` below 30 tasks in 3
   repositories.
+- **Binaries and timeouts:** `--broker BIN` defaults to the `ripwire-broker` next to `ripwire-eval` (then
+  `PATH`), `--ripwire BIN` to `ripwire` on `PATH`. `--timeout-s` caps one agent run (default 1800) and
+  `--check-timeout-s` one setup or check (default 600, also for `validate`).
 - **Cost:** every run is a paid agent session. `--agent-cmd` replaces the whole agent command (split on
   whitespace, never through a shell); to cap each Claude Code run, pass the default command with
   `--max-budget-usd N` added. `ripwire-eval --help` prints the default.
@@ -466,8 +474,11 @@ cargo run --release --example spike -- /path/to/repo "task"   # Phase 0 measurem
 
 The e2e and upstream tests are skipped when `ripwire` is not on `PATH`. Fixtures in
 `tests/fixtures/ripwire/` were recorded from ripwire 0.6.4. Fixtures in `tests/fixtures/hooks/` are
-real hook payloads from Claude Code 2.1.283 and Codex 0.157.1. `tests/fixtures/jev/` keeps the digests and
-probabilities of a live exchange with `jev-1.13.0`, never source.
+real hook payloads from Claude Code 2.1.283 and Codex 0.157.1; the two `Bash` ones come from Claude Code
+2.1.285 (D-129, D-131), as does the status line payload in `tests/fixtures/statusline/` (D-128). Paths
+in them are placeholders (`__WORKSPACE__`, `__TRANSCRIPT__`, `__SCRATCHPAD__`). `tests/fixtures/eval/` holds a
+synthetic `stream-json` transcript. `tests/fixtures/jev/` keeps the digests and probabilities of a live
+exchange with `jev-1.13.0`, never source.
 
 ## License
 

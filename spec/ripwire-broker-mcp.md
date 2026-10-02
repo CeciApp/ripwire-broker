@@ -498,6 +498,12 @@ foi injetado.
 - `#ripwire-off` / `#ripwire-on` fazem o opt-out por sessão. O marcador só vale como palavra
   inteira no fim ou no começo do prompt; citado no meio do texto não altera nada
   ([D-125](changelog.md#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt)).
+- Uma rajada de edições é uma pergunta só
+  ([D-106](changelog.md#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição)): uma
+  edição a menos de `--edit-interval-ms` (padrão 1000) da resposta anterior não pergunta nada; os
+  arquivos ficam guardados e vão junto com a próxima edição depois da janela. Só os 32 primeiros
+  arquivos distintos de uma rajada são guardados; os demais não seguem, e o gate do `Stop` os cobre.
+  `0` responde a cada edição. Os hooks pedem 1500 tokens no prompt e 800 depois de uma edição.
 - Cada injeção mostra um `systemMessage`, e o `hook-log` mostra contagens.
 - `ripwire-broker prompt` é o wrapper.
 - **Edições pelo shell (D-129).** No Claude Code o PostToolUse também casa `Bash`. Antes de subir o

@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
-Estado em 2026-10-01, até o
-[D-132](spec/changelog.md#d-132--documentação-alinhada-ao-d-131).
+Estado em 2026-10-02, até o
+[D-133](spec/changelog.md#d-133--auditoria-da-documentação-contra-o-código).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -65,7 +65,7 @@ cargo fmt --check
   `online*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-132, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-133, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.

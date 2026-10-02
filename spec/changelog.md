@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-02 12:15 | Auditoria da documentação contra o código: README e PRD §8.4 ganham a coalescência de edições do D-106 (`--edit-interval-ms`) e os orçamentos dos hooks; o README ganha `prompt --budget`, `--jev-provider`, as flags de binário e prazo do `ripwire-eval` e a procedência atual das fixtures | [D-133](#d-133--auditoria-da-documentação-contra-o-código) |
 | 2026-10-01 23:40 | Documentação alinhada ao D-131: o exemplo `integrations/claude-code/settings.json` ganha `Bash` no matcher do `PostToolUse` (como o `install` grava desde o D-129), o PRD deixa de dar a validação da barra como pendente, o `handoff.md` vai até o D-131, com o campo `agent` como pendência, e o diagrama ganha a barra de status e o `git` | [D-132](#d-132--documentação-alinhada-ao-d-131) |
 | 2026-10-01 23:16 | Fecha a pendência `bashEditDiff` do D-129: a lista de arquivos que o próprio Claude Code manda no `PostToolUse` do Bash substitui a impressão do git; depois do primeiro payload com o campo, a sessão não chama mais o `git`, e a impressão fica para versões que não o mandam | [D-131](#d-131--a-lista-do-próprio-claude-code-substitui-a-impressão-do-git) |
 | 2026-10-01 23:00 | Fecha as divergências 5 e 6 do D-128: no `--detail`, `último contexto` ganha a própria idade e a do snapshot vira `visto há`; no primeiro prompt, um envelope só com limitações não é injetado nem conta em `inj` | [D-130](#d-130--duas-idades-no-detalhe-e-o-primeiro-prompt-sem-conteúdo-não-é-injetado) |
@@ -5475,3 +5476,40 @@ Revisão da documentação e do diagrama depois do D-128 a D-131. Nenhuma mudan�
 - **Correção de uma afirmação minha:** eu disse que o archify não estava instalado nesta máquina.
   Estava, mas como skill em `~/.agents/skills/archify/`, fora do `PATH` e dos plugins onde procurei.
 - **Planos (`spec/plan/`) não foram mexidos:** são o registro do que foi planejado, não o estado.
+
+## D-133 — Auditoria da documentação contra o código
+
+**Data:** 2026-10-02. Pedido do mantenedor: verificar se a documentação está desatualizada em relação
+ao código. Nenhuma mudança de código.
+
+**Método.** Cada flag do `--help` dos dois binários procurada no README e no PRD; as variáveis de
+ambiente lidas pelo código; os parâmetros e orçamentos das tools em `src/mcp.rs`; os tipos de
+limitação e de `source.basis` citados no skill; as constantes de `src/hook.rs`, `src/worktree.rs`,
+`src/statusline.rs` e `src/online/` contra os números do README e do §8.4; as fixtures em
+`tests/fixtures/`; e a contagem de testes (padrão **462 passados, 2 ignorados**; com `online`
+**476 passados, 4 ignorados**, igual ao `handoff.md`).
+
+**O que estava faltando ou desatualizado:**
+
+- **`--edit-interval-ms` não aparecia em lugar nenhum fora do changelog.** O README e o §8.4 diziam
+  que cada edição recebe `context_after_edit`, mas desde o
+  [D-106](#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) uma edição dentro da
+  janela (1000 ms) não pergunta nada e os arquivos vão com a próxima; só os 32 primeiros arquivos
+  distintos da rajada são guardados, e os demais ficam para o `Stop` (o comentário de
+  `MAX_HELD_EDITS` diz "as mais recentes", mas o código guarda as primeiras). Os dois ganharam o parágrafo,
+  com os orçamentos dos hooks (1500 no prompt, 800 depois de uma edição), que também não estavam lá.
+- **README, fixtures:** dizia que as de `tests/fixtures/hooks/` vinham do Claude Code 2.1.283. As
+  duas de `Bash` vêm da 2.1.285 (D-129, D-131), e não citava `tests/fixtures/statusline/` (D-128) nem
+  `tests/fixtures/eval/` (sintética).
+- **README, `ripwire-eval`:** `--broker`, `--ripwire`, `--timeout-s` (1800) e `--check-timeout-s`
+  (600) só estavam no `--help`.
+- **README:** `prompt --budget N` e `--jev-provider typesafe` (este já estava no §23.6).
+
+**Conferido e sem mudança:** variáveis de ambiente, versão mínima do ripwire (0.6.4), toolchain
+(1.98.1), orçamentos e pisos das tools (2500/1500/1800, 256 e 512 com `--online`), limites do modo
+online, da barra de status e da impressão do git, os exemplos de `integrations/` e o skill. Flags que
+só o README documenta (`--codex-home`, `--redact-workspace`, `--log-refs`, `--summarizer-timeout-ms`)
+ficam assim: o PRD não é referência de CLI.
+
+**Nota de método:** o primeiro laço que comparou as flags usou `for f in $flags` no zsh, que não
+divide a variável, e respondeu "nada faltando". É a armadilha já listada no `handoff.md`.
