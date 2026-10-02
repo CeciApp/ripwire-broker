@@ -271,9 +271,10 @@ hook contract, so the same command serves both:
   dirty files (`git status`, plus each file's mtime and size) with the one from the previous hook. A `Bash`
   command that changed files gets `context_after_edit` for them (at most 50); a read-only one starts nothing and
   counts no event. Only changed files inside the workspace count, even when the workspace is a subdirectory of
-  the repository. Outside git it stays silent. `git` gets 500 ms; if it is slower, or `git status` lists more
-  than 5,000 entries, detection switches off for the rest of the session (no more `git` calls, and `Bash`
-  edits are left to the `Stop` gate); a new session tries again. A change made by another process while the
+  the repository. Outside git it stays silent. `git` gets 500 ms; if it is slower, if `git status` lists more
+  than 5,000 entries, or if two fingerprints in a row take over 50 ms (a Linux-sized tree takes ~240 ms),
+  detection switches off for the rest of the session (no more `git` calls, and `Bash` edits are left to the
+  `Stop` gate); a new session tries again. A change made by another process while the
   command ran is blamed on the command. Codex is unchanged.
 - **D-129:** edits made through the Bash tool now reach the edit hook in git workspaces. Re-run
   `ripwire-broker install claude-code --workspace DIR --hooks --write` to add `Bash` to the
