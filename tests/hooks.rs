@@ -39,6 +39,39 @@ fn injected(out: &Value) -> Value {
 }
 
 #[tokio::test]
+async fn a_first_prompt_with_only_limitations_injects_nothing_but_records_the_analysis() {
+    // ripwire finds nothing for this task: the envelope carries a limitation and no content.
+    let (b, _fake, ws) = hook_broker(FakeUpstream::new().answer_text("explore", "")).await;
+    let input = event("claude_code_user_prompt_submit", ws.path());
+    let mut state = SessionState::default();
+    ripwire_broker::statusline_state::bind(&mut state, "k");
+
+    let out = hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &input,
+        &b,
+        &mut state,
+        &Policy::default(),
+    )
+    .await;
+
+    assert!(
+        out.is_none(),
+        "no items, tests, risks or notes: nothing to inject: {out:?}"
+    );
+    assert_eq!(state.stats.injections, 0, "not counted in `inj`");
+    assert_eq!(state.stats.events, 1);
+    assert!(state.log.is_empty(), "hook-log lists injections only");
+    let snap = projection::project(&state, 1).unwrap();
+    assert_eq!(
+        snap.last_analysis.map(|a| a.status),
+        Some(AnalysisStatus::Unknown),
+        "the bar still shows `última: incerta`"
+    );
+}
+
+#[tokio::test]
 async fn the_first_prompt_gets_task_context_as_additional_context() {
     let (b, fake, ws) =
         hook_broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;

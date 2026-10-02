@@ -493,7 +493,8 @@ foi injetado.
 - O comando `ripwire-broker hook` atende o Claude Code e o Codex, que compartilham o
   contrato de hook.
 - O contexto é injetado no primeiro prompt e depois de edições. O gate de `Stop` é
-  opt-in (`--gate`).
+  opt-in (`--gate`). No primeiro prompt, um envelope sem itens, testes, riscos ou notas (só
+  limitações) não é injetado nem conta em `inj`; a análise ainda chega à barra (D-130).
 - `#ripwire-off` / `#ripwire-on` fazem o opt-out por sessão. O marcador só vale como palavra
   inteira no fim ou no começo do prompt; citado no meio do texto não altera nada
   ([D-125](changelog.md#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt)).
@@ -2552,7 +2553,7 @@ Omitir effort ausente, nulo ou desconhecido, sem assumir um padrão do modelo. A
 
 #### 24.5.2 Modo detalhado opcional
 
-`--detail` acrescenta, se couberem, `entregues N`, `reuso 42%`, `último contexto ~1,2k tok` e `há 20s`. A taxa usa `session_hits / (session_hits + delivered)`; denominador zero resulta em ausência do segmento.
+`--detail` acrescenta, se couberem, `entregues N`, `reuso 42%`, `último contexto ~1,2k tok há 5min` (a idade da última entrega, de `last_delivery.at`) e `visto há 20s` (a idade do snapshot, de `updated_at`; D-130). A taxa usa `session_hits / (session_hits + delivered)`; denominador zero resulta em ausência do segmento.
 
 Tokens do último contexto vêm de `Envelope.budget.estimated_tokens`, atualmente estimados pelo tamanho do JSON serializado dividido por quatro e arredondado para cima. Rotular como estimativa e somente exibir quando houve entrega de contexto/bloqueio. Não interpretar `requested_tokens - estimated_tokens` como economia: o primeiro valor é orçamento, não uma leitura de referência.
 
