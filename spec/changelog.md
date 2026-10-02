@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 23:00 | Fecha as divergências 5 e 6 do D-128: no `--detail`, `último contexto` ganha a própria idade e a do snapshot vira `visto há`; no primeiro prompt, um envelope só com limitações não é injetado nem conta em `inj` | [D-130](#d-130--duas-idades-no-detalhe-e-o-primeiro-prompt-sem-conteúdo-não-é-injetado) |
 | 2026-10-01 21:50 | Edições feitas pelo shell chegam ao hook de edição: o `PostToolUse` do Claude Code casa `Bash`, e uma impressão digital do `git status` decide, antes de subir o ripwire, se o comando mudou arquivos; só leitura não sobe o ripwire; uma árvore lenta ou suja demais desliga a detecção pela sessão; fecha a divergência 2 do D-128; 32 testes novos (457 padrão, 471 com `online`) | [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição) |
 | 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (a 1 e a 3 eram erros do roteiro; a 2 é um ponto cego, edições por Bash não chegam ao hook; a 4 é conforme por desenho; a 5 é rótulo ambíguo; a 6 conta certo, mas injeta envelope só com limitações; decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
@@ -5167,7 +5168,8 @@ mostrava `incerta`; o `Stop` (`attention_required`) trocou para `atenção`.
    eram desde o último hook (um `Stop`); a última entrega tinha 290 s. Mas o §24.5.2 põe `há` logo
    depois de `último contexto`, e a leitura natural é "contexto entregue há 18 s". **Decisão
    pendente no §24.5.2:** trocar o rótulo (`visto há`/`atualizado há`), mudar a posição, ou somar a
-   idade da entrega (`last_delivery.at`, que o snapshot já guarda) ao `último contexto`.
+   idade da entrega (`last_delivery.at`, que o snapshot já guarda) ao `último contexto`. **Fechada no
+   [D-130](#d-130--duas-idades-no-detalhe-e-o-primeiro-prompt-sem-conteúdo-não-é-injetado): as duas idades, cada uma com nome.**
 6. **Envelope sem itens conta em `inj` (6): a contagem está certa; a questão é se ele deve ser
    injetado.** O `UserPromptSubmit` da segunda rodada entregou `context_for_task · 0 items · ~186
    tokens` (`delivered: 0`), e a barra mostra `inj 1`. O envelope não era vazio: o transcript mostra
@@ -5177,6 +5179,7 @@ mostrava `incerta`; o `Stop` (`attention_required`) trocou para `atenção`.
    limitações, por isso 0. **Questão aberta para os hooks:** o primeiro prompt injeta o que o
    `context_for_task` devolver, sem filtro, enquanto o PostToolUse só injeta com `has_news`. Um
    envelope só com limitações (~186 tokens para dizer "não achei nada") pode ser sinal útil ou ruído.
+   **Fechada no [D-130](#d-130--duas-idades-no-detalhe-e-o-primeiro-prompt-sem-conteúdo-não-é-injetado): não é injetado.**
 
 **Observações do roteiro:**
 
@@ -5350,3 +5353,30 @@ contagem). Com o desligamento no portão de 50 ms: **455 passados, 2 ignorados**
 passados, 4 ignorados** (3 testes novos). Com as correções da revisão do CodeRabbit: **457 passados, 2 ignorados**;
 com `online` **471 passados, 4 ignorados** (2 testes novos). CA-10
 (`cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`) sem saída.
+
+## D-130 — Duas idades no detalhe, e o primeiro prompt sem conteúdo não é injetado
+
+**Data:** 2026-10-01. **Pedido do mantenedor.** Fecha as divergências 5 e 6 do
+[D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real), com a opção que ele escolheu em
+cada uma.
+
+**Divergência 5 — as duas idades, cada uma com nome.** O `há …` do `--detail` era a idade do snapshot
+(`updated_at`, gravado a cada hook), mas, logo depois de `último contexto`, lia-se como a idade da
+entrega. Agora são dois segmentos: `último contexto ~523 tok há 290s` (de `last_delivery.at`) e
+`visto há 18s` (de `updated_at`). `dados antigos` continua seguindo a idade do snapshot. O §24.5.2 e o
+README mudaram junto.
+
+**Divergência 6 — o primeiro prompt sem conteúdo não é injetado.** O primeiro prompt injetava o que o
+`context_for_task` devolvesse; um envelope só com limitações (o `route_uncertain` da validação, ~186
+tokens) custava tokens e não dava nada para agir. Agora, sem itens, testes, riscos nem notas
+(`carries_content`), o hook fica em silêncio, como o PostToolUse sem `has_news`: nada é injetado, nada
+conta em `inj`, nada entra no `hook-log`. A análise (`last_analysis`, `unknown`) é gravada antes, e a
+barra ainda mostra `última: incerta`. O evento continua contando em `events`.
+
+| Mudança | Teste | Mutação (pega) |
+| --- | --- | --- |
+| `último contexto … há <idade da entrega>` e `visto há <idade do snapshot>` | `detail_adds_delivered_reuse_last_context_and_age` (entrega a 970, snapshot a 1.000, agora 1.020: `há 50s · visto há 20s`), `token_counts_show_whole_below_a_thousand_and_drop_a_zero_decimal`, `age_counts_seconds_minutes_and_hours_and_a_future_stamp_is_zero` (vermelhos antes) | idade da entrega calculada do `updated_at` — pega |
+| `UserPromptSubmit` sem conteúdo → silêncio, análise gravada | `a_first_prompt_with_only_limitations_injects_nothing_but_records_the_analysis` (vermelho antes: injetava) | sempre injetar — pega; tirar só o termo das notas de `carries_content` — **não pega** (nenhum teste monta um envelope só com notas) |
+
+**Contagem:** padrão **458 passados, 2 ignorados**; com `online` **472 passados, 4 ignorados** (eram 457
+e 471: 1 teste novo; os 3 do detalhe foram ajustados). CA-10 sem saída.
