@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (a 1 e a 3 eram erros do roteiro; a 2 é um ponto cego, edições por Bash não chegam ao hook; a 4 é conforme por desenho; a 5 é rótulo ambíguo; a 6 conta certo, mas injeta envelope só com limitações; decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
 | 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
@@ -4658,6 +4659,7 @@ O plano de [`spec/plan/status-bar-plan.md`](plan/status-bar-plan.md) foi executa
 tarefa por vez, cada uma com revisão antes da seguinte, no branch `status-bar` (base `3505e67`). O
 contrato é o §24 do PRD. **Duas coisas ficam pendentes e não foram feitas:** a validação manual numa
 sessão real do Claude Code e a fixture de um payload real do `statusLine` (seção própria abaixo).
+**Feitas no [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real).**
 
 ### O que entrou
 
@@ -4821,6 +4823,9 @@ de detalhe não cabia em 100 colunas) deu 2,6/3,1/5,2, 2,5/2,8/29,3 (um pico iso
 ms (p50/p95/max). A medição não inclui o tempo de o Claude Code desenhar a barra.
 
 ### Validação manual e fixture de payload real: PENDENTES
+
+> Feitas depois, no [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real). O texto
+> abaixo fica como estava.
 
 **Não foram feitas.** O mantenedor roda a validação (spec §10): instalar com
 `--hooks --statusline --write` numa pasta de teste, abrir o Claude Code, mandar um prompt, editar um
@@ -5090,3 +5095,109 @@ O PRD §24.13 D5 e o README documentam a regra do nome do programa.
 **Contagem:** padrão **419 passados, 2 ignorados**; com `online` **433 passados, 4 ignorados**.
 CA-10 sem saída.
 
+## D-128 — Validação manual da barra e fixture de payload real
+
+**Data:** 2026-10-01. **Pedido do mantenedor.** Fecha as duas pendências do
+[D-123](#d-123--a-barra-de-status-é-implementada): a validação manual (§24.10) e a fixture de um
+payload real do `statusLine`. Roteiro e resultados anotados em `statusline-manual/ROTEIRO.md` (pasta
+local, não versionada).
+
+**Ambiente:** Claude Code **2.1.285**, macOS, binário release deste repositório, workspace de teste
+`statusline-manual/ws/` (repositório git com `src/lib.rs` e `Cargo.toml`), hooks instalados com
+`install claude-code --hooks --statusline --write`. O settings global do mantenedor tem barra própria,
+então o `install` não escreveu a barra (D5, como esperado) e a barra de teste entrou como override em
+`ws/.claude/settings.local.json`: primeiro o `capture.sh` (grava o stdin e repassa ao broker), depois,
+na segunda rodada, o comando que o `install` imprime.
+
+**Resultado:** nos passos 3.1 a 3.6 a barra, o snapshot em `statusline/` e o `hook-log` bateram
+(`inj`, `delivered`, `estimated_tokens`, `session_hits`, `opted_out`, `last_analysis.status`). O
+payload real tem `effort.level` (string, `"medium"` → `mid`), `workspace.project_dir` (string),
+`model.id`/`model.display_name` e `context_window.used_percentage` (número) com os nomes e tipos de
+§24.2/§24.8. `agent` não apareceu (sessão sem `--agent`): **a parte de agente do §24.8 segue sem
+prova com payload real.**
+
+**Segunda rodada (passo 6), sem o wrapper:** override com o comando que o `install` imprime
+(`'<binário>' statusline --workspace '<ws>' --color never`), sessão nova `2d463a40…`. A barra ficou
+`rw-brkr · Opus 5.5 mid · ctx 6% · hooks on · última: atenção · inj 1 · não reenviados 0`, igual ao
+snapshot novo dessa sessão (um por sessão × workspace) e ao mesmo comando rodado à mão; nenhum payload
+novo foi gravado. Antes de a barra se redesenhar, o mantenedor viu `última: incerta`, e estava
+certo: o `UserPromptSubmit` também grava `last_analysis` (com o `status` do envelope), e o envelope
+desse prompt tinha `status: "unknown"` (ver a divergência 6). Entre o prompt e o `Stop` a barra
+mostrava `incerta`; o `Stop` (`attention_required`) trocou para `atenção`.
+
+**Divergências (registradas, nenhuma corrigida; decisões pendentes):**
+
+1. **`hook-log` não mostra a edição (3.2): o roteiro estava errado; não é divergência do broker.**
+   O `hook-log` lista injeções por definição (README: "What the hooks injected in a session",
+   "lists the last 5 injections"): imprime `state.log`, que só o `record` preenche, para toda
+   resposta que chega ao modelo, PostToolUse incluído. Uma edição aparece como linha `PostToolUse`
+   quando injeta (`tests/hooks.rs` exige o log `[1, 2]` de prompt e edição); sem novidade
+   (`has_news`), só conta em `stats.events`, como na reprodução das fixtures. Na validação nem isso
+   podia acontecer: as edições foram por Bash e o hook não rodou (divergência 2). O passo 3.2 do
+   roteiro foi corrigido.
+2. **`stats.events` sobe 2 por turno mesmo com edição (3.1, 3.2): não é defeito da contagem;
+   é um ponto cego.** Contagem 2 → 4 → 6 → 8. O transcript da sessão mostra que o Claude editou
+   `src/lib.rs` pela ferramenta Bash (`echo '…' >> src/lib.rs`), não pelo Edit. O PostToolUse do
+   broker só casa `Edit|Write|MultiEdit|NotebookEdit` (`src/install.rs`), então o Claude Code nem o
+   chamou; os `PostToolUse:Bash` do transcript são de hooks globais do mantenedor. A contagem está
+   certa: as fixtures de `tests/fixtures/hooks/` reproduzidas num state-dir novo dão 1 → 2 → 3
+   (prompt, PostToolUse de Edit, `Stop`). **Questão aberta para o §24/hooks:** edição feita por shell
+   (`echo >>`, `sed -i`, formatadores, geradores) é invisível ao broker, e o Claude escolheu Bash
+   sozinho para uma edição trivial. Ou o matcher passa a incluir `Bash` (e a edição é detectada pela
+   árvore do git), ou o limite fica documentado. O roteiro (passo 3.2) passou a pedir o Edit
+   explicitamente.
+3. **`last_analysis.event` é `"Stop"`, maiúsculo; o roteiro conferia `"stop"`: erro do roteiro.**
+   O snapshot do §24.6.3 traz `"event": "Stop"`; `event_name` (`src/hook.rs`) usa os nomes de evento
+   do próprio Claude Code (`UserPromptSubmit`, `PostToolUse`, `Stop`), os mesmos do `hook-log`; o
+   `snap` de `tests/statusline.rs` usa `"Stop"`. O passo 3.3 do roteiro foi corrigido.
+4. **`hooks off` mantém `última: atenção` (3.4): conforme, por desenho; não é divergência.** O
+   §24.5.3 preserva "pausa dos hooks e alerta da última análise" juntos, o D2 põe `hooks off` e
+   `última: atenção`/`erro` entre os essenciais, e o §24.5.2 resolve a leitura como estado atual
+   pelo rótulo ("um resultado antigo sempre aparece como `última`, nunca como saúde atual"). O
+   opt-out não apaga `last_analysis`, e testes exigem isso
+   (`lines_fit_40_80_and_120_columns_and_shed_in_order`, `extreme_widths_keep_alerts_then_the_prefix`,
+   `paths_that_run_no_analysis_leave_the_last_analysis_untouched`). Uma `atenção` aponta obrigação
+   aberta que a pausa não resolve; escondê-la iria contra "incerteza não é escondida". O exemplo
+   de `hooks off` do §24.5 não tem `última:` só porque não tem análise.
+5. **`há …` do `--detail` parece a idade da entrega, mas é a da observação (3.6): o código segue a
+   spec; a ambiguidade é de apresentação.** `há` é `now - updated_at`, e `updated_at` é gravado a
+   cada hook do broker que roda (prompt, edição, `Stop`, opt-out/opt-in), como o §24.5.2 pede ("a
+   idade indica o momento da observação"). Na saída `último contexto ~523 tok · há 18s`, os 18 s
+   eram desde o último hook (um `Stop`); a última entrega tinha 290 s. Mas o §24.5.2 põe `há` logo
+   depois de `último contexto`, e a leitura natural é "contexto entregue há 18 s". **Decisão
+   pendente no §24.5.2:** trocar o rótulo (`visto há`/`atualizado há`), mudar a posição, ou somar a
+   idade da entrega (`last_delivery.at`, que o snapshot já guarda) ao `último contexto`.
+6. **Envelope sem itens conta em `inj` (6): a contagem está certa; a questão é se ele deve ser
+   injetado.** O `UserPromptSubmit` da segunda rodada entregou `context_for_task · 0 items · ~186
+   tokens` (`delivered: 0`), e a barra mostra `inj 1`. O envelope não era vazio: o transcript mostra
+   `status: "unknown"` e uma limitação `route_uncertain` ("no trace, symbol, change or docs signal
+   …; pass mode … or name a symbol"). Ele chegou ao modelo, e `record` (`src/hook.rs`) conta toda
+   resposta que chega, como o §24 define `inj`; `delivered` soma itens, testes, riscos e notas, não
+   limitações, por isso 0. **Questão aberta para os hooks:** o primeiro prompt injeta o que o
+   `context_for_task` devolver, sem filtro, enquanto o PostToolUse só injeta com `has_news`. Um
+   envelope só com limitações (~186 tokens para dizer "não achei nada") pode ser sinal útil ou ruído.
+
+**Observações do roteiro:**
+
+- O `refreshInterval: 1` do settings global é herdado pelo override local do `statusLine` e gerou um
+  payload por segundo; `"refreshInterval": 3600` no override resolveu. O roteiro (passo 1) deve dizer isto.
+- Logo ao abrir, a barra já mostrava `hooks on · última: pronta`, não `hooks sem dados`: havia um
+  `Stop` gravado para a sessão. Coerente com o código; o roteiro pode citar.
+
+**Fixture:** `tests/fixtures/statusline/claude_code.json`, o último payload da sessão (depois do 3.5),
+em 1 espaço de indentação como as fixtures de hooks. `cwd`, `workspace.current_dir` e
+`workspace.project_dir` viram `__WORKSPACE__`, `transcript_path` vira `__TRANSCRIPT__` e
+`scratchpad_dir` vira `__SCRATCHPAD__`; sem caminho, nome de usuário ou e-mail. Os outros campos
+(custo, `prompt_cache`, `rate_limits`, `session_name`) ficam como vieram, para o teste ler o payload
+inteiro.
+
+**Teste novo:** `the_captured_claude_code_payload_reads_its_own_projection` (`tests/statusline.rs`)
+publica um snapshot para o `session_id` da fixture e roda `statusline` **sem** `--workspace`: a raiz
+sai de `workspace.project_dir` e a barra é
+`rw-brkr · Opus 5.5 mid · ctx 6% · hooks on · última: atenção · inj 7 · não reenviados 18`.
+Os JSONs sintéticos existentes **não** foram trocados: `SONNET` e o de
+`the_manual_example_of_the_spec` conferem os exemplos escritos na spec, e os outros testam bordas
+(percentual fora da faixa, tipos errados, Unicode, agente) que um payload real não cobre.
+
+**Contagem:** padrão **420 passados, 2 ignorados**; com `online` **434 passados, 4 ignorados**
+(eram 419 e 433).
