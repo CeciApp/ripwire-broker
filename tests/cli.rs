@@ -865,7 +865,7 @@ fn install_claude_code_merges_idempotently_and_keeps_foreign_keys() {
     }
     assert_eq!(
         s["hooks"]["PostToolUse"][0]["matcher"],
-        "Edit|Write|MultiEdit|NotebookEdit"
+        "Edit|Write|MultiEdit|NotebookEdit|Bash"
     );
     assert_eq!(
         std::fs::read_to_string(mcp.with_extension("json.bak")).unwrap(),
@@ -901,6 +901,37 @@ fn install_claude_code_merges_idempotently_and_keeps_foreign_keys() {
         std::fs::read_to_string(mcp.with_extension("json.bak")).unwrap(),
         foreign_mcp,
         "the backup keeps the user's original"
+    );
+}
+
+#[test]
+fn reinstalling_over_an_old_matcher_adds_bash() {
+    let ws = tempfile::tempdir().unwrap();
+    let settings = ws.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let old = serde_json::json!({"hooks": {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [{"type": "command", "command": "'/old/ripwire-broker' hook claude-code post-tool-use --workspace 'x'"}]}]}});
+    std::fs::write(&settings, old.to_string()).unwrap();
+
+    let (code, _, err) = run(
+        &[
+            "install",
+            "claude-code",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--hooks",
+            "--write",
+        ],
+        "",
+    );
+
+    assert_eq!(code, 0, "{err}");
+    let s = read_json(&settings);
+    let groups = s["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "ours replaced, not duplicated: {s}");
+    assert_eq!(
+        groups[0]["matcher"],
+        "Edit|Write|MultiEdit|NotebookEdit|Bash"
     );
 }
 
