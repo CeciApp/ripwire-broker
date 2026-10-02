@@ -1,5 +1,7 @@
 //! The working-tree fingerprint (D-129): which files a shell command changed, from `git status`.
-use ripwire_broker::worktree::{Fingerprint, MAX_FINGERPRINT_ENTRIES, changed, fingerprint};
+use ripwire_broker::worktree::{
+    Fingerprint, MAX_FINGERPRINT_ENTRIES, Unusable, changed, fingerprint, fingerprint_within,
+};
 use std::path::Path;
 use std::process::Command;
 
@@ -44,7 +46,7 @@ fn rewrite(path: &Path, text: &str) {
 #[test]
 fn a_clean_tree_has_an_empty_fingerprint() {
     let dir = repo();
-    assert_eq!(fingerprint(dir.path()), Some(Fingerprint::default()));
+    assert_eq!(fingerprint(dir.path()), Ok(Fingerprint::default()));
 }
 
 #[test]
@@ -100,18 +102,30 @@ fn ignored_files_are_not_seen() {
 #[test]
 fn a_directory_outside_git_has_no_fingerprint() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(fingerprint(dir.path()), None);
+    assert_eq!(fingerprint(dir.path()), Err(Unusable::NotGit));
+    assert!(!Unusable::NotGit.switches_off(), "failing fast is cheap");
 }
 
 #[test]
-fn too_many_dirty_files_have_no_fingerprint() {
+fn too_many_dirty_files_are_too_dirty() {
     let dir = repo();
     let many = dir.path().join("many");
     std::fs::create_dir(&many).unwrap();
     for i in 0..=MAX_FINGERPRINT_ENTRIES {
         std::fs::write(many.join(format!("{i}.txt")), "x").unwrap();
     }
-    assert_eq!(fingerprint(dir.path()), None);
+    assert_eq!(fingerprint(dir.path()), Err(Unusable::TooDirty));
+    assert!(Unusable::TooDirty.switches_off());
+}
+
+#[test]
+fn a_spent_budget_is_too_slow() {
+    let dir = repo();
+    assert_eq!(
+        fingerprint_within(dir.path(), std::time::Duration::ZERO),
+        Err(Unusable::TooSlow)
+    );
+    assert!(Unusable::TooSlow.switches_off());
 }
 
 // Review focus 1
@@ -167,7 +181,7 @@ fn a_held_index_lock_does_not_stop_the_fingerprint() {
     let lock = dir.path().join(".git/index.lock");
     std::fs::write(&lock, "").unwrap();
     let index = std::fs::read(dir.path().join(".git/index")).unwrap();
-    assert!(fingerprint(dir.path()).is_some());
+    assert!(fingerprint(dir.path()).is_ok());
     assert_eq!(
         std::fs::read(dir.path().join(".git/index")).unwrap(),
         index,

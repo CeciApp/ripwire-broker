@@ -63,6 +63,11 @@ pub struct SessionState {
     /// changed (D-129); absent outside git and in states saved before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<crate::worktree::Fingerprint>,
+    /// Set when git was too slow or the tree too dirty to fingerprint: the rest of the session
+    /// asks git nothing and a shell command has no baseline, so the cost is paid once (D-129).
+    /// A new session tries again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktree_off: bool,
     /// The files this event's shell command changed, found by `run` before ripwire starts.
     /// Belongs to one event: never saved.
     #[serde(skip)]
@@ -592,17 +597,29 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     };
     // A shell command is an edit only if the working tree says so, and asking costs a `git
     // status`, not a ripwire (D-129). Every Claude Code event but `Stop` moves the baseline, so a
-    // command is never blamed for an edit made before it.
+    // command is never blamed for an edit made before it. A tree that was too slow or too dirty
+    // switches this off for the session: no more git, and a shell command has no baseline.
     if args.host == Host::ClaudeCode && args.event != Event::Stop {
         let before = state.worktree.take();
-        state.worktree = root.as_deref().and_then(crate::worktree::fingerprint);
+        let was_off = state.worktree_off;
+        if let (Some(r), false) = (root.as_deref(), state.worktree_off) {
+            match crate::worktree::fingerprint(r) {
+                Ok(print) => state.worktree = Some(print),
+                Err(why) => state.worktree_off = why.switches_off(),
+            }
+        }
         if is_shell(args.event, &input) {
-            let changed = match (&before, &state.worktree) {
+            let mut changed = match (&before, &state.worktree) {
                 (Some(b), Some(a)) => crate::worktree::changed(b, a),
                 _ => vec![],
             };
+            // The fingerprint covers the whole repository; a workspace in a subdirectory only
+            // cares about its own files, and a change elsewhere must not start ripwire.
+            if let Some(r) = &root {
+                changed.retain(|p| std::path::Path::new(p).starts_with(r));
+            }
             if changed.is_empty() || state.opted_out {
-                if state.worktree != before {
+                if state.worktree != before || state.worktree_off != was_off {
                     finish(&state);
                 }
                 return None;

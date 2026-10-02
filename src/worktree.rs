@@ -7,8 +7,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-/// Past this many dirty files the tree is "too dirty to follow" and has no fingerprint, so the
-/// session state never grows with it.
+/// Past this many `git status` entries the tree is "too dirty to follow" and has no fingerprint,
+/// so the session state never grows with it.
 pub const MAX_FINGERPRINT_ENTRIES: usize = 5000;
 
 /// For both git calls together: a hook must never hold the host up for long.
@@ -35,12 +35,35 @@ pub struct Fingerprint {
     pub entries: Vec<Entry>,
 }
 
-/// The fingerprint of the repository holding `root`; `None` outside git, when git fails or is
-/// slow, or past `MAX_FINGERPRINT_ENTRIES`.
-pub fn fingerprint(root: &Path) -> Option<Fingerprint> {
-    let deadline = Instant::now() + GIT_TIMEOUT;
+/// Why a tree has no fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unusable {
+    /// Not a git repository, or git is missing or failed: cheap to find out again.
+    NotGit,
+    /// git did not answer within the budget.
+    TooSlow,
+    /// More than `MAX_FINGERPRINT_ENTRIES` entries.
+    TooDirty,
+}
+
+impl Unusable {
+    /// Whether asking again is likely to cost as much for the same answer, so the session should
+    /// stop asking (D-129): a slow or very dirty tree stays so, while a failing git fails fast.
+    pub fn switches_off(self) -> bool {
+        matches!(self, Unusable::TooSlow | Unusable::TooDirty)
+    }
+}
+
+/// The fingerprint of the repository holding `root`, within the usual git budget.
+pub fn fingerprint(root: &Path) -> Result<Fingerprint, Unusable> {
+    fingerprint_within(root, GIT_TIMEOUT)
+}
+
+/// The fingerprint of the repository holding `root`, with `budget` for both git calls together.
+pub fn fingerprint_within(root: &Path, budget: Duration) -> Result<Fingerprint, Unusable> {
+    let deadline = Instant::now() + budget;
     let top = git(root, &["rev-parse", "--show-toplevel"], deadline)?;
-    let top = String::from_utf8(top).ok()?;
+    let top = String::from_utf8(top).map_err(|_| Unusable::NotGit)?;
     let top = Path::new(top.trim_end_matches('\n'));
     let out = git(
         root,
@@ -67,10 +90,10 @@ pub fn fingerprint(root: &Path) -> Option<Fingerprint> {
             path: path.to_string_lossy().into_owned(),
         });
         if entries.len() > MAX_FINGERPRINT_ENTRIES {
-            return None;
+            return Err(Unusable::TooDirty);
         }
     }
-    Some(Fingerprint { entries })
+    Ok(Fingerprint { entries })
 }
 
 /// The paths that are new, changed or deleted in `after`, then those dirty in `before` and clean
@@ -111,20 +134,29 @@ fn stamp(path: &Path) -> Option<Stamp> {
 }
 
 /// Runs git read-only (`GIT_OPTIONAL_LOCKS=0`: `status` must not refresh the index or contend for
-/// the user's lock) and returns stdout, or `None` on failure or past `deadline`.
-fn git(root: &Path, args: &[&str], deadline: Instant) -> Option<Vec<u8>> {
+/// the user's lock) and returns stdout. A repository chosen by the caller's environment
+/// (`GIT_DIR` and friends, set when the host itself runs under a git hook) would describe some
+/// other tree than `root`'s, so those variables are dropped.
+fn git(root: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, Unusable> {
+    if Instant::now() >= deadline {
+        return Err(Unusable::TooSlow);
+    }
     let mut child = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+        .map_err(|_| Unusable::NotGit)?;
     // Read on a thread: a long listing would fill the pipe and stall the child past the deadline.
-    let mut stdout = child.stdout.take()?;
+    let mut stdout = child.stdout.take().ok_or(Unusable::NotGit)?;
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         stdout.read_to_end(&mut buf).map(|_| buf)
@@ -132,14 +164,27 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Option<Vec<u8>> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = reader.join().ok()?.ok()?;
-                return status.success().then_some(out);
+                let out = reader
+                    .join()
+                    .ok()
+                    .and_then(Result::ok)
+                    .ok_or(Unusable::NotGit)?;
+                return if status.success() {
+                    Ok(out)
+                } else {
+                    Err(Unusable::NotGit)
+                };
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-            _ => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(Unusable::TooSlow);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Unusable::NotGit);
             }
         }
     }
