@@ -68,6 +68,11 @@ pub struct SessionState {
     /// A new session tries again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worktree_off: bool,
+    /// Fingerprints in a row that took longer than `SLOW_FINGERPRINT`; at `SLOW_FINGERPRINTS_OFF`
+    /// the session switches detection off like a timeout. One slow answer is still used: it may
+    /// be a cold cache (D-129).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub slow_fingerprints: u8,
     /// The files this event's shell command changed, found by `run` before ripwire starts.
     /// Belongs to one event: never saved.
     #[serde(skip)]
@@ -293,6 +298,17 @@ fn inject(event: Event, env: &Envelope) -> Value {
 /// A shell command changing many files (a formatter, a generator) is asked about the first ones;
 /// the `Stop` gate sees them all (D-129).
 pub const MAX_BASH_EDIT_FILES: usize = 50;
+
+/// The spec's cost gate for a hook (§2.3): a fingerprint slower than this costs every hook more
+/// than the feature is worth. Measured: ~15 ms in a 2,500-file repo, ~240 ms in the Linux tree.
+pub const SLOW_FINGERPRINT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Slow fingerprints in a row that switch detection off for the session (D-129).
+pub const SLOW_FINGERPRINTS_OFF: u8 = 2;
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
+}
 
 /// Whether the event is Claude Code's Bash tool finishing.
 pub fn is_shell(event: Event, input: &Value) -> bool {
@@ -601,10 +617,23 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     // switches this off for the session: no more git, and a shell command has no baseline.
     if args.host == Host::ClaudeCode && args.event != Event::Stop {
         let before = state.worktree.take();
-        let was_off = state.worktree_off;
+        let was = (state.worktree_off, state.slow_fingerprints);
         if let (Some(r), false) = (root.as_deref(), state.worktree_off) {
+            let started = std::time::Instant::now();
             match crate::worktree::fingerprint(r) {
-                Ok(print) => state.worktree = Some(print),
+                Ok(print) => {
+                    // Over the gate but under the timeout (a Linux-sized tree): used, and counted;
+                    // a second one in a row switches off, so one cold cache is forgiven.
+                    state.slow_fingerprints = match started.elapsed() > SLOW_FINGERPRINT {
+                        true => state.slow_fingerprints.saturating_add(1),
+                        false => 0,
+                    };
+                    if state.slow_fingerprints >= SLOW_FINGERPRINTS_OFF {
+                        state.worktree_off = true;
+                    } else {
+                        state.worktree = Some(print);
+                    }
+                }
                 Err(why) => state.worktree_off = why.switches_off(),
             }
         }
@@ -619,7 +648,8 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
                 changed.retain(|p| std::path::Path::new(p).starts_with(r));
             }
             if changed.is_empty() || state.opted_out {
-                if state.worktree != before || state.worktree_off != was_off {
+                if state.worktree != before || (state.worktree_off, state.slow_fingerprints) != was
+                {
                     finish(&state);
                 }
                 return None;

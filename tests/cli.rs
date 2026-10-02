@@ -3173,6 +3173,114 @@ mod shell_edits {
         assert_eq!(calls(&counter), after_prompt, "no more git in this session");
     }
 
+    /// A `git` that answers right but takes ~60 ms per call: over the gate, far under the timeout.
+    fn slow_real_git(tools: &Path) -> (std::ffi::OsString, std::path::PathBuf) {
+        let then = format!("sleep 0.06\nexec '{}' \"$@\"", real_git().display());
+        fake_git(tools, &then)
+    }
+
+    #[test]
+    fn one_fingerprint_over_the_gate_is_still_used() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (path, _) = slow_real_git(tools.path());
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+
+        let first = saved(st);
+        assert!(!first.worktree_off, "one slow answer could be a cold cache");
+        assert!(first.worktree.is_some(), "and its fingerprint is kept");
+        assert_eq!(first.slow_fingerprints, 1);
+    }
+
+    #[test]
+    fn two_fingerprints_in_a_row_over_the_gate_switch_detection_off() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (path, counter) = slow_real_git(tools.path());
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+        hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            bash_in("s", ws),
+            &env,
+        );
+        let off = saved(st);
+        assert!(
+            off.worktree_off,
+            "a tree this slow costs every hook too much (§2.3)"
+        );
+        let asked = calls(&counter);
+
+        std::fs::write(ws.join("a.txt"), "changed\n").unwrap();
+        let out = hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            bash_in("s", ws),
+            &env,
+        );
+
+        assert!(out.is_empty(), "{out}");
+        assert_eq!(calls(&counter), asked, "no more git in this session");
+    }
+
+    #[test]
+    fn a_fast_fingerprint_resets_the_slow_count() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (slow, _) = slow_real_git(tools.path());
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &[("PATH", slow.as_os_str())],
+        );
+        assert_eq!(saved(st).slow_fingerprints, 1);
+
+        shell(ws, st, "ls");
+
+        let after = saved(st);
+        assert_eq!(
+            after.slow_fingerprints, 0,
+            "a fast answer clears the streak"
+        );
+        assert!(!after.worktree_off);
+    }
+
     #[test]
     fn a_change_outside_a_subdirectory_workspace_stays_silent() {
         let (repo, state) = (git_repo(), tempfile::tempdir().unwrap());
