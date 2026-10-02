@@ -1158,7 +1158,14 @@ fn the_captured_claude_code_payload_reads_its_own_projection() {
     let ws = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
     let root = ws.path().canonicalize().unwrap();
-    let input = claude_code_payload(ws.path());
+    // The capture has the same path in all three fields; point the fallbacks elsewhere so only
+    // `workspace.project_dir` can find the projection.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&claude_code_payload(ws.path())).unwrap();
+    payload["workspace"]["current_dir"] = elsewhere.path().to_str().unwrap().into();
+    payload["cwd"] = elsewhere.path().to_str().unwrap().into();
+    let input = payload.to_string();
     let session = parse_input(&input).session_id.unwrap();
     publish(
         state.path(),
