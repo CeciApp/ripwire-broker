@@ -97,7 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
-| 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (decisões pendentes; a 2 é um ponto cego, edições por Bash não chegam ao hook); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
+| 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (a 2 é um ponto cego, edições por Bash não chegam ao hook; a 4 é conforme por desenho; a 5 é rótulo ambíguo; decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
 | 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
@@ -5141,8 +5141,15 @@ antes do primeiro `Stop`. Não explicado nem reproduzido; anotado para a próxim
    explicitamente.
 3. **`last_analysis.event` é `"Stop"`**, maiúsculo; o roteiro confere `"stop"`. Ajustar o roteiro ou
    o valor.
-4. **`hooks off` mantém `última: atenção` (3.4).** A análise é anterior ao opt-out e pode ser lida
-   como estado atual. Decidir no §24 se omite ou marca como antiga.
+4. **`hooks off` mantém `última: atenção` (3.4): conforme, por desenho; não é divergência.** O
+   §24.5.3 preserva "pausa dos hooks e alerta da última análise" juntos, o D2 põe `hooks off` e
+   `última: atenção`/`erro` entre os essenciais, e o §24.5.2 resolve a leitura como estado atual
+   pelo rótulo ("um resultado antigo sempre aparece como `última`, nunca como saúde atual"). O
+   opt-out não apaga `last_analysis`, e testes exigem isso
+   (`lines_fit_40_80_and_120_columns_and_shed_in_order`, `extreme_widths_keep_alerts_then_the_prefix`,
+   `paths_that_run_no_analysis_leave_the_last_analysis_untouched`). Uma `atenção` aponta obrigação
+   aberta que a pausa não resolve; escondê-la iria contra "incerteza não é escondida". O exemplo
+   de `hooks off` do §24.5 não tem `última:` só porque não tem análise.
 5. **`há …` do `--detail` parece a idade da entrega, mas é a da observação (3.6): o código segue a
    spec; a ambiguidade é de apresentação.** `há` é `now - updated_at`, e `updated_at` é gravado a
    cada hook do broker que roda (prompt, edição, `Stop`, opt-out/opt-in), como o §24.5.2 pede ("a
