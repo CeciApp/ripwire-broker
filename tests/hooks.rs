@@ -342,6 +342,121 @@ async fn an_edit_injects_what_it_may_have_affected() {
     );
 }
 
+/// A Claude Code `PostToolUse` of the Bash tool, as the host sends it.
+fn shell_event(ws: &Path, command: &str) -> Value {
+    json!({
+        "session_id": "s",
+        "cwd": ws,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_response": {"stdout": "", "stderr": "", "interrupted": false},
+    })
+}
+
+#[tokio::test]
+async fn a_shell_edit_gets_the_edit_context_for_the_files_run_found() {
+    let (b, fake, ws) = hook_broker(edit_fake()).await;
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::write(root.join("a.txt"), "hello.").unwrap();
+    let mut state = SessionState {
+        shell_edits: vec![root.join("a.txt").to_string_lossy().into_owned()],
+        ..SessionState::default()
+    };
+    let input = shell_event(ws.path(), "echo hello. > a.txt");
+
+    let out = post_tool_use(Host::ClaudeCode, &input, &b, &mut state)
+        .await
+        .expect("injected");
+
+    assert_eq!(injected(&out)["tool"], "context_after_edit");
+    assert_eq!(fake.calls()[0].1["files"], "a.txt");
+    assert!(state.shell_edits.is_empty(), "consumed by this event");
+    assert_eq!(state.stats.events, 1);
+}
+
+#[tokio::test]
+async fn a_shell_command_with_no_files_asks_nothing() {
+    let (b, fake, ws) = hook_broker(edit_fake()).await;
+    let input = shell_event(ws.path(), "ls");
+
+    let out = post_tool_use(Host::ClaudeCode, &input, &b, &mut SessionState::default()).await;
+
+    assert!(out.is_none());
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+}
+
+#[tokio::test]
+async fn a_large_shell_change_sends_at_most_the_cap() {
+    let (b, fake, ws) = hook_broker(edit_fake()).await;
+    let root = ws.path().canonicalize().unwrap();
+    let files: Vec<String> = (0..60)
+        .map(|i| {
+            let p = root.join(format!("f{i}.txt"));
+            std::fs::write(&p, "x").unwrap();
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let mut state = SessionState {
+        shell_edits: files,
+        ..SessionState::default()
+    };
+
+    post_tool_use(
+        Host::ClaudeCode,
+        &shell_event(ws.path(), "gen"),
+        &b,
+        &mut state,
+    )
+    .await;
+
+    let sent = fake.calls()[0].1["files"].as_str().unwrap().to_string();
+    assert_eq!(sent.split(',').count(), hook::MAX_BASH_EDIT_FILES, "{sent}");
+    assert!(
+        sent.starts_with("f0.txt,f1.txt"),
+        "in the order run found them: {sent}"
+    );
+}
+
+// Review focus 5
+#[tokio::test]
+async fn a_shell_deletion_still_reaches_the_edit_context() {
+    let (b, fake, ws) = hook_broker(edit_fake()).await;
+    let root = ws.path().canonicalize().unwrap();
+    let mut state = SessionState {
+        shell_edits: vec![root.join("gone.txt").to_string_lossy().into_owned()],
+        ..SessionState::default()
+    };
+
+    post_tool_use(
+        Host::ClaudeCode,
+        &shell_event(ws.path(), "rm gone.txt"),
+        &b,
+        &mut state,
+    )
+    .await;
+
+    assert_eq!(fake.calls()[0].1["files"], "gone.txt");
+}
+
+#[test]
+fn shell_edits_are_never_saved_and_the_fingerprint_is() {
+    let state = SessionState {
+        shell_edits: vec!["/x".into()],
+        worktree: Some(ripwire_broker::worktree::Fingerprint::default()),
+        ..SessionState::default()
+    };
+    let text = serde_json::to_string(&state).unwrap();
+    assert!(!text.contains("shell_edits"), "{text}");
+    let back: SessionState = serde_json::from_str(&text).unwrap();
+    assert!(back.shell_edits.is_empty());
+    assert_eq!(back.worktree, Some(Default::default()));
+    let mut saved: Value = serde_json::to_value(SessionState::default()).unwrap();
+    saved.as_object_mut().unwrap().remove("worktree");
+    let old: SessionState = serde_json::from_value(saved).unwrap();
+    assert_eq!(old.worktree, None, "a state saved before D-129 loads");
+}
+
 #[tokio::test]
 async fn a_codex_patch_names_the_changed_files() {
     let (b, fake, ws) = hook_broker(edit_fake()).await;

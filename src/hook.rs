@@ -59,6 +59,14 @@ pub struct SessionState {
     /// What the status line shows (PRD §24.6.3); absent in states saved before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statusline: Option<crate::statusline_state::Summary>,
+    /// The working tree as the last hook saw it, so a shell command can be told which files it
+    /// changed (D-129); absent outside git and in states saved before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::worktree::Fingerprint>,
+    /// The files this event's shell command changed, found by `run` before ripwire starts.
+    /// Belongs to one event: never saved.
+    #[serde(skip)]
+    pub shell_edits: Vec<String>,
 }
 
 /// What one session's hooks did, in counts only (PRD 16.1).
@@ -277,6 +285,15 @@ fn inject(event: Event, env: &Envelope) -> Value {
     })
 }
 
+/// A shell command changing many files (a formatter, a generator) is asked about the first ones;
+/// the `Stop` gate sees them all (D-129).
+pub const MAX_BASH_EDIT_FILES: usize = 50;
+
+/// Whether the event is Claude Code's Bash tool finishing.
+pub fn is_shell(event: Event, input: &Value) -> bool {
+    event == Event::PostToolUse && input.get("tool_name").and_then(Value::as_str) == Some("Bash")
+}
+
 /// Files named by an edit tool: `file_path` (Claude Code `Edit`/`Write`/`MultiEdit`),
 /// `notebook_path`, or the headers of a Codex `apply_patch`. In order, once each.
 fn edited_files(input: &Value) -> Vec<String> {
@@ -459,11 +476,20 @@ async fn respond(
         Event::PostToolUse | Event::Stop if state.opted_out => Ok(None),
         Event::PostToolUse => {
             let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
-            let files: Vec<String> = edited_files(input)
+            let shell = is_shell(event, input);
+            let named = if shell {
+                std::mem::take(&mut state.shell_edits)
+            } else {
+                edited_files(input)
+            };
+            let mut files: Vec<String> = named
                 .iter()
                 .map(|f| std::path::Path::new(cwd).join(f))
                 .filter_map(|p| broker.in_workspace(&p.to_string_lossy()))
                 .collect();
+            if shell {
+                files.truncate(MAX_BASH_EDIT_FILES);
+            }
             if files.is_empty() {
                 return Ok(None);
             }
@@ -472,7 +498,6 @@ async fn respond(
             // files named while the window is open are held and ride along with the next answer,
             // so holding an event back delays news by at most one edit and never drops it; the
             // `Stop` gate covers the tail of a turn in any case.
-            let mut files = files;
             if let (Some(now), true) = (policy.now_ms, policy.edit_interval_ms > 0) {
                 let waited = now.saturating_sub(state.last_edit_ms);
                 if state.last_edit_ms != 0 && waited < policy.edit_interval_ms {
