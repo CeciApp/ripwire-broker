@@ -97,7 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
-| 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (a 2 é um ponto cego, edições por Bash não chegam ao hook; a 4 é conforme por desenho; a 5 é rótulo ambíguo; decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
+| 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (a 2 é um ponto cego, edições por Bash não chegam ao hook; a 4 é conforme por desenho; a 5 é rótulo ambíguo; a 6 conta certo, mas injeta envelope só com limitações; decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
 | 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
@@ -5120,9 +5120,10 @@ prova com payload real.**
 (`'<binário>' statusline --workspace '<ws>' --color never`), sessão nova `2d463a40…`. A barra ficou
 `rw-brkr · Opus 5.5 mid · ctx 6% · hooks on · última: atenção · inj 1 · não reenviados 0`, igual ao
 snapshot novo dessa sessão (um por sessão × workspace) e ao mesmo comando rodado à mão; nenhum payload
-novo foi gravado. Antes de a barra se redesenhar, o mantenedor viu `última: incerta`; o snapshot só
-tem um `Stop` (`attention_required`) e `events: 2`, e numa sessão nova a barra não mostra `última:`
-antes do primeiro `Stop`. Não explicado nem reproduzido; anotado para a próxima rodada.
+novo foi gravado. Antes de a barra se redesenhar, o mantenedor viu `última: incerta`, e estava
+certo: o `UserPromptSubmit` também grava `last_analysis` (com o `status` do envelope), e o envelope
+desse prompt tinha `status: "unknown"` (ver a divergência 6). Entre o prompt e o `Stop` a barra
+mostrava `incerta`; o `Stop` (`attention_required`) trocou para `atenção`.
 
 **Divergências (registradas, nenhuma corrigida; decisões pendentes):**
 
@@ -5158,9 +5159,15 @@ antes do primeiro `Stop`. Não explicado nem reproduzido; anotado para a próxim
    depois de `último contexto`, e a leitura natural é "contexto entregue há 18 s". **Decisão
    pendente no §24.5.2:** trocar o rótulo (`visto há`/`atualizado há`), mudar a posição, ou somar a
    idade da entrega (`last_delivery.at`, que o snapshot já guarda) ao `último contexto`.
-6. **Injeção vazia conta em `inj` (6).** O `UserPromptSubmit` da segunda rodada entregou
-   `context_for_task · 0 items · ~186 tokens` (`delivered: 0`), e a barra mostra `inj 1`. Decidir se
-   um envelope sem itens é injeção.
+6. **Envelope sem itens conta em `inj` (6): a contagem está certa; a questão é se ele deve ser
+   injetado.** O `UserPromptSubmit` da segunda rodada entregou `context_for_task · 0 items · ~186
+   tokens` (`delivered: 0`), e a barra mostra `inj 1`. O envelope não era vazio: o transcript mostra
+   `status: "unknown"` e uma limitação `route_uncertain` ("no trace, symbol, change or docs signal
+   …; pass mode … or name a symbol"). Ele chegou ao modelo, e `record` (`src/hook.rs`) conta toda
+   resposta que chega, como o §24 define `inj`; `delivered` soma itens, testes, riscos e notas, não
+   limitações, por isso 0. **Questão aberta para os hooks:** o primeiro prompt injeta o que o
+   `context_for_task` devolver, sem filtro, enquanto o PostToolUse só injeta com `has_news`. Um
+   envelope só com limitações (~186 tokens para dizer "não achei nada") pode ser sinal útil ou ruído.
 
 **Observações do roteiro:**
 
