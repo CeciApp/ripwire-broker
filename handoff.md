@@ -119,10 +119,9 @@ Os instrumentos estão prontos; as medições, não.
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.
-- **Diagrama desatualizado.** `spec/diagrams/` não se atualiza sozinho (D-115) e parou antes da
-  barra de status: faltam o comando `statusline` lendo a projeção que os hooks publicam (D-123) e
-  o hook chamando o `git` (D-129). Edita-se o JSON e roda-se `deliver` do archify, que não está
-  instalado em todas as máquinas do mantenedor; editar só o JSON deixaria fonte e HTML divergentes.
+- **Diagrama:** `spec/diagrams/` não se atualiza sozinho. Quem mudar a topologia edita o JSON e roda
+  `deliver` do archify de novo (D-115, D-132). O archify é um skill, em `~/.agents/skills/archify/`,
+  não um comando no `PATH`.
 
 ## Armadilhas já pisadas
 
