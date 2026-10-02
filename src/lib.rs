@@ -38,3 +38,4 @@ pub mod supervise;
 pub mod upstream;
 pub mod usage;
 pub mod workspace;
+pub mod worktree;
