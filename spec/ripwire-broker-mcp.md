@@ -503,12 +503,18 @@ foi injetado.
   ripwire, o hook compara uma impressão digital da árvore do git (`git status` e `mtime`/`size` dos
   arquivos sujos) com a do hook anterior: só um comando que mudou arquivos segue para o
   `context_after_edit`, com no máximo 50 arquivos; um comando só de leitura não sobe o ripwire e não
-  conta evento. Todo evento do Claude Code menos o `Stop` atualiza a impressão. Limites: só em
-  workspace git (fora dele a edição pelo shell só é vista pelo gate do `Stop`); mais de 5000 arquivos
-  sujos desliga a detecção; uma mudança feita por outro processo durante o comando é atribuída a ele.
+  conta evento. Todo evento do Claude Code menos o `Stop` atualiza a impressão. Só contam os arquivos
+  mudados dentro do workspace, mesmo quando ele é um subdiretório do repositório. Limites: só em
+  workspace git (fora dele a edição pelo shell só é vista pelo gate do `Stop`); o `git` tem 500 ms
+  para as duas chamadas; mais lento que isso, ou com mais de 5000 entradas no `git status`, a detecção
+  se desliga pelo resto da sessão (`SessionState.worktree_off`): nenhum hook da sessão chama o `git`
+  de novo, um Bash fica sem linha de base e em silêncio, e o gate do `Stop` continua cobrindo; uma
+  sessão nova tenta outra vez. Assim um repositório lento paga no máximo um atraso de até 500 ms por
+  sessão. Uma mudança feita por outro processo durante o comando é atribuída a ele.
   Custo medido (release, Apple M3, processo inteiro do hook para um Bash só de leitura, p50/p95):
-  21,7/24,8 ms num repositório de 2.503 arquivos rastreados e 16,4/17,6 ms num sem arquivos sujos,
-  dos quais o `git status` responde por 13,5/14,7 ms e 6,3/6,7 ms.
+  21,7/24,8 ms num repositório médio (ceci_app, 2.503 arquivos rastreados) e 16,4/17,6 ms num sem
+  arquivos sujos, dos quais o `git status` responde por 13,5/14,7 ms e 6,3/6,7 ms. Um monorepo grande
+  **não** foi medido.
 - Detalhes em [D-030](changelog.md#d-030--hooks-nos-dois-hosts-proposta),
   [D-031](changelog.md#d-031--granularidade-da-automação-proposta),
   [D-041](changelog.md#d-041--contratos-reais-dos-hooks-e-limite-de-saída) e
