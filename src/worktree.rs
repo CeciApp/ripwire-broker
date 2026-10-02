@@ -32,6 +32,10 @@ pub struct Entry {
 /// The dirty files of a tree, in `git status` order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fingerprint {
+    /// The repository's top directory: two fingerprints compare only within one repository.
+    /// Empty in a fingerprint saved before it.
+    #[serde(default)]
+    pub top: String,
     pub entries: Vec<Entry>,
 }
 
@@ -84,6 +88,10 @@ pub fn fingerprint_within(root: &Path, budget: Duration) -> Result<Fingerprint, 
         let Ok(rel) = std::str::from_utf8(&field[3..]) else {
             continue;
         };
+        // A `stat` per dirty file is time too: a slow filesystem counts against the same budget.
+        if Instant::now() >= deadline {
+            return Err(Unusable::TooSlow);
+        }
         let path = top.join(rel);
         entries.push(Entry {
             stamp: stamp(&path),
@@ -93,12 +101,19 @@ pub fn fingerprint_within(root: &Path, budget: Duration) -> Result<Fingerprint, 
             return Err(Unusable::TooDirty);
         }
     }
-    Ok(Fingerprint { entries })
+    Ok(Fingerprint {
+        top: top.to_string_lossy().into_owned(),
+        entries,
+    })
 }
 
 /// The paths that are new, changed or deleted in `after`, then those dirty in `before` and clean
-/// in `after` (a revert or a commit is an edit too). Once each.
+/// in `after` (a revert or a commit is an edit too). Once each. A fingerprint of another
+/// repository is no baseline: its dirty files are not this command's edits.
 pub fn changed(before: &Fingerprint, after: &Fingerprint) -> Vec<String> {
+    if before.top != after.top {
+        return vec![];
+    }
     let was: HashMap<&str, Option<Stamp>> = before
         .entries
         .iter()
@@ -156,19 +171,28 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, Unusabl
         .spawn()
         .map_err(|_| Unusable::NotGit)?;
     // Read on a thread: a long listing would fill the pipe and stall the child past the deadline.
+    // The answer comes back over a channel with the same deadline: a process that git (or a
+    // wrapper) left behind can hold the pipe open long after git exits, and a plain `join` would
+    // wait for it. Such a reader is abandoned; it ends when the pipe closes.
     let mut stdout = child.stdout.take().ok_or(Unusable::NotGit)?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
-        stdout.read_to_end(&mut buf).map(|_| buf)
+        let _ = tx.send(stdout.read_to_end(&mut buf).map(|_| buf));
     });
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = reader
-                    .join()
-                    .ok()
-                    .and_then(Result::ok)
-                    .ok_or(Unusable::NotGit)?;
+                let left = deadline.saturating_duration_since(Instant::now());
+                let out = match rx.recv_timeout(left) {
+                    Ok(read) => read.map_err(|_| Unusable::NotGit)?,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        return Err(Unusable::TooSlow);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(Unusable::NotGit);
+                    }
+                };
                 return if status.success() {
                     Ok(out)
                 } else {

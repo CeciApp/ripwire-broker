@@ -3053,6 +3053,39 @@ mod shell_edits {
     }
 
     #[test]
+    fn a_git_that_leaves_its_output_open_cannot_hang_the_hook() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        // Exits at once, but a child it started keeps stdout open for 5 s.
+        let (path, _) = fake_git(tools.path(), "sleep 5 &\nexit 0");
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+
+        let started = std::time::Instant::now();
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "bounded by the git budget, not by the stray child: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            saved(st).worktree_off,
+            "an answer that never ends is too slow"
+        );
+    }
+
+    #[test]
     fn a_slow_git_switches_detection_off_for_the_session() {
         let (ws, state, tools) = (
             git_repo(),

@@ -46,7 +46,27 @@ fn rewrite(path: &Path, text: &str) {
 #[test]
 fn a_clean_tree_has_an_empty_fingerprint() {
     let dir = repo();
-    assert_eq!(fingerprint(dir.path()), Ok(Fingerprint::default()));
+    let print = fingerprint(dir.path()).unwrap();
+    assert_eq!(print.entries, Fingerprint::default().entries);
+    assert_eq!(
+        print.top,
+        root_of(&dir).to_string_lossy(),
+        "it knows its repository"
+    );
+}
+
+#[test]
+fn a_fingerprint_of_another_repository_is_no_baseline() {
+    let (a, b) = (repo(), repo());
+    std::fs::write(b.path().join("dirty.txt"), "x").unwrap();
+    let (before, after) = (
+        fingerprint(a.path()).unwrap(),
+        fingerprint(b.path()).unwrap(),
+    );
+    assert!(
+        changed(&before, &after).is_empty(),
+        "B's existing dirt is not an edit: {after:?}"
+    );
 }
 
 #[test]
