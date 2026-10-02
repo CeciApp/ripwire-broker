@@ -3198,13 +3198,13 @@ mod shell_edits {
     #[test]
     fn an_inherited_git_dir_does_not_redirect_the_fingerprint() {
         let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
-        let elsewhere = std::ffi::OsStr::new("/nonexistent/elsewhere/.git");
+        // Each would point git at another repository or index than the workspace's.
+        let os = std::ffi::OsStr::new;
         let env = [
-            ("GIT_DIR", elsewhere),
-            (
-                "GIT_WORK_TREE",
-                std::ffi::OsStr::new("/nonexistent/elsewhere"),
-            ),
+            ("GIT_DIR", os("/nonexistent/elsewhere/.git")),
+            ("GIT_WORK_TREE", os("/nonexistent/elsewhere")),
+            ("GIT_INDEX_FILE", os("/nonexistent/elsewhere/index")),
+            ("GIT_COMMON_DIR", os("/nonexistent/elsewhere/common")),
         ];
         let (ws, st) = (ws.path(), state.path());
         hook_env(
@@ -3215,10 +3215,8 @@ mod shell_edits {
             prompt_in("s", ws),
             &env,
         );
-        assert!(
-            saved(st).worktree.is_some(),
-            "the workspace's own repository is fingerprinted"
-        );
+        let print = saved(st).worktree.expect("the workspace's own repository");
+        assert!(print.entries.is_empty(), "its clean tree: {print:?}");
     }
 
     #[test]
