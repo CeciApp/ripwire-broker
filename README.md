@@ -275,7 +275,9 @@ hook contract, so the same command serves both:
   than 5,000 entries, or if two fingerprints in a row take over 50 ms (a Linux-sized tree takes ~240 ms),
   detection switches off for the rest of the session (no more `git` calls, and `Bash` edits are left to the
   `Stop` gate); a new session tries again. A change made by another process while the
-  command ran is blamed on the command. Codex is unchanged.
+  command ran is blamed on the command. When Claude Code reports the changed files itself
+  (`tool_response.bashEditDiff`, seen in 2.1.285), that list is used instead, and from the first such
+  payload on the session runs no `git` at all (D-131). Codex is unchanged.
 - **D-129:** edits made through the Bash tool now reach the edit hook in git workspaces. Re-run
   `ripwire-broker install claude-code --workspace DIR --hooks --write` to add `Bash` to the
   `PostToolUse` matcher; older installs keep working without it.

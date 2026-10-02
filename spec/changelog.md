@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 23:16 | Fecha a pendência `bashEditDiff` do D-129: a lista de arquivos que o próprio Claude Code manda no `PostToolUse` do Bash substitui a impressão do git; depois do primeiro payload com o campo, a sessão não chama mais o `git`, e a impressão fica para versões que não o mandam | [D-131](#d-131--a-lista-do-próprio-claude-code-substitui-a-impressão-do-git) |
 | 2026-10-01 21:50 | Edições feitas pelo shell chegam ao hook de edição: o `PostToolUse` do Claude Code casa `Bash`, e uma impressão digital do `git status` decide, antes de subir o ripwire, se o comando mudou arquivos; só leitura não sobe o ripwire; uma árvore lenta ou suja demais desliga a detecção pela sessão; fecha a divergência 2 do D-128; 32 testes novos (457 padrão, 471 com `online`) | [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição) |
 | 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (a 1 e a 3 eram erros do roteiro; a 2 é um ponto cego, edições por Bash não chegam ao hook; a 4 é conforme por desenho; a 5 é rótulo ambíguo; a 6 conta certo, mas injeta envelope só com limitações; decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
@@ -5339,7 +5340,8 @@ Com 100 ms de `sleep` no `git` falso, o teste das duas seguidas passava em paral
 `changedFiles` (caminhos absolutos): o próprio host diz quais arquivos o comando mudou. O mantenedor
 decidiu manter a impressão do git nesta rodada. Investigar o `bashEditDiff` (semântica quando nada
 mudou, `moreFiles`, estabilidade e documentação, a versão que o introduziu) fica como pendência: ele
-pode substituir ou complementar a impressão, com atribuição exata e sem depender do git.
+pode substituir ou complementar a impressão, com atribuição exata e sem depender do git. **Fechada no
+[D-131](#d-131--a-lista-do-próprio-claude-code-substitui-a-impressão-do-git): a lista do host vale quando existe, e a impressão fica de reserva.**
 
 **Contagem:** `cargo test --all-targets --locked`: **451 passados, 2 ignorados**; com
 `--features online`: **465 passados, 4 ignorados** (D-127: 419 e 433; 32 testes novos, 7 deles da
@@ -5350,3 +5352,56 @@ contagem). Com o desligamento no portão de 50 ms: **455 passados, 2 ignorados**
 passados, 4 ignorados** (3 testes novos). Com as correções da revisão do CodeRabbit: **457 passados, 2 ignorados**;
 com `online` **471 passados, 4 ignorados** (2 testes novos). CA-10
 (`cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`) sem saída.
+
+## D-131 — A lista do próprio Claude Code substitui a impressão do git
+
+**Data:** 2026-10-01. **Pedido do mantenedor** ("investigar, depois preferir"). Fecha a pendência
+`bashEditDiff` do [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição).
+
+**Investigação.** Sete payloads reais do `PostToolUse` do Bash (Claude Code 2.1.285, um comando por
+chamada, numa sessão do workspace de teste):
+
+| Comando | `bashEditDiff` | `changedFiles` | `files` (com hunks) | `moreFiles` |
+| --- | --- | --- | --- | --- |
+| `cat src/lib.rs` (só leitura) | ausente | — | — | — |
+| `echo x > /tmp/…` (fora do workspace) | ausente | — | — | — |
+| `git diff …; cp … /private/tmp/…` (escrita fora do workspace) | ausente | — | — | — |
+| `git checkout -- src/lib.rs` (reverter) | presente | 1 | 1 | 0 |
+| `rm novo.txt` (apaga um não rastreado) | presente | 1 | 1, com `"deleted": true` | 0 |
+| criar 60 arquivos | presente | **60 (todos)** | 5 | 55 |
+| `rm gen_*.txt` (apagar os 60) | presente | **60 (todos)** | 5 | 55 |
+
+A captura do D-129 mostrou também uma edição de arquivo rastreado (`echo >> src/lib.rs`, 1 caminho).
+Conclusões: o campo só aparece quando algo mudou **dentro do workspace**, e nunca vem vazio;
+`changedFiles` traz **todos** os caminhos, absolutos (o `files` com diff para em 5, e `moreFiles` conta o
+resto); reverter, apagar e criar não rastreado contam. O campo não é documentado, e a ausência não
+distingue "nada mudou" de "versão sem o campo".
+
+**Desenho.**
+
+- O primeiro payload de Bash com `bashEditDiff` grava `SessionState.host_reports_bash_edits` e apaga a
+  impressão guardada.
+- Com a marca: o campo presente dá os arquivos editados (`changedFiles`, cortados ao workspace e a 50,
+  sem chamar o `git`); o campo ausente é "nada mudou" (silêncio, sem ripwire, sem evento). Nenhum hook da
+  sessão tira impressão: o custo do `git` vai a zero, em qualquer tamanho de repositório.
+- Sem a marca (versões que não mandam o campo, ou antes do primeiro comando que mude algo): a impressão
+  do D-129 continua, com os mesmos limites e desligamentos.
+- O corte ao workspace aceita o caminho como o host o escreve e a raiz canônica (no macOS, `/var/…` e
+  `/private/var/…`).
+
+**Custo, se a hipótese falhar:** se o host omitir o campo numa mudança real do workspace (um caso que a
+captura não mostrou), essa edição fica sem contexto no meio do turno; o gate do `Stop` continua vendo.
+
+| Mudança | Teste | Mutação (pega) |
+| --- | --- | --- |
+| `host_bash_edits` lê `changedFiles` | `the_hosts_own_list_of_changed_files_is_used` (fixture real de 60 arquivos, nada mudou no disco: só a lista do host faz disso uma edição) | campo nunca lido — pega (3 testes) |
+| com a marca, sem o campo: silêncio e nenhum `git` | `once_the_host_reports_a_command_without_the_field_changed_nothing_and_git_rests` (`git` falso com contador) | `git` continua rodando — pega (3); impressão mantida — pega |
+| lista cortada ao workspace; a marca é salva mesmo quando a resposta é silêncio | `the_hosts_list_is_cut_to_the_workspace` | sem o corte — pega; marca não salva no silêncio — pega |
+| ripwire real com a lista do host | `a_real_bash_payload_naming_its_changed_file_injects_the_edit_context`; o teste do D-129 tira o campo do payload e cobre a impressão de reserva | — |
+
+Fixture nova: `tests/fixtures/hooks/claude_code_post_tool_use_bash_many.json` (o comando dos 60
+arquivos, com `__WORKSPACE__`, `__TRANSCRIPT__` e `__SCRATCHPAD__`, sem dado pessoal).
+
+
+**Contagem:** padrão **461 passados, 2 ignorados**; com `online` **475 passados, 4 ignorados** (eram 457
+e 471: 4 testes novos). CA-10 sem saída.
