@@ -590,6 +590,26 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
             let _ = crate::statusline_state::publish(store.dir(), &session_id, r, &snap);
         }
     };
+    // A shell command is an edit only if the working tree says so, and asking costs a `git
+    // status`, not a ripwire (D-129). Every Claude Code event but `Stop` moves the baseline, so a
+    // command is never blamed for an edit made before it.
+    if args.host == Host::ClaudeCode && args.event != Event::Stop {
+        let before = state.worktree.take();
+        state.worktree = root.as_deref().and_then(crate::worktree::fingerprint);
+        if is_shell(args.event, &input) {
+            let changed = match (&before, &state.worktree) {
+                (Some(b), Some(a)) => crate::worktree::changed(b, a),
+                _ => vec![],
+            };
+            if changed.is_empty() || state.opted_out {
+                if state.worktree != before {
+                    finish(&state);
+                }
+                return None;
+            }
+            state.shell_edits = changed;
+        }
+    }
     let default = Policy::default();
     let policy = Policy {
         every_prompt: args.every_prompt,

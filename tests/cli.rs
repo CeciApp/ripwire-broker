@@ -2772,3 +2772,186 @@ fn installed_hook_and_bar_agree_through_a_symlinked_workspace() {
     assert_eq!(code, 0);
     assert!(out.contains("última: erro"), "{out}");
 }
+
+mod shell_edits {
+    use super::run;
+    use ripwire_broker::state::StateStore;
+    use serde_json::json;
+    use std::path::Path;
+
+    const NO_RIPWIRE: &str = "/nonexistent/ripwire";
+
+    fn git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "i",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(&args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        dir
+    }
+
+    fn hook(event: &str, ws: &Path, state: &Path, input: serde_json::Value) -> String {
+        let (code, out, err) = run(
+            &[
+                "hook",
+                "claude-code",
+                event,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--state-dir",
+                state.to_str().unwrap(),
+                "--ripwire",
+                NO_RIPWIRE,
+            ],
+            &input.to_string(),
+        );
+        assert_eq!(code, 0, "{err}");
+        out
+    }
+
+    fn prompt(ws: &Path, state: &Path, text: &str) -> String {
+        hook(
+            "user-prompt-submit",
+            ws,
+            state,
+            json!({"session_id": "s", "cwd": ws, "hook_event_name": "UserPromptSubmit", "prompt": text}),
+        )
+    }
+
+    fn shell(ws: &Path, state: &Path, command: &str) -> String {
+        hook(
+            "post-tool-use",
+            ws,
+            state,
+            json!({"session_id": "s", "cwd": ws, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_response": {}}),
+        )
+    }
+
+    fn edit(ws: &Path, state: &Path, file: &str) -> String {
+        hook(
+            "post-tool-use",
+            ws,
+            state,
+            json!({"session_id": "s", "cwd": ws, "hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": ws.join(file)}, "tool_response": {}}),
+        )
+    }
+
+    fn saved(state: &Path) -> ripwire_broker::hook::SessionState {
+        StateStore::new(state.to_path_buf()).load("s")
+    }
+
+    #[test]
+    fn a_read_only_command_never_starts_ripwire() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+        let events = saved(state.path()).stats.events;
+
+        let out = shell(ws.path(), state.path(), "cat a.txt");
+
+        assert!(out.is_empty(), "silent, no ripwire launch: {out}");
+        assert_eq!(saved(state.path()).stats.events, events, "not counted");
+    }
+
+    #[test]
+    fn a_command_that_changed_a_file_goes_on_to_ripwire() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+        std::fs::write(ws.path().join("a.txt"), "changed\n").unwrap();
+
+        let out = shell(ws.path(), state.path(), "echo changed > a.txt");
+
+        assert!(
+            out.contains("no context"),
+            "it tried to launch ripwire: {out}"
+        );
+    }
+
+    #[test]
+    fn an_edit_moves_the_baseline_so_the_next_command_is_not_blamed() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+        // A shell command takes a baseline even where only Bash would refresh it.
+        shell(ws.path(), state.path(), "ls");
+        std::fs::write(ws.path().join("a.txt"), "by edit\n").unwrap();
+        edit(ws.path(), state.path(), "a.txt");
+
+        let out = shell(ws.path(), state.path(), "ls");
+
+        assert!(out.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn without_a_baseline_nothing_is_blamed() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        std::fs::write(ws.path().join("a.txt"), "changed\n").unwrap();
+
+        let out = shell(ws.path(), state.path(), "echo changed > a.txt");
+
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            saved(state.path()).worktree.is_some(),
+            "the baseline is taken now"
+        );
+    }
+
+    #[test]
+    fn opted_out_commands_stay_silent_and_still_move_the_baseline() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "#ripwire-off");
+        std::fs::write(ws.path().join("a.txt"), "paused\n").unwrap();
+
+        let out = shell(ws.path(), state.path(), "echo paused > a.txt");
+
+        assert!(out.is_empty(), "{out}");
+        let print = saved(state.path()).worktree.unwrap();
+        assert!(
+            print.entries.iter().any(|e| e.path.ends_with("a.txt")),
+            "{print:?}"
+        );
+    }
+
+    #[test]
+    fn outside_git_a_command_is_silent() {
+        let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+        std::fs::write(ws.path().join("a.txt"), "x").unwrap();
+
+        let out = shell(ws.path(), state.path(), "echo x > a.txt");
+
+        assert!(out.is_empty(), "{out}");
+        assert_eq!(saved(state.path()).worktree, None);
+    }
+
+    #[test]
+    fn stop_does_not_take_a_fingerprint() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        hook(
+            "stop",
+            ws.path(),
+            state.path(),
+            json!({"session_id": "s", "cwd": ws.path(), "hook_event_name": "Stop", "stop_hook_active": false}),
+        );
+        assert_eq!(saved(state.path()).worktree, None);
+    }
+}
