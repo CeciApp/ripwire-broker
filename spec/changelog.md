@@ -97,7 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
-| 2026-10-01 21:50 | Edições feitas pelo shell chegam ao hook de edição: o `PostToolUse` do Claude Code casa `Bash`, e uma impressão digital do `git status` decide, antes de subir o ripwire, se o comando mudou arquivos; só leitura não sobe o ripwire; uma árvore lenta ou suja demais desliga a detecção pela sessão; fecha a divergência 2 do D-128; 32 testes novos (455 padrão, 469 com `online`) | [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição) |
+| 2026-10-01 21:50 | Edições feitas pelo shell chegam ao hook de edição: o `PostToolUse` do Claude Code casa `Bash`, e uma impressão digital do `git status` decide, antes de subir o ripwire, se o comando mudou arquivos; só leitura não sobe o ripwire; uma árvore lenta ou suja demais desliga a detecção pela sessão; fecha a divergência 2 do D-128; 32 testes novos (457 padrão, 471 com `online`) | [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição) |
 | 2026-10-01 20:43 | Validação manual da barra (§24.10) numa sessão real do Claude Code 2.1.285: barra e snapshot batem em todos os passos, payload real confere com §24.2/§24.8; segunda rodada com o comando instalado igual; 6 divergências registradas (a 1 e a 3 eram erros do roteiro; a 2 é um ponto cego, edições por Bash não chegam ao hook; a 4 é conforme por desenho; a 5 é rótulo ambíguo; a 6 conta certo, mas injeta envelope só com limitações; decisões pendentes); fixture `tests/fixtures/statusline/claude_code.json` e 1 teste novo (420 padrão, 434 com `online`); fecha as pendências do D-123 | [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
@@ -5326,6 +5326,14 @@ carga desligue a detecção por acaso. Depois:
 Com 100 ms de `sleep` no `git` falso, o teste das duas seguidas passava em paralelo pelo motivo errado
 (o timeout de 500 ms disparava sob carga); com 60 ms ele só passa pela regra nova.
 
+**Revisão do CodeRabbit no PR #39.** Três achados "Major", corrigidos antes do merge:
+
+| # | Achado | Mudança | Teste | Mutação (pega) |
+| --- | --- | --- | --- | --- |
+| 1 | a linha de base não era ligada ao repositório: uma sessão que passasse do repositório A ao B veria a sujeira de B como edição | `Fingerprint.top` (raiz do repositório, `serde(default)` para estados antigos); `changed` devolve nada entre repositórios diferentes | `a_fingerprint_of_another_repository_is_no_baseline`; `a_clean_tree_has_an_empty_fingerprint` exige o `top` | tirar a comparação de `top` — pega |
+| 2 | o prazo de 500 ms não valia durante os `stat` dos arquivos sujos | o laço confere o prazo a cada entrada e devolve `TooSlow` | nenhum determinístico (um sistema de arquivos lento não se simula com estabilidade); a regra dos 50 ms já mede a impressão inteira, `stat` incluído | tirar a conferência — **não pega** |
+| 3 | um `git` (ou invólucro) que sai deixando um processo com o stdout aberto prendia o hook no `join` do leitor, sem prazo | o leitor manda o resultado por um canal, e o hook espera com `recv_timeout` até o prazo; o leitor que sobra é abandonado e termina quando o pipe fecha | `a_git_that_leaves_its_output_open_cannot_hang_the_hook` (um `git` falso com `sleep 5 &`: o hook volta em ~1 s, e não em ~6 s, e a detecção se desliga) | `recv()` sem prazo — pega (5,7 s) |
+
 **Pendência aberta: `bashEditDiff`.** Na captura, o payload do `PostToolUse` do Bash no Claude Code
 2.1.285 trouxe `tool_response.bashEditDiff` com `files[{filePath, hunks}]`, `moreFiles` e
 `changedFiles` (caminhos absolutos): o próprio host diz quais arquivos o comando mudou. O mantenedor
@@ -5339,5 +5347,6 @@ revisão final), somando todas as linhas `test result:`.
 Com o D-128 (PR #38) mesclado no branch: **452 passados, 2 ignorados**; com `online` **466
 passados, 4 ignorados** (o teste do D-128; a correção pedida pelo CodeRabbit no teste dele não muda a
 contagem). Com o desligamento no portão de 50 ms: **455 passados, 2 ignorados**; com `online` **469
-passados, 4 ignorados** (3 testes novos). CA-10
+passados, 4 ignorados** (3 testes novos). Com as correções da revisão do CodeRabbit: **457 passados, 2 ignorados**;
+com `online` **471 passados, 4 ignorados** (2 testes novos). CA-10
 (`cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`) sem saída.
