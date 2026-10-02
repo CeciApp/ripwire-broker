@@ -73,6 +73,11 @@ pub struct SessionState {
     /// be a cold cache (D-129).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub slow_fingerprints: u8,
+    /// Set by the first Bash payload that carries `tool_response.bashEditDiff`: this Claude Code
+    /// reports the files a command changed, so its absence means "nothing changed" and the git
+    /// fingerprint is not needed for the rest of the session (D-131).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_reports_bash_edits: bool,
     /// The files this event's shell command changed, found by `run` before ripwire starts.
     /// Belongs to one event: never saved.
     #[serde(skip)]
@@ -308,6 +313,25 @@ pub const SLOW_FINGERPRINTS_OFF: u8 = 2;
 
 fn is_zero(n: &u8) -> bool {
     *n == 0
+}
+
+/// The files Claude Code says a Bash command changed: `tool_response.bashEditDiff.changedFiles`
+/// (seen in 2.1.285, absolute paths, complete even when `files` stops at 5). `None` when the
+/// payload has no `bashEditDiff`, which a reporting host sends only for commands that changed
+/// something in the workspace.
+pub fn host_bash_edits(input: &Value) -> Option<Vec<String>> {
+    let diff = input.get("tool_response")?.get("bashEditDiff")?;
+    Some(
+        diff.get("changedFiles")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 /// Whether the event is Claude Code's Bash tool finishing.
@@ -626,7 +650,33 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     // status`, not a ripwire (D-129). Every Claude Code event but `Stop` moves the baseline, so a
     // command is never blamed for an edit made before it. A tree that was too slow or too dirty
     // switches this off for the session: no more git, and a shell command has no baseline.
-    if args.host == Host::ClaudeCode && args.event != Event::Stop {
+    // Claude Code itself may say which files a Bash command changed (`bashEditDiff`, D-131). Once a
+    // session has seen it, that list is the answer, its absence means "nothing changed", and git
+    // is never asked again; until then, the fingerprint below stands in.
+    let shell = is_shell(args.event, &input);
+    let host_edits = shell.then(|| host_bash_edits(&input)).flatten();
+    let newly_reporting = host_edits.is_some() && !state.host_reports_bash_edits;
+    if host_edits.is_some() {
+        state.host_reports_bash_edits = true;
+        state.worktree = None;
+    }
+    if args.host == Host::ClaudeCode && args.event != Event::Stop && state.host_reports_bash_edits {
+        if shell {
+            let mut changed = host_edits.unwrap_or_default();
+            // The host names paths as it sees them; the root is canonical. Either form counts.
+            changed.retain(|p| {
+                let p = std::path::Path::new(p);
+                root.as_deref().is_some_and(|r| p.starts_with(r)) || p.starts_with(&workspace)
+            });
+            if changed.is_empty() || state.opted_out {
+                if newly_reporting {
+                    finish(&state);
+                }
+                return None;
+            }
+            state.shell_edits = changed;
+        }
+    } else if args.host == Host::ClaudeCode && args.event != Event::Stop {
         let before = state.worktree.take();
         let was = (state.worktree_off, state.slow_fingerprints);
         if let (Some(r), false) = (root.as_deref(), state.worktree_off) {

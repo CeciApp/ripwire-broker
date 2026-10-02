@@ -505,8 +505,9 @@ foi injetado.
   arquivos sujos) com a do hook anterior: só um comando que mudou arquivos segue para o
   `context_after_edit`, com no máximo 50 arquivos; um comando só de leitura não sobe o ripwire e não
   conta evento. Todo evento do Claude Code menos o `Stop` atualiza a impressão. Só contam os arquivos
-  mudados dentro do workspace, mesmo quando ele é um subdiretório do repositório. Limites: só em
-  workspace git (fora dele a edição pelo shell só é vista pelo gate do `Stop`); o `git` tem 500 ms
+  mudados dentro do workspace, mesmo quando ele é um subdiretório do repositório. Limites da impressão
+  (que só vale quando o host não manda a lista, ver abaixo): só em workspace git (fora dele, sem a lista
+  do host, a edição pelo shell só é vista pelo gate do `Stop`); o `git` tem 500 ms
   para as duas chamadas; mais lento que isso, ou com mais de 5000 entradas no `git status`, a detecção
   se desliga pelo resto da sessão (`SessionState.worktree_off`): nenhum hook da sessão chama o `git`
   de novo, um Bash fica sem linha de base e em silêncio, e o gate do `Stop` continua cobrindo; uma
@@ -514,6 +515,10 @@ foi injetado.
   custo da proposta): a primeira ainda é usada, porque pode ser cache frio, e uma rápida zera a
   contagem (`SessionState.slow_fingerprints`). Assim um repositório lento paga no máximo dois atrasos
   por sessão. Uma mudança feita por outro processo durante o comando é atribuída a ele.
+  Quando o próprio Claude Code diz quais arquivos o comando mudou (`tool_response.bashEditDiff`,
+  visto na 2.1.285), essa lista vale e a impressão sai de cena: o primeiro payload com o campo marca a
+  sessão (`SessionState.host_reports_bash_edits`), daí em diante um Bash sem o campo não mudou nada e
+  nenhum hook chama o `git` (D-131). A impressão fica para versões que não mandam o campo.
   Custo medido (release, Apple M3, processo inteiro do hook para um Bash só de leitura, p50/p95):
   21,7/24,8 ms num repositório médio (ceci_app, 2.503 arquivos rastreados) e 16,4/17,6 ms num sem
   arquivos sujos, dos quais o `git status` responde por 13,5/14,7 ms e 6,3/6,7 ms. No kernel Linux

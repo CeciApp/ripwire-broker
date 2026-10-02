@@ -1,0 +1,168 @@
+{
+ "session_id": "dc291498-07f1-46c4-8a58-7f22ac71866c",
+ "transcript_path": "__TRANSCRIPT__",
+ "cwd": "__WORKSPACE__",
+ "scratchpad_dir": "__SCRATCHPAD__",
+ "prompt_id": "375f1aa1-505b-44a8-8a04-61a056452aa3",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "for i in $(seq 1 60); do echo $i > gen_$i.txt; done; ls gen_*.txt | wc -l",
+  "description": "Create 60 numbered text files and count them"
+ },
+ "tool_response": {
+  "stdout": "      60",
+  "stderr": "",
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false,
+  "bashEditDiff": {
+   "files": [
+    {
+     "filePath": "__WORKSPACE__/gen_1.txt",
+     "hunks": [
+      {
+       "oldStart": 0,
+       "oldLines": 0,
+       "newStart": 1,
+       "newLines": 1,
+       "lines": [
+        "+1"
+       ]
+      }
+     ],
+     "created": true
+    },
+    {
+     "filePath": "__WORKSPACE__/gen_10.txt",
+     "hunks": [
+      {
+       "oldStart": 0,
+       "oldLines": 0,
+       "newStart": 1,
+       "newLines": 1,
+       "lines": [
+        "+10"
+       ]
+      }
+     ],
+     "created": true
+    },
+    {
+     "filePath": "__WORKSPACE__/gen_11.txt",
+     "hunks": [
+      {
+       "oldStart": 0,
+       "oldLines": 0,
+       "newStart": 1,
+       "newLines": 1,
+       "lines": [
+        "+11"
+       ]
+      }
+     ],
+     "created": true
+    },
+    {
+     "filePath": "__WORKSPACE__/gen_12.txt",
+     "hunks": [
+      {
+       "oldStart": 0,
+       "oldLines": 0,
+       "newStart": 1,
+       "newLines": 1,
+       "lines": [
+        "+12"
+       ]
+      }
+     ],
+     "created": true
+    },
+    {
+     "filePath": "__WORKSPACE__/gen_13.txt",
+     "hunks": [
+      {
+       "oldStart": 0,
+       "oldLines": 0,
+       "newStart": 1,
+       "newLines": 1,
+       "lines": [
+        "+13"
+       ]
+      }
+     ],
+     "created": true
+    }
+   ],
+   "moreFiles": 55,
+   "changedFiles": [
+    "__WORKSPACE__/gen_1.txt",
+    "__WORKSPACE__/gen_10.txt",
+    "__WORKSPACE__/gen_11.txt",
+    "__WORKSPACE__/gen_12.txt",
+    "__WORKSPACE__/gen_13.txt",
+    "__WORKSPACE__/gen_14.txt",
+    "__WORKSPACE__/gen_15.txt",
+    "__WORKSPACE__/gen_16.txt",
+    "__WORKSPACE__/gen_17.txt",
+    "__WORKSPACE__/gen_18.txt",
+    "__WORKSPACE__/gen_19.txt",
+    "__WORKSPACE__/gen_2.txt",
+    "__WORKSPACE__/gen_20.txt",
+    "__WORKSPACE__/gen_21.txt",
+    "__WORKSPACE__/gen_22.txt",
+    "__WORKSPACE__/gen_23.txt",
+    "__WORKSPACE__/gen_24.txt",
+    "__WORKSPACE__/gen_25.txt",
+    "__WORKSPACE__/gen_26.txt",
+    "__WORKSPACE__/gen_27.txt",
+    "__WORKSPACE__/gen_28.txt",
+    "__WORKSPACE__/gen_29.txt",
+    "__WORKSPACE__/gen_3.txt",
+    "__WORKSPACE__/gen_30.txt",
+    "__WORKSPACE__/gen_31.txt",
+    "__WORKSPACE__/gen_32.txt",
+    "__WORKSPACE__/gen_33.txt",
+    "__WORKSPACE__/gen_34.txt",
+    "__WORKSPACE__/gen_35.txt",
+    "__WORKSPACE__/gen_36.txt",
+    "__WORKSPACE__/gen_37.txt",
+    "__WORKSPACE__/gen_38.txt",
+    "__WORKSPACE__/gen_39.txt",
+    "__WORKSPACE__/gen_4.txt",
+    "__WORKSPACE__/gen_40.txt",
+    "__WORKSPACE__/gen_41.txt",
+    "__WORKSPACE__/gen_42.txt",
+    "__WORKSPACE__/gen_43.txt",
+    "__WORKSPACE__/gen_44.txt",
+    "__WORKSPACE__/gen_45.txt",
+    "__WORKSPACE__/gen_46.txt",
+    "__WORKSPACE__/gen_47.txt",
+    "__WORKSPACE__/gen_48.txt",
+    "__WORKSPACE__/gen_49.txt",
+    "__WORKSPACE__/gen_5.txt",
+    "__WORKSPACE__/gen_50.txt",
+    "__WORKSPACE__/gen_51.txt",
+    "__WORKSPACE__/gen_52.txt",
+    "__WORKSPACE__/gen_53.txt",
+    "__WORKSPACE__/gen_54.txt",
+    "__WORKSPACE__/gen_55.txt",
+    "__WORKSPACE__/gen_56.txt",
+    "__WORKSPACE__/gen_57.txt",
+    "__WORKSPACE__/gen_58.txt",
+    "__WORKSPACE__/gen_59.txt",
+    "__WORKSPACE__/gen_6.txt",
+    "__WORKSPACE__/gen_60.txt",
+    "__WORKSPACE__/gen_7.txt",
+    "__WORKSPACE__/gen_8.txt",
+    "__WORKSPACE__/gen_9.txt"
+   ]
+  }
+ },
+ "tool_use_id": "toolu_017XAmsmWDeTfDVA4MPg7mfb",
+ "duration_ms": 222
+}
