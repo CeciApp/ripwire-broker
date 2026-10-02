@@ -2903,6 +2903,121 @@ mod shell_edits {
         StateStore::new(state.to_path_buf()).load("s")
     }
 
+    /// The recorded Claude Code 2.1.285 payload of a command that wrote 60 files: the host's own
+    /// `tool_response.bashEditDiff` lists all of them in `changedFiles` (D-131).
+    fn host_payload(ws: &Path) -> serde_json::Value {
+        let text = std::fs::read_to_string(format!(
+            "{}/tests/fixtures/hooks/claude_code_post_tool_use_bash_many.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+        .replace("__WORKSPACE__", ws.to_str().unwrap());
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["session_id"] = "s".into();
+        v
+    }
+
+    #[test]
+    fn the_hosts_own_list_of_changed_files_is_used() {
+        let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
+        prompt(ws.path(), state.path(), "task");
+
+        // Nothing changed on disk: only the host's list can make this an edit.
+        let out = hook(
+            "post-tool-use",
+            ws.path(),
+            state.path(),
+            host_payload(ws.path()),
+        );
+
+        assert!(out.contains("no context"), "it went on to ripwire: {out}");
+        assert!(
+            saved(state.path()).host_reports_bash_edits,
+            "the host is known to report"
+        );
+    }
+
+    #[test]
+    fn once_the_host_reports_a_command_without_the_field_changed_nothing_and_git_rests() {
+        let (ws, state, tools) = (
+            git_repo(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let then = format!("exec '{}' \"$@\"", real_git().display());
+        let (path, counter) = fake_git(tools.path(), &then);
+        let env = [("PATH", path.as_os_str())];
+        let (ws, st) = (ws.path(), state.path());
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+        hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            host_payload(ws),
+            &env,
+        );
+        let asked = calls(&counter);
+
+        std::fs::write(ws.join("a.txt"), "changed\n").unwrap();
+        let out = hook_env(
+            "claude-code",
+            "post-tool-use",
+            ws,
+            st,
+            bash_in("s", ws),
+            &env,
+        );
+        hook_env(
+            "claude-code",
+            "user-prompt-submit",
+            ws,
+            st,
+            prompt_in("s", ws),
+            &env,
+        );
+
+        assert!(
+            out.is_empty(),
+            "no field from a reporting host: no change: {out}"
+        );
+        assert_eq!(
+            calls(&counter),
+            asked,
+            "and no git for the rest of the session"
+        );
+        assert_eq!(saved(st).worktree, None, "no fingerprint kept");
+    }
+
+    #[test]
+    fn the_hosts_list_is_cut_to_the_workspace() {
+        let (repo, state) = (git_repo(), tempfile::tempdir().unwrap());
+        let ws = repo.path().join("sub");
+        std::fs::create_dir(&ws).unwrap();
+        prompt(&ws, state.path(), "task");
+        let mut payload = host_payload(&ws);
+        let outside = repo.path().join("out.txt").to_string_lossy().into_owned();
+        payload["tool_response"]["bashEditDiff"]["changedFiles"] = json!([outside]);
+
+        let out = hook("post-tool-use", &ws, state.path(), payload);
+
+        assert!(
+            out.is_empty(),
+            "a file outside the workspace starts nothing: {out}"
+        );
+        assert!(
+            saved(state.path()).host_reports_bash_edits,
+            "a silent answer still records that the host reports"
+        );
+    }
+
     #[test]
     fn a_read_only_command_never_starts_ripwire() {
         let (ws, state) = (git_repo(), tempfile::tempdir().unwrap());
@@ -3405,6 +3520,73 @@ fn a_real_bash_payload_after_a_shell_edit_injects_the_edit_context() {
     ))
     .unwrap()
     .replace("__WORKSPACE__", ws);
+    // Without `bashEditDiff` (an older Claude Code), the git fingerprint finds the edit.
+    let mut payload: serde_json::Value = serde_json::from_str(&fixture).unwrap();
+    payload["tool_response"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bashEditDiff");
+    let fixture = payload.to_string();
+    let session = serde_json::from_str::<serde_json::Value>(&fixture).unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    run(
+        &[
+            "hook",
+            "claude-code",
+            "user-prompt-submit",
+            "--state-dir",
+            dir,
+            "--workspace",
+            ws,
+        ],
+        &prompt_event(repo.path(), &session, "how is login validated?"),
+    );
+    let auth = repo.path().join("src/auth.py");
+    let text = std::fs::read_to_string(&auth).unwrap();
+    std::fs::write(&auth, text.replace("return user", "return user  # checked")).unwrap();
+
+    let (code, out, err) = run(
+        &[
+            "hook",
+            "claude-code",
+            "post-tool-use",
+            "--state-dir",
+            dir,
+            "--workspace",
+            ws,
+        ],
+        &fixture,
+    );
+
+    assert_eq!(code, 0, "{err}");
+    let out: serde_json::Value = serde_json::from_str(&out).expect("an answer");
+    let context = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("context_after_edit"), "{context}");
+    assert!(context.contains("auth.py"), "{context}");
+}
+
+#[test]
+fn a_real_bash_payload_naming_its_changed_file_injects_the_edit_context() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    let state = tempfile::tempdir().unwrap();
+    let dir = state.path().to_str().unwrap();
+    let ws = repo.path().to_str().unwrap();
+    let fixture = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/hooks/claude_code_post_tool_use_bash.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .replace("__WORKSPACE__", ws);
+    // The host's own list (D-131): `changedFiles` names the edited file.
+    let mut payload: serde_json::Value = serde_json::from_str(&fixture).unwrap();
+    payload["tool_response"]["bashEditDiff"]["changedFiles"] =
+        serde_json::json!([repo.path().join("src/auth.py")]);
+    let fixture = payload.to_string();
     let session = serde_json::from_str::<serde_json::Value>(&fixture).unwrap()["session_id"]
         .as_str()
         .unwrap()
