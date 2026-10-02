@@ -1,6 +1,6 @@
 # Proposta — edições feitas pelo shell chegam ao hook de edição
 
-Status: **design aprovado em conversa; aguardando revisão deste documento** · 2026-10-01 ·
+Status: **feito em [D-129](../changelog.md#d-129--edições-pelo-shell-chegam-ao-hook-de-edição)** · 2026-10-01 ·
 fecha a divergência 2 de [D-128](../changelog.md#d-128--validação-manual-da-barra-e-fixture-de-payload-real)
 (PR #38; o link resolve depois do merge dele).
 

@@ -264,9 +264,17 @@ hook contract, so the same command serves both:
 | Host event | What the broker does |
 | --- | --- |
 | `UserPromptSubmit` | First prompt of the session: `context_for_task` becomes `additionalContext`. Later prompts only with `--every-prompt` |
-| `PostToolUse` (`Edit`/`Write`/`MultiEdit`, Codex `apply_patch`) | `context_after_edit` for the edited files inside the workspace; nothing if there is nothing new |
+| `PostToolUse` (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Bash` on Claude Code, `apply_patch` on Codex) | `context_after_edit` for the edited files inside the workspace; nothing if there is nothing new. A `Bash` command counts only if it changed files in a git workspace (see below) |
 | `Stop` | `context_before_finish`. With `--gate`, blocks once on `attention_required` and sends the evidence; otherwise a one-line notice |
 
+- **Shell edits (Claude Code, git workspaces):** before starting ripwire, the hook compares a fingerprint of the
+  dirty files (`git status`, plus each file's mtime and size) with the one from the previous hook. A `Bash`
+  command that changed files gets `context_after_edit` for them (at most 50); a read-only one starts nothing and
+  counts no event. Outside git, or with more than 5,000 dirty files, it stays silent. A change made by another
+  process while the command ran is blamed on the command. Codex is unchanged.
+- **D-129:** edits made through the Bash tool now reach the edit hook in git workspaces. Re-run
+  `ripwire-broker install claude-code --workspace DIR --hooks --write` to add `Bash` to the
+  `PostToolUse` matcher; older installs keep working without it.
 - **Opt-out:** type `#ripwire-off` in a prompt to silence the session, and `#ripwire-on` to resume.
   The marker counts only as the whole last (or first) word of the prompt; one quoted mid-text does nothing.
 - **What was injected:** every injection shows a one-line `systemMessage`, and the full context sits in the

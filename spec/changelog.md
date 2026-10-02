@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-01 21:50 | Edições feitas pelo shell chegam ao hook de edição: o `PostToolUse` do Claude Code casa `Bash`, e uma impressão digital do `git status` decide, antes de subir o ripwire, se o comando mudou arquivos; só leitura não sobe o ripwire; fecha a divergência 2 do D-128; 25 testes novos (444 padrão, 458 com `online`) | [D-129](#d-129--edições-pelo-shell-chegam-ao-hook-de-edição) |
 | 2026-10-01 21:00 | As pendências menores da barra de status fechadas (D-123): rótulo do modelo, caracteres invisíveis, `reuso` saturado, `ctx` por campo, leitura e escrita privadas sem seguir links, `hook-stats` sem sessões vazias, nota e propriedade do `install`; 19 testes novos, e 3 na Revisão (419 padrão, 433 com `online`) | [D-127](#d-127--pendências-menores-da-barra-de-status) |
 | 2026-10-01 19:10 | O marcador `#ripwire-off`/`#ripwire-on` vale mesmo quando o ripwire não sobe: a pausa é confirmada e salva, a retomada é salva antes de a falha ser reportada; fecha o defeito registrado no D-123; 1 teste novo (397 padrão, 411 com `online`) | [D-126](#d-126--o-marcador-vale-mesmo-sem-ripwire) |
 | 2026-10-01 18:40 | O marcador `#ripwire-off`/`#ripwire-on` só vale como palavra inteira no fim ou no começo do prompt; citado no meio do texto (um relatório de subagente que o mencionava pausou os hooks de uma sessão real) não altera nada; 1 teste novo (396 padrão, 410 com `online`) | [D-125](#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt) |
@@ -5090,3 +5091,85 @@ O PRD §24.13 D5 e o README documentam a regra do nome do programa.
 **Contagem:** padrão **419 passados, 2 ignorados**; com `online` **433 passados, 4 ignorados**.
 CA-10 sem saída.
 
+## D-129 — Edições pelo shell chegam ao hook de edição
+
+**Data:** 2026-10-01. **Pedido do mantenedor.** Desenho em
+[proposta-edicoes-por-shell.md](plan/proposta-edicoes-por-shell.md). Fecha a divergência 2 do
+[D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real): um `echo >> arquivo` pelo Bash
+não chegava ao `context_after_edit`. (O D-128 está no PR #38, ainda não mergeado nesta branch; o link
+resolve depois do merge dele.) Em TDD, com uma mutação por teste novo, como no D-127.
+
+**O que mudou**
+
+- O `PostToolUse` do Claude Code passa a casar `Bash` (`install` escreve
+  `Edit|Write|MultiEdit|NotebookEdit|Bash`; o Codex não muda).
+- Antes de subir o ripwire, `hook::run` tira uma impressão digital da árvore (`git status
+  --porcelain=v1 -z --untracked-files=all` com `GIT_OPTIONAL_LOCKS=0`, mais `mtime` e `size` de cada
+  arquivo sujo) e a compara com a salva pelo hook anterior. Só um Bash que mudou arquivos segue para o
+  `context_after_edit`, com no máximo 50 arquivos (cortados depois do filtro de workspace); um Bash só de
+  leitura devolve `no context`, não sobe o ripwire e não conta evento.
+- Limites: 500 ms para as duas chamadas do `git`; mais de 5000 entradas sujas, sem git ou falha do
+  `git` dão `None` e silêncio, sem mensagem.
+- A impressão fica em `SessionState.worktree` (salva); `shell_edits` (a lista do comando atual) nunca é
+  salva.
+
+**Mudanças e testes**
+
+| # | Mudança | Teste | Mutação (pega) |
+| --- | --- | --- | --- |
+| 1 | `src/worktree.rs`: `fingerprint` e `changed` (T1) | 11 testes em `tests/worktree.rs`, entre eles `a_subdirectory_workspace_gets_paths_from_the_repository_root`, `odd_file_names_come_through_whole`, `a_rename_reports_the_new_name_and_skips_the_old_field`, `a_held_index_lock_does_not_stop_the_fingerprint`, `too_many_dirty_files_have_no_fingerprint` | sem o segundo campo do `R`; `top.join` por `root.join`; sem `out.extend`; `!=` por `==` em `changed`; `> MAX` frouxo; `--untracked-files=no`; sem `-z`; `success().then_some` sem o filtro; `stamp` sempre `None`; `--ignored`: todas pegas. **Não pega:** tirar `GIT_OPTIONAL_LOCKS=0` (ver abaixo) |
+| 2 | `respond` ramo `Bash`: usa `shell_edits` no lugar dos arquivos do evento, `mem::take`, corte em 50 depois de `in_workspace`; `SessionState.worktree` salva, `shell_edits` com `serde(skip)` (T2) | `a_shell_edit_gets_the_edit_context_for_the_files_run_found`, `a_shell_command_with_no_files_asks_nothing`, `a_large_shell_change_sends_at_most_the_cap`, `a_shell_deletion_still_reaches_the_edit_context`, `shell_edits_are_never_saved_and_the_fingerprint_is` | usar sempre os arquivos do evento; `clone` em vez de `mem::take`; sem o corte; `serde(skip)` por `serde(default)`: todas pegas |
+| 3 | `run`: impressão antes do ripwire para todo evento do Claude Code menos o `Stop`; Bash sem mudança, opt-out ou sem git ficam em silêncio (T3) | `a_read_only_command_never_starts_ripwire`, `a_command_that_changed_a_file_goes_on_to_ripwire`, `an_edit_moves_the_baseline_so_the_next_command_is_not_blamed`, `without_a_baseline_nothing_is_blamed`, `opted_out_commands_stay_silent_and_still_move_the_baseline`, `outside_git_a_command_is_silent`, `stop_does_not_take_a_fingerprint` | tirar o `return None`; tirar `\|\| state.opted_out`; impressão só no Bash; `(None, Some(a))` como tudo mudado; `!= Event::Stop` por `true`: todas pegas. **Não pega** nos testes da CLI: tirar `state.shell_edits = changed;` (ver abaixo) |
+| 4 | `install`: matcher do Claude Code ganha `Bash`; reinstalar sobre o matcher antigo troca o grupo, sem duplicar (T4) | `install_claude_code_merges_idempotently_and_keeps_foreign_keys` (asserção atualizada), `reinstalling_over_an_old_matcher_adds_bash` | os dois vermelhos antes da mudança; o matcher antigo de volta os derruba |
+| 5 | Fixture `tests/fixtures/hooks/claude_code_post_tool_use_bash.json`, gravada do Claude Code 2.1.285 (caminhos, transcript e `scratchpad_dir` trocados por `__WORKSPACE__`, `__TRANSCRIPT__`, `__SCRATCHPAD__`) (T5) | `a_real_bash_payload_after_a_shell_edit_injects_the_edit_context` (ripwire real, o caminho inteiro) | tirar `state.shell_edits = changed;`: pega (saída vazia, `EOF`) |
+
+Total: 11 + 5 + 7 + 1 + 1 = 25 testes novos (o da linha 4 ao lado de uma asserção atualizada). Na linha 3,
+`an_edit_moves_the_baseline_so_the_next_command_is_not_blamed` difere do roteiro do plano (ver abaixo).
+
+**Decisões e desvios**
+
+- **Desvio da spec §4.4.** A spec tirava a impressão "depois de decidir a resposta". Aqui ela sai em
+  `hook::run`, antes de o ripwire subir, em todo evento do Claude Code menos o `Stop`. É equivalente,
+  porque um hook nunca edita arquivos: a árvore é a mesma antes e depois da decisão, e tirá-la antes
+  permite não subir o ripwire num Bash só de leitura.
+- **Teste alterado na Tarefa 3.** `an_edit_moves_the_baseline_so_the_next_command_is_not_blamed`, do
+  roteiro, ganhou um `shell("ls")` depois do prompt. Sem ele, a mutação "impressão só no Bash" passava
+  por silêncio (sem linha de base, nada é atribuído, e o teste esperava silêncio).
+- **Timeout ou falha do `git`** (500 ms) troca a linha de base salva por `None`; o próximo Bash que
+  editar não tem comparação e não é atribuído (spec §5.2).
+- **Workspace num subdiretório do repositório, nomes com espaço/acento/aspas, `git mv`, `index.lock`
+  presente e `rm`:** cada um tem teste (T1 e T2), por serem as entradas que a spec implica e não lista.
+
+**Mutações que nenhum teste pegou**
+
+- **Tirar `GIT_OPTIONAL_LOCKS=0`.** O teste do `index.lock` não a vê: com o lock retido, a escrita
+  opcional do índice pelo `git` é um no-op silencioso, e numa fixture com o índice fresco não há o que
+  atualizar. Pegá-la exigiria uma fixture de índice desatualizado sem lock. Fica registrada; a variável
+  continua no código por prevenção.
+- **Tirar `state.shell_edits = changed;` em `run`.** Os testes da CLI da Tarefa 3 não a pegam (sem
+  ripwire, a execução falha antes de `respond`), mas o teste da Tarefa 5, com ripwire real, pega.
+
+**Custo (Tarefa 6)**
+
+Release, Apple M3, Darwin 27.0.0, 50 execuções, `--ripwire /nonexistent/ripwire` (o ripwire real
+nunca rodou fora do repositório). Processo inteiro do hook para um Bash só de leitura, comparado ao
+`git status` sozinho:
+
+| Repositório | Hook p50 / p95 / máx | `git status` p50 / p95 / máx | Entradas sujas |
+| --- | --- | --- | --- |
+| ceci_app (2.503 arquivos rastreados) | 21,7 / 24,8 / 25,9 ms | 13,5 / 14,7 / 15,1 ms | 2 |
+| ripwire-broker | 16,4 / 17,6 / 24,9 ms | 6,3 / 6,7 / 6,7 ms | 0 |
+
+O critério (p95 ≤ 50 ms) passa. Ressalva: o ceci_app é médio; um monorepo muito maior não foi medido.
+
+**Pendência aberta: `bashEditDiff`.** Na captura, o payload do `PostToolUse` do Bash no Claude Code
+2.1.285 trouxe `tool_response.bashEditDiff` com `files[{filePath, hunks}]`, `moreFiles` e
+`changedFiles` (caminhos absolutos): o próprio host diz quais arquivos o comando mudou. O mantenedor
+decidiu manter a impressão do git nesta rodada. Investigar o `bashEditDiff` (semântica quando nada
+mudou, `moreFiles`, estabilidade e documentação, a versão que o introduziu) fica como pendência: ele
+pode substituir ou complementar a impressão, com atribuição exata e sem depender do git.
+
+**Contagem:** `cargo test --all-targets --locked`: **444 passados, 2 ignorados**; com
+`--features online`: **458 passados, 4 ignorados** (D-127: 419 e 433; 25 testes novos).
+O D-128, no PR #38, soma mais 1 teste que não está nesta branch. CA-10
+(`cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'`) sem saída.

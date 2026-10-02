@@ -499,6 +499,16 @@ foi injetado.
   ([D-125](changelog.md#d-125--o-marcador-de-opt-out-só-vale-na-borda-do-prompt)).
 - Cada injeção mostra um `systemMessage`, e o `hook-log` mostra contagens.
 - `ripwire-broker prompt` é o wrapper.
+- **Edições pelo shell (D-129).** No Claude Code o PostToolUse também casa `Bash`. Antes de subir o
+  ripwire, o hook compara uma impressão digital da árvore do git (`git status` e `mtime`/`size` dos
+  arquivos sujos) com a do hook anterior: só um comando que mudou arquivos segue para o
+  `context_after_edit`, com no máximo 50 arquivos; um comando só de leitura não sobe o ripwire e não
+  conta evento. Todo evento do Claude Code menos o `Stop` atualiza a impressão. Limites: só em
+  workspace git (fora dele a edição pelo shell só é vista pelo gate do `Stop`); mais de 5000 arquivos
+  sujos desliga a detecção; uma mudança feita por outro processo durante o comando é atribuída a ele.
+  Custo medido (release, Apple M3, processo inteiro do hook para um Bash só de leitura, p50/p95):
+  21,7/24,8 ms num repositório de 2.503 arquivos rastreados e 16,4/17,6 ms num sem arquivos sujos,
+  dos quais o `git status` responde por 13,5/14,7 ms e 6,3/6,7 ms.
 - Detalhes em [D-030](changelog.md#d-030--hooks-nos-dois-hosts-proposta),
   [D-031](changelog.md#d-031--granularidade-da-automação-proposta),
   [D-041](changelog.md#d-041--contratos-reais-dos-hooks-e-limite-de-saída) e
