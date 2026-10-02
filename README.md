@@ -279,9 +279,9 @@ hook contract, so the same command serves both:
   `Stop` gate); a new session tries again. A change made by another process while the
   command ran is blamed on the command (the fallback only; the host's list is exact). Codex is unchanged.
 - **Bursts of edits:** an edit within `--edit-interval-ms` (default 1000) of the previous answer asks nothing;
-  its files are held (at most 32) and ride along with the next edit past the window, so news is delayed by one
-  edit at most and never dropped, and `Stop` covers the tail of the turn. `--edit-interval-ms 0` answers every
-  edit (D-106).
+  its files are held and ride along with the next edit past the window, so news is delayed by one edit at most.
+  Only the first 32 distinct files of a burst are held; the rest are not forwarded, and `Stop` covers them and
+  the tail of the turn. `--edit-interval-ms 0` answers every edit (D-106).
 - **Budgets:** the hooks ask for 1500 tokens at the prompt and 800 after an edit.
 - **D-129:** edits made through the Bash tool now reach the edit hook in git workspaces. Re-run
   `ripwire-broker install claude-code --workspace DIR --hooks --write` to add `Bash` to the
