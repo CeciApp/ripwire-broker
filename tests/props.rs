@@ -1042,3 +1042,27 @@ proptest! {
         prop_assert_eq!(index::anchors(&build(&forward), &query), index::anchors(&build(&shuffled), &query));
     }
 }
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Every active view gets at least one expansion, and they add up to the twelve exactly.
+    #[test]
+    fn the_split_never_exceeds_twelve_and_is_never_negative(
+        needs in prop::collection::vec(prop::option::of(0.0f64..=1.0), 4),
+    ) {
+        use ripwire_broker::memory::retrieve;
+        use ripwire_broker::online::response::{Decision, Unknown};
+        let names = ["semantic", "temporal", "causal", "entity"];
+        let answers = names.iter().zip(&needs).map(|(n, p)| (*n, match p {
+            Some(p) => Decision::Noul { probability: *p },
+            None => Decision::Unknown { reason: Unknown::Absent },
+        })).collect();
+        let route = retrieve::route(&answers);
+        let total: usize = route.budget.iter().map(|(_, n)| n).sum();
+        let active = needs.iter().flatten().filter(|p| **p >= 0.10).count();
+        prop_assert_eq!(route.budget.len(), active);
+        prop_assert!(route.budget.iter().all(|(_, n)| *n >= 1));
+        prop_assert_eq!(total, if active == 0 { 0 } else { retrieve::EXPANSIONS });
+    }
+}

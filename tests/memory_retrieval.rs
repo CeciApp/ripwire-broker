@@ -89,3 +89,83 @@ fn rrf_fuses_lexical_and_entity_ranks_into_at_most_eight_anchors() {
     assert_eq!(index::MAX_ANCHORS, 8);
     assert!(index::anchors(&three(), "nothing matches").is_empty());
 }
+
+// ---------------------------------------------------------------- routing (PRD jev-mem §10, step 4; T3.2)
+
+use ripwire_broker::memory::model::Graph;
+use ripwire_broker::memory::retrieve::{self, Route};
+use ripwire_broker::online::response::{Decision, Unknown};
+use std::collections::BTreeMap;
+
+fn p(v: f64) -> Decision {
+    Decision::Noul { probability: v }
+}
+
+fn unknown() -> Decision {
+    Decision::Unknown {
+        reason: Unknown::Absent,
+    }
+}
+
+fn routed(answers: &[(&'static str, Decision)]) -> Route {
+    let map: BTreeMap<&str, Decision> = answers.iter().cloned().collect();
+    retrieve::route(&map)
+}
+
+#[test]
+fn views_activate_at_010_and_unknown_never_activates() {
+    let r = routed(&[
+        ("semantic", p(0.10)),
+        ("temporal", p(0.0999)),
+        ("causal", unknown()),
+        ("entity", p(0.5)),
+        ("multi_hop_need", p(0.2)),
+        ("recency_importance", p(0.1)),
+    ]);
+    let views: Vec<Graph> = r.budget.iter().map(|(g, _)| *g).collect();
+    assert_eq!(views, [Graph::Semantic, Graph::Entity]);
+    assert!(routed(&[]).budget.is_empty(), "no answer, no view");
+}
+
+#[test]
+fn the_budget_of_twelve_is_split_by_largest_remainder_in_fixed_tie_order() {
+    assert_eq!(retrieve::EXPANSIONS, 12);
+    // One each, then 8 by need: 2.29, 2.29, 2.29, 1.14 → floors 2, 2, 2, 1 and one left over,
+    // which three equal remainders tie for: the fixed order gives it to semantic.
+    let r = routed(&[
+        ("entity", p(0.5)),
+        ("causal", p(1.0)),
+        ("temporal", p(1.0)),
+        ("semantic", p(1.0)),
+    ]);
+    assert_eq!(
+        r.budget,
+        [
+            (Graph::Semantic, 4),
+            (Graph::Temporal, 3),
+            (Graph::Causal, 3),
+            (Graph::Entity, 2)
+        ]
+    );
+    let r = routed(&[("semantic", p(0.3)), ("entity", p(0.7))]);
+    assert_eq!(
+        r.budget,
+        [(Graph::Semantic, 4), (Graph::Entity, 8)],
+        "1 + 3 and 1 + 7"
+    );
+}
+
+#[test]
+fn depth_is_one_unless_multi_hop_is_at_least_half() {
+    let at = |m: Decision| routed(&[("semantic", p(0.9)), ("multi_hop_need", m)]);
+    assert_eq!((at(p(0.49)).depth, at(p(0.49)).partial), (1, false));
+    assert_eq!(at(p(0.5)).depth, 2);
+    let unsure = at(unknown());
+    assert_eq!(
+        (unsure.depth, unsure.partial),
+        (1, true),
+        "unknown: depth 1, and said so"
+    );
+    assert!(routed(&[("recency_importance", p(0.5))]).recency);
+    assert!(!routed(&[("recency_importance", p(0.49))]).recency);
+}
