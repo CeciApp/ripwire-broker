@@ -814,3 +814,219 @@ fn memory_takes_at_most_four_slots_of_the_jev_request_limit() {
     assert_eq!(retrieve::slots(0, 24), (0, 24));
     assert_eq!(retrieve::slots(9, 24), (4, 20), "four at most");
 }
+
+// ---------------------------------------------------------------- stale sources, pending writes (§10, steps 1 and 9; T3.6)
+
+mod common;
+
+use ripwire_broker::memory::admission::{self, Draft, Event, Outcome, Stamp, Tests};
+use ripwire_broker::memory::{identity, store::Store};
+use ripwire_broker::online::reader::WorkspaceReader;
+
+/// An observation of `path` in `root`, with the hash of its bytes now.
+fn observed(root: &std::path::Path, ws: &str, path: &str, words: &str) -> Record {
+    let reader = WorkspaceReader::new(root).unwrap();
+    let draft = Draft {
+        event_key: words.into(),
+        event: Event::AfterEdit,
+        outcome: Outcome::AnalysisCompleted,
+        tests: Tests::Unknown,
+        scope: vec![path.into()],
+        evidence: vec![words.into()],
+    };
+    let stamp = Stamp {
+        observed_at_ms: 1,
+        ingest_seq: 0,
+        generation: 0,
+        retention_ms: u64::MAX / 2,
+    };
+    admission::admit(&reader, ws, &draft, stamp).unwrap()
+}
+
+fn passing() -> Reader {
+    reader(&[], 0.0, |_, _| p(0.9))
+}
+
+#[tokio::test]
+async fn a_memory_whose_source_changed_is_omitted_and_counted_stale() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    common::write(root.path(), "src/b.rs", "fn b() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Store::new(st.path(), &ws);
+    store
+        .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction"))
+        .unwrap();
+    store
+        .enqueue(&observed(root.path(), &ws, "src/b.rs", "eviction"))
+        .unwrap();
+    store.ingest().unwrap();
+    common::write(root.path(), "src/a.rs", "fn a() { changed() }\n");
+
+    let reader = WorkspaceReader::new(root.path()).unwrap();
+    let r = passing();
+    let got = retrieve::read_store(&store, &reader, "eviction", &r, &ReadConfig::default()).await;
+    assert_eq!(
+        got.stale_omitted, 1,
+        "src/a.rs changed since it was observed"
+    );
+    assert_eq!(
+        r.scored().len(),
+        1,
+        "a stale memory is not even sent for scoring"
+    );
+    let paths: Vec<&str> = got
+        .memories
+        .iter()
+        .map(|f| f.record.sources[0].path.as_str())
+        .collect();
+    assert_eq!(paths, ["src/b.rs"], "old advice is not served as current");
+}
+
+#[tokio::test]
+async fn hashes_and_generation_are_revalidated_right_before_delivery() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = std::sync::Arc::new(Store::new(st.path(), &ws));
+    let record = observed(root.path(), &ws, "src/a.rs", "eviction");
+    store.enqueue(&record).unwrap();
+    store.ingest().unwrap();
+    let reader = WorkspaceReader::new(root.path()).unwrap();
+
+    // Forgotten while the read was waiting on the provider.
+    let (other, id_) = (store.clone(), record.node_id.clone());
+    let forgetting = Reader::new(move |stage, _, _| {
+        if stage == Stage::Stopping {
+            other.forget(&id_, u64::MAX).unwrap();
+        }
+        p(0.9)
+    });
+    let got = retrieve::read_store(
+        &store,
+        &reader,
+        "eviction",
+        &forgetting,
+        &ReadConfig::default(),
+    )
+    .await;
+    assert!(
+        got.memories.is_empty(),
+        "a node gone by delivery time is not delivered"
+    );
+
+    // Forgotten, its tombstone over, and observed again while the read waited: the same id in a
+    // new generation is not what was scored.
+    let store = std::sync::Arc::new(Store::new(st.path(), &format!("{ws}3")));
+    store.enqueue(&record).unwrap();
+    store.ingest().unwrap();
+    let (other, again) = (store.clone(), record.clone());
+    let replaced = Reader::new(move |stage, _, _| {
+        if stage == Stage::Stopping {
+            other.forget(&again.node_id, 5).unwrap();
+            other.sweep(10).unwrap();
+            other.enqueue(&again).unwrap();
+            other.ingest().unwrap();
+        }
+        p(0.9)
+    });
+    let got = retrieve::read_store(
+        &store,
+        &reader,
+        "eviction",
+        &replaced,
+        &ReadConfig::default(),
+    )
+    .await;
+    assert!(got.memories.is_empty(), "another generation of the node");
+
+    // Edited while the read was waiting: stale by delivery time.
+    let store = Store::new(st.path(), &format!("{ws}2"));
+    store.enqueue(&record).unwrap();
+    store.ingest().unwrap();
+    let path = root.path().to_path_buf();
+    let editing = Reader::new(move |stage, _, _| {
+        if stage == Stage::Stopping {
+            common::write(&path, "src/a.rs", "fn a() { edited() }\n");
+        }
+        p(0.9)
+    });
+    let got = retrieve::read_store(
+        &store,
+        &reader,
+        "eviction",
+        &editing,
+        &ReadConfig::default(),
+    )
+    .await;
+    assert!(got.memories.is_empty());
+    assert_eq!(got.stale_omitted, 1);
+}
+
+#[tokio::test]
+async fn pending_writes_are_reported_and_not_awaited() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Store::new(st.path(), &ws);
+    store
+        .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction"))
+        .unwrap();
+    store.ingest().unwrap();
+    store
+        .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction later"))
+        .unwrap();
+    let reader = WorkspaceReader::new(root.path()).unwrap();
+    let got = retrieve::read_store(
+        &store,
+        &reader,
+        "eviction",
+        &passing(),
+        &ReadConfig::default(),
+    )
+    .await;
+    assert_eq!(got.pending_writes, 1);
+    assert_eq!(got.memories.len(), 1, "only what is incorporated");
+    assert_eq!(
+        store.pending().unwrap(),
+        1,
+        "a read never incorporates the spool"
+    );
+}
+
+#[tokio::test]
+async fn another_worktree_of_the_same_head_sees_nothing() {
+    let (repo, st, other) = (
+        common::sample_repo(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let wt = other.path().join("wt");
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["worktree", "add", "-q", wt.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let main = identity::workspace_id(repo.path()).unwrap();
+    let store = Store::new(st.path(), &main);
+    store
+        .enqueue(&observed(repo.path(), &main, "src/auth.py", "eviction"))
+        .unwrap();
+    store.ingest().unwrap();
+
+    let linked = Store::new(st.path(), &identity::workspace_id(&wt).unwrap());
+    let reader = WorkspaceReader::new(&wt).unwrap();
+    let got = retrieve::read_store(
+        &linked,
+        &reader,
+        "eviction",
+        &passing(),
+        &ReadConfig::default(),
+    )
+    .await;
+    assert_eq!((got.stop, got.memories.len()), (StopReason::Empty, 0));
+}

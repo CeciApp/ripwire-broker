@@ -178,6 +178,10 @@ pub struct Read {
     pub partial: bool,
     /// No request was allowed (`--memory-read-request-limit 0`): only a cache could serve.
     pub degraded: bool,
+    /// Memories left out because a source changed since they were observed.
+    pub stale_omitted: usize,
+    /// Observations in the spool, not incorporated yet: not awaited.
+    pub pending_writes: usize,
 }
 
 /// A candidate to score: the node and, after expansion, the edge that reached it.
@@ -310,6 +314,22 @@ pub async fn read(
     classifier: &dyn MemoryClassifier,
     cfg: &ReadConfig,
 ) -> Read {
+    read_with(state, query, classifier, cfg, &|_| true).await
+}
+
+/// [`read`], with the memories whose sources are no longer what they were left out (step 1):
+/// history, not current advice.
+async fn read_with(
+    state: &State,
+    query: &str,
+    classifier: &dyn MemoryClassifier,
+    cfg: &ReadConfig,
+    fresh: &dyn Fn(&Record) -> bool,
+) -> Read {
+    let mut current = state.clone();
+    current.nodes.retain(|_, r| fresh(r));
+    let stale_omitted = state.nodes.len() - current.nodes.len();
+    let state = &current;
     let mut run = Run {
         classifier,
         cfg,
@@ -328,6 +348,8 @@ pub async fn read(
         edges_seen: 0,
         partial: false,
         degraded: false,
+        stale_omitted,
+        pending_writes: 0,
     };
     let anchors = index::anchors(state, query);
     if anchors.is_empty() {
@@ -523,4 +545,41 @@ pub fn fit(read: &mut Read, max_items: usize, max_tokens: u32) {
 pub fn slots(read_limit: usize, jev_request_limit: usize) -> (usize, usize) {
     let memory = read_limit.min(4).min(jev_request_limit);
     (memory, jev_request_limit - memory)
+}
+
+/// Whether every source of a memory still has the bytes it was observed with, and is eligible.
+fn fresh_in(reader: &crate::online::reader::WorkspaceReader) -> impl Fn(&Record) -> bool + '_ {
+    move |r: &Record| {
+        r.sources.iter().all(|s| {
+            reader
+                .snapshot(&s.path)
+                .is_ok_and(|snap| snap.content_hash == s.sha256)
+        })
+    }
+}
+
+/// The read `context_for_task` makes: the current generation, stale memories left out, pending
+/// observations counted and not awaited, and every memory checked again right before delivery
+/// (step 9): its node still there in the same generation, its sources unchanged.
+pub async fn read_store(
+    store: &super::store::Store,
+    reader: &crate::online::reader::WorkspaceReader,
+    query: &str,
+    classifier: &dyn MemoryClassifier,
+    cfg: &ReadConfig,
+) -> Read {
+    let state = store.load().unwrap_or_default();
+    let fresh = fresh_in(reader);
+    let mut out = read_with(&state, query, classifier, cfg, &fresh).await;
+    out.pending_writes = store.pending().unwrap_or(0);
+    let now = store.load().unwrap_or_default();
+    out.memories.retain(|f| {
+        now.nodes
+            .get(&f.record.node_id)
+            .is_some_and(|n| n.generation == f.record.generation)
+    });
+    let present = out.memories.len();
+    out.memories.retain(|f| fresh(&f.record));
+    out.stale_omitted += present - out.memories.len();
+    out
 }
