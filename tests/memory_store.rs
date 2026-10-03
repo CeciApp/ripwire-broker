@@ -603,3 +603,135 @@ fn after_forget_all_nothing_is_collected_until_resumed() {
         "forgotten ids stay forgotten"
     );
 }
+
+// ---------------------------------------------------------------- review of phase 1 (D-137)
+
+#[test]
+fn an_enqueue_racing_forget_all_never_survives_it() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"v".repeat(64));
+    // forget --all lands after the enqueue checked the marker and before its file appeared.
+    let got = store.enqueue_with(&record(1), || {
+        store.forget_all(1_000_000).unwrap();
+    });
+    assert_eq!(got, Err(Refusal::Revoked));
+    assert_eq!(
+        store.pending().unwrap(),
+        0,
+        "nothing the user asked to erase stays"
+    );
+}
+
+/// A temporary as a writer killed between create and rename leaves it.
+fn leftover(dir: &Path, name: &str, age_secs: u64) -> std::path::PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    let p = dir.join(name);
+    fs::write(&p, "observation with text").unwrap();
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+    fs::File::options()
+        .write(true)
+        .open(&p)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+    p
+}
+
+#[test]
+fn leftover_temporaries_are_counted_cleaned_and_erased() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"x".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    let spool = store.dir().join("spool");
+    let stale = leftover(&spool, "a.tmp99-1", 3_600);
+    let fresh = leftover(&spool, "b.tmp99-2", 0);
+    assert_eq!(
+        store.usage().unwrap().pending,
+        1,
+        "a temporary is not an observation"
+    );
+    assert!(
+        store.usage().unwrap().spool_bytes > fs::metadata(&stale).unwrap().len(),
+        "but it takes room"
+    );
+
+    store.ingest().unwrap();
+    assert!(!stale.exists(), "an old one is a dead writer's: removed");
+    assert!(fresh.exists(), "a recent one may still be renamed");
+
+    let snap_tmp = leftover(store.dir(), "snapshot.tmp99-3", 0);
+    store.forget_all(1).unwrap();
+    assert!(
+        !fresh.exists() && !snap_tmp.exists(),
+        "forget --all leaves no temporary"
+    );
+}
+
+#[test]
+fn forget_all_on_an_unreadable_store_still_erases_the_spool() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"y".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    store.enqueue(&record(2)).unwrap();
+    let snapshot = store.dir().join("snapshot.json");
+    fs::write(&snapshot, "{broken").unwrap();
+
+    assert_eq!(
+        store.forget_all(1),
+        Err(Refusal::Unavailable(Unavailable::Corrupt))
+    );
+    assert!(store.is_revoked());
+    assert_eq!(
+        store.pending().unwrap(),
+        0,
+        "pending observations are erased anyway"
+    );
+    assert_eq!(
+        fs::read_to_string(&snapshot).unwrap(),
+        "{broken",
+        "the snapshot is kept as it was"
+    );
+}
+
+#[test]
+fn one_bad_spool_entry_does_not_block_ingestion_and_a_newer_schema_is_kept() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"z".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    let spool = store.dir().join("spool");
+    std::os::unix::fs::symlink("/etc/hosts", spool.join("planted.json")).unwrap();
+    let mut newer = serde_json::to_value(record(2)).unwrap();
+    newer["schema_version"] = json!(2);
+    fs::write(spool.join("newer.json"), newer.to_string()).unwrap();
+
+    let got = store.ingest().unwrap();
+    assert_eq!(got.added, 1, "the good one gets in");
+    assert!(
+        !spool.join("planted.json").exists(),
+        "a link is dropped, never followed"
+    );
+    assert!(
+        spool.join("newer.json").exists(),
+        "a newer schema is not ours to destroy"
+    );
+    assert_eq!(store.ingest().unwrap().added, 0);
+}
+
+#[test]
+fn a_linked_spool_directory_is_never_written_through() {
+    let state = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"q".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    let spool = store.dir().join("spool");
+    fs::remove_dir(&spool).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), &spool).unwrap();
+
+    assert_eq!(
+        store.enqueue(&record(2)),
+        Err(Refusal::Unavailable(Unavailable::Symlink))
+    );
+    assert!(fs::read_dir(elsewhere.path()).unwrap().next().is_none());
+}

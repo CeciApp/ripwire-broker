@@ -8,7 +8,7 @@
 //! hook never waits. One writer at a time incorporates them into a new generation and only then
 //! removes them: a crash in between replays the spool, and a replay is the same node.
 
-use super::model::Record;
+use super::model::{Record, Rejected};
 use super::time::Sequence;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +23,8 @@ const SPOOL: &str = "spool";
 const LOCK: &str = "lock";
 /// Written by `forget --all`; only `memory resume` removes it (PD-4).
 const REVOKED: &str = "revoked";
+/// Older than this, a spool temporary is a dead writer's.
+const DEAD_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The caps of PRD jev-mem §6; injectable so a test can reach them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,12 +242,26 @@ impl Store {
     /// Publishes an admitted observation to the spool. Durable once it returns; no lock, no
     /// snapshot read. A replay of a pending node replaces its file and takes no room.
     pub fn enqueue(&self, record: &Record) -> Result<(), Refusal> {
+        self.enqueue_with(record, || {})
+    }
+
+    /// [`Store::enqueue`] with `between` run after the revocation check and before the file
+    /// appears: where a concurrent `forget --all` can land. For race tests.
+    pub fn enqueue_with(&self, record: &Record, between: impl FnOnce()) -> Result<(), Refusal> {
         let name = spool_name(&record.node_id)?;
         self.check_dir()?;
         if self.is_revoked() {
             return Err(Refusal::Revoked);
         }
         let spool = self.dir.join(SPOOL);
+        if let Ok(m) = fs::symlink_metadata(&spool) {
+            if m.file_type().is_symlink() {
+                return Err(Unavailable::Symlink.into());
+            }
+            if m.mode() & 0o077 != 0 {
+                return Err(Unavailable::NotPrivate.into());
+            }
+        }
         let bytes = serde_json::to_vec(record).map_err(|_| Unavailable::Io)?;
         let target = spool.join(&name);
         if fs::symlink_metadata(&target).is_err() {
@@ -261,9 +277,17 @@ impl Store {
                 return Err(Refusal::Full(Full::Total));
             }
         }
+        between();
         crate::state::write_private(&spool, &target, &bytes)
             .and_then(|()| fs::File::open(&spool)?.sync_all())
-            .map_err(|_| Refusal::Unavailable(Unavailable::Io))
+            .map_err(|_| Refusal::Unavailable(Unavailable::Io))?;
+        // A `forget --all` that landed after the check above has already listed the spool: take
+        // back what it could not see, so nothing the user erased comes back.
+        if self.is_revoked() {
+            let _ = fs::remove_file(&target);
+            return Err(Refusal::Revoked);
+        }
+        Ok(())
     }
 
     /// Sizes on disk, without reading the snapshot.
@@ -301,14 +325,28 @@ impl Store {
         let mut done = Ingested::default();
         let mut consumed = Vec::new();
         let mut size = on_disk(&state)?.len() as u64;
+        self.remove_dead_temporaries()?;
         for path in self.spool_files()? {
-            let Some(bytes) = read_checked(&path, self.limits.spool_bytes)? else {
-                continue;
+            // One entry that cannot be read (a link, a directory) is dropped, never followed,
+            // and never stops the others.
+            let bytes = match read_checked(&path, self.limits.spool_bytes) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue,
+                Err(_) => {
+                    done.rejected += 1;
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
             };
-            let Ok(mut record) = Record::parse(&bytes) else {
-                done.rejected += 1;
-                consumed.push(path);
-                continue;
+            let mut record = match Record::parse(&bytes) {
+                Ok(record) => record,
+                // A newer schema may be a newer broker's: not ours to destroy.
+                Err(Rejected::UnknownSchema) => continue,
+                Err(_) => {
+                    done.rejected += 1;
+                    consumed.push(path);
+                    continue;
+                }
             };
             if state.tombstones.contains_key(&record.node_id) {
                 done.forgotten += 1;
@@ -429,6 +467,18 @@ impl Store {
         crate::state::write_private(&self.dir, &self.dir.join(REVOKED), b"")
             .and_then(|()| fs::File::open(&self.dir)?.sync_all())
             .map_err(|_| Unavailable::Io)?;
+        // Pending observations and every temporary go before the snapshot is read: a store that
+        // cannot be read keeps its snapshot, never the text the user asked to erase.
+        for path in self.spool_entries()? {
+            let _ = fs::remove_file(path);
+        }
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for e in entries.filter_map(Result::ok) {
+                if e.file_name().to_string_lossy().starts_with("snapshot.tmp") {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
+        }
         let mut state = self.load()?;
         let removed = state.nodes.len();
         for id in std::mem::take(&mut state.nodes).into_keys() {
@@ -436,9 +486,6 @@ impl Store {
         }
         state.generation += 1;
         self.write_snapshot(&on_disk(&state)?)?;
-        for path in self.spool_files()? {
-            let _ = fs::remove_file(path);
-        }
         Ok(removed)
     }
 
@@ -459,13 +506,30 @@ impl Store {
         Ok(true)
     }
 
-    fn spool_files(&self) -> Result<Vec<PathBuf>, Unavailable> {
+    /// A temporary older than [`DEAD_TEMPORARY`] belongs to a writer that died between create and
+    /// rename; a younger one may still be renamed.
+    fn remove_dead_temporaries(&self) -> Result<(), Unavailable> {
+        for path in self.spool_entries()? {
+            let is_temporary = path
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.starts_with("tmp"));
+            let dead = fs::symlink_metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > DEAD_TEMPORARY);
+            if is_temporary && dead {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Everything in the spool, observations and temporaries alike, in name order.
+    fn spool_entries(&self) -> Result<Vec<PathBuf>, Unavailable> {
         let mut files: Vec<PathBuf> = match fs::read_dir(self.dir.join(SPOOL)) {
-            Ok(entries) => entries
-                .filter_map(Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "json"))
-                .collect(),
+            Ok(entries) => entries.filter_map(Result::ok).map(|e| e.path()).collect(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
             Err(_) => return Err(Unavailable::Io),
         };
@@ -473,14 +537,23 @@ impl Store {
         Ok(files)
     }
 
+    /// The observations waiting: `*.json` entries.
+    fn spool_files(&self) -> Result<Vec<PathBuf>, Unavailable> {
+        let mut files = self.spool_entries()?;
+        files.retain(|p| p.extension().is_some_and(|x| x == "json"));
+        Ok(files)
+    }
+
+    /// Observations waiting, and the bytes of everything in the spool: a temporary takes room.
     fn spool_usage(&self) -> Result<(usize, u64), Unavailable> {
-        let files = self.spool_files()?;
-        let bytes = files
+        let pending = self.spool_files()?.len();
+        let bytes = self
+            .spool_entries()?
             .iter()
             .filter_map(|p| fs::symlink_metadata(p).ok())
             .map(|m| m.len())
             .sum();
-        Ok((files.len(), bytes))
+        Ok((pending, bytes))
     }
 
     /// `false` when there is no store yet.
