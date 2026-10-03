@@ -32,6 +32,12 @@ impl Sequence {
         self.last = last;
     }
 
+    /// The next sequence number; `None` once the sequence is exhausted.
+    pub fn advance(&mut self) -> Option<u64> {
+        self.last = self.last.checked_add(1)?;
+        Some(self.last)
+    }
+
     /// The next stamp; `None` once the sequence is exhausted, rather than wrapping around.
     pub fn stamp(
         &mut self,
@@ -39,8 +45,7 @@ impl Sequence {
         generation: u64,
         retention_ms: u64,
     ) -> Option<Stamp> {
-        let next = self.last.checked_add(1)?;
-        self.last = next;
+        let next = self.advance()?;
         Some(Stamp {
             observed_at_ms: clock.now_ms(),
             ingest_seq: next,

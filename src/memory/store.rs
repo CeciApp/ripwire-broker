@@ -3,6 +3,10 @@
 //! temporary, `sync_all`, `rename` and a sync of the directory, so a reader sees the previous
 //! generation or the new one and a power loss keeps one of them. What cannot be read is
 //! unavailable and is never overwritten: it may be a newer schema or evidence of a fault.
+//!
+//! Observations arrive in a spool of immutable files, one per node, written without a lock so a
+//! hook never waits. One writer at a time incorporates them into a new generation and only then
+//! removes them: a crash in between replays the spool, and a replay is the same node.
 
 use super::model::Record;
 use super::time::Sequence;
@@ -10,12 +14,36 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 const SNAPSHOT: &str = "snapshot.json";
+const SPOOL: &str = "spool";
+const LOCK: &str = "lock";
+
+/// The caps of PRD jev-mem §6; injectable so a test can reach them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub max_nodes: usize,
+    pub spool_entries: usize,
+    pub spool_bytes: u64,
+    pub snapshot_bytes: u64,
+    /// Spool and snapshot together.
+    pub total_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_nodes: 2_000,
+            spool_entries: 1_000,
+            spool_bytes: 16 * 1024 * 1024,
+            snapshot_bytes: 64 * 1024 * 1024,
+            total_bytes: 96 * 1024 * 1024,
+        }
+    }
+}
 
 /// Why a store cannot be used. Carries no path or content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +58,56 @@ pub enum Unavailable {
     Corrupt,
     UnknownSchema,
     Io,
+}
+
+/// Which cap a write ran into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Full {
+    Nodes,
+    SpoolEntries,
+    SpoolBytes,
+    Snapshot,
+    Total,
+}
+
+/// Why a write did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    Unavailable(Unavailable),
+    Full(Full),
+    /// Another writer holds the store; nobody waits for it.
+    Locked,
+    /// A node id that cannot name a spool file.
+    InvalidId,
+    /// Stopped at a [`Step`] by [`Store::ingest_crashing_at`].
+    Crashed,
+}
+
+impl From<Unavailable> for Refusal {
+    fn from(u: Unavailable) -> Self {
+        Self::Unavailable(u)
+    }
+}
+
+/// The points of an ingestion a crash can fall between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    BeforePublish,
+    AfterPublish,
+    /// After the first spool entry is removed.
+    MidRemoval,
+}
+
+/// What one ingestion did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ingested {
+    pub added: usize,
+    /// Already in the store: removed from the spool, nothing counted.
+    pub duplicates: usize,
+    /// Spool entries that did not parse; removed.
+    pub rejected: usize,
+    /// The cap that stopped it; what did not fit stays pending.
+    pub refused: Option<Full>,
 }
 
 /// One generation of a workspace's memory.
@@ -49,14 +127,28 @@ struct OnDisk {
     state: State,
 }
 
+fn on_disk(state: &State) -> Result<Vec<u8>, Unavailable> {
+    serde_json::to_vec(&OnDisk {
+        schema_version: SCHEMA_VERSION,
+        state: state.clone(),
+    })
+    .map_err(|_| Unavailable::Io)
+}
+
 pub struct Store {
     dir: PathBuf,
+    limits: Limits,
 }
 
 impl Store {
     pub fn new(state_dir: &Path, workspace_id: &str) -> Self {
+        Self::with_limits(state_dir, workspace_id, Limits::default())
+    }
+
+    pub fn with_limits(state_dir: &Path, workspace_id: &str, limits: Limits) -> Self {
         Self {
             dir: state_dir.join("memory").join(workspace_id),
+            limits,
         }
     }
 
@@ -64,7 +156,8 @@ impl Store {
         &self.dir
     }
 
-    /// The current generation; an empty state when there is none yet. Never creates anything.
+    /// The current generation; an empty state when there is none yet. Never creates anything
+    /// and never waits for the writer.
     pub fn load(&self) -> Result<State, Unavailable> {
         Ok(self.read()?.unwrap_or_default())
     }
@@ -72,22 +165,171 @@ impl Store {
     /// Publishes `state` as the new generation, unless the current one cannot be read.
     pub fn publish(&self, state: &State) -> Result<(), Unavailable> {
         self.read()?;
-        let bytes = serde_json::to_vec(&OnDisk {
-            schema_version: SCHEMA_VERSION,
-            state: state.clone(),
-        })
-        .map_err(|_| Unavailable::Io)?;
-        crate::state::write_private(&self.dir, &self.dir.join(SNAPSHOT), &bytes)
+        self.write_snapshot(&on_disk(state)?)
+    }
+
+    fn write_snapshot(&self, bytes: &[u8]) -> Result<(), Unavailable> {
+        crate::state::write_private(&self.dir, &self.dir.join(SNAPSHOT), bytes)
             .and_then(|()| fs::File::open(&self.dir)?.sync_all())
             .map_err(|_| Unavailable::Io)
     }
 
-    /// `None` when there is no store yet. The snapshot is opened once, without following a link
-    /// or blocking on a FIFO, and every check is made on what was opened.
-    fn read(&self) -> Result<Option<State>, Unavailable> {
+    /// The exclusive writer, held until dropped. Never waits: a held store is [`Refusal::Locked`].
+    pub fn writer(&self) -> Result<fs::File, Refusal> {
+        self.check_dir()?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.dir)
+            .map_err(|_| Unavailable::Io)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.dir.join(LOCK))
+            .map_err(|_| Unavailable::Io)?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(_) => Err(Refusal::Locked),
+        }
+    }
+
+    /// Publishes an admitted observation to the spool. Durable once it returns; no lock, no
+    /// snapshot read. A replay of a pending node replaces its file and takes no room.
+    pub fn enqueue(&self, record: &Record) -> Result<(), Refusal> {
+        let name = spool_name(&record.node_id)?;
+        self.check_dir()?;
+        let spool = self.dir.join(SPOOL);
+        let bytes = serde_json::to_vec(record).map_err(|_| Unavailable::Io)?;
+        let target = spool.join(&name);
+        if fs::symlink_metadata(&target).is_err() {
+            let (entries, used) = self.spool_usage()?;
+            if entries >= self.limits.spool_entries {
+                return Err(Refusal::Full(Full::SpoolEntries));
+            }
+            if used + bytes.len() as u64 > self.limits.spool_bytes {
+                return Err(Refusal::Full(Full::SpoolBytes));
+            }
+            let snapshot = fs::symlink_metadata(self.dir.join(SNAPSHOT)).map_or(0, |m| m.len());
+            if snapshot + used + bytes.len() as u64 > self.limits.total_bytes {
+                return Err(Refusal::Full(Full::Total));
+            }
+        }
+        crate::state::write_private(&spool, &target, &bytes)
+            .and_then(|()| fs::File::open(&spool)?.sync_all())
+            .map_err(|_| Refusal::Unavailable(Unavailable::Io))
+    }
+
+    /// Observations waiting in the spool.
+    pub fn pending(&self) -> Result<usize, Unavailable> {
+        Ok(self.spool_usage()?.0)
+    }
+
+    /// Incorporates the spool into a new generation under the writer lock.
+    pub fn ingest(&self) -> Result<Ingested, Refusal> {
+        self.ingest_until(None)
+    }
+
+    /// [`Store::ingest`] stopped at `step`, as a crash there would: for fault-injection tests.
+    pub fn ingest_crashing_at(&self, step: Step) -> Result<Ingested, Refusal> {
+        self.ingest_until(Some(step))
+    }
+
+    fn ingest_until(&self, crash: Option<Step>) -> Result<Ingested, Refusal> {
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        let mut done = Ingested::default();
+        let mut consumed = Vec::new();
+        let mut size = on_disk(&state)?.len() as u64;
+        for path in self.spool_files()? {
+            let Some(bytes) = read_checked(&path, self.limits.spool_bytes)? else {
+                continue;
+            };
+            let Ok(mut record) = Record::parse(&bytes) else {
+                done.rejected += 1;
+                consumed.push(path);
+                continue;
+            };
+            if state.nodes.contains_key(&record.node_id) {
+                done.duplicates += 1;
+                consumed.push(path);
+                continue;
+            }
+            if state.nodes.len() >= self.limits.max_nodes {
+                done.refused = Some(Full::Nodes);
+                break;
+            }
+            // The key, its quotes, the colon and the comma around the record.
+            let grows = bytes.len() as u64 + record.node_id.len() as u64 + 4;
+            if size + grows > self.limits.snapshot_bytes {
+                done.refused = Some(Full::Snapshot);
+                break;
+            }
+            record.ingest_seq = state
+                .sequence
+                .advance()
+                .ok_or(Full::Nodes)
+                .map_err(Refusal::Full)?;
+            record.generation = state.generation + 1;
+            size += grows;
+            state.nodes.insert(record.node_id.clone(), record);
+            done.added += 1;
+            consumed.push(path);
+        }
+        if crash == Some(Step::BeforePublish) {
+            return Err(Refusal::Crashed);
+        }
+        if done.added > 0 {
+            state.generation += 1;
+            let bytes = on_disk(&state)?;
+            if bytes.len() as u64 > self.limits.snapshot_bytes {
+                return Err(Refusal::Full(Full::Snapshot));
+            }
+            self.write_snapshot(&bytes)?;
+        }
+        if crash == Some(Step::AfterPublish) {
+            return Err(Refusal::Crashed);
+        }
+        for (i, path) in consumed.iter().enumerate() {
+            let _ = fs::remove_file(path);
+            if i == 0 && crash == Some(Step::MidRemoval) {
+                return Err(Refusal::Crashed);
+            }
+        }
+        Ok(done)
+    }
+
+    fn spool_files(&self) -> Result<Vec<PathBuf>, Unavailable> {
+        let mut files: Vec<PathBuf> = match fs::read_dir(self.dir.join(SPOOL)) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+            Err(_) => return Err(Unavailable::Io),
+        };
+        files.sort();
+        Ok(files)
+    }
+
+    fn spool_usage(&self) -> Result<(usize, u64), Unavailable> {
+        let files = self.spool_files()?;
+        let bytes = files
+            .iter()
+            .filter_map(|p| fs::symlink_metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        Ok((files.len(), bytes))
+    }
+
+    /// `false` when there is no store yet.
+    fn check_dir(&self) -> Result<bool, Unavailable> {
         let dir = match fs::symlink_metadata(&self.dir) {
             Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(_) => return Err(Unavailable::Io),
         };
         if dir.file_type().is_symlink() {
@@ -99,34 +341,18 @@ impl Store {
         if dir.mode() & 0o077 != 0 {
             return Err(Unavailable::NotPrivate);
         }
-        let file = match fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.dir.join(SNAPSHOT))
-        {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(Unavailable::Symlink),
-            Err(_) => return Err(Unavailable::Io),
+        Ok(true)
+    }
+
+    /// `None` when there is no store yet.
+    fn read(&self) -> Result<Option<State>, Unavailable> {
+        if !self.check_dir()? {
+            return Ok(None);
+        }
+        let Some(bytes) = read_checked(&self.dir.join(SNAPSHOT), self.limits.snapshot_bytes)?
+        else {
+            return Ok(None);
         };
-        let meta = file.metadata().map_err(|_| Unavailable::Io)?;
-        if !meta.is_file() {
-            return Err(Unavailable::NotRegular);
-        }
-        // Not reachable in a test without root: kept because the PRD asks for it (§6).
-        if meta.uid() != dir.uid() {
-            return Err(Unavailable::ForeignOwner);
-        }
-        if meta.len() > MAX_SNAPSHOT_BYTES {
-            return Err(Unavailable::TooLarge);
-        }
-        let mut bytes = Vec::new();
-        file.take(MAX_SNAPSHOT_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| Unavailable::Io)?;
-        if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
-            return Err(Unavailable::TooLarge);
-        }
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| Unavailable::Corrupt)?;
         let schema = value
@@ -138,4 +364,50 @@ impl Store {
         let on_disk: OnDisk = serde_json::from_value(value).map_err(|_| Unavailable::Corrupt)?;
         Ok(Some(on_disk.state))
     }
+}
+
+/// A node id names its spool file, so it must be a plain name.
+fn spool_name(node_id: &str) -> Result<String, Refusal> {
+    match !node_id.is_empty()
+        && node_id.len() <= 128
+        && node_id.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        true => Ok(format!("{node_id}.json")),
+        false => Err(Refusal::InvalidId),
+    }
+}
+
+/// `None` when the file does not exist. Opened once, without following a link or blocking on a
+/// FIFO, and every check is made on what was opened.
+fn read_checked(path: &Path, max: u64) -> Result<Option<Vec<u8>>, Unavailable> {
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(Unavailable::Symlink),
+        Err(_) => return Err(Unavailable::Io),
+    };
+    let meta = file.metadata().map_err(|_| Unavailable::Io)?;
+    if !meta.is_file() {
+        return Err(Unavailable::NotRegular);
+    }
+    // Not reachable in a test without root: kept because the PRD asks for it (§6).
+    let dir = path.parent().and_then(|d| fs::metadata(d).ok());
+    if dir.is_some_and(|d| d.uid() != meta.uid()) {
+        return Err(Unavailable::ForeignOwner);
+    }
+    if meta.len() > max {
+        return Err(Unavailable::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Unavailable::Io)?;
+    if bytes.len() as u64 > max {
+        return Err(Unavailable::TooLarge);
+    }
+    Ok(Some(bytes))
 }

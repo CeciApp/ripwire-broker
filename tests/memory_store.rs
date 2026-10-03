@@ -18,7 +18,7 @@ fn record(n: u64) -> Record {
         "kind": "edit_observation",
         "content": format!("observation {n}"),
         "observed_at_ms": n,
-        "ingest_seq": n,
+        "ingest_seq": 0,
         "timestamp_role": "observation",
         "expires_at_ms": n + 1,
         "generation": n
@@ -176,4 +176,190 @@ fn a_reader_never_observes_a_partial_generation() {
         done.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(reader.join().unwrap() > 0);
     });
+}
+
+// ---------------------------------------------------------------- spool → snapshot (§6, CA-4, CA-7)
+
+use ripwire_broker::memory::store::{Full, Limits, Refusal, Step};
+
+/// The same observation seen again by another session: another clock and event key.
+fn seen_again(n: u64) -> Record {
+    let mut r = record(n);
+    r.observed_at_ms += 10_000;
+    r.event_key = "another session".into();
+    r
+}
+
+#[test]
+fn replaying_the_same_observation_yields_one_node_and_one_increment() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"g".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.enqueue(&seen_again(1)).unwrap();
+    let first = store.ingest().unwrap();
+    assert_eq!((first.added, first.duplicates), (1, 0));
+
+    store.enqueue(&seen_again(1)).unwrap();
+    store.enqueue(&record(2)).unwrap();
+    let second = store.ingest().unwrap();
+    assert_eq!((second.added, second.duplicates), (1, 1));
+
+    let s = store.load().unwrap();
+    assert_eq!(s.nodes.len(), 2);
+    let seqs: Vec<u64> = s.nodes.values().map(|r| r.ingest_seq).collect();
+    assert_eq!(
+        seqs,
+        [1, 2],
+        "one increment per new node, assigned under the lock"
+    );
+    assert_eq!(s.generation, 2);
+    assert_eq!(store.pending().unwrap(), 0, "the spool is drained");
+}
+
+#[test]
+fn a_crash_between_commit_and_spool_removal_does_not_duplicate() {
+    for step in [Step::BeforePublish, Step::AfterPublish, Step::MidRemoval] {
+        let state = tempfile::tempdir().unwrap();
+        let store = Store::new(state.path(), &"h".repeat(64));
+        for n in 1..=3 {
+            store.enqueue(&record(n)).unwrap();
+        }
+        assert_eq!(
+            store.ingest_crashing_at(step),
+            Err(Refusal::Crashed),
+            "{step:?}"
+        );
+        let survived = store.load().unwrap();
+        match step {
+            Step::BeforePublish => assert!(survived.nodes.is_empty(), "nothing committed"),
+            _ => assert_eq!(survived.nodes.len(), 3, "{step:?}: committed whole"),
+        }
+
+        let resumed = store.ingest().unwrap();
+        let s = store.load().unwrap();
+        assert_eq!(s.nodes.len(), 3, "{step:?}");
+        let mut seqs: Vec<u64> = s.nodes.values().map(|r| r.ingest_seq).collect();
+        seqs.sort();
+        assert_eq!(seqs, [1, 2, 3], "{step:?}: no node counted twice");
+        assert_eq!(resumed.added + survived.nodes.len(), 3, "{step:?}");
+        assert_eq!(store.pending().unwrap(), 0, "{step:?}");
+    }
+}
+
+#[test]
+fn a_full_store_refuses_new_writes_with_a_reason() {
+    let state = tempfile::tempdir().unwrap();
+    let small = |l: Limits| Store::with_limits(state.path(), &"i".repeat(64), l);
+    assert_eq!(
+        Limits::default(),
+        Limits {
+            max_nodes: 2_000,
+            spool_entries: 1_000,
+            spool_bytes: 16 * 1024 * 1024,
+            snapshot_bytes: 64 * 1024 * 1024,
+            total_bytes: 96 * 1024 * 1024,
+        },
+        "PRD jev-mem §6"
+    );
+
+    let store = small(Limits {
+        max_nodes: 2,
+        ..Limits::default()
+    });
+    for n in 1..=3 {
+        store.enqueue(&record(n)).unwrap();
+    }
+    let got = store.ingest().unwrap();
+    assert_eq!((got.added, got.refused), (2, Some(Full::Nodes)));
+    assert_eq!(store.load().unwrap().nodes.len(), 2, "never past the cap");
+    assert_eq!(
+        store.pending().unwrap(),
+        1,
+        "the refused one stays pending, not lost"
+    );
+
+    let store = Store::with_limits(
+        state.path(),
+        "n",
+        Limits {
+            spool_entries: 2,
+            ..Limits::default()
+        },
+    );
+    store.enqueue(&record(10)).unwrap();
+    store.enqueue(&record(11)).unwrap();
+    assert_eq!(
+        store.enqueue(&record(12)),
+        Err(Refusal::Full(Full::SpoolEntries))
+    );
+    assert_eq!(
+        store.enqueue(&seen_again(11)).map(|_| ()),
+        Ok(()),
+        "a replay takes no room"
+    );
+
+    let one = serde_json::to_vec(&record(20)).unwrap().len() as u64;
+    let st = tempfile::tempdir().unwrap();
+    let store = Store::with_limits(
+        st.path(),
+        "j",
+        Limits {
+            spool_bytes: one + 10,
+            ..Limits::default()
+        },
+    );
+    store.enqueue(&record(20)).unwrap();
+    assert_eq!(
+        store.enqueue(&record(21)),
+        Err(Refusal::Full(Full::SpoolBytes))
+    );
+
+    let st = tempfile::tempdir().unwrap();
+    let store = Store::with_limits(
+        st.path(),
+        "k",
+        Limits {
+            snapshot_bytes: one,
+            ..Limits::default()
+        },
+    );
+    store.enqueue(&record(30)).unwrap();
+    store.enqueue(&record(31)).unwrap();
+    assert_eq!(store.ingest().unwrap().refused, Some(Full::Snapshot));
+    assert!(store.load().unwrap().nodes.len() < 2);
+
+    let st = tempfile::tempdir().unwrap();
+    let store = Store::with_limits(
+        st.path(),
+        "l",
+        Limits {
+            total_bytes: one + 10,
+            ..Limits::default()
+        },
+    );
+    store.enqueue(&record(40)).unwrap();
+    store.ingest().unwrap();
+    assert_eq!(store.enqueue(&record(41)), Err(Refusal::Full(Full::Total)));
+}
+
+#[test]
+fn a_second_writer_does_not_wait_and_reports_the_lock() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"m".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    let held = store.writer().unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(store.ingest().map(|_| ()), Err(Refusal::Locked));
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "did not wait"
+    );
+    assert_eq!(
+        store.enqueue(&record(2)).map(|_| ()),
+        Ok(()),
+        "publishing to the spool needs no lock"
+    );
+    assert!(store.load().is_ok(), "nor does reading");
+    drop(held);
+    assert_eq!(store.ingest().unwrap().added, 2);
 }

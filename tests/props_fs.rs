@@ -481,3 +481,44 @@ fn no_generated_path_escapes_the_workspace_into_a_record() {
         })
         .unwrap();
 }
+
+#[test]
+fn replay_is_idempotent() {
+    use ripwire_broker::memory::model::Record;
+    use ripwire_broker::memory::store::Store;
+
+    let record = |n: u64, again: bool| -> Record {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "policy_version": "memory-policy/v1",
+            "node_id": format!("{n:064}"), "content_hash": format!("{n:064}"),
+            "workspace_id": "w", "event_key": if again { "b" } else { "a" },
+            "kind": "edit_observation", "content": format!("o{n}"),
+            "observed_at_ms": if again { 9 } else { 1 }, "ingest_seq": 0,
+            "timestamp_role": "observation", "expires_at_ms": 10, "generation": 0
+        }))
+        .unwrap()
+    };
+    // Each step enqueues an observation (from a small set, so replays happen) or ingests.
+    let steps = prop::collection::vec((0u64..6, any::<bool>(), any::<bool>()), 1..24);
+    TestRunner::new(config())
+        .run(&steps, |steps| {
+            let state = tempfile::tempdir().unwrap();
+            let store = Store::new(state.path(), "w");
+            let mut seen = std::collections::BTreeSet::new();
+            for (n, again, ingest) in steps {
+                store.enqueue(&record(n, again)).unwrap();
+                seen.insert(n);
+                if ingest {
+                    store.ingest().unwrap();
+                }
+            }
+            store.ingest().unwrap();
+            let s = store.load().unwrap();
+            prop_assert_eq!(s.nodes.len(), seen.len());
+            let mut seqs: Vec<u64> = s.nodes.values().map(|r| r.ingest_seq).collect();
+            seqs.sort();
+            prop_assert_eq!(seqs, (1..=seen.len() as u64).collect::<Vec<_>>());
+            Ok(())
+        })
+        .unwrap();
+}
