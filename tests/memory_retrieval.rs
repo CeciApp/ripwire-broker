@@ -719,23 +719,6 @@ async fn provider_error() {
 }
 
 #[tokio::test]
-async fn budget_omitted() {
-    let r = stopping(|n| match n {
-        "evidence_sufficient" => p(0.99),
-        _ => p(0.0),
-    });
-    let mut got = stop_of(&one(), &r, ReadConfig::default()).await;
-    assert_eq!(got.stop, StopReason::Sufficient);
-    retrieve::fit(&mut got, 3, 1);
-    assert!(got.memories.is_empty());
-    assert_eq!(
-        got.stop,
-        StopReason::BudgetOmitted,
-        "nothing fit the budget"
-    );
-}
-
-#[tokio::test]
 async fn without_a_valid_stopping_answer_it_is_never_sufficient() {
     let r = stopping(|n| match n {
         "evidence_sufficient" => p(0.99),
@@ -772,7 +755,7 @@ fn expandable() -> State {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_deadline_cuts_http_and_local_loops() {
+async fn the_deadline_cuts_the_requests() {
     let started = tokio::time::Instant::now();
     let got = retrieve::read(&one(), "eviction", &Silent, &ReadConfig::default()).await;
     assert_eq!(got.stop, StopReason::Deadline);
@@ -875,8 +858,11 @@ fn memory_takes_at_most_four_slots_of_the_jev_request_limit() {
 mod common;
 
 use ripwire_broker::memory::admission::{self, Draft, Event, Outcome, Stamp, Tests};
+use ripwire_broker::memory::recall::Recall;
+use ripwire_broker::memory::retrieve::ReadSetup;
 use ripwire_broker::memory::{identity, store::Store};
 use ripwire_broker::online::reader::WorkspaceReader;
+use std::sync::Arc;
 
 /// An observation of `path` in `root`, with the hash of its bytes now.
 fn observed(root: &std::path::Path, ws: &str, path: &str, words: &str) -> Record {
@@ -898,8 +884,35 @@ fn observed(root: &std::path::Path, ws: &str, path: &str, words: &str) -> Record
     admission::admit(&reader, ws, &draft, stamp).unwrap()
 }
 
-fn passing() -> Reader {
-    reader(&[], 0.0, |_, _| p(0.9))
+fn passing() -> Arc<Reader> {
+    Arc::new(reader(&[], 0.0, |_, _| p(0.9)))
+}
+
+/// What `context_for_task` reads with: the warm snapshot, sources checked.
+fn recall(
+    store: &Arc<Store>,
+    root: &std::path::Path,
+    classifier: Arc<dyn MemoryClassifier>,
+) -> Recall {
+    let setup = ReadSetup {
+        store: store.clone(),
+        classifier,
+        cfg: ReadConfig::default(),
+    };
+    Recall::new(setup, root).unwrap()
+}
+
+async fn recalled(
+    store: &Arc<Store>,
+    root: &std::path::Path,
+    classifier: Arc<dyn MemoryClassifier>,
+    query: &str,
+) -> Read {
+    recall(store, root, classifier)
+        .read(query)
+        .await
+        .read
+        .expect("the snapshot loads")
 }
 
 #[tokio::test]
@@ -908,7 +921,7 @@ async fn a_memory_whose_source_changed_is_omitted_and_counted_stale() {
     common::write(root.path(), "src/a.rs", "fn a() {}\n");
     common::write(root.path(), "src/b.rs", "fn b() {}\n");
     let ws = identity::workspace_id(root.path()).unwrap();
-    let store = Store::new(st.path(), &ws);
+    let store = Arc::new(Store::new(st.path(), &ws));
     store
         .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction"))
         .unwrap();
@@ -918,9 +931,8 @@ async fn a_memory_whose_source_changed_is_omitted_and_counted_stale() {
     store.ingest().unwrap();
     common::write(root.path(), "src/a.rs", "fn a() { changed() }\n");
 
-    let reader = WorkspaceReader::new(root.path()).unwrap();
     let r = passing();
-    let got = retrieve::read_store(&store, &reader, "eviction", &r, &ReadConfig::default()).await;
+    let got = recalled(&store, root.path(), r.clone(), "eviction").await;
     assert_eq!(
         got.stale_omitted, 1,
         "src/a.rs changed since it was observed"
@@ -939,32 +951,194 @@ async fn a_memory_whose_source_changed_is_omitted_and_counted_stale() {
 }
 
 #[tokio::test]
+async fn only_what_a_read_is_about_to_use_has_its_sources_checked() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &ws));
+    common::write(root.path(), "src/hit.rs", "fn hit() {}\n");
+    store
+        .enqueue(&observed(root.path(), &ws, "src/hit.rs", "eviction"))
+        .unwrap();
+    // Thirty memories the query has nothing to do with, every one of them stale.
+    for n in 0..30 {
+        let path = format!("src/m{n}.rs");
+        common::write(root.path(), &path, "fn m() {}\n");
+        store
+            .enqueue(&observed(root.path(), &ws, &path, &format!("unrelated{n}")))
+            .unwrap();
+        common::write(root.path(), &path, "fn m() { changed() }\n");
+    }
+    store.ingest().unwrap();
+    let got = recalled(&store, root.path(), passing(), "eviction").await;
+    assert_eq!(got.memories.len(), 1);
+    assert_eq!(
+        got.stale_omitted, 0,
+        "the unrelated ones are never looked at, so never counted"
+    );
+}
+
+#[tokio::test]
+async fn checking_sources_counts_against_the_deadline() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &ws));
+    // Anchors over large sources: hashing them all takes far longer than the deadline.
+    let big = "x".repeat(7 * 1024 * 1024);
+    for n in 0..4 {
+        let path = format!("src/big{n}.rs");
+        common::write(root.path(), &path, &big);
+        store
+            .enqueue(&observed(root.path(), &ws, &path, "eviction"))
+            .unwrap();
+    }
+    store.ingest().unwrap();
+    let setup = ReadSetup {
+        store: store.clone(),
+        classifier: passing(),
+        cfg: ReadConfig {
+            deadline: std::time::Duration::from_millis(60),
+            ..ReadConfig::default()
+        },
+    };
+    let recall = Recall::new(setup, root.path()).unwrap();
+    recall.read("warm up").await;
+    let started = std::time::Instant::now();
+    let got = recall.read("eviction").await;
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_millis(400),
+        "the read keeps to its deadline, local work included: {took:?}"
+    );
+    let read = got.read.unwrap();
+    assert_eq!(read.stop, StopReason::Deadline);
+    assert!(read.memories.is_empty());
+
+    // With all the time it needs, the hashing still runs beside the async thread, never on it:
+    // a timer on this same thread fires on time.
+    let setup = ReadSetup {
+        store: store.clone(),
+        classifier: passing(),
+        cfg: ReadConfig {
+            deadline: std::time::Duration::from_secs(30),
+            ..ReadConfig::default()
+        },
+    };
+    let patient = Recall::new(setup, root.path()).unwrap();
+    patient.read("warm up").await;
+    let started = std::time::Instant::now();
+    let (_, ticked) = tokio::join!(patient.read("eviction"), async {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        started.elapsed()
+    });
+    assert!(
+        ticked < std::time::Duration::from_millis(150),
+        "the async thread was held for {ticked:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_memory_reached_by_a_relation_is_not_scored_either() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    common::write(root.path(), "src/b.rs", "fn b() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &ws));
+    let (a, b) = (
+        observed(root.path(), &ws, "src/a.rs", "eviction"),
+        observed(root.path(), &ws, "src/b.rs", "unrelated"),
+    );
+    store.enqueue(&a).unwrap();
+    store.enqueue(&b).unwrap();
+    store.ingest().unwrap();
+    let mut state = store.load().unwrap();
+    let mut related = edge(0, 0, Graph::Semantic);
+    (related.source, related.target) = (a.node_id.clone(), b.node_id.clone());
+    state.edges.insert(related.key(), related);
+    store.publish(&state).unwrap();
+    common::write(root.path(), "src/b.rs", "fn b() { changed() }\n");
+
+    let r = Arc::new(reader(&["semantic"], 0.0, |_, _| p(0.9)));
+    let got = recalled(&store, root.path(), r.clone(), "eviction").await;
+    assert_eq!(
+        r.scored(),
+        std::slice::from_ref(&a.node_id),
+        "b is stale: never sent"
+    );
+    assert_eq!(got.stale_omitted, 1);
+}
+
+/// Answers at once, except the stopping request, which never comes back.
+struct NeverStops(Reader);
+
+#[async_trait]
+impl MemoryClassifier for NeverStops {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        if req.state.get("depth").is_some() {
+            std::future::pending::<()>().await;
+        }
+        self.0.decide(req).await
+    }
+}
+
+#[tokio::test]
+async fn the_last_checks_keep_their_time_when_the_provider_takes_all_of_it() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &ws));
+    store
+        .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction"))
+        .unwrap();
+    store.ingest().unwrap();
+    let setup = ReadSetup {
+        store: store.clone(),
+        classifier: Arc::new(NeverStops(reader(&[], 0.0, |_, _| p(0.9)))),
+        cfg: ReadConfig {
+            deadline: std::time::Duration::from_millis(200),
+            ..ReadConfig::default()
+        },
+    };
+    let recall = Recall::new(setup, root.path()).unwrap();
+    recall.read("warm up").await;
+    let got = recall.read("eviction").await;
+    let read = got.read.unwrap();
+    assert_eq!(read.stop, StopReason::Deadline);
+    assert_eq!(
+        read.memories.len(),
+        1,
+        "scored before the deadline, and checked again inside it: {:?}",
+        got.limitations
+    );
+}
+
+#[tokio::test]
 async fn hashes_and_generation_are_revalidated_right_before_delivery() {
     let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     common::write(root.path(), "src/a.rs", "fn a() {}\n");
     let ws = identity::workspace_id(root.path()).unwrap();
-    let store = std::sync::Arc::new(Store::new(st.path(), &ws));
+    let store = Arc::new(Store::new(st.path(), &ws));
     let record = observed(root.path(), &ws, "src/a.rs", "eviction");
     store.enqueue(&record).unwrap();
     store.ingest().unwrap();
-    let reader = WorkspaceReader::new(root.path()).unwrap();
 
-    // Forgotten while the read was waiting on the provider.
+    // Forgotten while the second read, served from the warm snapshot, was waiting on the
+    // provider.
     let (other, id_) = (store.clone(), record.node_id.clone());
-    let forgetting = Reader::new(move |stage, _, _| {
-        if stage == Stage::Stopping {
+    let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = stops.clone();
+    let forgetting = Arc::new(Reader::new(move |stage, name, _| {
+        if stage == Stage::Stopping
+            && name == "evidence_sufficient"
+            && counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+        {
             other.forget(&id_, u64::MAX).unwrap();
         }
         p(0.9)
-    });
-    let got = retrieve::read_store(
-        &store,
-        &reader,
-        "eviction",
-        &forgetting,
-        &ReadConfig::default(),
-    )
-    .await;
+    }));
+    let warm = recall(&store, root.path(), forgetting);
+    let first = warm.read("eviction").await.read.unwrap();
+    assert_eq!(first.memories.len(), 1, "delivered while it is there");
+    let got = warm.read("eviction").await.read.unwrap();
     assert!(
         got.memories.is_empty(),
         "a node gone by delivery time is not delivered"
@@ -972,11 +1146,11 @@ async fn hashes_and_generation_are_revalidated_right_before_delivery() {
 
     // Forgotten, its tombstone over, and observed again while the read waited: the same id in a
     // new generation is not what was scored.
-    let store = std::sync::Arc::new(Store::new(st.path(), &format!("{ws}3")));
+    let store = Arc::new(Store::new(st.path(), &format!("{ws}3")));
     store.enqueue(&record).unwrap();
     store.ingest().unwrap();
     let (other, again) = (store.clone(), record.clone());
-    let replaced = Reader::new(move |stage, _, _| {
+    let replaced = Arc::new(Reader::new(move |stage, _, _| {
         if stage == Stage::Stopping {
             other.forget(&again.node_id, 5).unwrap();
             other.sweep(10).unwrap();
@@ -984,36 +1158,22 @@ async fn hashes_and_generation_are_revalidated_right_before_delivery() {
             other.ingest().unwrap();
         }
         p(0.9)
-    });
-    let got = retrieve::read_store(
-        &store,
-        &reader,
-        "eviction",
-        &replaced,
-        &ReadConfig::default(),
-    )
-    .await;
+    }));
+    let got = recalled(&store, root.path(), replaced, "eviction").await;
     assert!(got.memories.is_empty(), "another generation of the node");
 
     // Edited while the read was waiting: stale by delivery time.
-    let store = Store::new(st.path(), &format!("{ws}2"));
+    let store = Arc::new(Store::new(st.path(), &format!("{ws}2")));
     store.enqueue(&record).unwrap();
     store.ingest().unwrap();
     let path = root.path().to_path_buf();
-    let editing = Reader::new(move |stage, _, _| {
+    let editing = Arc::new(Reader::new(move |stage, _, _| {
         if stage == Stage::Stopping {
             common::write(&path, "src/a.rs", "fn a() { edited() }\n");
         }
         p(0.9)
-    });
-    let got = retrieve::read_store(
-        &store,
-        &reader,
-        "eviction",
-        &editing,
-        &ReadConfig::default(),
-    )
-    .await;
+    }));
+    let got = recalled(&store, root.path(), editing, "eviction").await;
     assert!(got.memories.is_empty());
     assert_eq!(got.stale_omitted, 1);
 }
@@ -1023,7 +1183,7 @@ async fn pending_writes_are_reported_and_not_awaited() {
     let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     common::write(root.path(), "src/a.rs", "fn a() {}\n");
     let ws = identity::workspace_id(root.path()).unwrap();
-    let store = Store::new(st.path(), &ws);
+    let store = Arc::new(Store::new(st.path(), &ws));
     store
         .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction"))
         .unwrap();
@@ -1031,15 +1191,7 @@ async fn pending_writes_are_reported_and_not_awaited() {
     store
         .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction later"))
         .unwrap();
-    let reader = WorkspaceReader::new(root.path()).unwrap();
-    let got = retrieve::read_store(
-        &store,
-        &reader,
-        "eviction",
-        &passing(),
-        &ReadConfig::default(),
-    )
-    .await;
+    let got = recalled(&store, root.path(), passing(), "eviction").await;
     assert_eq!(got.pending_writes, 1);
     assert_eq!(got.memories.len(), 1, "only what is incorporated");
     assert_eq!(
@@ -1073,15 +1225,7 @@ async fn another_worktree_of_the_same_head_sees_nothing() {
         .unwrap();
     store.ingest().unwrap();
 
-    let linked = Store::new(st.path(), &identity::workspace_id(&wt).unwrap());
-    let reader = WorkspaceReader::new(&wt).unwrap();
-    let got = retrieve::read_store(
-        &linked,
-        &reader,
-        "eviction",
-        &passing(),
-        &ReadConfig::default(),
-    )
-    .await;
+    let linked = Arc::new(Store::new(st.path(), &identity::workspace_id(&wt).unwrap()));
+    let got = recalled(&linked, &wt, passing(), "eviction").await;
     assert_eq!((got.stop, got.memories.len()), (StopReason::Empty, 0));
 }

@@ -7,7 +7,7 @@ use super::store::{State, Unavailable};
 use crate::model::{Basis, Limitation, Source};
 use crate::online::reader::WorkspaceReader;
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 use tokio::sync::watch;
 
 type Version = Option<(u64, SystemTime)>;
@@ -34,9 +34,12 @@ enum Miss {
     Unavailable(Unavailable),
 }
 
+/// Of the read's deadline, what the checks right before delivery keep for themselves.
+const REVALIDATION: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub struct Recall {
     setup: ReadSetup,
-    reader: WorkspaceReader,
+    reader: Arc<WorkspaceReader>,
     warm: Arc<Mutex<Warm>>,
 }
 
@@ -44,16 +47,19 @@ impl Recall {
     pub fn new(setup: ReadSetup, workspace: &std::path::Path) -> Result<Self, String> {
         Ok(Self {
             setup,
-            reader: WorkspaceReader::new(workspace)?,
+            reader: Arc::new(WorkspaceReader::new(workspace)?),
             warm: Arc::default(),
         })
     }
 
-    /// Reads memory for `query` inside the read's deadline, the snapshot load included. Never
-    /// fails: what goes wrong is a limitation.
+    /// Reads memory for `query` inside the read's deadline, the snapshot load and the checks right
+    /// before delivery included. Never fails: what goes wrong is a limitation.
     pub async fn read(&self, query: &str) -> Recalled {
-        let started = Instant::now();
         let cfg = &self.setup.cfg;
+        let until = tokio::time::Instant::now() + cfg.deadline;
+        let left = || until.saturating_duration_since(tokio::time::Instant::now());
+        let store = self.setup.store.clone();
+        let pending = tokio::task::spawn_blocking(move || store.pending().unwrap_or(0));
         let state = match self.state(cfg.deadline).await {
             Ok(state) => state,
             Err(miss) => {
@@ -63,26 +69,30 @@ impl Recall {
                 };
             }
         };
+        // The requests stop early enough to leave the last checks their time.
         let cfg = ReadConfig {
-            deadline: cfg.deadline.saturating_sub(started.elapsed()),
+            deadline: left().saturating_sub(REVALIDATION),
             ..cfg.clone()
         };
         let classifier = &*self.setup.classifier;
-        let mut read = retrieve::read_fresh(&state, &self.reader, query, classifier, &cfg).await;
-        read.pending_writes = self.setup.store.pending().unwrap_or(0);
+        let mut read =
+            retrieve::read_fresh(state, self.reader.clone(), query, classifier, &cfg).await;
+        let checked = match self.state(left()).await {
+            Ok(now) => retrieve::revalidate(&mut read, &now, self.reader.clone(), until).await,
+            Err(_) => false,
+        };
         let mut limitations = vec![];
-        match self
-            .state(self.setup.cfg.deadline.saturating_sub(started.elapsed()))
-            .await
-        {
-            Ok(now) => retrieve::revalidate(&mut read, &now, &self.reader),
+        if !checked {
             // What was read cannot be checked against the current generation: nothing goes out.
-            Err(_) => {
-                read.memories.clear();
-                read.partial = true;
-                limitations.push(unchecked());
-            }
+            read.memories.clear();
+            read.partial = true;
+            limitations.push(unchecked());
         }
+        read.pending_writes = tokio::time::timeout_at(until, pending)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(0);
         if matches!(
             read.stop,
             StopReason::ProviderError | StopReason::Deadline | StopReason::Cancelled

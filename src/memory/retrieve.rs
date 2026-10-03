@@ -90,9 +90,11 @@ use super::model::{Edge, Record};
 use super::prompts::{self, Stage};
 use super::store::State;
 use crate::online::classifier::MemoryClassifier;
+use crate::online::reader::WorkspaceReader;
 use crate::online::request::StateRequest;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Expansions in all; the same twelve [`route`] splits among the views.
@@ -111,8 +113,8 @@ pub const ENTRY: f64 = 0.60;
 /// What a broker started with `--memory` reads with.
 #[derive(Clone)]
 pub struct ReadSetup {
-    pub store: std::sync::Arc<super::store::Store>,
-    pub classifier: std::sync::Arc<dyn MemoryClassifier>,
+    pub store: Arc<super::store::Store>,
+    pub classifier: Arc<dyn MemoryClassifier>,
     pub cfg: ReadConfig,
 }
 
@@ -323,33 +325,105 @@ fn rank(found: &mut [Found], recency: bool) {
     });
 }
 
-/// Reads memory for `query` (PRD jev-mem §10).
+/// Reads memory for `query` (PRD jev-mem §10), over the snapshot alone: no source is checked.
 pub async fn read(
     state: &State,
     query: &str,
     classifier: &dyn MemoryClassifier,
     cfg: &ReadConfig,
 ) -> Read {
-    read_with(state, query, classifier, cfg, &|_| true).await
+    read_with(
+        Arc::new(state.clone()),
+        query,
+        classifier,
+        cfg,
+        Local::Inline,
+    )
+    .await
+}
+
+/// Where a read's local work runs: the ranking of the anchors and the check of each memory's
+/// sources (PRD jev-mem §8.2, blocking I/O in a bounded executor).
+#[derive(Clone)]
+enum Local {
+    /// On the snapshot alone, in place: nothing is read from disk.
+    Inline,
+    /// Off the async threads, under the read's deadline, checking sources in this workspace.
+    Disk(Arc<WorkspaceReader>),
+}
+
+impl Local {
+    /// `work`, or `None` once `until` passes: on the disk, in the blocking pool, so that neither
+    /// the async thread nor the structural answer beside it waits on it.
+    async fn run<T: Send + 'static>(
+        &self,
+        until: tokio::time::Instant,
+        work: impl FnOnce(&Local) -> T + Send + 'static,
+    ) -> Option<T> {
+        match self {
+            Local::Inline => Some(work(self)),
+            Local::Disk(_) => {
+                let local = self.clone();
+                let blocking = tokio::task::spawn_blocking(move || work(&local));
+                tokio::time::timeout_at(until, blocking).await.ok()?.ok()
+            }
+        }
+    }
+
+    /// Whether every source of `r` still has the bytes it was observed with, and is eligible.
+    fn fresh(&self, r: &Record) -> bool {
+        match self {
+            Local::Inline => true,
+            Local::Disk(reader) => r.sources.iter().all(|s| {
+                reader
+                    .snapshot(&s.path)
+                    .is_ok_and(|snap| snap.content_hash == s.sha256)
+            }),
+        }
+    }
+
+    /// `items` whose memories are fresh, and how many were not; `None` once `until` passes. Only
+    /// what a read is about to use is checked, never the whole store.
+    async fn keep_fresh<T: Send + 'static>(
+        &self,
+        items: Vec<T>,
+        record: fn(&T) -> &Record,
+        until: tokio::time::Instant,
+    ) -> Option<(Vec<T>, usize)> {
+        let stop = until.into_std();
+        self.run(until, move |local| {
+            let mut kept = Vec::with_capacity(items.len());
+            let mut stale = 0;
+            for item in items {
+                if matches!(local, Local::Disk(_)) && std::time::Instant::now() >= stop {
+                    return None;
+                }
+                match local.fresh(record(&item)) {
+                    true => kept.push(item),
+                    false => stale += 1,
+                }
+            }
+            Some((kept, stale))
+        })
+        .await
+        .flatten()
+    }
 }
 
 /// [`read`], with the memories whose sources are no longer what they were left out (step 1):
-/// history, not current advice.
+/// history, not current advice. Every local step counts against the deadline.
 async fn read_with(
-    state: &State,
+    state: Arc<State>,
     query: &str,
     classifier: &dyn MemoryClassifier,
     cfg: &ReadConfig,
-    fresh: &(dyn Fn(&Record) -> bool + Sync),
+    local: Local,
 ) -> Read {
-    let mut current = state.clone();
-    current.nodes.retain(|_, r| fresh(r));
-    let stale_omitted = state.nodes.len() - current.nodes.len();
-    let state = &current;
+    let until = tokio::time::Instant::now() + cfg.deadline;
     let mut run = Run {
         classifier,
         cfg,
-        until: tokio::time::Instant::now() + cfg.deadline,
+        until,
         requests: 0,
         questions: 0,
         partial: false,
@@ -364,10 +438,27 @@ async fn read_with(
         edges_seen: 0,
         partial: false,
         degraded: false,
-        stale_omitted,
+        stale_omitted: 0,
         pending_writes: 0,
     };
-    let anchors = index::anchors(state, query);
+    let (ranked, q) = (state.clone(), query.to_string());
+    let Some(anchors) = local
+        .run(until, move |_| {
+            index::anchors(&ranked, &q)
+                .into_iter()
+                .filter_map(|(id, rrf)| ranked.nodes.get(&id).map(|r| (r.clone(), rrf)))
+                .collect::<Vec<_>>()
+        })
+        .await
+    else {
+        out.stop = StopReason::Deadline;
+        return finish(out, run);
+    };
+    let Some((anchors, stale)) = local.keep_fresh(anchors, |(r, _)| r, until).await else {
+        out.stop = StopReason::Deadline;
+        return finish(out, run);
+    };
+    out.stale_omitted += stale;
     if anchors.is_empty() {
         return out;
     }
@@ -395,10 +486,9 @@ async fn read_with(
     // 2. The anchors, scored.
     let best = anchors.first().map_or(1.0, |a| a.1).max(f64::MIN_POSITIVE);
     let batch: Vec<Candidate> = anchors
-        .iter()
-        .filter_map(|(id, rrf)| state.nodes.get(id).map(|r| (r, rrf)))
-        .map(|(r, rrf)| Candidate {
-            record: r.clone(),
+        .into_iter()
+        .map(|(record, rrf)| Candidate {
+            record,
             anchor: rrf / best,
             via: None,
         })
@@ -485,6 +575,12 @@ async fn read_with(
         queued.clear();
         limited = true;
     }
+    let Some((queued, stale)) = local.keep_fresh(queued, |c| &c.record, until).await else {
+        out.stop = StopReason::Deadline;
+        out.memories = selected;
+        return finish(out, run);
+    };
+    out.stale_omitted += stale;
     if !queued.is_empty() {
         let more = match run.score(query, &selected, queued).await {
             Ok(m) => m,
@@ -541,25 +637,6 @@ fn finish(mut out: Read, run: Run<'_>) -> Read {
     out
 }
 
-/// Keeps the best memories that fit `max_items` and `max_tokens` (4 bytes of text per token).
-/// A read that found memories and keeps none is `BudgetOmitted`.
-pub fn fit(read: &mut Read, max_items: usize, max_tokens: u32) {
-    let had = !read.memories.is_empty();
-    let mut used = 0u32;
-    let mut kept = vec![];
-    for f in std::mem::take(&mut read.memories) {
-        let cost = f.record.content.len().div_ceil(4) as u32;
-        if kept.len() < max_items && used + cost <= max_tokens {
-            used += cost;
-            kept.push(f);
-        }
-    }
-    if had && kept.is_empty() {
-        read.stop = StopReason::BudgetOmitted;
-    }
-    read.memories = kept;
-}
-
 /// How a query's `--jev-request-limit` is shared (PRD jev-mem §8.2): memory takes at most four
 /// slots, never more than its own limit nor than there are; discovery keeps the rest.
 pub fn slots(read_limit: usize, jev_request_limit: usize) -> (usize, usize) {
@@ -567,56 +644,44 @@ pub fn slots(read_limit: usize, jev_request_limit: usize) -> (usize, usize) {
     (memory, jev_request_limit - memory)
 }
 
-/// Whether every source of a memory still has the bytes it was observed with, and is eligible.
-fn fresh_in(reader: &crate::online::reader::WorkspaceReader) -> impl Fn(&Record) -> bool + '_ {
-    move |r: &Record| {
-        r.sources.iter().all(|s| {
-            reader
-                .snapshot(&s.path)
-                .is_ok_and(|snap| snap.content_hash == s.sha256)
-        })
-    }
-}
-
-/// A read of `state` that leaves out memories whose sources changed since they were observed.
+/// A read of `state` that leaves out memories whose sources changed since they were observed,
+/// checked off the async threads and only for what the read is about to use.
 pub async fn read_fresh(
-    state: &State,
-    reader: &crate::online::reader::WorkspaceReader,
+    state: Arc<State>,
+    reader: Arc<WorkspaceReader>,
     query: &str,
     classifier: &dyn MemoryClassifier,
     cfg: &ReadConfig,
 ) -> Read {
-    read_with(state, query, classifier, cfg, &fresh_in(reader)).await
+    read_with(state, query, classifier, cfg, Local::Disk(reader)).await
 }
 
 /// Step 9, right before delivery: keeps the memories whose node is still in `now` in the same
-/// generation and whose sources are unchanged; the stale ones are counted.
-pub fn revalidate(read: &mut Read, now: &State, reader: &crate::online::reader::WorkspaceReader) {
+/// generation and whose sources are unchanged; the stale ones are counted. `false` when the
+/// sources could not all be checked by `until`: then nothing read can go out.
+pub async fn revalidate(
+    read: &mut Read,
+    now: &State,
+    reader: Arc<WorkspaceReader>,
+    until: tokio::time::Instant,
+) -> bool {
     read.memories.retain(|f| {
         now.nodes
             .get(&f.record.node_id)
             .is_some_and(|n| n.generation == f.record.generation)
     });
-    let present = read.memories.len();
-    let fresh = fresh_in(reader);
-    read.memories.retain(|f| fresh(&f.record));
-    read.stale_omitted += present - read.memories.len();
-}
-
-/// The read `context_for_task` makes: the current generation, stale memories left out, pending
-/// observations counted and not awaited, and every memory checked again right before delivery.
-pub async fn read_store(
-    store: &super::store::Store,
-    reader: &crate::online::reader::WorkspaceReader,
-    query: &str,
-    classifier: &dyn MemoryClassifier,
-    cfg: &ReadConfig,
-) -> Read {
-    let state = store.load().unwrap_or_default();
-    let mut out = read_fresh(&state, reader, query, classifier, cfg).await;
-    out.pending_writes = store.pending().unwrap_or(0);
-    revalidate(&mut out, &store.load().unwrap_or_default(), reader);
-    out
+    let found = std::mem::take(&mut read.memories);
+    match Local::Disk(reader)
+        .keep_fresh(found, |f| &f.record, until)
+        .await
+    {
+        Some((kept, stale)) => {
+            read.memories = kept;
+            read.stale_omitted += stale;
+            true
+        }
+        None => false,
+    }
 }
 
 /// The memories of `read` as the envelope carries them (PRD jev-mem §11).
