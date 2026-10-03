@@ -424,9 +424,9 @@ Rollback operacional: iniciar sem `--memory`; nenhuma coleta/consulta/inferênci
 - §8/§9: hooks publicam observações locais; tool de tarefa lê memória; manter três tools MCP e ampliar envelope explicitamente.
 - §11/§16: orçamento compartilhado, dedup separado e avaliação de custo total, não só economia do agente.
 - §15: persistência de texto elegível, retenção/forget, isolamento, novo consentimento remoto de histórico. O estado atual de fingerprints não autoriza essa retenção por si só.
-- §23.1: documentar `--memory` implicando `--online` e substituir a regra de ausência de `--online` pela ausência de ambas as flags para garantir zero chamadas Jev na execução normal. Autorizar worker remoto de memória fora de `context_for_task` somente com opt-in novo. O texto vigente proíbe esse comportamento; a implementação não pode dizer que já estava autorizado pelo contrato anterior. Preservar CA-10 para o build sem feature `online` e a operação local de status/forget/add/resume. Registrar `memory drain` como o segundo comando que aceita `--online` (D-135).
-- §23.2/§23.3: estados além de arquivos, Choice, prompts de memória e resultados parciais; preservar rescore atual.
-- §23.5/§23.15: SLOs, quotas entre processos, contagem de perguntas e novos braços de avaliação.
+- **Aplicado (D-138).** §23.1: documentar `--memory` implicando `--online` e substituir a regra de ausência de `--online` pela ausência de ambas as flags para garantir zero chamadas Jev na execução normal. Autorizar worker remoto de memória fora de `context_for_task` somente com opt-in novo. O texto vigente proíbe esse comportamento; a implementação não pode dizer que já estava autorizado pelo contrato anterior. Preservar CA-10 para o build sem feature `online` e a operação local de status/forget/add/resume. Registrar `memory drain` como o segundo comando que aceita `--online` (D-135).
+- **Aplicado (D-138).** §23.2/§23.3: estados além de arquivos, Choice, prompts de memória e resultados parciais; preservar rescore atual.
+- §23.5/§23.15: SLOs, quotas entre processos, contagem de perguntas e novos braços de avaliação. **§23.5 aplicado (D-138);** os braços do §23.15 ficam para a Fase 5 do plano.
 - §24: manter barra como projeção barata; qualquer contador adicional terá contrato próprio, sem carregar grafo de memória.
 
 ## 17. Fontes e rastreabilidade
