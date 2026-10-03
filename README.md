@@ -278,6 +278,15 @@ of the analyses. The text is rendered from those fields (`memory-observation/v1`
 execução de testes desconhecida. …`. The broker never runs the tests, so it never records that
 they passed, that a bug was fixed or that a merge is safe.
 
+**When it is collected:** after `context_after_edit` and `context_before_finish` build their
+answer, never before and never changing it; `context_for_task` collects nothing, and an answer
+the broker could not assess (`unknown`) claims nothing. The answer waits at most 25 ms for the
+observation to be durable; past that the write finishes in the background and is counted as
+unconfirmed, and no more than four such writes run at once. The status resource gains a
+`memory` field with these counts (confirmed, unconfirmed, rejected) only when memory is on. In
+this phase the broker core does this, but `serve --memory` does not switch it on yet: the
+server wires it together with the worker that enriches the memories.
+
 **What is never kept:** the prompt, the transcript, a diff, a file's body, shell output or
 anything a model generated. A source the online policy refuses (`.env` and other sensitive
 names, ignored, hidden, binary, symlinked or outside the root) refuses the whole observation,

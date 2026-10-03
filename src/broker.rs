@@ -1,6 +1,8 @@
 //! The broker core: routes a request to ripwire verbs, normalizes, and shapes the envelope.
 
 use crate::budget;
+use crate::memory::admission::Event as MemoryEvent;
+use crate::memory::publish::{Counts as MemoryCounts, MemoryConfig, Publisher};
 use crate::metrics::{Metrics, RequestRecord, StageSpan, UpstreamSpan};
 use crate::model::*;
 use crate::normalize::{self, Entry};
@@ -182,6 +184,8 @@ pub struct BrokerConfig {
     pub summarizer_wait: Duration,
     /// The remote classifier (PRD §23); `None` keeps the broker offline (RF-ONLINE-01).
     pub online: Option<OnlineConfig>,
+    /// Persistent memory (PRD jev-mem); `None` keeps no history.
+    pub memory: Option<MemoryConfig>,
 }
 
 impl BrokerConfig {
@@ -196,6 +200,7 @@ impl BrokerConfig {
             summarizer: None,
             summarizer_wait: Duration::from_millis(1500),
             online: None,
+            memory: None,
         }
     }
 }
@@ -313,6 +318,7 @@ pub struct Broker {
     session: Mutex<SessionMemory>,
     notes: Option<NoteEngine>,
     online: Option<OnlineEngine>,
+    memory: Option<Publisher>,
     metrics: Mutex<Metrics>,
     last_error: Mutex<Option<&'static str>>,
     /// The last availability probe and when it finished, so back-to-back reads of the status
@@ -337,6 +343,9 @@ pub struct BrokerStatus {
     /// Only for a process started with `--online` (RF-ONLINE-15).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online: Option<OnlineStatus>,
+    /// Only for a process started with `--memory`: counts, never content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryCounts>,
     pub metrics: Metrics,
 }
 
@@ -405,6 +414,7 @@ impl Broker {
                 error: "workspace_violation",
                 message,
             })?;
+        let memory = config.memory.map(|m| Publisher::new(m, workspace.root()));
         Ok(Self {
             upstream,
             workspace,
@@ -418,6 +428,7 @@ impl Broker {
                 .summarizer
                 .map(|m| NoteEngine::new(m, config.summarizer_wait)),
             online,
+            memory,
             metrics: Mutex::new(Metrics::default()),
             last_error: Mutex::new(None),
             probe: Mutex::new(None),
@@ -500,6 +511,7 @@ impl Broker {
                     metrics: engine.metrics(),
                 }
             }),
+            memory: self.memory.as_ref().map(Publisher::counts),
             metrics: {
                 let mut m = self.metrics.lock().unwrap().clone();
                 m.session.remembered = self.session.lock().unwrap().len();
@@ -611,6 +623,17 @@ impl Broker {
         result
     }
 
+    /// With `--memory`, publishes what this answer observed, after it is built and without
+    /// changing it (PRD jev-mem §8.1).
+    async fn observe(&self, event: MemoryEvent, env: &Envelope, scope: Vec<String>) {
+        if let Some(memory) = &self.memory {
+            let id = REQUEST.try_with(|r| r.id).unwrap_or(0);
+            memory
+                .observe(event, env, scope, format!("mcp/{}/{id}", env.tool))
+                .await;
+        }
+    }
+
     pub async fn context_after_edit(&self, req: EditRequest) -> Result<Envelope, BrokerError> {
         self.traced("context_after_edit", self.context_after_edit_inner(req))
             .await
@@ -638,7 +661,13 @@ impl Broker {
         } else {
             json!({"files": files.join(",")})
         };
-        let mut entries = normalize::situation(&self.call("situational_awareness", args).await?);
+        let situation = self.call("situational_awareness", args).await?;
+        let mut entries = normalize::situation(&situation);
+        // What the observation is about: the files named, else those ripwire saw change.
+        let scope = match files.is_empty() {
+            true => normalize::changed_files(&situation),
+            false => files.clone(),
+        };
         // The checks are independent of each other, so they go out together: at most
         // `max_edit_checks` of them, the same bound the sequential loop had. RF-14 (D-049) is
         // that a cancellation is respected -- the future is dropped, the tool records
@@ -704,6 +733,7 @@ impl Broker {
             entries,
         );
         self.remember(&env);
+        self.observe(MemoryEvent::AfterEdit, &env, scope).await;
         Ok(env)
     }
 
@@ -847,6 +877,7 @@ impl Broker {
             entries,
         );
         self.remember(&env);
+        self.observe(MemoryEvent::BeforeFinish, &env, changed).await;
         Ok(env)
     }
 

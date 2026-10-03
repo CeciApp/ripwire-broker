@@ -586,3 +586,14 @@ fn read_checked(path: &Path, max: u64) -> Result<Option<Vec<u8>>, Unavailable> {
     }
     Ok(Some(bytes))
 }
+
+/// Where admitted observations go: the store's spool, or a stand-in a test makes slow.
+pub trait Spool: Send + Sync {
+    fn enqueue(&self, record: &Record) -> Result<(), Refusal>;
+}
+
+impl Spool for Store {
+    fn enqueue(&self, record: &Record) -> Result<(), Refusal> {
+        Store::enqueue(self, record)
+    }
+}
