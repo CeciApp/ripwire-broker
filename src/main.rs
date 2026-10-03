@@ -22,18 +22,22 @@ use std::sync::Arc;
 
 /// Canonical workspace, ripwire version and the broker/upstream configuration for `serve`.
 fn settings(a: ServeArgs) -> Result<Settings, String> {
+    // The flag the operator typed: `--memory` turns online on by itself (PRD jev-mem §4).
+    let asked = match a.memory {
+        Some(_) => "--memory",
+        None => "--online",
+    };
     // Never a silent downgrade to offline (PRD §23.1, invariant 3).
     if a.online.is_some() && !cfg!(feature = "online") {
-        return Err(
-            "--online: this binary was built without the online feature; \
+        return Err(format!(
+            "{asked}: this binary was built without the online feature; \
              rebuild it with `cargo build --release --features online`"
-                .into(),
-        );
+        ));
     }
     // Checked before anything is published or started (CA-ONLINE-02).
     #[cfg(feature = "online")]
     let online = match &a.online {
-        Some(o) => Some(online_config(o)?),
+        Some(o) => Some(online_config(o).map_err(|e| format!("{asked}: {e}"))?),
         None => None,
     };
     let workspace = a

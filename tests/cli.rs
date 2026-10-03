@@ -603,6 +603,65 @@ fn online_without_a_credential_fails_before_publishing_mcp() {
     }
 }
 
+#[cfg(not(feature = "online"))]
+#[test]
+fn a_build_without_the_online_feature_refuses_memory_clearly() {
+    let ws = tempfile::tempdir().unwrap();
+    let ws = ws.path().to_str().unwrap();
+
+    let (code, out, err) = run(
+        &[
+            "--workspace",
+            ws,
+            "--ripwire",
+            "/nonexistent/ripwire",
+            "--memory",
+        ],
+        "",
+    );
+
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "no MCP server is published: {out}");
+    assert!(err.contains("--memory"), "names the flag asked for: {err}");
+    assert!(err.contains("built without the online feature"), "{err}");
+}
+
+#[cfg(feature = "online")]
+#[test]
+fn memory_without_a_credential_fails_before_publishing_mcp() {
+    let ws = tempfile::tempdir().unwrap();
+    let ws = ws.path().to_str().unwrap();
+    let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args([
+            "--workspace",
+            ws,
+            "--ripwire",
+            "/nonexistent/ripwire",
+            "--memory",
+        ])
+        .env_remove("RIPWIRE_BROKER_JEV_API_KEY")
+        .env_remove("XDG_STATE_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "no downgrade to offline: {stderr}"
+    );
+    assert!(stdout.is_empty(), "no MCP server is published: {stdout}");
+    assert!(stderr.contains("RIPWIRE_BROKER_JEV_API_KEY"), "{stderr}");
+    assert!(
+        stderr.contains("--memory"),
+        "names the flag asked for: {stderr}"
+    );
+}
+
 #[cfg(feature = "online")]
 #[test]
 fn the_credential_never_appears_in_errors_or_debug_output() {
