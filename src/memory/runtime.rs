@@ -138,6 +138,10 @@ pub enum DrainStop {
     Empty,
     Jobs,
     Deadline,
+    /// Another worker (a running `serve --memory`) holds the workspace's remote slot.
+    Busy,
+    /// The provider refused the credential.
+    Suspended,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +151,8 @@ pub struct Drained {
 }
 
 /// `memory drain`: incorporates the spool and runs ready jobs, at most `max_jobs` and for at
-/// most `deadline`; a job cut by the deadline stays pending.
+/// most `deadline`. A job cut by the deadline has used its run (runs are counted on disk), and
+/// its lease is free for the next process.
 pub async fn drain(
     store: &Store,
     worker: &Worker,
@@ -156,6 +161,12 @@ pub async fn drain(
     deadline: Duration,
 ) -> Result<Drained, Refusal> {
     let _ = store.ingest();
+    if store.remote_slot()?.is_none() {
+        return Ok(Drained {
+            jobs: 0,
+            stop: DrainStop::Busy,
+        });
+    }
     let until = tokio::time::Instant::now() + deadline;
     let mut jobs = 0;
     loop {
@@ -181,10 +192,11 @@ pub async fn drain(
             }
             Ok(Ok(Some(_))) => jobs += 1,
             Ok(Ok(None)) => {
-                return Ok(Drained {
-                    jobs,
-                    stop: DrainStop::Empty,
-                });
+                let stop = match worker.is_suspended() {
+                    true => DrainStop::Suspended,
+                    false => DrainStop::Empty,
+                };
+                return Ok(Drained { jobs, stop });
             }
             Ok(Err(e)) => return Err(e),
         }

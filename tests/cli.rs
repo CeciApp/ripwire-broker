@@ -4389,7 +4389,34 @@ fn memory_drain_needs_online_and_a_credential() {
     else {
         panic!()
     };
-    assert_eq!(m.action, cli::MemoryAction::Drain);
+    assert_eq!(
+        m.action,
+        cli::MemoryAction::Drain {
+            model: None,
+            candidates: None
+        }
+    );
+    let Ok(Command::Memory(m)) = parse(&[
+        "memory",
+        "drain",
+        "--workspace",
+        "/w",
+        "--online",
+        "--jev-model",
+        "jev-1.14.0",
+        "--memory-write-candidates",
+        "7",
+    ]) else {
+        panic!()
+    };
+    assert_eq!(
+        m.action,
+        cli::MemoryAction::Drain {
+            model: Some("jev-1.14.0".into()),
+            candidates: Some(7)
+        },
+        "the same model and K as the server, so edge keys match"
+    );
     let err = parse(&["memory", "drain", "--workspace", "/w"]).unwrap_err();
     assert!(err.contains("--online"), "drain says what it needs: {err}");
 

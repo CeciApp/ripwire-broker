@@ -149,7 +149,11 @@ async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
             Ok(k) => k,
             Err(e) => return fail(e.to_string()),
         };
-        let client = match JevClient::new(key, DEFAULT_MODEL, std::time::Duration::from_secs(15)) {
+        let cli::MemoryAction::Drain { model, candidates } = &a.action else {
+            return ExitCode::from(2);
+        };
+        let model = model.clone().unwrap_or_else(|| DEFAULT_MODEL.into());
+        let client = match JevClient::new(key, &model, std::time::Duration::from_secs(15)) {
             Ok(c) => c,
             Err(e) => return fail(e),
         };
@@ -163,12 +167,20 @@ async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
         let store = Arc::new(memory::store::Store::new(&dir, &id));
         let classifier: MemoryClient = Arc::new(Shared::new(Arc::new(client), 4));
         let config = Config {
-            model: DEFAULT_MODEL.into(),
-            candidates: 4,
+            model,
+            candidates: candidates.unwrap_or(4),
         };
         let worker = Worker::new(store.clone(), classifier, config);
         let clock = memory::time::SystemClock;
         match drain(&store, &worker, &clock, DRAIN_JOBS, DRAIN_DEADLINE).await {
+            Ok(d) if matches!(d.stop, memory::runtime::DrainStop::Busy) => fail(
+                "a running server holds this workspace's memory worker; it drains it already"
+                    .into(),
+            ),
+            Ok(d) if matches!(d.stop, memory::runtime::DrainStop::Suspended) => fail(format!(
+                "the provider refused the credential after {} jobs",
+                d.jobs
+            )),
             Ok(d) => {
                 println!("drained {} jobs ({:?})", d.jobs, d.stop);
                 ExitCode::SUCCESS
@@ -341,7 +353,7 @@ async fn main() -> ExitCode {
             );
             return ExitCode::SUCCESS;
         }
-        Ok(Command::Memory(a)) if a.action == cli::MemoryAction::Drain => {
+        Ok(Command::Memory(a)) if matches!(a.action, cli::MemoryAction::Drain { .. }) => {
             return memory_drain(&a).await;
         }
         Ok(Command::Memory(a)) => {

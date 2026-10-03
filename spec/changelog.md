@@ -5731,7 +5731,7 @@ provider (401/403 suspendem, 429 só dentro do prazo, um retry, quatro tentativa
 requisições em voo por processo (`online::classifier::Shared`) e um job remoto por workspace; o
 worker no `serve --memory` (que agora liga também a coleta das tools, adiada da T1.14) e
 `memory drain --online`; o custo por operação no status e a quota em uso no `memory status`.
-Testes: 519 → 555 no build padrão, 533 → 570 com `online`.
+Testes: 519 → 562 no build padrão, 533 → 578 com `online` (com as correções da revisão).
 
 **Decisões tomadas no caminho:**
 
@@ -5765,4 +5765,32 @@ do mantenedor, fora desta sessão.
 
 **Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos (41) e
 `props_fs` verdes; CA-10 sem crate de rede; guarda de fixtures verde; nenhum `reqwest`, `secrecy`,
-`println!` ou `unsafe` em `src/memory/`. Revisão independente do diff: ver abaixo, quando houver.
+`println!` ou `unsafe` em `src/memory/`.
+
+**Revisão independente do diff (plano §7, item 6), por um agente revisor só de leitura:** 12
+achados, 2 altos. Dez corrigidos em TDD (teste vermelho, correção, mutação que derrubou):
+
+- **Alto — a quota de 24 h esgotada falhava todos os jobs em um minuto:** cada recusa gastava uma
+  execução, e nada recuperava um job `Failed`. Agora uma tentativa que nada enviou (quota esgotada
+  ou store ocupado) devolve o job com `Outcome::Defer`, sem gastar a execução; e `memory retry`
+  é a ação explícita do PRD §8.2 que devolve as execuções aos jobs falhos.
+- **Alto — um lock ocupado perdia respostas pagas:** `charge`, `commit_enrichment` e `finish`
+  falhavam na hora com `Locked`. Agora esperam até 2 s (`Store::writer_waiting`); o escritor comum
+  continua sem esperar, e o hook nunca toma o lock.
+- **Médio:** o prazo de 5 s valia só para a espera de um 429 (agora limita toda tentativa); depois de
+  um 429 fora do prazo os outros lotes seguiam (agora param); uma falha de transporte nas relações
+  concluía o job e o contava como enriquecido (agora o job volta, as relações ficam devidas, e o
+  contador sobe no `finish(Done)`, uma vez, porque `Done` é terminal); o `--online` sozinho passara a
+  dividir um teto de processo com a descoberta (agora `classifier::for_process` só junta os dois com
+  `--memory`); o commit não respeitava os tetos de 32.000 arestas e do snapshot (agora respeita, e
+  descarta as arestas novas que transbordariam, guardando o resto da resposta).
+- **Baixo:** o `drain` dizia "vazio" quando um servidor segurava o worker ou o provider recusava a
+  chave (agora `Busy` e `Suspended`, com saída de erro) e ignorava o modelo e o K do servidor (agora
+  `--jev-model` e `--memory-write-candidates`); os bytes de resposta da memória entravam no
+  `jev_response_bytes` da descoberta (agora não); a documentação do `drain` dizia que um job cortado
+  fica pendente sem gastar execução (corrigida: a execução conta).
+- **Não corrigidos, registrados:** um salto do relógio para a frente congela a quota pelo tamanho do
+  salto mais 24 h (é o outro lado de "relógio atrasado não libera quota"; distinguir os dois exige
+  uma referência de tempo confiável que o broker não tem); a E/S de disco do worker roda nas threads
+  do tokio e cada cobrança regrava o snapshot (tirar o livro-razão do snapshot é uma mudança de
+  formato; fica para quando o tamanho do store pesar).

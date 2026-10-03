@@ -42,7 +42,8 @@ commands; `ripwire-broker --help` lists them all:
 | `memory forget --workspace DIR (--all \| --id ID)` | Forgets one memory and what derives from it, or everything (which also revokes collection) |
 | `memory add --workspace DIR --file PATH` | Adds an explicit note from a JSON file, `{"text": "...", "references": ["src/a.rs"]}` |
 | `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
-| `memory drain --workspace DIR --online` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key) |
+| `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker or the provider refuses the key |
+| `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back; local |
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
 return a structured error (`upstream_unavailable` / `incompatible_upstream`), and the next
@@ -317,7 +318,9 @@ attempts at most, one retry for a transient failure, and waits for a 429 only in
 401/403 stops the worker until the server restarts. One job per workspace talks to the provider
 at a time, memory and discovery share the four requests in flight, and the workspace has a
 persisted budget of 1,000 attempts and 20,000 questions per 24 hours that a restart or a clock
-set back does not reset. The worker stops with the server; what it did not finish waits on disk.
+set back does not reset; with it spent, jobs stay pending and keep their runs. A job runs twice at
+most and then waits for `memory retry`. The worker stops with the server; what it did not
+finish waits on disk.
 The status resource's `memory` field adds what the worker cost, by operation (typing,
 relations): attempts, retries, questions, bytes sent, failures by category and quota refusals,
 counts only. `memory status` shows the attempts and questions spent in the last 24 hours.

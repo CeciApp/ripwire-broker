@@ -849,3 +849,16 @@ async fn the_memory_transport_posts_through_the_same_client() {
     );
     assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn memory_responses_are_not_counted_as_discovery_bytes() {
+    let ok = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.9},"q1":{"type":"noul","noul":0.1}}}"#;
+    let f = fixture(vec![json(200, ok)]).await;
+    let c = client(f.port, Duration::from_secs(5));
+    c.decide(&memory_request()).await.unwrap();
+    assert_eq!(
+        Classifier::response_bytes(&c).total,
+        0,
+        "jev_response_bytes stays discovery's"
+    );
+}

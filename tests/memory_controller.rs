@@ -1405,3 +1405,27 @@ fn commits_stay_inside_the_edge_and_snapshot_caps() {
         "what fits is kept"
     );
 }
+
+#[tokio::test]
+async fn drain_says_when_it_could_not_run_instead_of_reporting_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+    let clock = ripwire_broker::memory::time::SystemClock;
+    let held = store.remote_slot().unwrap().unwrap(); // a running server
+    let w = Worker::new(store.clone(), Scripted::new(vec![]), config(4));
+    let busy = runtime::drain(&store, &w, &clock, 20, runtime::DRAIN_DEADLINE)
+        .await
+        .unwrap();
+    assert_eq!((busy.jobs, busy.stop), (0, DrainStop::Busy));
+    drop(held);
+
+    let refused = Worker::new(
+        store.clone(),
+        Scripted::new(vec![Some(ClassifyError::Auth(401))]),
+        config(4),
+    );
+    let suspended = runtime::drain(&store, &refused, &clock, 20, runtime::DRAIN_DEADLINE)
+        .await
+        .unwrap();
+    assert_eq!(suspended.stop, DrainStop::Suspended);
+}

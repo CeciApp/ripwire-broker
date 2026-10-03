@@ -96,7 +96,7 @@ pub fn run(cmd: &MemoryCommand) -> Result<String, String> {
             Ok("added 1 note".into())
         }
         // Needs the provider: the binary runs it, with the `online` feature (PD-2).
-        MemoryAction::Drain => Err("memory drain is run by the server binary".into()),
+        MemoryAction::Drain { .. } => Err("memory drain is run by the server binary".into()),
         MemoryAction::Retry => {
             let n = store
                 .retry_all_failed()
