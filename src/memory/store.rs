@@ -42,6 +42,8 @@ pub struct Limits {
     pub snapshot_bytes: u64,
     /// Spool and snapshot together.
     pub total_bytes: u64,
+    /// Edges in all, deterministic and inferred.
+    pub max_edges: usize,
     /// Classifier attempts and questions in a moving 24-hour window, for every process.
     pub attempts_per_day: u32,
     pub questions_per_day: u32,
@@ -55,6 +57,7 @@ impl Default for Limits {
             spool_bytes: 16 * 1024 * 1024,
             snapshot_bytes: 64 * 1024 * 1024,
             total_bytes: 96 * 1024 * 1024,
+            max_edges: 32_000,
             attempts_per_day: 1_000,
             questions_per_day: 20_000,
         }
@@ -703,15 +706,34 @@ impl Store {
         }
         node.enrichment.state = enrichment;
         node.enrichment.prompt_version = Some(super::prompts::VERSION.into());
+        let mut added = Vec::new();
         for mut edge in edges {
             if !state.nodes.contains_key(&edge.source) || !state.nodes.contains_key(&edge.target) {
                 continue;
             }
+            // Past the cap a new edge is left out; one already there is only refreshed.
+            let key = edge.key();
+            if state.edges.len() >= self.limits.max_edges && !state.edges.contains_key(&key) {
+                continue;
+            }
             edge.generation = generation;
-            state.edges.insert(edge.key(), edge);
+            if state.edges.insert(key.clone(), edge).is_none() {
+                added.push(key);
+            }
         }
         state.generation = generation;
-        self.write_snapshot(&on_disk(&state)?)?;
+        let mut bytes = on_disk(&state)?;
+        if bytes.len() as u64 > self.limits.snapshot_bytes {
+            // The new edges would overflow the snapshot: keep the rest of the answer without them.
+            for key in &added {
+                state.edges.remove(key);
+            }
+            bytes = on_disk(&state)?;
+            if bytes.len() as u64 > self.limits.snapshot_bytes {
+                return Err(Refusal::Full(Full::Snapshot));
+            }
+        }
+        self.write_snapshot(&bytes)?;
         Ok(true)
     }
 

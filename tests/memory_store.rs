@@ -258,6 +258,7 @@ fn a_full_store_refuses_new_writes_with_a_reason() {
             spool_bytes: 16 * 1024 * 1024,
             snapshot_bytes: 64 * 1024 * 1024,
             total_bytes: 96 * 1024 * 1024,
+            max_edges: 32_000,
             attempts_per_day: 1_000,
             questions_per_day: 20_000,
         },

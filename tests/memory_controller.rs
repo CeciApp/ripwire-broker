@@ -1323,3 +1323,85 @@ async fn a_relations_failure_leaves_the_job_pending_and_is_not_counted() {
         (ripwire_broker::memory::queue::JobState::Done, before + 1)
     );
 }
+
+#[test]
+fn commits_stay_inside_the_edge_and_snapshot_caps() {
+    use ripwire_broker::memory::model::Edge;
+    use ripwire_broker::memory::store::Limits;
+    assert_eq!(Limits::default().max_edges, 32_000, "PRD jev-mem §6");
+    let edge = |s: u64, t: u64, relation: &str| Edge {
+        source: id(s),
+        target: id(t),
+        graph: Graph::Semantic,
+        relation: relation.into(),
+        basis: EdgeBasis::JevInference,
+        score: Some(0.9),
+        model: Some("m".into()),
+        prompt_version: None,
+        policy: "p".into(),
+        generation: 0,
+    };
+    let make = |limits: Limits| {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::with_limits(dir.path(), &"c".repeat(64), limits);
+        for n in 1..=3 {
+            store.enqueue(&rec(n, "cache layer", &["e"])).unwrap();
+        }
+        store.ingest().unwrap();
+        (dir, store)
+    };
+
+    let (_d, store) = make(Limits {
+        max_edges: 2,
+        ..Default::default()
+    });
+    let g = store.load().unwrap().nodes[&id(1)].generation;
+    let three = vec![edge(1, 2, "a"), edge(1, 3, "b"), edge(2, 3, "c")];
+    store
+        .commit_enrichment(&id(1), g, None, EnrichmentState::Complete, three)
+        .unwrap();
+    assert_eq!(
+        store.load().unwrap().edges.len(),
+        2,
+        "never past the edge cap"
+    );
+
+    let (d, store) = make(Limits::default());
+    let size = std::fs::metadata(
+        d.path()
+            .join("memory")
+            .join("c".repeat(64))
+            .join("snapshot.json"),
+    )
+    .unwrap()
+    .len();
+    let tight = Store::with_limits(
+        d.path(),
+        &"c".repeat(64),
+        Limits {
+            snapshot_bytes: size + 400,
+            ..Default::default()
+        },
+    );
+    let g = store.load().unwrap().nodes[&id(1)].generation;
+    let wide: Vec<Edge> = (0..20)
+        .map(|i| edge(1, 2, &format!("{i}{}", "r".repeat(100))))
+        .collect();
+    let types = ripwire_broker::memory::model::Types {
+        episodic: Some(0.5),
+        ..Default::default()
+    };
+    tight
+        .commit_enrichment(&id(1), g, Some(types), EnrichmentState::Complete, wide)
+        .unwrap();
+    let s = tight.load().unwrap();
+    assert!(
+        s.edges.is_empty(),
+        "the edges that would overflow the snapshot are left out"
+    );
+    assert_eq!(
+        s.nodes[&id(1)].types.episodic,
+        Some(0.5),
+        "what fits is kept"
+    );
+}
