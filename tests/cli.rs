@@ -4441,3 +4441,31 @@ fn memory_status_shows_the_24h_budget_in_use() {
         (Some(2), Some(9))
     );
 }
+
+#[test]
+fn memory_retry_brings_failed_jobs_back() {
+    use ripwire_broker::memory::queue::{JobState, Outcome};
+    use ripwire_broker::memory::{identity, model::Record, store::Store};
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = Store::new(st.path(), &identity::workspace_id(ws.path()).unwrap());
+    let record: Record = serde_json::from_value(json!({
+        "schema_version": 1, "policy_version": "memory-policy/v1", "node_id": "a1", "content_hash": "a1",
+        "workspace_id": "w", "event_key": "e", "kind": "edit_observation", "content": "c",
+        "observed_at_ms": 1, "ingest_seq": 0, "timestamp_role": "observation",
+        "expires_at_ms": u64::MAX, "generation": 0
+    }))
+    .unwrap();
+    store.enqueue(&record).unwrap();
+    store.ingest().unwrap();
+    let lease = store.lease_next(0).unwrap().unwrap();
+    store.finish(lease, Outcome::Failed).unwrap();
+
+    let (code, out, err) = memory_cmd(ws.path(), st.path(), &["retry"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("1 failed job"), "{out}");
+    assert_eq!(store.load().unwrap().jobs["a1"].state, JobState::Pending);
+    assert!(
+        parse(&["memory", "retry", "--workspace", "/w", "--online"]).is_err(),
+        "local only"
+    );
+}

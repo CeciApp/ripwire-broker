@@ -37,6 +37,11 @@ pub enum Outcome {
         not_before_ms: u64,
     },
     Failed,
+    /// Nothing was sent (the quota is spent, the store was busy): back to pending, not before
+    /// then, and the run is not counted.
+    Defer {
+        not_before_ms: u64,
+    },
 }
 
 /// A job taken by this process. It is held through the lock on its lease file: when the

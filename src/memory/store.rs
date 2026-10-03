@@ -28,6 +28,8 @@ const REVOKED: &str = "revoked";
 const LEASES: &str = "leases";
 /// Held while a job talks to the provider: one remote job per workspace (PRD jev-mem §8.2).
 const REMOTE: &str = "remote.lock";
+/// How long the worker's bookkeeping waits for another writer.
+const WRITER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// Older than this, a spool temporary is a dead writer's.
 const DEAD_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -255,6 +257,21 @@ impl Store {
         match file.try_lock() {
             Ok(()) => Ok(file),
             Err(_) => Err(Refusal::Locked),
+        }
+    }
+
+    /// The writer for the worker's bookkeeping (quota, commits, job ends), which must not be
+    /// lost to a brief ingestion elsewhere: waits up to [`WRITER_WAIT`], then [`Refusal::Locked`].
+    /// A hook never takes it.
+    pub fn writer_waiting(&self) -> Result<fs::File, Refusal> {
+        let until = std::time::Instant::now() + WRITER_WAIT;
+        loop {
+            match self.writer() {
+                Err(Refusal::Locked) if std::time::Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
         }
     }
 
@@ -613,21 +630,50 @@ impl Store {
 
     /// Ends a run. A retry with no run left fails the job.
     pub fn finish(&self, lease: Lease, outcome: Outcome) -> Result<(), Refusal> {
-        let _writer = self.writer()?;
+        let _writer = self.writer_waiting()?;
         let mut state = self.load()?;
-        if let Some(job) = state.jobs.get_mut(&lease.node_id) {
-            job.state = match outcome {
-                Outcome::Done => JobState::Done,
-                Outcome::Failed => JobState::Failed,
-                Outcome::Retry { not_before_ms } => {
-                    job.not_before_ms = not_before_ms;
-                    JobState::Pending
-                }
-            };
-            self.write_snapshot(&on_disk(&state)?)?;
-        }
+        let Some(job) = state.jobs.get_mut(&lease.node_id) else {
+            return Ok(());
+        };
+        // The cadence of PRD jev-mem §9 counts a node once, when its planned stages finish:
+        // `Done` is terminal, so this happens once per job.
+        let newly_counted = outcome == Outcome::Done;
+        job.state = match outcome {
+            Outcome::Done => JobState::Done,
+            Outcome::Failed => JobState::Failed,
+            Outcome::Retry { not_before_ms } => {
+                job.not_before_ms = not_before_ms;
+                JobState::Pending
+            }
+            Outcome::Defer { not_before_ms } => {
+                job.runs = job.runs.saturating_sub(1);
+                job.not_before_ms = not_before_ms;
+                JobState::Pending
+            }
+        };
+        state.enriched += u64::from(newly_counted);
+        self.write_snapshot(&on_disk(&state)?)?;
         drop(lease);
         Ok(())
+    }
+
+    /// `memory retry`: every failed job back to pending, with its runs. Returns how many.
+    pub fn retry_all_failed(&self) -> Result<usize, Refusal> {
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        let mut n = 0;
+        for job in state
+            .jobs
+            .values_mut()
+            .filter(|j| j.state == JobState::Failed)
+        {
+            (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
+            n += 1;
+        }
+        if n > 0 {
+            self.write_snapshot(&on_disk(&state)?)?;
+        }
+        Ok(n)
     }
 
     /// Applies what the classifier decided about `node_id`, under the writer lock and never
@@ -641,7 +687,7 @@ impl Store {
         enrichment: EnrichmentState,
         edges: Vec<Edge>,
     ) -> Result<bool, Refusal> {
-        let _writer = self.writer()?;
+        let _writer = self.writer_waiting()?;
         let mut state = self.load()?;
         let generation = state.generation + 1;
         // Answers about a node that is gone, or was replaced since they were asked, are late.
@@ -652,15 +698,11 @@ impl Store {
         else {
             return Ok(false);
         };
-        let finished =
-            |s: EnrichmentState| matches!(s, EnrichmentState::Complete | EnrichmentState::Partial);
-        let first = finished(enrichment) && !finished(node.enrichment.state);
         if let Some(types) = types {
             node.types = types;
         }
         node.enrichment.state = enrichment;
         node.enrichment.prompt_version = Some(super::prompts::VERSION.into());
-        state.enriched += u64::from(first);
         for mut edge in edges {
             if !state.nodes.contains_key(&edge.source) || !state.nodes.contains_key(&edge.target) {
                 continue;
@@ -684,14 +726,14 @@ impl Store {
         else {
             return Ok(false);
         };
-        *job = Job::default();
+        (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
         self.write_snapshot(&on_disk(&state)?)?;
         Ok(true)
     }
 
     /// Charges the 24-hour quota before a request is sent; refused, nothing is sent.
     pub fn charge(&self, now_ms: u64, attempts: u32, questions: u32) -> Result<(), Refusal> {
-        let _writer = self.writer()?;
+        let _writer = self.writer_waiting()?;
         let mut state = self.load()?;
         let fits = state.ledger.charge(
             now_ms,

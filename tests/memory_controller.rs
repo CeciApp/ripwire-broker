@@ -700,23 +700,35 @@ async fn an_answer_for_a_forgotten_node_does_not_recreate_it() {
 
 #[test]
 fn the_enrichment_counter_increments_exactly_once_per_node() {
+    use ripwire_broker::memory::queue::Outcome;
     let dir = tempfile::tempdir().unwrap();
     let store = stored(dir.path(), &[rec(1, "cache layer", &["e"])]);
-    let seen = store.load().unwrap().nodes[&id(1)].generation;
+    let first = store.lease_next(0).unwrap().unwrap();
     store
-        .commit_enrichment(&id(1), seen, None, EnrichmentState::Failed, vec![])
+        .finish(first, Outcome::Retry { not_before_ms: 0 })
         .unwrap();
     assert_eq!(
         store.load().unwrap().enriched,
         0,
-        "a failed run is not an enrichment"
+        "a run that did not finish is not an enrichment"
     );
+    let second = store.lease_next(0).unwrap().unwrap();
+    store.finish(second, Outcome::Done).unwrap();
+    assert_eq!(store.load().unwrap().enriched, 1);
+    // Brought back by hand and run again: still one node.
     store
-        .commit_enrichment(&id(1), seen, None, EnrichmentState::Complete, vec![])
+        .commit_enrichment(
+            &id(1),
+            store.load().unwrap().nodes[&id(1)].generation,
+            None,
+            EnrichmentState::Complete,
+            vec![],
+        )
         .unwrap();
-    store
-        .commit_enrichment(&id(1), seen, None, EnrichmentState::Complete, vec![])
-        .unwrap();
+    assert!(
+        !store.retry_failed(&id(1)).unwrap(),
+        "only a failed job comes back"
+    );
     assert_eq!(
         store.load().unwrap().enriched,
         1,
@@ -1233,5 +1245,81 @@ async fn questions_attempts_bytes_and_cache_are_counted_per_operation_without_co
             m.typing.attempts + m.relations.attempts,
             m.typing.questions + m.relations.questions
         )
+    );
+}
+
+// ---------------------------------------------------------------- review of phase 2 (D-138)
+
+#[tokio::test]
+async fn a_spent_quota_keeps_jobs_pending_and_uses_no_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = ripwire_broker::memory::store::Limits {
+        attempts_per_day: 0,
+        ..Default::default()
+    };
+    let store = Store::with_limits(dir.path(), &"c".repeat(64), limits);
+    store.enqueue(&rec(1, "cache layer", &["e"])).unwrap();
+    store.ingest().unwrap();
+    let store = Arc::new(store);
+    let fake = Scripted::new(vec![]);
+    let w = worker(&store, fake.clone());
+    for minute in 0..5u64 {
+        let _ = w.run_once(minute * 3_600_000).await.unwrap();
+    }
+    let job = &store.load().unwrap().jobs[&id(1)];
+    assert_eq!(
+        job.state,
+        ripwire_broker::memory::queue::JobState::Pending,
+        "kept, not failed"
+    );
+    assert_eq!(job.runs, 0, "a run that sent nothing does not count");
+    assert_eq!(fake.sent(), 0);
+    assert_eq!(w.metrics().typing.quota_refusals, 5);
+}
+
+#[tokio::test]
+async fn a_relations_failure_leaves_the_job_pending_and_is_not_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(
+        dir.path(),
+        &[rec(1, "cache layer", &["e"]), rec(9, "cache layer", &["e"])],
+    ));
+    for _ in 0..1 {
+        let l = store.lease_next(0).unwrap().unwrap();
+        store
+            .finish(l, ripwire_broker::memory::queue::Outcome::Done)
+            .unwrap();
+    }
+    let before = store.load().unwrap().enriched;
+    // Typing answers; the relations request fails twice (one retry).
+    let fake = Scripted::new(vec![
+        None,
+        Some(ClassifyError::Network),
+        Some(ClassifyError::Network),
+    ]);
+    let w = worker(&store, fake.clone());
+    let ran = w.run_once(1_000).await.unwrap().unwrap();
+    assert_eq!(ran.state, EnrichmentState::Partial);
+    let s = store.load().unwrap();
+    assert_eq!(
+        s.jobs[&id(9)].state,
+        ripwire_broker::memory::queue::JobState::Pending,
+        "the pairs are still owed"
+    );
+    assert_eq!(
+        s.enriched, before,
+        "not counted until its planned stages finish"
+    );
+    assert!(
+        s.nodes[&id(9)].types.episodic.is_some(),
+        "what did arrive is kept"
+    );
+
+    let again = w.run_once(1_000_000).await.unwrap().unwrap();
+    assert_eq!(again.state, EnrichmentState::Complete);
+    let s = store.load().unwrap();
+    assert_eq!(
+        (s.jobs[&id(9)].state, s.enriched),
+        (ripwire_broker::memory::queue::JobState::Done, before + 1)
     );
 }

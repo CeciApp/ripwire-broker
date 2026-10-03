@@ -7,7 +7,7 @@ use super::metrics::{Metrics, Operation};
 use super::model::{Edge, EdgeBasis, EnrichmentState, Graph, POLICY_VERSION, Record, Types};
 use super::prompts::{self, Stage};
 use super::queue::{Lease, Outcome};
-use super::store::{Refusal, State, Store};
+use super::store::{Full, Refusal, State, Store};
 use super::wire::{self, Group};
 use crate::online::classifier::{ClassifyError, MemoryClassifier};
 use crate::online::request::StateRequest;
@@ -20,6 +20,10 @@ use std::sync::Arc;
 pub const EDGE_THRESHOLD: f64 = 0.60;
 /// A failed run is retried no sooner than this.
 const RETRY_AFTER_MS: u64 = 60_000;
+/// With the 24-hour budget spent, a job looks again no sooner than this.
+const QUOTA_RETRY_MS: u64 = 10 * 60_000;
+/// With the store busy, a job looks again no sooner than this.
+const BUSY_RETRY_MS: u64 = 5_000;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -219,8 +223,12 @@ enum Failure {
     Auth,
     /// A 429 whose wait does not fit the run: try again no sooner than this many ms.
     Cooldown(u64),
-    /// Out of attempts, of quota, or a failure not worth retrying.
+    /// Out of attempts or time, or a failure not worth retrying.
     GaveUp,
+    /// The 24-hour budget is spent: nothing was sent, and the job keeps its run.
+    Quota,
+    /// The store's bookkeeping was busy: nothing was sent, and the job keeps its run.
+    Busy,
 }
 
 struct Budget {
@@ -246,9 +254,19 @@ async fn send(
             return Err(Failure::GaveUp);
         }
         let questions = req.questions.0.len();
-        if store.charge(now_ms, 1, questions as u32).is_err() {
-            metrics.quota_refusals += 1;
+        let left = budget
+            .deadline
+            .saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
             return Err(Failure::GaveUp);
+        }
+        match store.charge(now_ms, 1, questions as u32) {
+            Ok(()) => {}
+            Err(Refusal::Full(Full::Quota)) => {
+                metrics.quota_refusals += 1;
+                return Err(Failure::Quota);
+            }
+            Err(_) => return Err(Failure::Busy),
         }
         budget.attempts_left -= 1;
         budget.sent += 1;
@@ -256,9 +274,11 @@ async fn send(
         metrics.retries += u64::from(retried);
         metrics.questions += questions as u64;
         metrics.bytes_sent += bytes;
-        let error = match classifier.decide(req).await {
-            Ok(d) => return Ok(d),
-            Err(e) => e,
+        // The run's deadline bounds every attempt, not only a 429's wait (PRD jev-mem §8.2).
+        let error = match tokio::time::timeout(left, classifier.decide(req)).await {
+            Ok(Ok(d)) => return Ok(d),
+            Ok(Err(e)) => e,
+            Err(_) => ClassifyError::Timeout,
         };
         *metrics.failures.entry(error.category()).or_default() += 1;
         match error {
@@ -280,6 +300,14 @@ async fn send(
             _ => return Err(Failure::GaveUp),
         }
         retried = true;
+    }
+}
+
+/// How long a job that sent nothing waits before trying again.
+fn deferral(failure: &Failure) -> u64 {
+    match failure {
+        Failure::Quota => QUOTA_RETRY_MS,
+        _ => BUSY_RETRY_MS,
     }
 }
 
@@ -339,11 +367,27 @@ pub async fn enrich(
                 preference: p(3),
             }
         }
+        // Nothing was sent: the job waits, pending, and keeps its run (PRD jev-mem §8.2).
+        Err(failure @ (Failure::Quota | Failure::Busy)) => {
+            store.finish(
+                lease,
+                Outcome::Defer {
+                    not_before_ms: now_ms + deferral(&failure),
+                },
+            )?;
+            return Ok(Enriched {
+                state: EnrichmentState::Pending,
+                requests: budget.sent,
+                edges: 0,
+                auth_failed: false,
+                metrics,
+            });
+        }
         Err(failure) => {
             let (wait, auth_failed) = match failure {
                 Failure::Auth => (RETRY_AFTER_MS, true),
                 Failure::Cooldown(ms) => (ms, false),
-                Failure::GaveUp => (RETRY_AFTER_MS, false),
+                _ => (RETRY_AFTER_MS, false),
             };
             store.commit_enrichment(
                 &node.node_id,
@@ -387,9 +431,11 @@ pub async fn enrich(
     let base = json!({"new_memory": item(&node)});
     let mut answers: Vec<BTreeMap<&str, Decision>> = vec![BTreeMap::new(); chosen.len()];
     let mut auth_failed = false;
+    // How the job ends when a relations request got no answer: its pairs are still owed.
+    let mut owed: Option<Outcome> = None;
     let batches = wire::batches(&cfg.model, &base, "candidates", groups).unwrap_or_default();
     for batch in batches {
-        if auth_failed {
+        if owed.is_some() {
             partial = true;
             break;
         }
@@ -423,8 +469,22 @@ pub async fn enrich(
                     answers[*g].insert(prompts::name_of(name), d);
                 }
             }
-            Err(Failure::Auth) => auth_failed = true,
-            Err(_) => partial = true,
+            Err(failure) => {
+                partial = true;
+                auth_failed |= matches!(failure, Failure::Auth);
+                owed = Some(match failure {
+                    Failure::Quota | Failure::Busy => Outcome::Defer {
+                        not_before_ms: now_ms + deferral(&failure),
+                    },
+                    // A 429 that did not fit: no other batch goes before its cooldown.
+                    Failure::Cooldown(ms) => Outcome::Retry {
+                        not_before_ms: now_ms + ms,
+                    },
+                    Failure::Auth | Failure::GaveUp => Outcome::Retry {
+                        not_before_ms: now_ms + RETRY_AFTER_MS,
+                    },
+                });
+            }
         }
     }
     let edges: Vec<Edge> = chosen
@@ -437,9 +497,9 @@ pub async fn enrich(
         true => EnrichmentState::Partial,
         false => EnrichmentState::Complete,
     };
-    metrics.jobs_done = 1;
+    metrics.jobs_done = u64::from(owed.is_none());
     store.commit_enrichment(&node.node_id, node.generation, Some(types), outcome, edges)?;
-    store.finish(lease, Outcome::Done)?;
+    store.finish(lease, owed.unwrap_or(Outcome::Done))?;
     Ok(Enriched {
         state: outcome,
         requests: budget.sent,

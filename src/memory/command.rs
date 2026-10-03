@@ -97,6 +97,12 @@ pub fn run(cmd: &MemoryCommand) -> Result<String, String> {
         }
         // Needs the provider: the binary runs it, with the `online` feature (PD-2).
         MemoryAction::Drain => Err("memory drain is run by the server binary".into()),
+        MemoryAction::Retry => {
+            let n = store
+                .retry_all_failed()
+                .map_err(|r| format!("memory retry: {}", category(r)))?;
+            Ok(format!("brought back {n} failed job(s)"))
+        }
         MemoryAction::Resume => match store.resume() {
             Ok(true) => Ok("memory collection resumed for this workspace".into()),
             Ok(false) => Ok("memory collection was not revoked for this workspace".into()),

@@ -884,3 +884,38 @@ fn the_24h_ledger_survives_a_restart_and_a_clock_rollback() {
     store.charge(t - 2 * DAY, 1, 0).unwrap();
     assert_eq!(store.charge(t + 1, 1, 0), Err(Refusal::Full(Full::Quota)));
 }
+
+#[test]
+fn the_worker_bookkeeping_waits_briefly_for_another_writer() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"w".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    // Another process ingests for a moment: a quota charge waits for it instead of failing.
+    let held = store.writer().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+    });
+    assert_eq!(
+        store.charge(5 * DAY, 1, 4),
+        Ok(()),
+        "a brief lock is waited for"
+    );
+    release.join().unwrap();
+    assert_eq!(
+        store.ingest().map(|_| ()),
+        Ok(()),
+        "and the plain writer still never waits"
+    );
+
+    let held = store.writer().unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        store.charge(5 * DAY, 1, 4),
+        Err(Refusal::Locked),
+        "but not forever"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    drop(held);
+}
