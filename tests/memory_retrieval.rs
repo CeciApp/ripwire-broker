@@ -175,7 +175,7 @@ fn depth_is_one_unless_multi_hop_is_at_least_half() {
 use async_trait::async_trait;
 use ripwire_broker::memory::model::{Edge, EdgeBasis};
 use ripwire_broker::memory::prompts::{self, Stage};
-use ripwire_broker::memory::retrieve::{Read, ReadConfig};
+use ripwire_broker::memory::retrieve::{Read, ReadConfig, StopReason};
 use ripwire_broker::online::classifier::{ClassifyError, MemoryClassifier};
 use ripwire_broker::online::request::StateRequest;
 use std::sync::Mutex;
@@ -492,4 +492,206 @@ async fn only_active_views_are_expanded_with_their_direction() {
     let r = reader(&["semantic"], 0.0, |_, _| p(0.9));
     read(&s, "eviction", &r).await;
     assert_eq!(r.scored(), [id(1), id(4)]);
+}
+
+// ---------------------------------------------------------------- stop reasons (§10, step 8; T3.4)
+
+/// One anchor that passes; stopping answers from `stop`; the rest as given.
+fn stopping(stop: impl Fn(&str) -> Decision + Send + Sync + 'static) -> Reader {
+    Reader::new(move |stage, name, _| match stage {
+        Stage::Routing => p(0.0),
+        Stage::Scoring => p(0.9),
+        _ => stop(name),
+    })
+}
+
+fn one() -> State {
+    state(vec![rec(1, "eviction policy", &[])])
+}
+
+async fn stop_of(s: &State, r: &Reader, cfg: ReadConfig) -> Read {
+    retrieve::read(s, "eviction", r, &cfg).await
+}
+
+#[tokio::test]
+async fn sufficient() {
+    let r = stopping(|n| match n {
+        "evidence_sufficient" => p(0.95),
+        "continue_useful" => p(0.9),
+        _ => p(0.14),
+    });
+    let got = stop_of(&one(), &r, ReadConfig::default()).await;
+    assert_eq!(got.stop, StopReason::Sufficient);
+    assert_eq!(got.memories.len(), 1);
+    let short = stopping(|n| match n {
+        "evidence_sufficient" => p(0.949),
+        "continue_useful" => p(0.9),
+        _ => p(0.14),
+    });
+    assert_ne!(
+        stop_of(&one(), &short, ReadConfig::default()).await.stop,
+        StopReason::Sufficient
+    );
+}
+
+#[tokio::test]
+async fn low_expected_gain() {
+    let r = stopping(|n| match n {
+        "evidence_sufficient" => p(0.5),
+        "continue_useful" => p(0.14),
+        _ => p(0.5),
+    });
+    assert_eq!(
+        stop_of(&one(), &r, ReadConfig::default()).await.stop,
+        StopReason::LowExpectedGain
+    );
+}
+
+#[tokio::test]
+async fn empty() {
+    let r = stopping(|_| p(0.0));
+    let got = retrieve::read(&one(), "nothing in common", &r, &ReadConfig::default()).await;
+    assert_eq!(
+        (got.stop, got.requests),
+        (StopReason::Empty, 0),
+        "no anchor, no request"
+    );
+}
+
+/// Never answers.
+struct Silent;
+
+#[async_trait]
+impl MemoryClassifier for Silent {
+    async fn decide(&self, _: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline() {
+    let got = retrieve::read(&one(), "eviction", &Silent, &ReadConfig::default()).await;
+    assert_eq!(got.stop, StopReason::Deadline);
+}
+
+#[tokio::test]
+async fn request_limit() {
+    let r = stopping(|_| p(0.5));
+    let cfg = ReadConfig {
+        request_limit: 1,
+        ..Default::default()
+    };
+    let got = stop_of(&one(), &r, cfg).await;
+    assert_eq!(
+        (got.stop, got.requests, got.memories.len()),
+        (StopReason::RequestLimit, 1, 0)
+    );
+}
+
+#[tokio::test]
+async fn question_limit() {
+    let r = stopping(|_| p(0.5));
+    let cfg = ReadConfig {
+        max_questions: 6,
+        ..Default::default()
+    };
+    let got = stop_of(&one(), &r, cfg).await;
+    assert_eq!(
+        (got.stop, got.questions),
+        (StopReason::QuestionLimit, 6),
+        "routing fit, scoring did not"
+    );
+}
+
+#[tokio::test]
+async fn graph_limit() {
+    let mut records = vec![rec(1, "eviction", &[])];
+    let mut edges = vec![];
+    for n in 100..120 {
+        records.push(rec(n, "other", &[]));
+        edges.push(edge(1, n, Graph::Semantic));
+    }
+    let s = with_edges(records, edges);
+    let r = Reader::new(|stage, name, _| match (stage, name) {
+        (Stage::Routing, "semantic") => p(1.0),
+        (Stage::Routing, _) => p(0.0),
+        (Stage::Scoring, _) => p(0.9),
+        (_, "continue_useful") => p(0.9),
+        _ => p(0.5),
+    });
+    let got = stop_of(&s, &r, ReadConfig::default()).await;
+    assert_eq!(
+        got.stop,
+        StopReason::GraphLimit,
+        "more neighbours than the expansions allow"
+    );
+}
+
+#[tokio::test]
+async fn cancelled() {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let cfg = ReadConfig {
+        cancel: Some(cancel),
+        ..Default::default()
+    };
+    let got = retrieve::read(&one(), "eviction", &Silent, &cfg).await;
+    assert_eq!(
+        (got.stop, got.requests),
+        (StopReason::Cancelled, 0),
+        "nothing is sent"
+    );
+}
+
+/// Fails every request.
+struct Down;
+
+#[async_trait]
+impl MemoryClassifier for Down {
+    async fn decide(&self, _: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        Err(ClassifyError::Server(503))
+    }
+}
+
+#[tokio::test]
+async fn provider_error() {
+    let got = retrieve::read(&one(), "eviction", &Down, &ReadConfig::default()).await;
+    assert_eq!(
+        (got.stop, got.requests),
+        (StopReason::ProviderError, 1),
+        "never retried"
+    );
+}
+
+#[tokio::test]
+async fn budget_omitted() {
+    let r = stopping(|n| match n {
+        "evidence_sufficient" => p(0.99),
+        _ => p(0.0),
+    });
+    let mut got = stop_of(&one(), &r, ReadConfig::default()).await;
+    assert_eq!(got.stop, StopReason::Sufficient);
+    retrieve::fit(&mut got, 3, 1);
+    assert!(got.memories.is_empty());
+    assert_eq!(
+        got.stop,
+        StopReason::BudgetOmitted,
+        "nothing fit the budget"
+    );
+}
+
+#[tokio::test]
+async fn without_a_valid_stopping_answer_it_is_never_sufficient() {
+    let r = stopping(|n| match n {
+        "evidence_sufficient" => p(0.99),
+        "missing_evidence" => unknown(),
+        _ => p(0.0),
+    });
+    let got = stop_of(&one(), &r, ReadConfig::default()).await;
+    assert_ne!(
+        got.stop,
+        StopReason::Sufficient,
+        "an unknown answer is never a yes"
+    );
+    assert!(got.partial);
 }

@@ -114,6 +114,10 @@ pub struct ReadConfig {
     pub deadline: Duration,
     /// Requests a read may send (`--memory-read-request-limit`); never retried.
     pub request_limit: usize,
+    /// Questions a read may ask in all (PRD jev-mem §8.3: 6 + 2 × 32 + 4).
+    pub max_questions: usize,
+    /// The MCP call's cancellation.
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Default for ReadConfig {
@@ -122,6 +126,8 @@ impl Default for ReadConfig {
             model: "jev-1.13.0".into(),
             deadline: Duration::from_millis(750),
             request_limit: 4,
+            max_questions: 74,
+            cancel: None,
         }
     }
 }
@@ -194,6 +200,7 @@ fn weighted(s: [f64; 4], anchor: f64) -> f64 {
 struct Run<'a> {
     classifier: &'a dyn MemoryClassifier,
     cfg: &'a ReadConfig,
+    until: tokio::time::Instant,
     requests: usize,
     questions: usize,
     partial: bool,
@@ -204,11 +211,35 @@ impl Run<'_> {
         &mut self,
         state: Value,
         questions: Vec<crate::online::request::JevQuestion>,
-    ) -> Option<Vec<Decision>> {
+    ) -> Result<Vec<Decision>, StopReason> {
+        let cancel = self.cfg.cancel.clone().unwrap_or_default();
+        if cancel.is_cancelled() {
+            return Err(StopReason::Cancelled);
+        }
+        if self.requests >= self.cfg.request_limit {
+            return Err(StopReason::RequestLimit);
+        }
+        if self.questions + questions.len() > self.cfg.max_questions {
+            return Err(StopReason::QuestionLimit);
+        }
+        let left = self
+            .until
+            .saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err(StopReason::Deadline);
+        }
         let req = StateRequest::new(&self.cfg.model, state, questions);
         self.requests += 1;
         self.questions += req.questions.0.len();
-        self.classifier.decide(&req).await.ok()
+        // No retry on the read path: a failure ends the read and keeps what it validated.
+        tokio::select! {
+            _ = cancel.cancelled() => Err(StopReason::Cancelled),
+            answer = tokio::time::timeout(left, self.classifier.decide(&req)) => match answer {
+                Err(_) => Err(StopReason::Deadline),
+                Ok(Err(_)) => Err(StopReason::ProviderError),
+                Ok(Ok(d)) => Ok(d),
+            },
+        }
     }
 
     /// Scores `batch`; the ones that pass the gate, with their score.
@@ -217,7 +248,7 @@ impl Run<'_> {
         query: &str,
         evidence: &[Found],
         batch: Vec<Candidate>,
-    ) -> Option<Vec<Found>> {
+    ) -> Result<Vec<Found>, StopReason> {
         let state = json!({
             "query": query,
             "evidence": evidence.iter().map(|f| &f.record.content).collect::<Vec<_>>(),
@@ -249,7 +280,7 @@ impl Run<'_> {
                 });
             }
         }
-        Some(out)
+        Ok(out)
     }
 }
 
@@ -276,6 +307,7 @@ pub async fn read(
     let mut run = Run {
         classifier,
         cfg,
+        until: tokio::time::Instant::now() + cfg.deadline,
         requests: 0,
         questions: 0,
         partial: false,
@@ -297,15 +329,13 @@ pub async fn read(
 
     // 1. Routing, on the query alone.
     let routing = prompts::questions(Stage::Routing, 0);
-    let Some(answers) = run
-        .ask(
-            json!({"query": query}),
-            routing.iter().map(|(_, q)| q.clone()).collect(),
-        )
-        .await
-    else {
-        out.stop = StopReason::ProviderError;
-        return finish(out, run);
+    let questions = routing.iter().map(|(_, q)| q.clone()).collect();
+    let answers = match run.ask(json!({"query": query}), questions).await {
+        Ok(a) => a,
+        Err(reason) => {
+            out.stop = reason;
+            return finish(out, run);
+        }
     };
     let by_name: BTreeMap<&str, Decision> = routing.iter().map(|(n, _)| *n).zip(answers).collect();
     let route = route(&by_name);
@@ -324,9 +354,12 @@ pub async fn read(
         .collect();
     let mut visited: BTreeSet<String> = batch.iter().map(|c| c.record.node_id.clone()).collect();
     out.visited = visited.len();
-    let Some(mut selected) = run.score(query, &[], batch).await else {
-        out.stop = StopReason::ProviderError;
-        return finish(out, run);
+    let mut selected = match run.score(query, &[], batch).await {
+        Ok(s) => s,
+        Err(reason) => {
+            out.stop = reason;
+            return finish(out, run);
+        }
     };
     rank(&mut selected, route.recency);
 
@@ -393,10 +426,13 @@ pub async fn read(
     }
     out.visited = visited.len();
     if !queued.is_empty() {
-        let Some(more) = run.score(query, &selected, queued).await else {
-            out.stop = StopReason::ProviderError;
-            out.memories = selected;
-            return finish(out, run);
+        let more = match run.score(query, &selected, queued).await {
+            Ok(m) => m,
+            Err(reason) => {
+                out.stop = reason;
+                out.memories = selected;
+                return finish(out, run);
+            }
         };
         selected.extend(more);
         rank(&mut selected, route.recency);
@@ -414,9 +450,13 @@ pub async fn read(
         )
         .await;
     let by_name: BTreeMap<&str, Decision> = match answers {
-        Some(a) => stopping.iter().map(|(n, _)| *n).zip(a).collect(),
-        None => BTreeMap::new(),
+        Ok(a) => stopping.iter().map(|(n, _)| *n).zip(a).collect(),
+        Err(reason) => {
+            out.stop = reason;
+            return finish(out, run);
+        }
     };
+    run.partial |= by_name.values().any(|d| d.probability().is_none());
     let p = |n: &str| by_name.get(n).and_then(Decision::probability);
     out.stop = match (
         p("evidence_sufficient"),
@@ -439,4 +479,23 @@ fn finish(mut out: Read, run: Run<'_>) -> Read {
     out.questions = run.questions;
     out.partial |= run.partial;
     out
+}
+
+/// Keeps the best memories that fit `max_items` and `max_tokens` (4 bytes of text per token).
+/// A read that found memories and keeps none is `BudgetOmitted`.
+pub fn fit(read: &mut Read, max_items: usize, max_tokens: u32) {
+    let had = !read.memories.is_empty();
+    let mut used = 0u32;
+    let mut kept = vec![];
+    for f in std::mem::take(&mut read.memories) {
+        let cost = f.record.content.len().div_ceil(4) as u32;
+        if kept.len() < max_items && used + cost <= max_tokens {
+            used += cost;
+            kept.push(f);
+        }
+    }
+    if had && kept.is_empty() {
+        read.stop = StopReason::BudgetOmitted;
+    }
+    read.memories = kept;
 }
