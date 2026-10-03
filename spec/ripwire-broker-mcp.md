@@ -668,6 +668,16 @@ os pais quando derivada, `stale: false` (uma memória com fonte mudada é omitid
 byte a byte o de antes. Memória é relato do passado: não muda `status` e não substitui itens,
 riscos ou testes.
 
+A leitura corre ao lado da parte estrutural de `context_for_task`, dentro de
+`--memory-read-deadline-ms`, com a carga do snapshot incluída, e nunca faz a ferramenta falhar.
+O snapshot fica quente entre chamadas e só é recarregado quando o arquivo muda; a carga roda fora
+das threads assíncronas, uma por vez. Faltando memória, o envelope diz por quê:
+`memory_cold` (o snapshot ainda carrega; a carga continua e a próxima chamada o encontra pronto),
+`memory_unavailable` (store ilegível: corrompido, esquema novo, I/O) ou `memory_incomplete`
+(o provedor falhou, o prazo acabou, ou o store mudou e as memórias não puderam ser conferidas de
+novo, caso em que nenhuma sai). Uma memória sai uma vez por sessão com `--incremental`, como os
+itens; `include_seen` a manda de novo. A consulta nunca é gravada.
+
 ### 9.2 Tool `context_after_edit`
 
 **Objetivo:** mostrar o que a edição pode ter afetado sem reler todo o contexto inicial.

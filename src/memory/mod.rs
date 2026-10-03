@@ -12,6 +12,7 @@ pub mod model;
 pub mod prompts;
 pub mod publish;
 pub mod queue;
+pub mod recall;
 pub mod retrieve;
 pub mod runtime;
 pub mod store;

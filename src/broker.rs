@@ -3,6 +3,8 @@
 use crate::budget;
 use crate::memory::admission::Event as MemoryEvent;
 use crate::memory::publish::{MemoryConfig, MemoryStatus, Publisher};
+use crate::memory::recall::{Recall, Recalled};
+use crate::memory::retrieve;
 use crate::metrics::{Metrics, RequestRecord, StageSpan, UpstreamSpan};
 use crate::model::*;
 use crate::normalize::{self, Entry};
@@ -319,6 +321,8 @@ pub struct Broker {
     notes: Option<NoteEngine>,
     online: Option<OnlineEngine>,
     memory: Option<Publisher>,
+    /// The memory read of `context_for_task`, with `--memory`.
+    recall: Option<Recall>,
     metrics: Mutex<Metrics>,
     last_error: Mutex<Option<&'static str>>,
     /// The last availability probe and when it finished, so back-to-back reads of the status
@@ -414,7 +418,20 @@ impl Broker {
                 error: "workspace_violation",
                 message,
             })?;
-        let memory = config.memory.map(|m| Publisher::new(m, workspace.root()));
+        let (memory, recall) = match config.memory {
+            Some(mut m) => {
+                let read = m.read.take();
+                let recall = read
+                    .map(|r| Recall::new(r, workspace.root()))
+                    .transpose()
+                    .map_err(|message| BrokerError {
+                        error: "workspace_violation",
+                        message,
+                    })?;
+                (Some(Publisher::new(m, workspace.root())), recall)
+            }
+            None => (None, None),
+        };
         Ok(Self {
             upstream,
             workspace,
@@ -429,6 +446,7 @@ impl Broker {
                 .map(|m| NoteEngine::new(m, config.summarizer_wait)),
             online,
             memory,
+            recall,
             metrics: Mutex::new(Metrics::default()),
             last_error: Mutex::new(None),
             probe: Mutex::new(None),
@@ -886,8 +904,36 @@ impl Broker {
             .await
     }
 
+    /// The structural context and, with `--memory`, the memory read, side by side (PRD jev-mem
+    /// §10). Memory only adds to the answer: it never fails it and never changes its status.
     async fn context_for_task_inner(&self, req: TaskRequest) -> Result<Envelope, BrokerError> {
         check_budget_at(req.budget_tokens, self.min_task_budget())?;
+        let recall = async {
+            match &self.recall {
+                Some(r) => Some(r.read(&req.task).await),
+                None => None,
+            }
+        };
+        let (env, recalled) = tokio::join!(self.structural_task(&req), recall);
+        let mut env = env?;
+        if let Some(recalled) = recalled {
+            self.attach_memory(&mut env, recalled, !req.include_seen);
+        }
+        self.remember(&env);
+        Ok(env)
+    }
+
+    /// `memories` and `provenance.memory`, and what kept the read short as limitations.
+    fn attach_memory(&self, env: &mut Envelope, recalled: Recalled, skip_seen: bool) {
+        env.limitations.extend(recalled.limitations);
+        if let Some(read) = recalled.read {
+            let session = self.session.lock().unwrap();
+            let seen = |id: &str| skip_seen && session.has(&session::memory_fingerprint(id));
+            retrieve::attach(env, &read, &seen);
+        }
+    }
+
+    async fn structural_task(&self, req: &TaskRequest) -> Result<Envelope, BrokerError> {
         let route = router::route(&req.task, req.mode);
         let mut verbs = Vec::new();
         let entries = match (route.intent, route.symbol.as_deref()) {
@@ -935,11 +981,11 @@ impl Broker {
                             .await?;
                         let mut entries = normalize::ctx("explore", &payload);
                         entries.push(normalize::symbol_not_found(symbol));
-                        return Ok(self.complete_task(&req, route.intent, verbs, entries).await);
+                        return Ok(self.complete_task(req, route.intent, verbs, entries).await);
                     }
                     Err(e) => return Err(e.into()),
                 };
-                let mut entries = self.symbol_context(&found, &req, &mut verbs).await?;
+                let mut entries = self.symbol_context(&found, req, &mut verbs).await?;
                 if intent == Intent::Change {
                     verbs.push("impact");
                     let payload = self.call("impact", json!({"symbol": symbol})).await?;
@@ -970,7 +1016,7 @@ impl Broker {
                 entries
             }
         };
-        Ok(self.complete_task(&req, route.intent, verbs, entries).await)
+        Ok(self.complete_task(req, route.intent, verbs, entries).await)
     }
 
     /// The task's envelope, with notes when a local model is configured (PRD 10.3).
@@ -992,7 +1038,6 @@ impl Broker {
             self.attach_notes(engine, &mut env, &included, !req.include_seen)
                 .await;
         }
-        self.remember(&env);
         env
     }
 
@@ -1062,6 +1107,9 @@ impl Broker {
         }
         for n in &env.notes {
             memory.remember(session::note_fingerprint(n));
+        }
+        for m in &env.memories {
+            memory.remember(session::memory_fingerprint(&m.id));
         }
     }
 

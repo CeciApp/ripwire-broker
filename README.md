@@ -68,7 +68,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
-| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Being built** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects and enriches; nothing reads memories back yet |
+| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Being built** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects, enriches and reads memories back in `context_for_task`; the hooks do not deliver them yet |
 | `--memory-read-deadline-ms N` | `750` | 1–750; longest a task waits for memory |
 | `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read; 0 serves only the local index |
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
@@ -324,6 +324,15 @@ finish waits on disk.
 The status resource's `memory` field adds what the worker cost, by operation (typing,
 relations): attempts, retries, questions, bytes sent, failures by category and quota refusals,
 counts only. `memory status` shows the attempts and questions spent in the last 24 hours.
+
+**Reading:** with `--memory`, `context_for_task` reads memory alongside the structural context
+and adds at most three memories (600 tokens, a fifth of the budget) in a `memories` field, with
+`provenance.memory` saying why the read stopped and what it cost. Memory never fails the tool and
+never changes `status`. When it is missing the answer says why: `memory_cold` (a large snapshot
+is still loading; the next call finds it warm), `memory_unavailable` (the store cannot be read)
+or `memory_incomplete` (the provider failed, time ran out, or the store changed under the read,
+in which case none goes out). With `--incremental` a memory goes out once per session. The task
+text is sent to the classifier and never written to disk.
 
 **Forgetting:** forgetting a memory removes it, every note derived from it and its pending
 copies, in a new generation, and keeps its id from coming back for the retention period, even

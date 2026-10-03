@@ -2387,3 +2387,314 @@ async fn a_memory_delivered_in_this_session_is_not_repeated() {
     assert_eq!(ids, ["n2"], "the two already delivered are left out");
     assert!(second.budget.already_delivered >= 2, "and counted as such");
 }
+
+// ---------------------------------------------------------------- context_for_task reads memory (PRD jev-mem §10; T3.10)
+
+use ripwire_broker::memory::admission::{self, Draft, Event, Outcome, Stamp, Tests};
+use ripwire_broker::memory::identity;
+use ripwire_broker::memory::retrieve::{ReadConfig, ReadSetup};
+use ripwire_broker::online::classifier::{ClassifyError, MemoryClassifier};
+use ripwire_broker::online::request::StateRequest;
+use ripwire_broker::online::response::Decision;
+
+/// Says yes to everything, and that the evidence is sufficient.
+struct Agreeable;
+
+#[async_trait::async_trait]
+impl MemoryClassifier for Agreeable {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        Ok(req
+            .questions
+            .0
+            .iter()
+            .map(|(_, q)| {
+                let t = &q.instructions;
+                let p = match () {
+                    _ if t.starts_with("Does evidence support every factual part") => 0.99,
+                    _ if t.starts_with("Is a fact needed to answer query absent") => 0.0,
+                    _ if t.starts_with("Do items of evidence contradict") => 0.0,
+                    _ => 0.9,
+                };
+                Decision::Noul { probability: p }
+            })
+            .collect())
+    }
+}
+
+struct Refusing;
+
+#[async_trait::async_trait]
+impl MemoryClassifier for Refusing {
+    async fn decide(&self, _: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        Err(ClassifyError::Server(503))
+    }
+}
+
+/// A workspace with one remembered edit of `src/cache.rs`, and a broker reading it.
+async fn remembering(
+    classifier: Arc<dyn MemoryClassifier>,
+    cfg: ReadConfig,
+) -> (Broker, tempfile::TempDir, tempfile::TempDir, Arc<Store>) {
+    remembering_with(move |_| classifier, cfg).await
+}
+
+async fn remembering_with(
+    classifier: impl FnOnce(&Store) -> Arc<dyn MemoryClassifier>,
+    cfg: ReadConfig,
+) -> (Broker, tempfile::TempDir, tempfile::TempDir, Arc<Store>) {
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(ws.path(), "src/cache.rs", "fn get() {}\n");
+    let id = identity::workspace_id(ws.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &id));
+    let reader = ripwire_broker::online::reader::WorkspaceReader::new(ws.path()).unwrap();
+    let draft = Draft {
+        event_key: "e".into(),
+        event: Event::AfterEdit,
+        outcome: Outcome::AnalysisCompleted,
+        tests: Tests::Unknown,
+        scope: vec!["src/cache.rs".into()],
+        evidence: vec!["quality_delta".into()],
+    };
+    let stamp = Stamp {
+        observed_at_ms: 1,
+        ingest_seq: 0,
+        generation: 0,
+        retention_ms: u64::MAX / 2,
+    };
+    store
+        .enqueue(&admission::admit(&reader, &id, &draft, stamp).unwrap())
+        .unwrap();
+    store.ingest().unwrap();
+    let mut config = BrokerConfig::new(ws.path());
+    config.incremental = true;
+    let mut memory = MemoryConfig::new(store.clone(), id, 1_000_000);
+    memory.read = Some(ReadSetup {
+        store: store.clone(),
+        classifier: classifier(&store),
+        cfg,
+    });
+    config.memory = Some(memory);
+    let fake = FakeUpstream::new().answer("explore", "explore_export_auth");
+    let b = Broker::connect(Arc::new(fake), config).await.unwrap();
+    (b, ws, st, store)
+}
+
+async fn plain_task(ws: &std::path::Path) -> Value {
+    let fake = FakeUpstream::new().answer("explore", "explore_export_auth");
+    let b = Broker::connect(Arc::new(fake), BrokerConfig::new(ws))
+        .await
+        .unwrap();
+    to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn memory_is_read_alongside_the_structural_context() {
+    let (b, ws, _st, _store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        out["items"],
+        plain_task(ws.path()).await["items"],
+        "the structural answer is untouched"
+    );
+    assert_eq!(out["memories"].as_array().map(Vec::len), Some(1), "{out:#}");
+    assert_eq!(out["provenance"]["memory"]["stop_reason"], "sufficient");
+}
+
+#[tokio::test]
+async fn a_provider_failure_a_full_disk_or_a_corrupt_store_keeps_the_structural_answer() {
+    let kinds = |out: &Value| {
+        out["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["kind"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let (b, ws, _st, _store) = remembering(Arc::new(Refusing), ReadConfig::default()).await;
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(out["items"], plain_task(ws.path()).await["items"]);
+    assert!(out.get("memories").is_none());
+    assert!(
+        kinds(&out).contains(&"memory_incomplete".to_string()),
+        "{out:#}"
+    );
+
+    let (b, ws, _st, store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    std::fs::write(store.dir().join("snapshot.json"), "{broken").unwrap();
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(out["items"], plain_task(ws.path()).await["items"]);
+    assert!(
+        kinds(&out).contains(&"memory_unavailable".to_string()),
+        "{out:#}"
+    );
+}
+
+#[tokio::test]
+async fn memory_never_changes_ready_or_attention_required() {
+    let (b, ws, _st, _store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(out["status"], plain_task(ws.path()).await["status"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cold_large_snapshot_omits_memory_with_a_limitation_and_warms_up() {
+    let cfg = ReadConfig {
+        deadline: std::time::Duration::from_millis(5),
+        ..Default::default()
+    };
+    let (b, _ws, _st, store) = remembering(Arc::new(Agreeable), cfg).await;
+    // A large store: 2,000 memories of 2 KB each.
+    let mut s = store.load().unwrap();
+    let one = s.nodes.values().next().unwrap().clone();
+    for n in 0..2_000 {
+        let mut r = one.clone();
+        r.node_id = format!("{n:064}");
+        r.content = format!("{n} {}", "word ".repeat(380));
+        s.nodes.insert(r.node_id.clone(), r);
+    }
+    store.publish(&s).unwrap();
+    let cold = |out: &Value| {
+        out["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["kind"] == "memory_cold")
+    };
+
+    let first = to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        cold(&first),
+        "too large to load inside the read's time: {first:#}"
+    );
+    assert!(
+        !first["items"].as_array().unwrap().is_empty(),
+        "the structural answer goes out anyway"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let out = to_json(
+            &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+                .await
+                .unwrap(),
+        );
+        if !cold(&out) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "it warms up in the background"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_query_is_never_persisted() {
+    let (b, _ws, st, store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let marker = "zebra-unique-query-7f3";
+    b.context_for_task(TaskRequest::new(&format!("cache {marker}")))
+        .await
+        .unwrap();
+    store.ingest().unwrap();
+    let mut dirs = vec![st.path().to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            match p.is_dir() {
+                true => dirs.push(p),
+                false => assert!(
+                    !std::fs::read_to_string(&p)
+                        .unwrap_or_default()
+                        .contains(marker),
+                    "{}",
+                    p.display()
+                ),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_memory_goes_out_once_per_session() {
+    let (b, _ws, _st, _store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let ask = || b.context_for_task(TaskRequest::new("how is the cache evicted?"));
+    let first = to_json(&ask().await.unwrap());
+    assert_eq!(first["memories"].as_array().map(Vec::len), Some(1));
+    let second = to_json(&ask().await.unwrap());
+    assert!(second.get("memories").is_none(), "{second:#}");
+    assert_eq!(
+        second["provenance"]["memory"]["stop_reason"], "sufficient",
+        "read, then withheld"
+    );
+    let third = to_json(
+        &b.context_for_task(TaskRequest {
+            include_seen: true,
+            ..TaskRequest::new("how is the cache evicted?")
+        })
+        .await
+        .unwrap(),
+    );
+    assert_eq!(
+        third["memories"].as_array().map(Vec::len),
+        Some(1),
+        "include_seen sends it again"
+    );
+}
+
+/// Agrees, after breaking the store under the read.
+struct Breaking(std::path::PathBuf);
+
+#[async_trait::async_trait]
+impl MemoryClassifier for Breaking {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        std::fs::write(&self.0, "{broken").unwrap();
+        Agreeable.decide(req).await
+    }
+}
+
+#[tokio::test]
+async fn a_store_broken_during_the_read_delivers_no_memory() {
+    let breaking = |store: &Store| -> Arc<dyn MemoryClassifier> {
+        Arc::new(Breaking(store.dir().join("snapshot.json")))
+    };
+    let (b, _ws, _st, _store) = remembering_with(breaking, ReadConfig::default()).await;
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    );
+    assert!(out.get("memories").is_none(), "{out:#}");
+    assert!(
+        out["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["kind"] == "memory_incomplete"),
+        "{out:#}"
+    );
+    assert_eq!(out["provenance"]["memory"]["partial"], true);
+}

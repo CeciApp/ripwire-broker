@@ -108,6 +108,22 @@ pub const BEAM: usize = 4;
 /// A candidate needs at least this relevance, and this score.
 pub const ENTRY: f64 = 0.60;
 
+/// What a broker started with `--memory` reads with.
+#[derive(Clone)]
+pub struct ReadSetup {
+    pub store: std::sync::Arc<super::store::Store>,
+    pub classifier: std::sync::Arc<dyn MemoryClassifier>,
+    pub cfg: ReadConfig,
+}
+
+impl std::fmt::Debug for ReadSetup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadSetup")
+            .field("cfg", &self.cfg)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReadConfig {
     pub model: String,
@@ -324,7 +340,7 @@ async fn read_with(
     query: &str,
     classifier: &dyn MemoryClassifier,
     cfg: &ReadConfig,
-    fresh: &dyn Fn(&Record) -> bool,
+    fresh: &(dyn Fn(&Record) -> bool + Sync),
 ) -> Read {
     let mut current = state.clone();
     current.nodes.retain(|_, r| fresh(r));
@@ -558,9 +574,33 @@ fn fresh_in(reader: &crate::online::reader::WorkspaceReader) -> impl Fn(&Record)
     }
 }
 
+/// A read of `state` that leaves out memories whose sources changed since they were observed.
+pub async fn read_fresh(
+    state: &State,
+    reader: &crate::online::reader::WorkspaceReader,
+    query: &str,
+    classifier: &dyn MemoryClassifier,
+    cfg: &ReadConfig,
+) -> Read {
+    read_with(state, query, classifier, cfg, &fresh_in(reader)).await
+}
+
+/// Step 9, right before delivery: keeps the memories whose node is still in `now` in the same
+/// generation and whose sources are unchanged; the stale ones are counted.
+pub fn revalidate(read: &mut Read, now: &State, reader: &crate::online::reader::WorkspaceReader) {
+    read.memories.retain(|f| {
+        now.nodes
+            .get(&f.record.node_id)
+            .is_some_and(|n| n.generation == f.record.generation)
+    });
+    let present = read.memories.len();
+    let fresh = fresh_in(reader);
+    read.memories.retain(|f| fresh(&f.record));
+    read.stale_omitted += present - read.memories.len();
+}
+
 /// The read `context_for_task` makes: the current generation, stale memories left out, pending
-/// observations counted and not awaited, and every memory checked again right before delivery
-/// (step 9): its node still there in the same generation, its sources unchanged.
+/// observations counted and not awaited, and every memory checked again right before delivery.
 pub async fn read_store(
     store: &super::store::Store,
     reader: &crate::online::reader::WorkspaceReader,
@@ -569,18 +609,9 @@ pub async fn read_store(
     cfg: &ReadConfig,
 ) -> Read {
     let state = store.load().unwrap_or_default();
-    let fresh = fresh_in(reader);
-    let mut out = read_with(&state, query, classifier, cfg, &fresh).await;
+    let mut out = read_fresh(&state, reader, query, classifier, cfg).await;
     out.pending_writes = store.pending().unwrap_or(0);
-    let now = store.load().unwrap_or_default();
-    out.memories.retain(|f| {
-        now.nodes
-            .get(&f.record.node_id)
-            .is_some_and(|n| n.generation == f.record.generation)
-    });
-    let present = out.memories.len();
-    out.memories.retain(|f| fresh(&f.record));
-    out.stale_omitted += present - out.memories.len();
+    revalidate(&mut out, &store.load().unwrap_or_default(), reader);
     out
 }
 

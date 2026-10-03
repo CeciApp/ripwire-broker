@@ -229,6 +229,13 @@ impl Store {
         Ok(self.read()?.unwrap_or_default())
     }
 
+    /// The snapshot file's length and modification time, which change with every publication;
+    /// `None` without one. A stat, never a read: what tells a kept copy is still current.
+    pub fn snapshot_version(&self) -> Option<(u64, std::time::SystemTime)> {
+        let meta = fs::symlink_metadata(self.dir.join(SNAPSHOT)).ok()?;
+        Some((meta.len(), meta.modified().ok()?))
+    }
+
     /// Publishes `state` as the new generation, unless the current one cannot be read.
     pub fn publish(&self, state: &State) -> Result<(), Unavailable> {
         self.read()?;

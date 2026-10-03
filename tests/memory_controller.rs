@@ -1429,3 +1429,32 @@ async fn drain_says_when_it_could_not_run_instead_of_reporting_empty() {
         .unwrap();
     assert_eq!(suspended.stop, DrainStop::Suspended);
 }
+
+#[tokio::test]
+async fn serve_with_memory_reads_with_its_flags() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let args = serve(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--memory",
+        "--memory-read-deadline-ms",
+        "400",
+        "--memory-read-request-limit",
+        "2",
+    ]);
+    let rt = runtime::from_serve(&args, state.path(), Some(Scripted::new(vec![])))
+        .unwrap()
+        .unwrap();
+    let read = rt
+        .publish()
+        .read
+        .as_ref()
+        .expect("context_for_task reads memory");
+    assert_eq!(read.cfg.deadline, std::time::Duration::from_millis(400));
+    assert_eq!(read.cfg.request_limit, 2);
+    assert_eq!(read.cfg.model, runtime::DEFAULT_MODEL);
+    assert_eq!(
+        read.store.dir(),
+        Store::new(state.path(), rt.workspace_id()).dir()
+    );
+}
