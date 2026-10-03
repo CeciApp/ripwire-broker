@@ -20,6 +20,17 @@ pub trait Classifier: Send + Sync {
     async fn classify(&self, req: &JevRequest) -> Result<Vec<Option<f64>>, ClassifyError>;
 }
 
+/// The memory controller's view of the provider (PRD jev-mem §7): typed decisions about a
+/// structured state. Same client, credential, endpoint and limits as [`Classifier`].
+#[async_trait]
+pub trait MemoryClassifier: Send + Sync {
+    /// One attempt: a decision per question, in request order; retries are the caller's.
+    async fn decide(
+        &self,
+        req: &super::request::StateRequest,
+    ) -> Result<Vec<super::response::Decision>, ClassifyError>;
+}
+
 /// A failed attempt, classified (PRD §23.10).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClassifyError {

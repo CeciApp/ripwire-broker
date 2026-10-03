@@ -777,3 +777,75 @@ async fn the_client_reuses_a_pooled_connection() {
         "one pooled connection serves sequential requests"
     );
 }
+
+// --- jev-mem T2.4: one transport for discovery and memory (PRD jev-mem §7) ---
+
+use ripwire_broker::online::classifier::MemoryClassifier;
+use ripwire_broker::online::request::{JevQuestion, StateRequest};
+use ripwire_broker::online::response::Decision;
+
+fn memory_request() -> StateRequest {
+    StateRequest::new(
+        "jev-1.13.0",
+        serde_json::json!({"observation": "Evento: análise após edição."}),
+        vec![
+            JevQuestion::noul("episodic?"),
+            JevQuestion::noul("semantic?"),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn the_memory_transport_posts_through_the_same_client() {
+    let ok = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.9},"q1":{"type":"noul","noul":0.1}}}"#;
+    let big = vec![b' '; MAX_RESPONSE_BYTES + 1];
+    let f = fixture(vec![
+        json(200, ok),
+        json(401, "{}"),
+        Some((200, vec![("content-type", "application/json".into())], big)),
+    ])
+    .await;
+    let c = client(f.port, Duration::from_secs(5));
+    let req = memory_request();
+
+    let got = c.decide(&req).await.unwrap();
+    assert_eq!(
+        got,
+        vec![
+            Decision::Noul { probability: 0.9 },
+            Decision::Noul { probability: 0.1 }
+        ]
+    );
+    let seen = f.seen.lock().unwrap().clone();
+    assert!(
+        seen[0].head.starts_with("POST /v1/systemone HTTP/1.1\r\n"),
+        "{}",
+        seen[0].head
+    );
+    assert_eq!(
+        seen[0].header("authorization").as_deref(),
+        Some("Bearer tok-123")
+    );
+    assert_eq!(
+        seen[0].body,
+        serde_json::to_vec(&req).unwrap(),
+        "body sent verbatim"
+    );
+
+    assert_eq!(c.decide(&req).await, Err(ClassifyError::Auth(401)));
+    assert_eq!(
+        c.decide(&req).await,
+        Err(ClassifyError::TooLarge),
+        "the same 256 KiB cap"
+    );
+
+    // Discovery and memory share one pooled connection.
+    let (port, connections) = keep_alive(0.6).await;
+    let c = client(port, Duration::from_secs(5));
+    c.classify(&request()).await.unwrap();
+    assert_eq!(
+        c.decide(&memory_request()).await.unwrap()[0].probability(),
+        Some(0.6)
+    );
+    assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
