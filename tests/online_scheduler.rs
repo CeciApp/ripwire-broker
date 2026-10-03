@@ -897,3 +897,46 @@ async fn memory_and_discovery_share_four_requests_and_one_client() {
     );
     assert!(probe.peak.load(SeqCst) >= 2, "they did run together");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_memory_discovery_keeps_its_client_and_its_per_query_ceiling() {
+    use ripwire_broker::online::classifier::for_process;
+    let probe = Arc::new(Probe::default());
+    let (discovery, memory) = for_process(probe.clone(), 4, false);
+    assert!(memory.is_none(), "no memory, no memory client");
+    assert_eq!(
+        Arc::as_ptr(&discovery) as *const () as usize,
+        Arc::as_ptr(&probe) as *const () as usize,
+        "--online alone gets the client as before (PRD jev-mem §4)"
+    );
+    let mut tasks = tokio::task::JoinSet::new();
+    for n in 0..8 {
+        let d = discovery.clone();
+        tasks.spawn(async move {
+            let item = StateItem {
+                id: format!("i{n}"),
+                path: "a.rs".into(),
+                text: "x".into(),
+            };
+            d.classify(&build(
+                "jev-1.13.0",
+                "q",
+                SemanticStage::FileAdmission,
+                vec![item],
+            ))
+            .await
+            .map(|_| ())
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done.unwrap().unwrap();
+    }
+    assert!(
+        probe.peak.load(SeqCst) > 4,
+        "no process-wide ceiling: peak {}",
+        probe.peak.load(SeqCst)
+    );
+
+    let (_, memory) = for_process(Arc::new(Probe::default()), 4, true);
+    assert!(memory.is_some(), "with memory, one shared client for both");
+}

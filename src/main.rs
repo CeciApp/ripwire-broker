@@ -44,11 +44,12 @@ fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
     let (online, memory_client) = match &a.online {
         // Only `--memory` gets a prefix: the `--online` message stays as it was.
         Some(o) => {
-            let (config, client) = online_config(o).map_err(|e| match a.memory {
-                Some(_) => format!("{asked}: {e}"),
-                None => e,
-            })?;
-            (Some(config), Some(client))
+            let (config, client) =
+                online_config(o, a.memory.is_some()).map_err(|e| match a.memory {
+                    Some(_) => format!("{asked}: {e}"),
+                    None => e,
+                })?;
+            (Some(config), client)
         }
         None => (None, None),
     };
@@ -101,15 +102,17 @@ fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
 #[cfg(feature = "online")]
 fn online_config(
     o: &cli::OnlineArgs,
-) -> Result<(ripwire_broker::online::OnlineConfig, MemoryClient), String> {
-    use ripwire_broker::online::classifier::Shared;
+    with_memory: bool,
+) -> Result<(ripwire_broker::online::OnlineConfig, Option<MemoryClient>), String> {
+    use ripwire_broker::online::classifier::for_process;
     use ripwire_broker::online::credential::Credential;
     use ripwire_broker::online::jev::JevClient;
     let key = Credential::from_env().map_err(|e| e.to_string())?;
     let client = JevClient::new(key, &o.model, o.timeout)?;
-    // One client and one ceiling of requests in flight for discovery and memory (PRD jev-mem §4).
-    let shared = Arc::new(Shared::new(Arc::new(client), o.max_in_flight));
-    let mut config = ripwire_broker::online::OnlineConfig::new(shared.clone());
+    // With memory, one client and one ceiling of requests in flight for discovery and memory;
+    // without it, discovery as before (PRD jev-mem §4).
+    let (discovery, memory_client) = for_process(Arc::new(client), o.max_in_flight, with_memory);
+    let mut config = ripwire_broker::online::OnlineConfig::new(discovery);
     config.provider = o.provider.clone();
     config.max_in_flight = o.max_in_flight;
     config.request_limit = o.request_limit;
@@ -118,7 +121,7 @@ fn online_config(
     config.deadline = o.deadline;
     config.lookahead_max = o.lookahead_max;
     config.max_source_bytes = o.max_source_bytes.map(|b| b as usize);
-    Ok((config, shared))
+    Ok((config, memory_client))
 }
 
 /// `memory drain --online` (PD-2): the spool incorporated and ready jobs sent, for at most 60 s or

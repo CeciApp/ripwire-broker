@@ -141,3 +141,22 @@ impl<T: MemoryClassifier + 'static> MemoryClassifier for Shared<T> {
         self.inner.decide(req).await
     }
 }
+
+/// The classifiers of a process. Without memory, discovery gets `client` exactly as before, under
+/// its per-query ceiling only (PRD jev-mem §4: no change without `--memory`). With memory, both
+/// get one [`Shared`] client under one process-wide ceiling.
+#[allow(clippy::type_complexity)]
+pub fn for_process<T: Classifier + MemoryClassifier + 'static>(
+    client: std::sync::Arc<T>,
+    max_in_flight: usize,
+    memory: bool,
+) -> (
+    std::sync::Arc<dyn Classifier>,
+    Option<std::sync::Arc<dyn MemoryClassifier>>,
+) {
+    if !memory {
+        return (client, None);
+    }
+    let shared = std::sync::Arc::new(Shared::new(client, max_in_flight));
+    (shared.clone(), Some(shared))
+}
