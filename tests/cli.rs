@@ -397,6 +397,95 @@ fn memory_implies_online_and_both_flags_are_equivalent() {
     assert_eq!(both.online_origin, Some(cli::OnlineOrigin::Explicit));
 }
 
+#[test]
+fn memory_options_have_defaults_and_refuse_values_out_of_range() {
+    let serve = |extra: &[&str]| {
+        let mut args = vec!["--workspace", "/w", "--memory"];
+        args.extend(extra);
+        parse(&args)
+    };
+    let Ok(Command::Serve(d)) = serve(&[]) else {
+        panic!()
+    };
+    let m = d.memory.unwrap();
+    assert_eq!(m.read_deadline, Duration::from_millis(750));
+    assert_eq!(
+        (
+            m.read_request_limit,
+            m.write_candidates,
+            m.retention_days,
+            m.max_nodes
+        ),
+        (4, 4, 30, 2000),
+        "PRD jev-mem §4"
+    );
+
+    let Ok(Command::Serve(set)) = serve(&[
+        "--memory-read-deadline-ms",
+        "1",
+        "--memory-read-request-limit",
+        "0",
+        "--memory-write-candidates",
+        "10",
+        "--memory-retention-days",
+        "365",
+        "--memory-max-nodes",
+        "1",
+    ]) else {
+        panic!()
+    };
+    let m = set.memory.unwrap();
+    assert_eq!(m.read_deadline, Duration::from_millis(1));
+    assert_eq!(
+        (
+            m.read_request_limit,
+            m.write_candidates,
+            m.retention_days,
+            m.max_nodes
+        ),
+        (0, 10, 365, 1),
+        "zero requests is allowed: cache and index only"
+    );
+
+    for (flag, bad) in [
+        ("--memory-read-deadline-ms", "751"),
+        ("--memory-read-deadline-ms", "0"),
+        ("--memory-read-request-limit", "5"),
+        ("--memory-write-candidates", "11"),
+        ("--memory-retention-days", "0"),
+        ("--memory-retention-days", "366"),
+        ("--memory-max-nodes", "2001"),
+        ("--memory-max-nodes", "0"),
+        ("--memory-max-nodes", "many"),
+    ] {
+        let err = serve(&[flag, bad]).expect_err(&format!("{flag} {bad}"));
+        assert!(err.contains(flag), "{flag} {bad}: {err}");
+    }
+
+    let err = parse(&["--workspace", "/w", "--memory-max-nodes", "10"]).unwrap_err();
+    assert!(err.contains("need --memory"), "{err}");
+    for bad in [
+        &["hook", "codex", "stop", "--memory-max-nodes", "10"][..],
+        &[
+            "prompt",
+            "--workspace",
+            "/w",
+            "--memory-retention-days",
+            "3",
+            "t",
+        ],
+        &[
+            "doctor",
+            "--workspace",
+            "/w",
+            "--memory-read-deadline-ms",
+            "5",
+        ],
+    ] {
+        assert!(parse(bad).is_err(), "{bad:?}");
+    }
+}
+
 // --- e2e: the binary's commands against a real ripwire (skipped without it) ---
 
 mod common;

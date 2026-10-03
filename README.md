@@ -62,6 +62,12 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
+| `--memory` | off | Persistent per-workspace memory; implies `--online`. **Being built** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): today it only parses |
+| `--memory-read-deadline-ms N` | `750` | 1–750; longest a task waits for memory |
+| `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read; 0 serves only the local index |
+| `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
+| `--memory-retention-days N` | `30` | 1–365 |
+| `--memory-max-nodes N` | `2000` | 1–2000 memories per workspace |
 
 ### How an MCP host passes configuration
 

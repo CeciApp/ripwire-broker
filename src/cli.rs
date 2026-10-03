@@ -19,7 +19,8 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                                 [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
                                 [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
                                 [--jev-lookahead-max N]]
-                      [--memory]
+                      [--memory [--memory-read-deadline-ms N] [--memory-read-request-limit N]
+                                [--memory-write-candidates N] [--memory-retention-days N] [--memory-max-nodes N]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
@@ -99,6 +100,12 @@ pub enum OnlineOrigin {
 pub struct MemoryArgs {
     /// Longest `context_for_task` waits for memory.
     pub read_deadline: Duration,
+    /// Classifier requests one read may send; 0 serves only the cache and the index.
+    pub read_request_limit: usize,
+    /// Existing memories a new one is compared with.
+    pub write_candidates: usize,
+    pub retention_days: u32,
+    pub max_nodes: usize,
 }
 
 /// `--online` and its `--jev-*` companions (PRD §23.6, D-059). No credential here: it comes
@@ -272,6 +279,7 @@ struct Flags {
     width: Option<u64>,
     color: Option<String>,
     jev: HashMap<&'static str, String>,
+    memory: HashMap<&'static str, String>,
     switches: Vec<&'static str>,
     words: Vec<String>,
 }
@@ -349,10 +357,32 @@ impl Flags {
         }
     }
 
-    fn memory(&self) -> Option<MemoryArgs> {
-        self.on("--memory").then(|| MemoryArgs {
-            read_deadline: Duration::from_millis(750),
-        })
+    fn memory(&self) -> Result<Option<MemoryArgs>, String> {
+        if !self.on("--memory") {
+            return match self.memory.is_empty() {
+                true => Ok(None),
+                false => Err(usage("the --memory-* options need --memory")),
+            };
+        }
+        // Each option with its default and its range (PRD jev-mem §4).
+        let within = |k: &str, default: u64, min: u64, max: u64| -> Result<u64, String> {
+            let Some(v) = self.memory.get(k) else {
+                return Ok(default);
+            };
+            match v.parse::<u64>() {
+                Ok(n) if (min..=max).contains(&n) => Ok(n),
+                _ => Err(usage(format_args!(
+                    "{k} takes a number from {min} to {max}"
+                ))),
+            }
+        };
+        Ok(Some(MemoryArgs {
+            read_deadline: Duration::from_millis(within("--memory-read-deadline-ms", 750, 1, 750)?),
+            read_request_limit: within("--memory-read-request-limit", 4, 0, 4)? as usize,
+            write_candidates: within("--memory-write-candidates", 4, 0, 10)? as usize,
+            retention_days: within("--memory-retention-days", 30, 1, 365)? as u32,
+            max_nodes: within("--memory-max-nodes", 2000, 1, 2000)? as usize,
+        }))
     }
 
     fn workspace(&self) -> Result<PathBuf, String> {
@@ -390,6 +420,15 @@ const JEV: &[&str] = &[
     "--jev-max-candidates",
     "--jev-deadline-ms",
     "--jev-lookahead-max",
+];
+
+/// The valued `--memory-*` flags; kept as text until `Flags::memory` checks them.
+const MEMORY: &[&str] = &[
+    "--memory-read-deadline-ms",
+    "--memory-read-request-limit",
+    "--memory-write-candidates",
+    "--memory-retention-days",
+    "--memory-max-nodes",
 ];
 
 /// `allowed` lists the switches and valued flags this command accepts.
@@ -441,6 +480,10 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             jev if JEV.contains(&jev) => {
                 let key = JEV.iter().find(|k| **k == jev).unwrap();
                 f.jev.insert(key, value);
+            }
+            memory if MEMORY.contains(&memory) => {
+                let key = MEMORY.iter().find(|k| **k == memory).unwrap();
+                f.memory.insert(key, value);
             }
             _ => return Err(usage(format_args!("unknown argument '{a}'"))),
         }
@@ -506,6 +549,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     ]
                     .into_iter()
                     .chain(JEV.iter().copied())
+                    .chain(MEMORY.iter().copied())
                     .collect::<Vec<_>>(),
                 ),
             )?;
@@ -520,7 +564,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 ripwire_max_rss_mb: f.max_rss_mb,
                 online: f.online()?,
                 online_origin: f.online_origin(),
-                memory: f.memory(),
+                memory: f.memory()?,
             }))
         }
         Some("__supervise") => {
