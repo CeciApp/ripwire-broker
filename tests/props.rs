@@ -13,6 +13,7 @@ use ripwire_broker::cli::{self, Command};
 use ripwire_broker::local;
 use ripwire_broker::markup;
 use ripwire_broker::memory::identity as memory_identity;
+use ripwire_broker::memory::time as memory_time;
 use ripwire_broker::model::{Budget, Envelope, Item, Provenance, Role, Source, Status, Untrusted};
 use ripwire_broker::notes;
 use ripwire_broker::online::cache::{self, KeyParts};
@@ -910,5 +911,34 @@ proptest! {
             memory_identity::hash(&[&joined, ""]),
             "an empty component still counts"
         );
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Whatever the wall clock says, each stamp's sequence is above the previous one.
+    #[test]
+    fn ingest_sequence_is_strictly_monotonic(
+        start in 0u64..u64::MAX / 2,
+        readings in prop::collection::vec(any::<u64>(), 1..40),
+    ) {
+        struct Fixed(u64);
+        impl memory_time::Clock for Fixed {
+            fn now_ms(&self) -> u64 {
+                self.0
+            }
+        }
+        let mut seq = memory_time::Sequence::default();
+        seq.resume(start);
+        let mut last = start;
+        for r in readings {
+            let s = seq.stamp(&Fixed(r), 1, 0).unwrap();
+            prop_assert!(s.ingest_seq > last, "{} after {}", s.ingest_seq, last);
+            prop_assert_eq!(s.observed_at_ms, r, "the clock is recorded as read");
+            last = s.ingest_seq;
+        }
+        seq.resume(u64::MAX);
+        prop_assert!(seq.stamp(&Fixed(0), 1, 0).is_none(), "never wraps around");
     }
 }

@@ -191,3 +191,93 @@ fn the_node_id_ignores_clock_scores_and_retries() {
     );
     assert_ne!(identity::node_id(&"v".repeat(64), r.kind, &hash), id);
 }
+
+// ---------------------------------------------------------------- time (PRD jev-mem §5.4)
+
+use ripwire_broker::memory::admission::{self, Draft, Event, Outcome, Tests};
+use ripwire_broker::memory::model::TimestampRole;
+use ripwire_broker::memory::time::{self, Clock, Sequence};
+use ripwire_broker::online::reader::WorkspaceReader;
+use std::cell::RefCell;
+
+/// A wall clock that answers what it is told, in order.
+struct Script(RefCell<Vec<u64>>);
+
+impl Clock for Script {
+    fn now_ms(&self) -> u64 {
+        self.0.borrow_mut().remove(0)
+    }
+}
+
+#[test]
+fn mtime_commit_and_a_clock_rollback_never_become_event_time() {
+    let repo = common::sample_repo();
+    let root = repo.path();
+    let reader = WorkspaceReader::new(root).unwrap();
+    let ws = identity::workspace_id(root).unwrap();
+    let draft = Draft {
+        event_key: "s/e".into(),
+        event: Event::AfterEdit,
+        outcome: Outcome::AnalysisCompleted,
+        tests: Tests::Unknown,
+        scope: vec!["src/auth.py".into()],
+        evidence: vec![],
+    };
+    let clock = Script(RefCell::new(vec![5_000, 5_000, 1_000]));
+    let mut seq = Sequence::default();
+    let day = 24 * 60 * 60 * 1000;
+
+    let first = admission::admit(&reader, &ws, &draft, seq.stamp(&clock, 1, day).unwrap()).unwrap();
+    assert_eq!(first.timestamp_role, TimestampRole::Observation);
+    assert_eq!(
+        first.event_time, None,
+        "an observation time is not an event time"
+    );
+    assert_eq!((first.observed_at_ms, first.ingest_seq), (5_000, 1));
+
+    // An old mtime and a commit dated in the past change nothing about time.
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(root.join("src/auth.py"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args([
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "old",
+            "--date",
+            "2001-01-01T00:00:00",
+        ])
+        .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00")
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    let mut replay = seq.clone();
+    replay.resume(0);
+    let again =
+        admission::admit(&reader, &ws, &draft, replay.stamp(&clock, 1, day).unwrap()).unwrap();
+    assert_eq!(again, first, "same node, same time fields");
+
+    // The wall clock goes back: the sequence still grows, and no duration comes out negative.
+    let mut later = seq.clone();
+    let back = later.stamp(&clock, 1, day).unwrap();
+    assert_eq!((back.observed_at_ms, back.ingest_seq), (1_000, 2));
+    assert_eq!(
+        time::elapsed_ms(back.observed_at_ms, first.observed_at_ms),
+        None
+    );
+    assert_eq!(
+        time::elapsed_ms(first.observed_at_ms, back.observed_at_ms),
+        Some(4_000)
+    );
+    assert_eq!(time::elapsed_ms(7, 7), Some(0));
+}
