@@ -430,3 +430,54 @@ fn a_listing_offers_names_but_only_eligible_files_can_be_read() {
     );
     let _ = Path::new("unused");
 }
+
+// ---------------------------------------------------------------- memory admission (PRD jev-mem §5.2)
+
+#[test]
+fn no_generated_path_escapes_the_workspace_into_a_record() {
+    use ripwire_broker::memory::admission::{self, Draft, Event, Outcome, Stamp, Tests};
+
+    let dir = guarded_root();
+    let root = dir.path().canonicalize().unwrap();
+    let reader = WorkspaceReader::new(&root).unwrap();
+    let stamp = Stamp {
+        observed_at_ms: 1,
+        ingest_seq: 1,
+        generation: 1,
+        retention_ms: 1,
+    };
+
+    TestRunner::new(config())
+        .run(&path_strategy(), |path| {
+            // Only ever asked about. Never created, never written, never removed.
+            let draft = Draft {
+                event_key: "e".into(),
+                event: Event::AfterEdit,
+                outcome: Outcome::AnalysisCompleted,
+                tests: Tests::Unknown,
+                scope: vec![path.clone()],
+                evidence: vec![],
+            };
+            let Ok(record) = admission::admit(&reader, "w", &draft, stamp) else {
+                return Ok(());
+            };
+            for source in &record.sources {
+                let joined = root.join(&source.path);
+                prop_assert!(
+                    !Path::new(&source.path)
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_))),
+                    "{:?} was admitted as {:?}",
+                    path,
+                    source.path
+                );
+                prop_assert!(
+                    joined.canonicalize().unwrap().starts_with(&root),
+                    "{:?} resolves outside the root",
+                    path
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+}

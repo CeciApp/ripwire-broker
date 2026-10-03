@@ -261,6 +261,26 @@ The mode is **experimental** until the A/B evaluation of
 [PRD §23.15](spec/ripwire-broker-mcp.md#2315-avaliação-e-barras-de-merge) shows it keeps or
 improves correctness.
 
+## Persistent memory (being built)
+
+`--memory` keeps observations of the workspace between sessions
+([PRD](docs/jev-mem-prd.md), [plan](spec/plan/jev-mem-plan.md)). It is being built in phases
+and is not usable yet; this section grows with it.
+
+**What an automatic memory holds:** which analysis ran (after an edit, before finishing), its
+outcome as the broker saw it, the files in scope with the SHA-256 of their bytes, and the names
+of the analyses. The text is rendered from those fields (`memory-observation/v1`), for example
+`Evento: análise após edição. Escopo: src/cache.rs. Observado pelo broker: análise concluída;
+execução de testes desconhecida. …`. The broker never runs the tests, so it never records that
+they passed, that a bug was fixed or that a merge is safe.
+
+**What is never kept:** the prompt, the transcript, a diff, a file's body, shell output or
+anything a model generated. A source the online policy refuses (`.env` and other sensitive
+names, ignored, hidden, binary, symlinked or outside the root) refuses the whole observation,
+and so does a value shaped like a credential (`sk-…`, `AKIA…`, `ghp_…`, a JWT, `password=…`)
+or an e-mail address. The scan is conservative, not a promise to catch every secret; a refusal
+is counted by reason and never logged with its content.
+
 ## Automatic mode (hooks)
 
 MCP alone only offers tools; the agent still has to call them. Hooks make it automatic
