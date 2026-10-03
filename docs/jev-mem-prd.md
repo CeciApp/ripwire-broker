@@ -142,7 +142,7 @@ Descoberta e memória compartilham cliente HTTP, autenticação e controle globa
 | `memory drain --workspace PATH --online` | execução explícita limitada a 60 s, até 20 jobs; exige feature `online` e credencial. Único subcomando, além do `serve`, que aceita `--online`: exceção explícita ao [D-064](../spec/changelog.md#d-064--cache-diagnóstico-e-integração-proposta), não a revogação dele (D-135, PD-2) |
 | `memory forget --workspace PATH --all` ou `--id ID` | exclusão explícita local, sem rede ou credencial, com bloqueio de reingestão do ID; `--all` grava o marcador `revoked` (§6) |
 | `memory add --workspace PATH --file PATH` | nota `explicit_note` do §5.2, local, sem rede ou credencial; mesmo filtro de admissão das observações automáticas (D-135, PD-1) |
-| `memory resume --workspace PATH` | local, sem rede ou credencial; remove o marcador `revoked` e é a única forma de reativar a coleta depois de `forget --all` (D-135, PD-4) |
+| `memory resume --workspace PATH` | local, sem rede ou credencial; remove o marcador `revoked` e é a única forma de reativar a coleta depois de `forget --all`; enquanto o marcador existir, `--memory` não coleta nem envia, mesmo após reinício (D-135, PD-4) |
 | `hook … --memory` | o hook publica observações no spool local; nunca faz HTTP, não implica `--online` e não exige credencial (D-135, PD-3) |
 | `install … --memory` | grava `--memory` no `serve` e nos hooks somente quando pedido; a prévia nomeia persistência local e envio de histórico; nunca grava a chave nem acrescenta `--online` redundante (D-135, PD-3) |
 
@@ -219,7 +219,7 @@ Jobs guardam ID, etapa, digest, tentativa, `not_before`, geração, lease e resu
 
 Retenção padrão de 30 dias: varredura no início do worker e a cada hora ativa. Excluir nós expirados, arestas, índices, cache e descendentes derivados; fontes originais de uma nota continuam sujeitas à retenção. Memória derivada não prolonga validade dos pais. Sob teto de capacidade, remover expirados; persistindo saturação, recusar novos writes com motivo. Relógio regressivo suspende expiração por idade até recuperar referência confiável, preservando tetos de capacidade.
 
-`forget` adquire lock, incrementa geração, remove spool/jobs/nós/derivados/cache afetados e publica snapshot sem o conteúdo; só então confirma. Tombstone de hash impede replay de spool antigo e nova ingestão do mesmo ID durante a retenção. Exclusão `--all` revoga também autorização local de coleta: grava no store o marcador `revoked`, que só `memory resume` remove (§4). Excluir temporários remanescentes; não manter backups contendo texto. Remoção lógica do armazenamento controlado não promete apagar cópias do sistema operacional nem dados já enviados ao provider.
+`forget` adquire lock, incrementa geração, remove spool/jobs/nós/derivados/cache afetados e publica snapshot sem o conteúdo; só então confirma. Tombstone de hash impede replay de spool antigo e nova ingestão do mesmo ID durante a retenção. Exclusão `--all` revoga também autorização local de coleta: grava no store o marcador `revoked`, que só `memory resume` remove (§4). Enquanto o marcador existir, ele prevalece sobre `--memory`, inclusive depois de reiniciar o processo: nem `serve --memory` nem `hook --memory` admitem observações no spool, e nenhum envio ao Jev começa. Excluir temporários remanescentes; não manter backups contendo texto. Remoção lógica do armazenamento controlado não promete apagar cópias do sistema operacional nem dados já enviados ao provider.
 
 ## 7. System One: protocolo e decisões
 
