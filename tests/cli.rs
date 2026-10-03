@@ -4010,3 +4010,179 @@ fn memory_add_refuses_a_forbidden_input_path_and_untrusted_text_stays_data() {
     assert_eq!(r.event_key, "operator_supplied");
     assert!(!store.is_revoked(), "the text is never acted upon");
 }
+
+/// A recorded Claude Code `PostToolUse` of an edit in `ws`.
+fn edit_event(ws: &std::path::Path, session: &str) -> String {
+    json!({
+        "session_id": session, "cwd": ws, "hook_event_name": "PostToolUse",
+        "tool_name": "Edit", "tool_input": {"file_path": ws.join("src/auth.py")}
+    })
+    .to_string()
+}
+
+#[test]
+fn hook_takes_memory_and_never_implies_online() {
+    let Ok(Command::Hook(h)) = parse(&["hook", "claude-code", "post-tool-use", "--memory"]) else {
+        panic!()
+    };
+    assert!(h.memory);
+    let Ok(Command::Hook(h)) = parse(&["hook", "claude-code", "post-tool-use"]) else {
+        panic!()
+    };
+    assert!(!h.memory, "off unless asked");
+    assert!(
+        parse(&["hook", "claude-code", "stop", "--memory", "--online"]).is_err(),
+        "memory in a hook never implies --online"
+    );
+}
+
+#[test]
+fn a_hook_with_memory_enqueues_and_never_opens_a_socket() {
+    require_ripwire!();
+    use ripwire_broker::memory::{identity, store::Store};
+    let (repo, st) = (common::sample_repo(), tempfile::tempdir().unwrap());
+    let ws = repo.path();
+    common::write(
+        ws,
+        "src/auth.py",
+        "def login(user, token):\n    return user\n",
+    );
+    // Anything that tried the network through a proxy would land here.
+    let sentinel = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sentinel.set_nonblocking(true).unwrap();
+    let proxy = format!("http://{}", sentinel.local_addr().unwrap());
+
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args([
+            "hook",
+            "claude-code",
+            "post-tool-use",
+            "--memory",
+            "--state-dir",
+        ])
+        .arg(st.path())
+        .env_remove("RIPWIRE_BROKER_JEV_API_KEY")
+        .env_remove("XDG_STATE_HOME")
+        .envs([
+            ("HTTPS_PROXY", &proxy),
+            ("HTTP_PROXY", &proxy),
+            ("ALL_PROXY", &proxy),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(edit_event(ws, "s1").as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(sentinel.accept().is_err(), "no connection was attempted");
+    let store = Store::new(st.path(), &identity::workspace_id(ws).unwrap());
+    assert_eq!(store.pending().unwrap(), 1, "queued without a credential");
+}
+
+#[test]
+fn a_short_lived_hook_leaves_a_recoverable_queue() {
+    require_ripwire!();
+    use ripwire_broker::memory::{identity, store::Store};
+    let (repo, st) = (common::sample_repo(), tempfile::tempdir().unwrap());
+    let ws = repo.path();
+    common::write(
+        ws,
+        "src/auth.py",
+        "def login(user, token):\n    return user\n",
+    );
+    let args = [
+        "hook",
+        "claude-code",
+        "post-tool-use",
+        "--memory",
+        "--state-dir",
+        st.path().to_str().unwrap(),
+    ];
+
+    let (code, _, err) = run(&args, &edit_event(ws, "s1"));
+    assert_eq!(code, 0, "{err}");
+    // The process is gone; a later writer picks the observation up.
+    let store = Store::new(st.path(), &identity::workspace_id(ws).unwrap());
+    let ingested = store.ingest().unwrap();
+    assert_eq!(ingested.added, 1);
+    let r = store.load().unwrap().nodes.into_values().next().unwrap();
+    assert_eq!(r.sources[0].path, "src/auth.py");
+
+    // Without --memory, the same hook keeps nothing.
+    let other = tempfile::tempdir().unwrap();
+    let (code, _, _) = run(
+        &[
+            "hook",
+            "claude-code",
+            "post-tool-use",
+            "--state-dir",
+            other.path().to_str().unwrap(),
+        ],
+        &edit_event(ws, "s2"),
+    );
+    assert_eq!(code, 0);
+    assert!(!other.path().join("memory").exists());
+}
+
+/// PRD jev-mem §8.2: what `--memory` adds to a hook, p95 ≤ 10 ms and p99 ≤ 25 ms. Run by hand,
+/// in release, with the real ripwire:
+/// `cargo test --release --locked --test cli -- --ignored the_hook_overhead_meets_the_slo --nocapture`.
+#[test]
+#[ignore = "a measurement: run in release by hand and record the result"]
+fn the_hook_overhead_meets_the_slo() {
+    require_ripwire!();
+    let (repo, st) = (common::sample_repo(), tempfile::tempdir().unwrap());
+    let ws = repo.path();
+    let state = st.path().to_str().unwrap();
+    let time = |memory: bool, i: usize| {
+        common::write(
+            ws,
+            "src/auth.py",
+            &format!("def login(user, token):\n    return {i}\n"),
+        );
+        let mut args = vec!["hook", "claude-code", "post-tool-use", "--state-dir", state];
+        if memory {
+            args.push("--memory");
+        }
+        let started = std::time::Instant::now();
+        let (code, _, err) = run(&args, &edit_event(ws, &format!("s{i}")));
+        assert_eq!(code, 0, "{err}");
+        started.elapsed().as_secs_f64() * 1000.0
+    };
+    let (mut with, mut without) = (vec![], vec![]);
+    // The first run after a change pays for ripwire's warm-up: alternate which one goes first.
+    for i in 0..60 {
+        match i % 2 {
+            0 => {
+                without.push(time(false, i));
+                with.push(time(true, i));
+            }
+            _ => {
+                with.push(time(true, i));
+                without.push(time(false, i));
+            }
+        }
+    }
+    let pct = |v: &mut Vec<f64>, p: f64| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[((v.len() as f64 - 1.0) * p).round() as usize]
+    };
+    let p95 = pct(&mut with, 0.95) - pct(&mut without, 0.95);
+    let p99 = pct(&mut with, 0.99) - pct(&mut without, 0.99);
+    eprintln!("hook overhead of --memory: p95 {p95:.1} ms, p99 {p99:.1} ms (60 runs each)");
+    assert!(p95 <= 10.0, "p95 {p95:.1} ms");
+    assert!(p99 <= 25.0, "p99 {p99:.1} ms");
+}

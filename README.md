@@ -287,6 +287,13 @@ unconfirmed, and no more than four such writes run at once. The status resource 
 this phase the broker core does this, but `serve --memory` does not switch it on yet: the
 server wires it together with the worker that enriches the memories.
 
+**From the hooks:** `hook … --memory` collects the same observations after an edit or at
+`Stop`. It only writes to the local spool: it never makes an HTTP request, needs no credential
+and does not imply `--online`. The observation waits in the spool until a process with
+`--memory` incorporates it, so a hook that exits leaves nothing half done. `#ripwire-off` stops
+collection for that session only. Measured on a laptop in release, with the real ripwire, the
+flag adds about 4–7 ms at p95 to a hook of about 80 ms (the PRD's bar is 10 ms).
+
 **What is never kept:** the prompt, the transcript, a diff, a file's body, shell output or
 anything a model generated. A source the online policy refuses (`.env` and other sensitive
 names, ignored, hidden, binary, symlinked or outside the root) refuses the whole observation,

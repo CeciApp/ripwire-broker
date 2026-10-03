@@ -24,7 +24,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
-                      [--edit-interval-ms N]
+                      [--edit-interval-ms N] [--memory]
        ripwire-broker hook-log --session ID [--state-dir DIR]
        ripwire-broker hook-stats [--state-dir DIR] [--json]
        ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] TASK...
@@ -162,6 +162,9 @@ pub struct HookArgs {
     pub log_refs: bool,
     /// Absent: the default coalescing window. `0` answers every edit on its own.
     pub edit_interval_ms: Option<u64>,
+    /// Publish observations to the workspace's memory spool (PD-3): local only, never HTTP,
+    /// and never implies `--online`.
+    pub memory: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -645,6 +648,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     "--gate",
                     "--log-refs",
                     "--edit-interval-ms",
+                    "--memory",
                 ]),
             )?;
             no_words(&f)?;
@@ -658,6 +662,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 gate: f.on("--gate"),
                 log_refs: f.on("--log-refs"),
                 edit_interval_ms: f.edit_interval_ms,
+                memory: f.on("--memory"),
             }))
         }
         Some("hook-log") => {

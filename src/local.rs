@@ -14,6 +14,7 @@ pub async fn launch(
     upstream: &UpstreamArgs,
     incremental: bool,
     version: Option<String>,
+    memory: Option<crate::memory::publish::MemoryConfig>,
 ) -> Result<Broker, BrokerError> {
     let workspace = workspace.canonicalize().map_err(|e| BrokerError {
         error: "workspace_violation",
@@ -24,6 +25,7 @@ pub async fn launch(
     up.timeout = upstream.timeout;
     let mut config = BrokerConfig::new(&workspace);
     config.incremental = incremental;
+    config.memory = memory;
     config.ripwire_version = version.unwrap_or_else(|| ripwire_version(&up.binary));
     let process = RipwireUpstream::spawn(up).await?;
     Broker::connect(Arc::new(process), config).await
@@ -36,7 +38,7 @@ pub const CONTEXT_CLOSE: &str = "</ripwire-broker-context>";
 /// context as delimited untrusted data. On failure, the task alone and the reason.
 pub async fn prompt(args: &PromptArgs) -> (String, Option<BrokerError>) {
     let context = async {
-        let broker = launch(&args.workspace, &args.upstream, false, None).await?;
+        let broker = launch(&args.workspace, &args.upstream, false, None, None).await?;
         let mut req = TaskRequest::new(&args.task);
         if let Some(b) = args.budget_tokens {
             req.budget_tokens = b;

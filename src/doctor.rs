@@ -99,7 +99,8 @@ pub async fn run(args: &DoctorArgs) -> Report {
         ),
     }
     let broker = match (&workspace, upstream_ok) {
-        (Some(ws), true) => match crate::local::launch(ws, &args.upstream, false, None).await {
+        (Some(ws), true) => match crate::local::launch(ws, &args.upstream, false, None, None).await
+        {
             Ok(b) => {
                 r.add(
                     "required_verbs",
