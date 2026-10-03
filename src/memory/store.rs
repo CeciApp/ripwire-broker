@@ -26,6 +26,8 @@ const LOCK: &str = "lock";
 const REVOKED: &str = "revoked";
 /// Lease lock files, one per job; a held lock is a live run.
 const LEASES: &str = "leases";
+/// Held while a job talks to the provider: one remote job per workspace (PRD jev-mem §8.2).
+const REMOTE: &str = "remote.lock";
 /// Older than this, a spool temporary is a dead writer's.
 const DEAD_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -587,6 +589,26 @@ impl Store {
             self.write_snapshot(&on_disk(&state)?)?;
         }
         Ok(taken)
+    }
+
+    /// The workspace's single remote slot, held until dropped; `None` while another worker,
+    /// in this process or another, holds it.
+    pub fn remote_slot(&self) -> Result<Option<fs::File>, Refusal> {
+        self.check_dir()?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.dir)
+            .map_err(|_| Unavailable::Io)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.dir.join(REMOTE))
+            .map_err(|_| Unavailable::Io)?;
+        Ok(file.try_lock().is_ok().then_some(file))
     }
 
     /// Ends a run. A retry with no run left fails the job.

@@ -994,3 +994,40 @@ async fn no_model_swap_and_no_silent_heuristic_on_failure() {
             .all(|e| e.basis == EdgeBasis::Deterministic)
     );
 }
+
+#[tokio::test]
+async fn one_remote_job_per_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(
+        dir.path(),
+        &[rec(1, "cache", &["a"]), rec(2, "layer", &["b"])],
+    ));
+    let hanging = Arc::new(Scripted {
+        script: Mutex::default(),
+        seen: Mutex::default(),
+        hang: true,
+    });
+    let busy = Arc::new(worker(&store, hanging));
+    let running = {
+        let busy = busy.clone();
+        tokio::spawn(async move { busy.run_once(1_000).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Another worker of the same workspace, in this or another process, waits its turn.
+    let other = Store::new(dir.path(), &"c".repeat(64));
+    let quick = Scripted::new(vec![]);
+    let second = Worker::new(Arc::new(other), quick.clone(), config(4));
+    assert!(
+        second.run_once(1_000).await.unwrap().is_none(),
+        "one remote job at a time"
+    );
+    assert_eq!(quick.sent(), 0);
+
+    running.abort();
+    let _ = running.await;
+    assert!(
+        second.run_once(1_000).await.unwrap().is_some(),
+        "free once the first is gone"
+    );
+}

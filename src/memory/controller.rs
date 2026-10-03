@@ -441,6 +441,9 @@ impl Worker {
         if self.is_suspended() {
             return Ok(None);
         }
+        let Some(_slot) = self.store.remote_slot()? else {
+            return Ok(None);
+        };
         let Some(lease) = self.store.lease_next(now_ms)? else {
             return Ok(None);
         };
