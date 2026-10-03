@@ -942,3 +942,34 @@ proptest! {
         prop_assert!(seq.stamp(&Fixed(0), 1, 0).is_none(), "never wraps around");
     }
 }
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Whatever numbers come back, a decision's probability is unknown or inside `[0, 1]`.
+    #[test]
+    fn no_parsed_probability_is_ever_outside_the_unit_interval(
+        noul in any::<f64>(), a in any::<f64>(), b in any::<f64>(), pick in any::<bool>(),
+    ) {
+        use ripwire_broker::online::request::{JevQuestion, StateRequest};
+        use ripwire_broker::online::response::parse_decisions;
+        let req = StateRequest::new(
+            "m",
+            serde_json::json!({}),
+            vec![JevQuestion::noul("n"), JevQuestion::choice("c", &[("x", "x"), ("y", "y")])],
+        );
+        let body = serde_json::json!({"model": "m", "answers": {
+            "q0": {"type": "noul", "noul": noul},
+            "q1": {"type": "choice", "choice": if pick { "x" } else { "y" },
+                   "probabilities": {"x": a, "y": b}}
+        }})
+        .to_string();
+        if let Ok(decisions) = parse_decisions(&req, &body) {
+            for d in decisions {
+                if let Some(p) = d.probability() {
+                    prop_assert!((0.0..=1.0).contains(&p), "{}", p);
+                }
+            }
+        }
+    }
+}

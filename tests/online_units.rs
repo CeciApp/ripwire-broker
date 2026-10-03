@@ -930,3 +930,162 @@ fn a_memory_request_is_split_before_32_questions_or_38000_bytes_and_never_cuts_a
         "nor after a pair that fit"
     );
 }
+
+// --- jev-mem T2.3: typed decisions (PRD jev-mem §7, CA-8) ---
+
+use ripwire_broker::online::response::{Decision, Unknown, parse_decisions};
+
+/// A request with a Noul `q0` and a Choice `q1` over before/after/unknown.
+fn decision_request() -> StateRequest {
+    StateRequest::new(
+        "jev-1.13.0",
+        serde_json::json!({}),
+        vec![
+            JevQuestion::noul("same fact?"),
+            JevQuestion::choice(
+                "order?",
+                &[("before", "b"), ("after", "a"), ("unknown", "u")],
+            ),
+        ],
+    )
+}
+
+fn answer(q0: &str, q1: &str) -> String {
+    format!(r#"{{"model":"jev-1.13.0","answers":{{"q0":{q0},"q1":{q1}}}}}"#)
+}
+
+const NOUL: &str = r#"{"type":"noul","noul":0.7}"#;
+const CHOICE: &str = r#"{"type":"choice","choice":"before","probabilities":{"before":0.8,"after":0.15,"unknown":0.05},"confidence":0.6}"#;
+
+#[test]
+fn a_decision_is_noul_choice_or_unknown_and_never_zero() {
+    let req = decision_request();
+    let got = parse_decisions(&req, &answer(NOUL, CHOICE)).unwrap();
+    assert_eq!(got[0], Decision::Noul { probability: 0.7 });
+    let Decision::Choice {
+        selected,
+        probabilities,
+        confidence,
+    } = &got[1]
+    else {
+        panic!("{:?}", got[1])
+    };
+    assert_eq!(selected, "before");
+    assert_eq!(probabilities["after"], 0.15);
+    assert_eq!(*confidence, Some(0.6));
+    assert_eq!(
+        got[1].probability(),
+        Some(0.8),
+        "the gate reads probabilities[choice], not confidence"
+    );
+
+    // One bad field: only its own decision is unknown.
+    let cases = [
+        (
+            r#"{"type":"choice","choice":0.7}"#,
+            Unknown::WrongType,
+            "type swapped",
+        ),
+        (
+            r#"{"type":"noul","noul":1.5}"#,
+            Unknown::OutOfRange,
+            "above 1",
+        ),
+        (
+            r#"{"type":"noul","noul":-0.01}"#,
+            Unknown::OutOfRange,
+            "below 0",
+        ),
+        (r#"{"type":"noul"}"#, Unknown::Absent, "no value"),
+    ];
+    for (q0, why, what) in cases {
+        let got = parse_decisions(&req, &answer(q0, CHOICE)).unwrap();
+        assert_eq!(got[0], Decision::Unknown { reason: why }, "{what}");
+        assert!(
+            matches!(got[1], Decision::Choice { .. }),
+            "{what}: the other stands"
+        );
+    }
+    let choices = [
+        (
+            r#"{"type":"choice","choice":"during","probabilities":{"before":0.8,"after":0.15,"unknown":0.05}}"#,
+            "chosen option not asked",
+        ),
+        (
+            r#"{"type":"choice","choice":"before","probabilities":{"before":0.8,"after":0.2}}"#,
+            "an option missing",
+        ),
+        (
+            r#"{"type":"choice","choice":"before","probabilities":{"before":0.8,"after":0.1,"unknown":0.05,"during":0.05}}"#,
+            "an option more",
+        ),
+        (
+            r#"{"type":"choice","choice":"before","probabilities":{"before":0.8,"after":0.15,"unknown":0.06}}"#,
+            "sum off by 1e-2",
+        ),
+        (
+            r#"{"type":"choice","choice":"before","probabilities":{"before":1.2,"after":-0.25,"unknown":0.05}}"#,
+            "out of range though summing to 1",
+        ),
+        (r#"{"type":"noul","noul":0.4}"#, "a noul for a choice"),
+    ];
+    for (q1, what) in choices {
+        let got = parse_decisions(&req, &answer(NOUL, q1)).unwrap();
+        assert!(
+            matches!(got[1], Decision::Unknown { .. }),
+            "{what}: {:?}",
+            got[1]
+        );
+        assert_eq!(got[1].probability(), None, "{what}: unknown is never 0");
+    }
+    let near = r#"{"type":"choice","choice":"after","probabilities":{"before":0.3,"after":0.6995,"unknown":0.0}}"#;
+    let got = parse_decisions(&req, &answer(NOUL, near)).unwrap();
+    assert_eq!(
+        got[1].probability(),
+        Some(0.6995),
+        "within 1e-3, and never renormalized"
+    );
+    let odd = r#"{"type":"choice","choice":"after","probabilities":{"before":0.6,"after":0.4,"unknown":0.0}}"#;
+    let got = parse_decisions(&req, &answer(NOUL, odd)).unwrap();
+    assert_eq!(
+        got[1].probability(),
+        Some(0.4),
+        "the selected option's, even when another is higher"
+    );
+    let missing = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.2}}}"#;
+    assert_eq!(
+        parse_decisions(&req, missing).unwrap()[1],
+        Decision::Unknown {
+            reason: Unknown::Absent
+        }
+    );
+
+    // Model or ids wrong: the whole batch.
+    let other = answer(NOUL, CHOICE).replace("jev-1.13.0", "jev-latest");
+    assert_eq!(
+        parse_decisions(&req, &other),
+        Err(InvalidResponse::WrongModel)
+    );
+    let extra = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.2},"q7":{"type":"noul","noul":0.2}}}"#;
+    assert_eq!(
+        parse_decisions(&req, extra),
+        Err(InvalidResponse::UnknownQuestion)
+    );
+    let twice = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.2},"q0":{"type":"noul","noul":0.9}}}"#;
+    assert_eq!(
+        parse_decisions(&req, twice),
+        Err(InvalidResponse::DuplicateQuestion)
+    );
+    assert_eq!(
+        parse_decisions(&req, "{nope"),
+        Err(InvalidResponse::Malformed)
+    );
+    assert_eq!(
+        parse_decisions(
+            &req,
+            r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":1e400}}}"#
+        ),
+        Err(InvalidResponse::Malformed),
+        "an infinite number is not JSON"
+    );
+}
