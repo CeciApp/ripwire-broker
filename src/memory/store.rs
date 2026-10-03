@@ -21,6 +21,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT: &str = "snapshot.json";
 const SPOOL: &str = "spool";
 const LOCK: &str = "lock";
+/// Written by `forget --all`; only `memory resume` removes it (PD-4).
+const REVOKED: &str = "revoked";
 
 /// The caps of PRD jev-mem §6; injectable so a test can reach them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +83,8 @@ pub enum Refusal {
     InvalidId,
     /// Stopped at a [`Step`] by [`Store::ingest_crashing_at`].
     Crashed,
+    /// Collection was revoked by `forget --all` and not resumed.
+    Revoked,
 }
 
 impl From<Unavailable> for Refusal {
@@ -215,6 +219,9 @@ impl Store {
     pub fn enqueue(&self, record: &Record) -> Result<(), Refusal> {
         let name = spool_name(&record.node_id)?;
         self.check_dir()?;
+        if self.is_revoked() {
+            return Err(Refusal::Revoked);
+        }
         let spool = self.dir.join(SPOOL);
         let bytes = serde_json::to_vec(record).map_err(|_| Unavailable::Io)?;
         let target = spool.join(&name);
@@ -253,6 +260,9 @@ impl Store {
 
     fn ingest_until(&self, crash: Option<Step>) -> Result<Ingested, Refusal> {
         let _writer = self.writer()?;
+        if self.is_revoked() {
+            return Err(Refusal::Revoked);
+        }
         let mut state = self.load()?;
         let mut done = Ingested::default();
         let mut consumed = Vec::new();
@@ -376,6 +386,43 @@ impl Store {
             }
         }
         Ok(removed)
+    }
+
+    /// `forget --all`: revokes collection first, so a crash midway never leaves it on, then
+    /// forgets every node and every pending observation. Returns how many nodes were removed.
+    pub fn forget_all(&self, until_ms: u64) -> Result<usize, Refusal> {
+        let _writer = self.writer()?;
+        crate::state::write_private(&self.dir, &self.dir.join(REVOKED), b"")
+            .and_then(|()| fs::File::open(&self.dir)?.sync_all())
+            .map_err(|_| Unavailable::Io)?;
+        let mut state = self.load()?;
+        let removed = state.nodes.len();
+        for id in std::mem::take(&mut state.nodes).into_keys() {
+            state.tombstones.insert(id, until_ms);
+        }
+        state.generation += 1;
+        self.write_snapshot(&on_disk(&state)?)?;
+        for path in self.spool_files()? {
+            let _ = fs::remove_file(path);
+        }
+        Ok(removed)
+    }
+
+    /// Whether `forget --all` revoked collection; it stays so across restarts until resumed.
+    pub fn is_revoked(&self) -> bool {
+        fs::symlink_metadata(self.dir.join(REVOKED)).is_ok()
+    }
+
+    /// `memory resume`: lifts the revocation. `false` when there was none.
+    pub fn resume(&self) -> Result<bool, Refusal> {
+        let _writer = self.writer()?;
+        if !self.is_revoked() {
+            return Ok(false);
+        }
+        fs::remove_file(self.dir.join(REVOKED))
+            .and_then(|()| fs::File::open(&self.dir)?.sync_all())
+            .map_err(|_| Unavailable::Io)?;
+        Ok(true)
     }
 
     fn spool_files(&self) -> Result<Vec<PathBuf>, Unavailable> {

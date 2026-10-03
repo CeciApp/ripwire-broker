@@ -38,6 +38,7 @@ commands; `ripwire-broker --help` lists them all:
 | `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
 | `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
+| `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory; local, no network or credential ([below](#persistent-memory-being-built)) |
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
 return a structured error (`upstream_unavailable` / `incompatible_upstream`), and the next
@@ -293,6 +294,9 @@ and memory stays off for that workspace.
 copies, in a new generation, and keeps its id from coming back for the retention period, even
 from an old pending copy. No backup with its text is kept. It cannot reach copies the operating
 system made (swap, snapshots, backups of the disk) nor anything already sent to the provider.
+Forgetting everything also revokes collection for the workspace: a `revoked` marker in the store
+wins over `--memory`, across restarts, until `ripwire-broker memory resume --workspace DIR`
+removes it. What was forgotten stays forgotten after resuming.
 
 ## Automatic mode (hooks)
 

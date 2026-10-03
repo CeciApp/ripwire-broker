@@ -33,6 +33,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
        ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online]
        ripwire-broker statusline [--workspace DIR] [--state-dir DIR] [--detail] [--width N] [--color never|always]
+       ripwire-broker memory resume --workspace DIR [--state-dir DIR]
 
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
 Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
@@ -197,6 +198,21 @@ pub struct InstallArgs {
     pub online: bool,
 }
 
+/// What `memory` does; every action is local: no network, credential or `online` feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryAction {
+    /// Lifts the revocation `memory forget --all` leaves (PD-4).
+    Resume,
+}
+
+/// `memory <action> --workspace DIR [--state-dir DIR]` (PRD jev-mem §4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryCommand {
+    pub action: MemoryAction,
+    pub workspace: PathBuf,
+    pub state_dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatuslineArgs {
     pub workspace: Option<PathBuf>,
@@ -224,6 +240,8 @@ pub enum Command {
     Install(InstallArgs),
     /// Prints the Claude Code status line from the hooks' projection; never starts ripwire.
     Statusline(StatuslineArgs),
+    /// The workspace's persistent memory, locally.
+    Memory(MemoryCommand),
     /// `--help` or `--version`: print and exit successfully.
     Info(String),
     /// Internal: run `argv` under a memory limit (how the server starts ripwire, D-050).
@@ -735,6 +753,19 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 detail: f.on("--detail"),
                 width: f.width.map(|w| w as usize),
                 color,
+            }))
+        }
+        Some("memory") => {
+            let action = match it.next().as_deref() {
+                Some("resume") => MemoryAction::Resume,
+                other => return Err(usage(format_args!("unknown memory command {other:?}"))),
+            };
+            let f = flags(it, &["--workspace", "--state-dir"])?;
+            no_words(&f)?;
+            Ok(Command::Memory(MemoryCommand {
+                action,
+                workspace: f.workspace()?,
+                state_dir: f.state_dir.clone(),
             }))
         }
         Some(other) => Err(usage(format_args!("unknown command '{other}'"))),

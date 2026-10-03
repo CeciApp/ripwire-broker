@@ -567,3 +567,39 @@ fn forget_leaves_no_temporary_or_backup_with_text() {
         );
     }
 }
+
+// ---------------------------------------------------------------- revocation (§6, PD-4)
+
+#[test]
+fn after_forget_all_nothing_is_collected_until_resumed() {
+    let state = tempfile::tempdir().unwrap();
+    let ws = "u".repeat(64);
+    let store = Store::new(state.path(), &ws);
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    store.enqueue(&record(2)).unwrap();
+
+    assert_eq!(store.forget_all(1_000_000).unwrap(), 1);
+    assert!(store.load().unwrap().nodes.is_empty());
+    assert_eq!(store.pending().unwrap(), 0, "pending observations go too");
+    assert!(store.is_revoked());
+
+    // A new process, as after a restart: the marker wins over --memory.
+    let restarted = Store::new(state.path(), &ws);
+    assert!(restarted.is_revoked());
+    assert_eq!(restarted.enqueue(&record(3)), Err(Refusal::Revoked));
+    assert_eq!(restarted.ingest().map(|_| ()), Err(Refusal::Revoked));
+    assert_eq!(restarted.pending().unwrap(), 0);
+
+    assert!(restarted.resume().unwrap(), "it was revoked");
+    assert!(!restarted.is_revoked());
+    assert!(!restarted.resume().unwrap(), "resuming twice is harmless");
+    restarted.enqueue(&record(3)).unwrap();
+    assert_eq!(restarted.ingest().unwrap().added, 1);
+    restarted.enqueue(&record(1)).unwrap();
+    assert_eq!(
+        restarted.ingest().unwrap().forgotten,
+        1,
+        "forgotten ids stay forgotten"
+    );
+}

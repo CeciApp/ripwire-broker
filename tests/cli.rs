@@ -3816,3 +3816,43 @@ fn a_real_bash_payload_naming_its_changed_file_injects_the_edit_context() {
     assert!(context.contains("context_after_edit"), "{context}");
     assert!(context.contains("auth.py"), "{context}");
 }
+
+#[test]
+fn memory_resume_is_local_and_clears_the_revocation() {
+    use ripwire_broker::memory::{identity, store::Store};
+
+    let Ok(Command::Memory(m)) = parse(&["memory", "resume", "--workspace", "/w"]) else {
+        panic!("{:?}", parse(&["memory", "resume", "--workspace", "/w"]))
+    };
+    assert_eq!(m.action, cli::MemoryAction::Resume);
+    assert!(
+        parse(&["memory", "resume"]).is_err(),
+        "--workspace is required"
+    );
+    assert!(parse(&["memory", "resume", "--workspace", "/w", "--online"]).is_err());
+    assert!(parse(&["memory", "rewind", "--workspace", "/w"]).is_err());
+
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = Store::new(st.path(), &identity::workspace_id(ws.path()).unwrap());
+    store.forget_all(u64::MAX).unwrap();
+    assert!(store.is_revoked());
+
+    let args = [
+        "memory",
+        "resume",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        st.path().to_str().unwrap(),
+    ];
+    // No credential and no ripwire: a local command needs neither.
+    let (code, out, err) =
+        run_with_env(&args, "", &[("PATH", std::ffi::OsStr::new("/nonexistent"))]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("resumed"), "{out}");
+    assert!(!store.is_revoked());
+
+    let (code, out, _) = run(&args, "");
+    assert_eq!(code, 0);
+    assert!(out.contains("not revoked"), "{out}");
+}

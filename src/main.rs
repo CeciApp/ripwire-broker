@@ -256,6 +256,19 @@ async fn main() -> ExitCode {
             );
             return ExitCode::SUCCESS;
         }
+        Ok(Command::Memory(a)) => {
+            // Dispatched before `settings`: local, never online (PRD jev-mem §4).
+            return match ripwire_broker::memory::command::run(&a) {
+                Ok(text) => {
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Err(msg) => {
             eprintln!("{msg}");
             return ExitCode::from(2);

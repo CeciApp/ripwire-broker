@@ -3,6 +3,7 @@
 //! controller lives behind the `online` feature.
 
 pub mod admission;
+pub mod command;
 pub mod identity;
 pub mod model;
 pub mod store;
