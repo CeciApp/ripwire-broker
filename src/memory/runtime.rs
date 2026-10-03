@@ -64,6 +64,10 @@ pub fn from_serve(
         u64::from(memory.retention_days) * DAY_MS,
     );
     let worker = Arc::new(Worker::new(store.clone(), classifier, config.clone()));
+    let publish = MemoryConfig {
+        worker: Some(worker.metrics_handle()),
+        ..publish
+    };
     Ok(Some(Runtime {
         store,
         workspace_id,

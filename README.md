@@ -318,6 +318,9 @@ attempts at most, one retry for a transient failure, and waits for a 429 only in
 at a time, memory and discovery share the four requests in flight, and the workspace has a
 persisted budget of 1,000 attempts and 20,000 questions per 24 hours that a restart or a clock
 set back does not reset. The worker stops with the server; what it did not finish waits on disk.
+The status resource's `memory` field adds what the worker cost, by operation (typing,
+relations): attempts, retries, questions, bytes sent, failures by category and quota refusals,
+counts only. `memory status` shows the attempts and questions spent in the last 24 hours.
 
 **Forgetting:** forgetting a memory removes it, every note derived from it and its pending
 copies, in a new generation, and keeps its id from coming back for the retention period, even

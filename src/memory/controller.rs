@@ -3,6 +3,7 @@
 //! node exists before any inference; nothing here holds the store's lock while waiting on the
 //! network, and every request is charged to the 24-hour quota before it is sent.
 
+use super::metrics::{Metrics, Operation};
 use super::model::{Edge, EdgeBasis, EnrichmentState, Graph, POLICY_VERSION, Record, Types};
 use super::prompts::{self, Stage};
 use super::queue::{Lease, Outcome};
@@ -13,6 +14,7 @@ use crate::online::request::StateRequest;
 use crate::online::response::Decision;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// An inferred edge needs at least this probability (PRD jev-mem §7).
 pub const EDGE_THRESHOLD: f64 = 0.60;
@@ -28,13 +30,15 @@ pub struct Config {
 }
 
 /// What one run did; counts only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Enriched {
     pub state: EnrichmentState,
     pub requests: usize,
     pub edges: usize,
     /// The provider refused the credential (401/403).
     pub auth_failed: bool,
+    /// What this run cost.
+    pub metrics: Metrics,
 }
 
 fn tokens(text: &str) -> BTreeSet<String> {
@@ -233,24 +237,30 @@ async fn send(
     req: &StateRequest,
     now_ms: u64,
     budget: &mut Budget,
+    metrics: &mut Operation,
 ) -> Result<Vec<Decision>, Failure> {
     let mut retried = false;
+    let bytes = serde_json::to_vec(req).map_or(0, |b| b.len() as u64);
     loop {
         if budget.attempts_left == 0 {
             return Err(Failure::GaveUp);
         }
-        if store
-            .charge(now_ms, 1, req.questions.0.len() as u32)
-            .is_err()
-        {
+        let questions = req.questions.0.len();
+        if store.charge(now_ms, 1, questions as u32).is_err() {
+            metrics.quota_refusals += 1;
             return Err(Failure::GaveUp);
         }
         budget.attempts_left -= 1;
         budget.sent += 1;
+        metrics.attempts += 1;
+        metrics.retries += u64::from(retried);
+        metrics.questions += questions as u64;
+        metrics.bytes_sent += bytes;
         let error = match classifier.decide(req).await {
             Ok(d) => return Ok(d),
             Err(e) => e,
         };
+        *metrics.failures.entry(error.category()).or_default() += 1;
         match error {
             ClassifyError::Auth(_) => return Err(Failure::Auth),
             ClassifyError::RateLimited { retry_after } => {
@@ -289,6 +299,7 @@ pub async fn enrich(
             requests: 0,
             edges: 0,
             auth_failed: false,
+            metrics: Metrics::default(),
         });
     };
     let mut budget = Budget {
@@ -296,6 +307,7 @@ pub async fn enrich(
         deadline: tokio::time::Instant::now() + RUN_DEADLINE,
         sent: 0,
     };
+    let mut metrics = Metrics::default();
     let mut partial = false;
 
     // Typing: four Nouls on the observation alone. Without it the run failed.
@@ -307,7 +319,16 @@ pub async fn enrich(
             .map(|(_, q)| q)
             .collect(),
     );
-    let types = match send(store, classifier, &typing, now_ms, &mut budget).await {
+    let types = match send(
+        store,
+        classifier,
+        &typing,
+        now_ms,
+        &mut budget,
+        &mut metrics.typing,
+    )
+    .await
+    {
         Ok(d) => {
             partial |= d.iter().any(|d| d.probability().is_none());
             let p = |i: usize| d.get(i).and_then(Decision::probability);
@@ -342,6 +363,10 @@ pub async fn enrich(
                 requests: budget.sent,
                 edges: 0,
                 auth_failed,
+                metrics: Metrics {
+                    jobs_failed: 1,
+                    ..metrics.clone()
+                },
             });
         }
     };
@@ -382,7 +407,16 @@ pub async fn enrich(
             .map(|(_, q)| q)
             .collect();
         let req = StateRequest::new(&cfg.model, batch.request.state.clone(), questions);
-        match send(store, classifier, &req, now_ms, &mut budget).await {
+        match send(
+            store,
+            classifier,
+            &req,
+            now_ms,
+            &mut budget,
+            &mut metrics.relations,
+        )
+        .await
+        {
             Ok(decisions) => {
                 for ((g, name), d) in batch.keys.iter().zip(decisions) {
                     partial |= d.probability().is_none();
@@ -403,6 +437,7 @@ pub async fn enrich(
         true => EnrichmentState::Partial,
         false => EnrichmentState::Complete,
     };
+    metrics.jobs_done = 1;
     store.commit_enrichment(&node.node_id, node.generation, Some(types), outcome, edges)?;
     store.finish(lease, Outcome::Done)?;
     Ok(Enriched {
@@ -410,6 +445,7 @@ pub async fn enrich(
         requests: budget.sent,
         edges: count,
         auth_failed,
+        metrics,
     })
 }
 
@@ -420,6 +456,7 @@ pub struct Worker {
     classifier: std::sync::Arc<dyn MemoryClassifier>,
     cfg: Config,
     suspended: std::sync::atomic::AtomicBool,
+    metrics: Arc<std::sync::Mutex<Metrics>>,
 }
 
 impl Worker {
@@ -433,6 +470,7 @@ impl Worker {
             classifier,
             cfg,
             suspended: Default::default(),
+            metrics: Default::default(),
         }
     }
 
@@ -448,11 +486,22 @@ impl Worker {
             return Ok(None);
         };
         let ran = enrich(&self.store, &*self.classifier, lease, &self.cfg, now_ms).await?;
+        self.metrics.lock().unwrap().add(&ran.metrics);
         if ran.auth_failed {
             self.suspended
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(Some(ran))
+    }
+
+    /// The live handle to [`Worker::metrics`], for the status resource.
+    pub fn metrics_handle(&self) -> Arc<std::sync::Mutex<Metrics>> {
+        self.metrics.clone()
+    }
+
+    /// What this worker cost so far, by operation; counts only.
+    pub fn metrics(&self) -> Metrics {
+        self.metrics.lock().unwrap().clone()
     }
 
     pub fn is_suspended(&self) -> bool {

@@ -91,3 +91,14 @@ impl Ledger {
         true
     }
 }
+
+impl Ledger {
+    /// Attempts and questions charged in the 24 hours before `now_ms` (or the latest time seen).
+    pub fn used(&self, now_ms: u64) -> (u32, u32) {
+        let now = now_ms.max(self.high_water_ms);
+        self.entries
+            .iter()
+            .filter(|(at, _, _)| at.saturating_add(DAY_MS) > now)
+            .fold((0, 0), |(a, q), e| (a + e.1, q + e.2))
+    }
+}

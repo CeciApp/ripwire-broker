@@ -4422,3 +4422,22 @@ fn memory_drain_needs_online_and_a_credential() {
         ),
     }
 }
+
+#[test]
+fn memory_status_shows_the_24h_budget_in_use() {
+    use ripwire_broker::memory::{identity, store::Store};
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = Store::new(st.path(), &identity::workspace_id(ws.path()).unwrap());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    store.charge(now, 2, 9).unwrap();
+    let (code, out, err) = memory_cmd(ws.path(), st.path(), &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (v["attempts_24h"].as_u64(), v["questions_24h"].as_u64()),
+        (Some(2), Some(9))
+    );
+}

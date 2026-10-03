@@ -1181,3 +1181,57 @@ impl MemoryClassifier for Slow {
         self.0.decide(req).await
     }
 }
+
+// ---------------------------------------------------------------- cost metrics (PRD jev-mem §8.3, §14; T2.13)
+
+#[tokio::test]
+async fn questions_attempts_bytes_and_cache_are_counted_per_operation_without_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(
+        dir.path(),
+        &[
+            rec(1, "secret-ish cache layer text", &["src/cache.rs"]),
+            rec(2, "secret-ish cache layer text two", &["src/cache.rs"]),
+        ],
+    ));
+    let fake = Scripted::new(vec![Some(ClassifyError::Server(503))]);
+    let w = worker(&store, fake.clone());
+    while w.run_once(1_000).await.unwrap().is_some() {}
+
+    let m = w.metrics();
+    assert_eq!(
+        m.typing.questions,
+        4 * 2 + 4,
+        "two nodes typed, one retried"
+    );
+    assert_eq!((m.typing.attempts, m.typing.retries), (3, 1));
+    assert_eq!(m.typing.failures.get("server"), Some(&1));
+    assert!(m.relations.attempts >= 1 && m.relations.questions >= 4);
+    assert!(m.typing.bytes_sent > 0 && m.relations.bytes_sent > 0);
+    assert_eq!(m.jobs_done, 2);
+    assert_eq!(
+        fake.sent() as u64,
+        m.typing.attempts + m.relations.attempts,
+        "every attempt counted"
+    );
+
+    let shown = serde_json::to_string(&m).unwrap();
+    for leak in ["secret-ish", "cache layer", "src/cache.rs", "Bearer"] {
+        assert!(!shown.contains(leak), "{leak} in {shown}");
+    }
+
+    // The 24-hour budget it used is on disk, for `memory status` and any other process.
+    let s = store.load().unwrap();
+    let (attempts, questions) = s
+        .ledger
+        .entries
+        .iter()
+        .fold((0, 0), |(a, q), e| (a + e.1, q + e.2));
+    assert_eq!(
+        (attempts as u64, questions as u64),
+        (
+            m.typing.attempts + m.relations.attempts,
+            m.typing.questions + m.relations.questions
+        )
+    );
+}

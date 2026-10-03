@@ -23,6 +23,8 @@ pub struct MemoryConfig {
     pub wait: Duration,
     /// Writes still running in the background beyond which no new one starts.
     pub max_in_flight: usize,
+    /// The worker's running cost, shown in the status resource; `None` without a worker.
+    pub worker: Option<Arc<Mutex<super::metrics::Metrics>>>,
 }
 
 impl std::fmt::Debug for MemoryConfig {
@@ -42,8 +44,18 @@ impl MemoryConfig {
             retention_ms,
             wait: Duration::from_millis(25),
             max_in_flight: 4,
+            worker: None,
         }
     }
+}
+
+/// The `memory` field of the status resource: collection counts and the worker's cost.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct MemoryStatus {
+    #[serde(flatten)]
+    pub counts: Counts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker: Option<super::metrics::Metrics>,
 }
 
 /// Counts only, for the status resource.
@@ -76,6 +88,18 @@ impl Publisher {
 
     pub fn counts(&self) -> Counts {
         *self.counts.lock().unwrap()
+    }
+
+    /// The status resource's `memory` field.
+    pub fn status(&self) -> MemoryStatus {
+        MemoryStatus {
+            counts: self.counts(),
+            worker: self
+                .config
+                .worker
+                .as_ref()
+                .map(|m| m.lock().unwrap().clone()),
+        }
     }
 
     /// Publishes what `env` observed about `scope`. An answer the broker could not assess

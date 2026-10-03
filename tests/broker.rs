@@ -2075,3 +2075,24 @@ async fn a_panicking_write_never_keeps_its_slot() {
         "five dead writes left no slot taken: {counts}"
     );
 }
+
+#[tokio::test]
+async fn the_status_shows_what_the_memory_worker_cost() {
+    use ripwire_broker::memory::metrics::Metrics;
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut config = BrokerConfig::new(ws.path());
+    let mut memory = MemoryConfig::new(Arc::new(Store::new(state.path(), "w")), "w".into(), 1);
+    let worker = Arc::new(std::sync::Mutex::new(Metrics::default()));
+    worker.lock().unwrap().typing.attempts = 3;
+    memory.worker = Some(worker);
+    config.memory = Some(memory);
+    let b = Broker::connect(Arc::new(memory_fake()), config)
+        .await
+        .unwrap();
+    let status = to_json(&b.status().await)["memory"].clone();
+    assert_eq!(status["worker"]["typing"]["attempts"], 3, "{status}");
+    assert_eq!(
+        status["confirmed"], 0,
+        "the collection counts stay where they were"
+    );
+}
