@@ -229,7 +229,8 @@ impl Record {
 }
 
 /// The four relational views over the same nodes (PRD jev-mem §7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Ordered as a tie between views goes (PRD jev-mem §10.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Graph {
     Semantic,

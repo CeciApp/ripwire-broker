@@ -169,3 +169,327 @@ fn depth_is_one_unless_multi_hop_is_at_least_half() {
     assert!(routed(&[("recency_importance", p(0.5))]).recency);
     assert!(!routed(&[("recency_importance", p(0.49))]).recency);
 }
+
+// ---------------------------------------------------------------- scoring and expansion (§10, steps 5–7; T3.3)
+
+use async_trait::async_trait;
+use ripwire_broker::memory::model::{Edge, EdgeBasis};
+use ripwire_broker::memory::prompts::{self, Stage};
+use ripwire_broker::memory::retrieve::{Read, ReadConfig};
+use ripwire_broker::online::classifier::{ClassifyError, MemoryClassifier};
+use ripwire_broker::online::request::StateRequest;
+use std::sync::Mutex;
+
+/// The stage, question name and candidate index of an instruction of `memory-prompts/v1`.
+fn which(text: &str) -> (Stage, &'static str, usize) {
+    for stage in [Stage::Routing, Stage::Scoring, Stage::Stopping] {
+        for i in 0..16 {
+            for (name, q) in prompts::questions(stage, i) {
+                if q.instructions == text {
+                    return (stage, name, i);
+                }
+            }
+        }
+    }
+    panic!("not a read question: {text}")
+}
+
+type Answer = Box<dyn Fn(Stage, &str, Option<&str>) -> Decision + Send + Sync>;
+
+/// Answers each read question from its stage, name and the candidate it is about.
+struct Reader {
+    answer: Answer,
+    seen: Mutex<Vec<StateRequest>>,
+}
+
+impl Reader {
+    fn new(answer: impl Fn(Stage, &str, Option<&str>) -> Decision + Send + Sync + 'static) -> Self {
+        Reader {
+            answer: Box::new(answer),
+            seen: Mutex::default(),
+        }
+    }
+    /// Every candidate id sent for scoring, in order.
+    fn scored(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| {
+                r.state
+                    .get("candidates")
+                    .and_then(|c| c.as_array())
+                    .cloned()
+            })
+            .flatten()
+            .map(|c| c["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl MemoryClassifier for Reader {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        self.seen.lock().unwrap().push(req.clone());
+        Ok(req
+            .questions
+            .0
+            .iter()
+            .map(|(_, q)| {
+                let (stage, name, i) = which(&q.instructions);
+                let cand = req.state["candidates"]
+                    .get(i)
+                    .and_then(|c| c["id"].as_str());
+                (self.answer)(
+                    stage,
+                    name,
+                    if stage == Stage::Scoring { cand } else { None },
+                )
+            })
+            .collect())
+    }
+}
+
+fn edge(s: u64, t: u64, graph: Graph) -> Edge {
+    Edge {
+        source: id(s),
+        target: id(t),
+        graph,
+        relation: "r".into(),
+        basis: EdgeBasis::JevInference,
+        score: Some(0.9),
+        model: Some("m".into()),
+        prompt_version: None,
+        policy: "p".into(),
+        generation: 1,
+    }
+}
+
+fn with_edges(records: Vec<Record>, edges: Vec<Edge>) -> State {
+    let mut s = state(records);
+    for e in edges {
+        s.edges.insert(e.key(), e);
+    }
+    s
+}
+
+/// Routing: the views given, depth by `multi_hop`; scoring from `score`; stopping: low gain.
+fn reader(
+    views: &'static [&'static str],
+    multi_hop: f64,
+    score: impl Fn(&str, &str) -> Decision + Send + Sync + 'static,
+) -> Reader {
+    Reader::new(move |stage, name, cand| match stage {
+        Stage::Routing if views.contains(&name) => p(1.0),
+        Stage::Routing if name == "multi_hop_need" => p(multi_hop),
+        Stage::Routing => p(0.0),
+        Stage::Scoring => score(cand.unwrap(), name),
+        _ => p(0.0),
+    })
+}
+
+async fn read(s: &State, query: &str, r: &Reader) -> Read {
+    retrieve::read(s, query, r, &ReadConfig::default()).await
+}
+
+#[tokio::test]
+async fn the_score_is_the_weighted_sum_and_needs_four_valid_answers() {
+    let s = state(vec![
+        rec(1, "cache eviction policy", &[]),
+        rec(2, "cache warmup", &[]),
+        rec(3, "cache store", &[]),
+        rec(4, "cache misc", &[]),
+    ]);
+    let (a, b, c, d) = (id(1), id(2), id(3), id(4));
+    let r = reader(&[], 0.0, move |cand, name| {
+        let v = |rel, new, use_, sup| match name {
+            "relevance" => rel,
+            "new_information" => new,
+            "relation_usefulness" => use_,
+            _ => sup,
+        };
+        match cand {
+            x if x == a => p(v(0.9, 0.5, 0.5, 0.5)),
+            x if x == b => p(v(0.59, 1.0, 1.0, 1.0)),
+            x if x == c && name == "new_information" => unknown(),
+            x if x == c => p(0.9),
+            x if x == d => p(v(0.6, 0.1, 0.1, 0.1)),
+            _ => unreachable!(),
+        }
+    });
+    let got = read(&s, "cache eviction", &r).await;
+    let ids: Vec<&str> = got
+        .memories
+        .iter()
+        .map(|f| f.record.node_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [id(1).as_str()],
+        "B: relevance 0.59; C: an unknown answer; D: score below 0.60"
+    );
+    // 0.40·0.9 + 0.20·0.5 + 0.15·0.5 + 0.15·0.5 + 0.10·1.0 (the best anchor).
+    assert!(
+        (got.memories[0].score - 0.71).abs() < 1e-9,
+        "{}",
+        got.memories[0].score
+    );
+}
+
+#[tokio::test]
+async fn no_node_is_scored_twice_and_every_visit_is_counted() {
+    let s = with_edges(
+        vec![rec(1, "eviction", &[]), rec(2, "b", &[]), rec(3, "c", &[])],
+        vec![
+            edge(1, 2, Graph::Semantic),
+            edge(2, 1, Graph::Semantic),
+            edge(1, 3, Graph::Semantic),
+            edge(3, 2, Graph::Semantic),
+        ],
+    );
+    let r = reader(&["semantic"], 0.9, |_, _| p(0.9));
+    let got = read(&s, "eviction", &r).await;
+    let scored = r.scored();
+    let mut unique = scored.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(scored.len(), unique.len(), "scored twice: {scored:?}");
+    assert_eq!(got.visited, 3);
+    assert!(
+        got.edges_seen >= 3,
+        "every edge looked at counts, kept or not: {}",
+        got.edges_seen
+    );
+}
+
+#[tokio::test]
+async fn expansion_respects_twelve_sixteen_depth_two_128_and_beam_four() {
+    // A chain from one anchor: depth 2 reaches two hops, never a third.
+    let s = with_edges(
+        vec![
+            rec(1, "eviction", &[]),
+            rec(2, "b", &[]),
+            rec(3, "c", &[]),
+            rec(4, "d", &[]),
+        ],
+        vec![
+            edge(1, 2, Graph::Semantic),
+            edge(2, 3, Graph::Semantic),
+            edge(3, 4, Graph::Semantic),
+        ],
+    );
+    let r = reader(&["semantic"], 0.9, |_, _| p(0.9));
+    read(&s, "eviction", &r).await;
+    assert!(!r.scored().contains(&id(4)), "depth 2 at most");
+
+    // A fan-out: 40 neighbours of one anchor.
+    let mut records = vec![rec(1, "eviction", &[])];
+    let mut edges = vec![];
+    for n in 100..140 {
+        records.push(rec(n, "other", &[]));
+        edges.push(edge(1, n, Graph::Semantic));
+    }
+    let s = with_edges(records, edges);
+    let r = reader(&["semantic"], 0.9, |_, _| p(0.9));
+    let got = read(&s, "eviction", &r).await;
+    assert!(got.expansions <= retrieve::MAX_EXPANSIONS && retrieve::MAX_EXPANSIONS == 12);
+    assert!(got.visited <= 16, "{}", got.visited);
+    assert!(got.edges_seen <= 128, "{}", got.edges_seen);
+
+    // 200 edges out of the anchor, in a view that is off: each one looked at still counts.
+    let mut records = vec![rec(1, "eviction", &[])];
+    let mut edges = vec![];
+    for n in 1000..1200 {
+        records.push(rec(n, "other", &[]));
+        edges.push(edge(1, n, Graph::Causal));
+    }
+    let s = with_edges(records, edges);
+    let r = reader(&["semantic"], 0.9, |_, _| p(0.9));
+    let got = read(&s, "eviction", &r).await;
+    assert_eq!(got.edges_seen, 128, "looking stops at the cap");
+
+    // Six anchors, each with its own neighbour: only the best four are expanded.
+    let mut records = vec![];
+    let mut edges = vec![];
+    for n in 1..=6 {
+        records.push(rec(n, "eviction", &[]));
+        records.push(rec(50 + n, "z", &[]));
+        edges.push(edge(n, 50 + n, Graph::Semantic));
+    }
+    let s = with_edges(records, edges);
+    let r = reader(&["semantic"], 0.0, |_, _| p(0.9));
+    read(&s, "eviction", &r).await;
+    let scored = r.scored();
+    assert!(scored.contains(&id(51)) && scored.contains(&id(54)));
+    assert!(
+        !scored.contains(&id(55)) && !scored.contains(&id(56)),
+        "beam 4: {scored:?}"
+    );
+}
+
+#[tokio::test]
+async fn recency_only_breaks_ties() {
+    let mut x = rec(10, "x", &[]);
+    x.ingest_seq = 1;
+    let mut y = rec(20, "y", &[]);
+    y.ingest_seq = 9;
+    let z = rec(5, "z", &[]);
+    let s = with_edges(
+        vec![rec(1, "eviction", &[]), x, y, z],
+        vec![
+            edge(1, 10, Graph::Semantic),
+            edge(1, 20, Graph::Semantic),
+            edge(1, 5, Graph::Semantic),
+        ],
+    );
+    let s = &s;
+    let order = |recency: f64| {
+        let r = Reader::new(move |stage, name, cand| match (stage, name) {
+            (Stage::Routing, "semantic") => p(1.0),
+            (Stage::Routing, "recency_importance") => p(recency),
+            (Stage::Routing, _) => p(0.0),
+            (Stage::Scoring, _) if cand == Some(id(5).as_str()) => p(1.0),
+            (Stage::Scoring, _) => p(0.9),
+            _ => p(0.0),
+        });
+        async move {
+            let got = read(s, "eviction", &r).await;
+            got.memories
+                .iter()
+                .map(|f| f.record.node_id.clone())
+                .collect::<Vec<_>>()
+        }
+    };
+    let with = order(0.9).await;
+    let without = order(0.1).await;
+    assert_eq!(with[..2], [id(1), id(5)], "a higher score stays ahead");
+    assert_eq!(with[2..], [id(20), id(10)], "recency breaks the tie");
+    assert_eq!(without[2..], [id(10), id(20)], "otherwise the id does");
+}
+
+#[tokio::test]
+async fn only_active_views_are_expanded_with_their_direction() {
+    let s = with_edges(
+        vec![
+            rec(1, "eviction", &[]),
+            rec(2, "b", &[]),
+            rec(3, "c", &[]),
+            rec(4, "d", &[]),
+        ],
+        vec![
+            edge(1, 2, Graph::Causal),
+            edge(3, 1, Graph::Causal),
+            edge(1, 4, Graph::Semantic),
+        ],
+    );
+    let r = reader(&["causal"], 0.0, |_, _| p(0.9));
+    read(&s, "eviction", &r).await;
+    assert_eq!(
+        r.scored(),
+        [id(1), id(2)],
+        "the causal edge out of the anchor only"
+    );
+    let r = reader(&["semantic"], 0.0, |_, _| p(0.9));
+    read(&s, "eviction", &r).await;
+    assert_eq!(r.scored(), [id(1), id(4)]);
+}
