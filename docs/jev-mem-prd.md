@@ -1,6 +1,6 @@
 # PRD: memória persistente com Jev no ripwire-broker
 
-**Versão:** 0.2 · **Data:** 2026-10-03 · **Status:** proposta para revisão, não implementada.  
+**Versão:** 0.3 · **Data:** 2026-10-03 · **Status:** proposta revisada, reconciliada com o estudo e com as decisões do mantenedor (D-135); não implementada.  
 **Base do broker:** `3b60a1b29252485bc43a3e2b0ee914203dde9211`, pacote `0.1.0`.  
 **Implementação:** Rust; System One remoto Jev `jev-1.13.0`; System Two é o agente do host, com sumarizador local opcional para notas derivadas.
 
@@ -10,7 +10,7 @@ Adicionar memória de trabalho entre sessões, isolada por workspace/worktree, p
 
 Este documento é uma **adaptação de produto inspirada em Jev-Mem**, não uma reprodução do experimento. Os parâmetros novos abaixo são decisões propostas e metas a medir, não resultados observados.
 
-**Pendência da revisão solicitada:** neste checkout não foram encontrados `docs/2026-10-03_Jev-Mem.pdf` nem `docs/jev-mem.md`, inclusive na busca por esses nomes nos projetos e worktrees locais. Foi lido o PDF encontrado em `/Users/aquental/Downloads/Jev-Mem.pdf`, arXiv `2609.23986v1`, 16 páginas, SHA-256 `413c592431ce55f8372c1561b7dd572e3603d0e66b447f6e4097e4678bfc5e87`. Não foi possível confirmar que é a mesma cópia solicitada nem certificar o estudo linha a linha. A auditoria abaixo confronta os trechos e problemas transcritos pelo solicitante com esse PDF, as fontes dos autores e o broker. O PRD deve passar por uma última reconciliação quando o estudo estiver disponível; não atribuir a ele uma revisão integral já concluída.
+**Estudo e PDF reconciliados (v0.3).** O estudo [`docs/jev-mem.md`](jev-mem.md) e o PDF [`docs/2026-10-03_Jev-Mem.pdf`](2026-10-03_Jev-Mem.pdf) estão neste repositório. O PDF é o arXiv `2609.23986v1`, 16 páginas, SHA-256 `413c592431ce55f8372c1561b7dd572e3603d0e66b447f6e4097e4678bfc5e87`: o mesmo hash da cópia lida na v0.2, portanto a mesma cópia. O estudo foi confrontado por inteiro com este PRD, com o PDF e com o código do broker (§2.4). As citações que ele faz do paper e do broker conferem. Onde ele propõe o produto de outro modo, prevalece este PRD, pelo motivo registrado em cada linha do §2.4.
 
 O [PRD principal](../spec/ripwire-broker-mcp.md) permanece inalterado. Conflitos normativos estão enumerados no §16 para eventual incorporação somente após revisão do mantenedor. Esta entrega não altera código, dependências, configuração do host nem ativa chamadas remotas.
 
@@ -38,7 +38,7 @@ O próprio PDF contém divergências: §4.2 cita Multi-Hop `0,625`, Open-Domain 
 | `role: memory` | `Role` atual não possui essa variante; hook serializa envelope em `additionalContext` | Campo explícito e apresentação textual; validação real por host no §11 |
 | Comparação depreciativa com Mem0 | Não há comparação correspondente demonstrada nas fontes examinadas | Remover essa tese; comparar braços mensuráveis |
 
-A revisão integral de `docs/jev-mem.md`, inclusive referências, fórmulas e eventuais problemas além dos itens transcritos, permanece pendente (§1).
+Com o estudo no repositório, cada ponto foi localizado nele; o §2.4 mostra onde. Dois pontos atacam a transcrição, não o estudo. O estudo diz que um System One local não existe **no broker** (§4.5 dele), o que é verdade. E não apresenta a admissão filtrada como algoritmo original: o §2.3 dele registra a escrita sem filtro, e o filtro aparece só como proposta de produto (§4.2 dele). Os vereditos da tabela continuam valendo para as afirmações como foram transcritas.
 
 ### 2.3 Desvios obrigatoriamente declarados
 
@@ -56,6 +56,33 @@ A revisão integral de `docs/jev-mem.md`, inclusive referências, fórmulas e ev
 | Falhas | Limites do experimento | Nó persistido antes do enriquecimento; respostas parciais declaradas | Grafo completo imediatamente após write |
 
 Ausência de fine-tune é uma restrição deste produto, não evidência de que o paper exigiu fine-tune. Uma futura etapa vetorial requer PRD complementar com modelo, licença, pesos fixados, runtime Rust e orçamento; não instalar Python, PyTorch, MLX, Laya ou banco vetorial implicitamente.
+
+### 2.4 Reconciliação com o estudo `docs/jev-mem.md`
+
+Feita em 03/10/2026, seção por seção do estudo, contra o PDF (texto extraído e conferido com as Tabelas 1–2 e o Appendix B), o código do broker e este PRD. "Confere" quer dizer que a citação está certa; "diverge" quer dizer que o estudo propõe o produto de outro modo e este PRD decide diferente.
+
+| Estudo | O que diz | Verificação | Neste PRD | Ponto do §2.2 |
+|---|---|---|---|---|
+| §1 | LoCoMo: `0,777` (+11,0% sobre o melhor baseline), construção `158 s` (6,6×), consulta `0,93 s` (−36,7%); claim dos autores até reproduzir | Confere com o resumo, §4.2 e Tabelas 1–2: +11,0% é sobre MAGMA (`0,700`), 6,6× sobre Nemori (`1.044 s`), −36,7% sobre MAGMA (`1,47 s`) | §2.1: nenhum número transfere ao broker | — |
+| §2.1–2.2 | `o_t=(x_t,τ_t,μ_t)`, quatro grafos sobre os mesmos nós, índices vetorial e léxico; Noul e Choice; perguntas do lote não leem umas às outras; Nouls do mesmo estado em uma invocação | Confere com §3 do PDF (Eqs. 4–10) | §5.1 (um nó, quatro visões), §7; "uma invocação" não é "uma decisão": custo no §8.3 | Custo e latência |
+| §2.3 | Escrita sem filtro de admissão; typing com 4 Nouls; até `K_w=10` candidatos; relações por par, causal nas duas direções, alias só sem IDs comuns; Choice temporal de sete opções; aresta com `P≥0,60` | Confere com §3.2 e Appendix B.2 (`admission_enabled=false`) | §2.3 (admissão filtrada é desvio), §7 e §8.1 (K default 4, máximo 10) | Admissão filtrada |
+| §2.4 | Consolidação "a cada 20 writes"; 4 Nouls + Choice `representation`; originais preservados; System Two só com `merge`/`promote` `≥0,85` e contradição `<0,85` | Confere, com uma imprecisão: o Appendix B.3 diz 20 escritas Jev **bem-sucedidas** | §9: 20 enriquecimentos completos ou 24 h, retomável | Cadência; "Jev nunca autoriza merge" |
+| §2.5 | Routing com 6 Nouls; orçamento 80, mínimo 1 para need `≥0,10`, restante proporcional (expoente 1,0, maiores restos); beam 10; parada `0,95`/`0,15`/`0,15` ou `continue_useful<0,15`; limites 8, 60, 2400, 16 tentativas, 15 s | Confere com Appendix B.4–B.5 | §10 e §8.2: orçamento 12, beam 4, profundidade 2, 750 ms, 4 requests (§2.3) | — |
+| §2.1, §4.3 | Não registra que o timestamp é de observação | O Appendix B.1 diz que ele marca quando a frase foi observada, não quando o evento ocorreu | §5.4: `timestamp_role` sempre explícito | Entidade e tempo |
+| §3 | `--online` só em rotas que terminam em `explore`; cache de decisões só em memória; sumarizador local opcional, até 3 notas de 600 caracteres; hooks não recebem notas (D-046); subagentes compartilham o MCP do pai | Confere com `src/broker.rs` (passo `--online` nas rotas `explore`), `src/notes.rs` (`MAX_GROUPS=3`, `MAX_NOTE_CHARS=600`), D-046 e README | §3, §9 | — |
+| §4.1 item 2 | `--memory` só no `serve`, como `--online` (D-064) | **Diverge** | §4: `memory status/forget/add/resume` locais, `hook --memory` só com spool, `memory drain --online` como exceção ao D-064 (D-135) | — |
+| §4.2 | Candidatos a nó: texto da tarefa, arquivos e hashes, preferência explícita no prompt, resultado do `Stop`/`attention_required`, nota de consolidação; não gravar prompt, `.env`, diff cru, PII | **Diverge em dois:** a consulta de `context_for_task` não é persistida (§10) e preferência só entra por `memory add` (§5.2), nunca do prompt. Os demais viram `sources`, `finish_observation` e `derived_note` | §5.1, §5.2 | Schema ausente |
+| §4.3 | Store em `$XDG_STATE_HOME/ripwire-broker/memory/<workspace-hash>/`, sqlite ou JSONL | Diretório confere com `StateStore::default_dir()` (`src/state.rs`). **Diverge:** sqlite seria dependência nova; o hash do workspace precisa da worktree | §3 (nenhuma dependência), §5.1 (`workspace_id` com git-dir e common-dir), §6 (spool e snapshot) | — |
+| §4.3 | Relação temporal por mtime/commit | **Diverge** | §5.4: mtime, commit e checkout são só metadados; relação de observação só por `ingest_seq` | Entidade e tempo |
+| §4.3 | Candidatos via Ripwire e índice vetorial "se houver"; orçamento "menor que 80" | Sem índice vetorial no broker | §2.3, §10: lexical + entidade, sem embedding; orçamento 12 | — |
+| §4.4 | System Two: A (host, recomendado), B (`--summarizer-cmd` só na consolidação), C (segunda API, fora do MVP); em A, itens `role: memory` | Ordem A, B, C mantida. **Diverge** em `role: memory`: `Role` não tem essa variante e clientes podem descartar papel desconhecido | §11: `memories[]` e `provenance.memory`, mais seção textual | `role: memory` |
+| §4.5 | Feature `memory` ou reutilizar `online`; `--memory` **exige** `--online`; "sem Jev vira Mem0 pobre" | **Diverge:** `--memory` **implica** `--online` (decisão do mantenedor); a comparação com Mem0 não tem experimento | §4 (reutiliza a feature `online`; uma flag basta); §2.2 e §14 (braço C mede a seleção determinística) | System One local; Mem0 |
+| §4.6 | Fora de escopo: Jev gerar resposta, substituir Ripwire, fine-tune, mandar o grafo inteiro ao Jev | Confere | §7, §9, §11 | — |
+| §4.7 | Ordem: spec, store, write com Jev, read, consolidação, A/B | Confere com §15; a spec fica em `docs/` enquanto proposta e entra no PRD principal no fechamento | §15, §16 | — |
+| §5 | O servidor MCP não pode pedir inferência ao modelo da sessão; System Two do `--memory` é o host | Confere com o contrato MCP do broker (só o host chama tools) | §11 | — |
+| §6 | Referências internas | `spec/old/jev-integration-prd.md`, `src/online/`, `src/summarizer.rs`, `handoff.md` existem; os prompts estão no Appendix B.2–B.5 | §17 | — |
+
+O cabeçalho do estudo nomeia o projeto em `/root/projects/ripwire-broker`, caminho de outra máquina; não afeta nenhuma afirmação. Nenhuma fórmula do estudo contradiz o PDF; as que este PRD troca (orçamento, beam, score do §10) estão marcadas como do produto.
 
 ## 3. Plataforma e ferramentas existentes
 
@@ -112,12 +139,16 @@ Descoberta e memória compartilham cliente HTTP, autenticação e controle globa
 | `--memory-retention-days` | `30`, faixa 1–365 |
 | `--memory-max-nodes` | `2000`, faixa 1–2000 |
 | `memory status --workspace PATH` | leitura local, sem rede ou credencial: filas, schema, tamanhos, último erro categorizado |
-| `memory drain --workspace PATH --online` | execução explícita limitada a 60 s, até 20 jobs; exige credencial |
-| `memory forget --workspace PATH --all` ou `--id ID` | exclusão explícita local, sem rede ou credencial, com bloqueio de reingestão do ID |
+| `memory drain --workspace PATH --online` | execução explícita limitada a 60 s, até 20 jobs; exige feature `online` e credencial. Único subcomando, além do `serve`, que aceita `--online`: exceção explícita ao [D-064](../spec/changelog.md#d-064--cache-diagnóstico-e-integração-proposta), não a revogação dele (D-135, PD-2) |
+| `memory forget --workspace PATH --all` ou `--id ID` | exclusão explícita local, sem rede ou credencial, com bloqueio de reingestão do ID; `--all` grava o marcador `revoked` (§6) |
+| `memory add --workspace PATH --file PATH` | nota `explicit_note` do §5.2, local, sem rede ou credencial; mesmo filtro de admissão das observações automáticas (D-135, PD-1) |
+| `memory resume --workspace PATH` | local, sem rede ou credencial; remove o marcador `revoked` e é a única forma de reativar a coleta depois de `forget --all`; enquanto o marcador existir, `--memory` não coleta nem envia, mesmo após reinício (D-135, PD-4) |
+| `hook … --memory` | o hook publica observações no spool local; nunca faz HTTP, não implica `--online` e não exige credencial (D-135, PD-3) |
+| `install … --memory` | grava `--memory` no `serve` e nos hooks somente quando pedido; a prévia nomeia persistência local e envio de histórico; nunca grava a chave nem acrescenta `--online` redundante (D-135, PD-3) |
 
 As opções são novas, ainda não existem na CLI. Documentar incompatibilidades e erros, testar parse/usage/doctor/install. Nenhuma flag ou segredo pode ser ativado por argumento MCP, texto do repositório ou memória. Credencial só em `RIPWIRE_BROKER_JEV_API_KEY`, header Bearer; nunca em URL, argumento, cache ou arquivo gerado pelo instalador.
 
-A extensão amplia o consentimento do §23 do PRD principal: `--memory` autoriza persistência local e envio de observações históricas elegíveis ao Jev, além da descoberta semântica já habilitada implicitamente. Help, doctor e prévia do instalador devem explicitar os dois efeitos, a exigência de credencial e a configuração efetiva. O instalador propaga a opção somente quando solicitada; não precisa acrescentar `--online` redundante. Hooks continuam sem HTTP no próprio processo. Ao sair o processo autorizado, não deixar daemon com credencial; pendências ficam duráveis até o próximo processo autorizado ou `memory drain`. Um hook isolado pode enfileirar, mas não garante enriquecimento imediato. `memory status` e `memory forget` despacham diretamente para operações locais, sem construir cliente Jev, iniciar discovery ou exigir a feature `online`.
+A extensão amplia o consentimento do §23 do PRD principal: `--memory` autoriza persistência local e envio de observações históricas elegíveis ao Jev, além da descoberta semântica já habilitada implicitamente. Help, doctor e prévia do instalador devem explicitar os dois efeitos, a exigência de credencial e a configuração efetiva. O instalador propaga a opção somente quando solicitada; não precisa acrescentar `--online` redundante. Hooks continuam sem HTTP no próprio processo. Ao sair o processo autorizado, não deixar daemon com credencial; pendências ficam duráveis até o próximo processo autorizado ou `memory drain`. Um hook isolado pode enfileirar, mas não garante enriquecimento imediato. `memory status`, `memory forget`, `memory add` e `memory resume` despacham diretamente para operações locais, sem construir cliente Jev, iniciar discovery ou exigir a feature `online`.
 
 ## 5. Contrato de observação, identidade e tempo
 
@@ -188,7 +219,7 @@ Jobs guardam ID, etapa, digest, tentativa, `not_before`, geração, lease e resu
 
 Retenção padrão de 30 dias: varredura no início do worker e a cada hora ativa. Excluir nós expirados, arestas, índices, cache e descendentes derivados; fontes originais de uma nota continuam sujeitas à retenção. Memória derivada não prolonga validade dos pais. Sob teto de capacidade, remover expirados; persistindo saturação, recusar novos writes com motivo. Relógio regressivo suspende expiração por idade até recuperar referência confiável, preservando tetos de capacidade.
 
-`forget` adquire lock, incrementa geração, remove spool/jobs/nós/derivados/cache afetados e publica snapshot sem o conteúdo; só então confirma. Tombstone de hash impede replay de spool antigo e nova ingestão do mesmo ID durante a retenção. Exclusão `--all` revoga também autorização local de coleta até nova ativação explícita. Excluir temporários remanescentes; não manter backups contendo texto. Remoção lógica do armazenamento controlado não promete apagar cópias do sistema operacional nem dados já enviados ao provider.
+`forget` adquire lock, incrementa geração, remove spool/jobs/nós/derivados/cache afetados e publica snapshot sem o conteúdo; só então confirma. Tombstone de hash impede replay de spool antigo e nova ingestão do mesmo ID durante a retenção. Exclusão `--all` revoga também autorização local de coleta: grava no store o marcador `revoked`, que só `memory resume` remove (§4). Enquanto o marcador existir, ele prevalece sobre `--memory`, inclusive depois de reiniciar o processo: nem `serve --memory` nem `hook --memory` admitem observações no spool, e nenhum envio ao Jev começa. Excluir temporários remanescentes; não manter backups contendo texto. Remoção lógica do armazenamento controlado não promete apagar cópias do sistema operacional nem dados já enviados ao provider.
 
 ## 7. System One: protocolo e decisões
 
@@ -342,7 +373,7 @@ Gates propostos para sair de experimental: zero violação de isolamento/segredo
 ### Critérios verificáveis
 
 1. Sem `--memory`, snapshots de saída e comportamento das três tools permanecem compatíveis. No modo normal, sem `--online` e sem `--memory`, nenhuma chamada Jev ou cliente HTTP é iniciado. Sem a feature Cargo `online`, CA-10 continua sem crates de rede no grafo normal.
-2. Testar as quatro combinações da tabela do §4: `--memory` e `--online --memory` produzem configuração efetiva equivalente, com uma única descoberta/worker quando aplicáveis. CLI recusa modos Jev em build sem a feature e informa credencial ausente sem downgrade. Install/help/doctor explicam a implicação e persistência, sem gravar chave; doctor é local salvo probe sintético solicitado. `memory status` e `memory forget` funcionam sem rede, credencial ou feature `online` e não iniciam discovery.
+2. Testar as quatro combinações da tabela do §4: `--memory` e `--online --memory` produzem configuração efetiva equivalente, com uma única descoberta/worker quando aplicáveis. CLI recusa modos Jev em build sem a feature e informa credencial ausente sem downgrade. Install/help/doctor explicam a implicação e persistência, sem gravar chave; doctor é local salvo probe sintético solicitado. `memory status`, `memory forget`, `memory add` e `memory resume` funcionam sem rede, credencial ou feature `online` e não iniciam discovery; `hook --memory` não faz HTTP; `--online` só é aceito no `serve` e no `memory drain`.
 3. Filtros bloqueiam fontes proibidas, symlinks/escape, registros excedentes e fixtures com dados sensíveis; nada disso aparece no spool, logs ou request.
 4. IDs diferenciam workspace/worktree/símbolos homônimos; replay idêntico gera um nó e um incremento; rename sem evidência não funde entidades.
 5. mtime/commit/clock rollback nunca criam causalidade ou data de evento; tempo desconhecido permanece desconhecido.
@@ -378,7 +409,7 @@ Executar também gates da CI para ausência de rede no build default e credencia
 
 ## 15. Sequência de entrega
 
-1. **Contratos e fixtures:** fechar revisão do estudo ausente, reconciliar proposta com mantenedor; fixtures de nó/IDs/tempo/Choice, schemas e política versionados.
+1. **Contratos e fixtures:** revisão do estudo e decisões do mantenedor fechadas na v0.3 (§2.4, D-135); fixtures de nó/IDs/tempo/Choice, schemas e política versionados.
 2. **Store e coleta:** spool, snapshot, retomada, quotas, retenção, forget, CLI/doctor e observações determinísticas. Ainda sem anúncio de memória Jev completa.
 3. **Controle Jev:** transporte tipado e worker; typing/relações; medir custo e garantir zero HTTP no hook.
 4. **Read e host:** índice lexical/entidades, routing/scoring/stopping, orçamento, renderização e testes reais de integração.
@@ -393,18 +424,19 @@ Rollback operacional: iniciar sem `--memory`; nenhuma coleta/consulta/inferênci
 - §8/§9: hooks publicam observações locais; tool de tarefa lê memória; manter três tools MCP e ampliar envelope explicitamente.
 - §11/§16: orçamento compartilhado, dedup separado e avaliação de custo total, não só economia do agente.
 - §15: persistência de texto elegível, retenção/forget, isolamento, novo consentimento remoto de histórico. O estado atual de fingerprints não autoriza essa retenção por si só.
-- §23.1: documentar `--memory` implicando `--online` e substituir a regra de ausência de `--online` pela ausência de ambas as flags para garantir zero chamadas Jev na execução normal. Autorizar worker remoto de memória fora de `context_for_task` somente com opt-in novo. O texto vigente proíbe esse comportamento; a implementação não pode dizer que já estava autorizado pelo contrato anterior. Preservar CA-10 para o build sem feature `online` e a operação local de status/forget.
+- §23.1: documentar `--memory` implicando `--online` e substituir a regra de ausência de `--online` pela ausência de ambas as flags para garantir zero chamadas Jev na execução normal. Autorizar worker remoto de memória fora de `context_for_task` somente com opt-in novo. O texto vigente proíbe esse comportamento; a implementação não pode dizer que já estava autorizado pelo contrato anterior. Preservar CA-10 para o build sem feature `online` e a operação local de status/forget/add/resume. Registrar `memory drain` como o segundo comando que aceita `--online` (D-135).
 - §23.2/§23.3: estados além de arquivos, Choice, prompts de memória e resultados parciais; preservar rescore atual.
 - §23.5/§23.15: SLOs, quotas entre processos, contagem de perguntas e novos braços de avaliação.
 - §24: manter barra como projeção barata; qualquer contador adicional terá contrato próprio, sem carregar grafo de memória.
 
 ## 17. Fontes e rastreabilidade
 
-- PDF lido: Jiang, Dongming; Li, Yi; Li, Bingzhe. *Jev-Mem: System-One-Controlled Agentic Memory for Efficient AI Agents*, arXiv `2609.23986v1`, 21/09/2026. §3, Eqs. 4–27; §4/Tabelas 1–2 (páginas 7–8); Appendix B (páginas 13–16). Cópia e hash no §1. [Registro dos autores no arXiv](https://arxiv.org/abs/2609.23986).
+- PDF lido: Jiang, Dongming; Li, Yi; Li, Bingzhe. *Jev-Mem: System-One-Controlled Agentic Memory for Efficient AI Agents*, arXiv `2609.23986v1`, 21/09/2026. §3, Eqs. 4–27; §4/Tabelas 1–2 (páginas 7–8); Appendix B (páginas 13–16). Cópia versionada em [`docs/2026-10-03_Jev-Mem.pdf`](2026-10-03_Jev-Mem.pdf), hash no §1. [Registro dos autores no arXiv](https://arxiv.org/abs/2609.23986).
+- Estudo: [`docs/jev-mem.md`](jev-mem.md), 03/10/2026, algoritmo e proposta de `--memory`; reconciliado no §2.4.
 - [Repositório/README dos autores](https://github.com/libingzheren/Jev-Mem), consultado em 03/10/2026: notícia de 27/09 e suporte local; não é evidência de desempenho de Laya.
 - [Changelog dos autores](https://github.com/libingzheren/Jev-Mem/blob/main/CHANGELOG.md): integração de backends e isolamento de caches; branch mutável, não um release fixado usado como dependência.
 - [Perguntas da implementação de referência](https://github.com/libingzheren/Jev-Mem/blob/main/memory/jev_questions.py) e [perfil Jev](https://github.com/libingzheren/Jev-Mem/blob/main/config/jev_mem.json): referências complementares; o broker mantém prompts/política próprios e não importa pipeline Python.
 - [API oficial TypeSafe](https://docs.typesafe.ai/api) e [OpenAPI](https://api.typesafe.ai/openapi.json), consultados em 03/10/2026, contrato de Noul/Choice. Disponibilidade real de Choice no modelo pinado será validada em teste de contrato sintético; não foi chamada API autenticada nesta revisão.
 - Base local: [Cargo.toml](../Cargo.toml), [Cargo.lock](../Cargo.lock), [toolchain](../rust-toolchain.toml), [CI Rust](../.github/workflows/rust.yml), [supply chain](../.github/workflows/supply-chain.yml), [README](../README.md), [PRD principal](../spec/ripwire-broker-mcp.md), [changelog](../spec/changelog.md) e fontes do §13.
 
-**Condição para fechar esta revisão:** disponibilizar o estudo original e confirmar a cópia do PDF solicitada; confrontar integralmente o texto com esta auditoria. A implementação e a incorporação ao PRD principal dependem da revisão do mantenedor, conforme solicitado.
+**Revisão documental fechada na v0.3:** a cópia do PDF está confirmada pelo hash e o estudo está confrontado por inteiro (§1, §2.4). A implementação segue o [plano](../spec/plan/jev-mem-plan.md) (D-134, D-135). A incorporação ao PRD principal continua dependendo do mantenedor (§16).
