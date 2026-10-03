@@ -750,3 +750,247 @@ async fn an_edge_to_a_candidate_forgotten_meanwhile_is_dropped() {
         "nothing points at a forgotten node"
     );
 }
+
+// ---------------------------------------------------------------- provider failures (PRD jev-mem §8.2, §12; T2.9)
+
+use ripwire_broker::memory::controller::Worker;
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+/// Fails as scripted, one entry per request, then answers every Noul with 0.1.
+struct Scripted {
+    script: Mutex<VecDeque<Option<ClassifyError>>>,
+    seen: Mutex<Vec<StateRequest>>,
+    hang: bool,
+}
+
+impl Scripted {
+    fn new(script: Vec<Option<ClassifyError>>) -> Arc<Self> {
+        Arc::new(Scripted {
+            script: Mutex::new(script.into()),
+            seen: Mutex::default(),
+            hang: false,
+        })
+    }
+    fn sent(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl MemoryClassifier for Scripted {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        self.seen.lock().unwrap().push(req.clone());
+        if self.hang {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+        if let Some(Some(e)) = self.script.lock().unwrap().pop_front() {
+            return Err(e);
+        }
+        Ok(req.questions.0.iter().map(|_| noul(0.1)).collect())
+    }
+}
+
+fn worker(store: &Arc<Store>, classifier: Arc<dyn MemoryClassifier>) -> Worker {
+    Worker::new(store.clone(), classifier, config(4))
+}
+
+#[tokio::test]
+async fn auth_failures_suspend_the_worker_until_reauthorized() {
+    for status in [401, 403] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+        let fake = Scripted::new(vec![Some(ClassifyError::Auth(status))]);
+        let w = worker(&store, fake.clone());
+        let ran = w.run_once(1_000).await.unwrap().expect("one job");
+        assert_eq!(ran.state, EnrichmentState::Failed);
+        assert!(w.is_suspended(), "{status}");
+        assert!(
+            w.run_once(1_000_000).await.unwrap().is_none(),
+            "{status}: nothing more is sent"
+        );
+        assert_eq!(fake.sent(), 1, "{status}: never retried");
+        w.reauthorize();
+        assert!(
+            w.run_once(1_000_000).await.unwrap().is_some(),
+            "{status}: a new credential resumes"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_429_waits_only_inside_the_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+    let fake = Scripted::new(vec![Some(ClassifyError::RateLimited {
+        retry_after: Some("2".into()),
+    })]);
+    let started = tokio::time::Instant::now();
+    let ran = worker(&store, fake.clone())
+        .run_once(1_000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ran.state,
+        EnrichmentState::Complete,
+        "waited 2 s, inside the 5 s budget, and retried"
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+    assert_eq!(fake.sent(), 2);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+    let fake = Scripted::new(vec![Some(ClassifyError::RateLimited {
+        retry_after: Some("30".into()),
+    })]);
+    let started = tokio::time::Instant::now();
+    let ran = worker(&store, fake.clone())
+        .run_once(1_000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ran.state, EnrichmentState::Failed);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "no wait past the budget"
+    );
+    assert_eq!(fake.sent(), 1);
+    let job = &store.load().unwrap().jobs[&id(1)];
+    assert_eq!(
+        job.not_before_ms,
+        1_000 + 30_000,
+        "the provider's cooldown is kept for the next run"
+    );
+
+    // A second 429 inside the budget is not waited for again.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+    let twice = ClassifyError::RateLimited {
+        retry_after: Some("1".into()),
+    };
+    let fake = Scripted::new(vec![Some(twice.clone()), Some(twice)]);
+    let ran = worker(&store, fake.clone())
+        .run_once(1_000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (ran.state, fake.sent()),
+        (EnrichmentState::Failed, 2),
+        "one wait at most"
+    );
+}
+
+#[tokio::test]
+async fn a_5xx_is_retried_once_inside_the_four_attempts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+    let fake = Scripted::new(vec![Some(ClassifyError::Server(503))]);
+    let ran = worker(&store, fake.clone())
+        .run_once(1_000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (ran.state, fake.sent()),
+        (EnrichmentState::Complete, 2),
+        "one retry"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+    let fake = Scripted::new(vec![
+        Some(ClassifyError::Server(503)),
+        Some(ClassifyError::Server(502)),
+    ]);
+    let ran = worker(&store, fake.clone())
+        .run_once(1_000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (ran.state, fake.sent()),
+        (EnrichmentState::Failed, 2),
+        "never a second retry"
+    );
+
+    // Every request failing, with candidates: four attempts in all for the job.
+    let dir = tempfile::tempdir().unwrap();
+    let records: Vec<Record> = (1..=12).map(|n| rec(n, "cache layer", &["e"])).collect();
+    let store = Arc::new(stored(dir.path(), &records));
+    let mut script = vec![None];
+    script.extend(vec![Some(ClassifyError::Timeout); 40]);
+    let fake = Scripted::new(script);
+    let w = Worker::new(store.clone(), fake.clone(), config(10));
+    for _ in 1..=11 {
+        let l = store.lease_next(0).unwrap().unwrap();
+        store
+            .finish(l, ripwire_broker::memory::queue::Outcome::Done)
+            .unwrap();
+    }
+    let _ = w.run_once(1_000).await.unwrap();
+    assert!(fake.sent() <= 4, "{} attempts", fake.sent());
+}
+
+#[tokio::test]
+async fn cancellation_stops_http_and_leaves_the_job_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+    let fake = Arc::new(Scripted {
+        script: Mutex::default(),
+        seen: Mutex::default(),
+        hang: true,
+    });
+    let w = worker(&store, fake.clone());
+    let cut = tokio::time::timeout(std::time::Duration::from_millis(100), w.run_once(1_000)).await;
+    assert!(cut.is_err(), "cancelled while the request was in flight");
+    assert_eq!(
+        store.load().unwrap().nodes[&id(1)].enrichment.state,
+        EnrichmentState::Pending
+    );
+    let again = store
+        .lease_next(1_000)
+        .unwrap()
+        .expect("the job is free for the next run");
+    assert_eq!(again.run(), 2);
+}
+
+#[tokio::test]
+async fn no_model_swap_and_no_silent_heuristic_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(
+        dir.path(),
+        &[rec(1, "cache layer", &["e"]), rec(2, "cache layer", &["e"])],
+    ));
+    let fake = Scripted::new(vec![
+        Some(ClassifyError::Network),
+        Some(ClassifyError::Network),
+    ]);
+    let ran = worker(&store, fake.clone())
+        .run_once(1_000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ran.state, EnrichmentState::Failed);
+    assert!(
+        fake.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.model == "jev-1.13.0"),
+        "never another model"
+    );
+    let s = store.load().unwrap();
+    let node = s
+        .nodes
+        .values()
+        .find(|n| n.enrichment.state == EnrichmentState::Failed)
+        .unwrap();
+    assert_eq!(node.types.episodic, None, "nothing guessed in its place");
+    assert!(
+        s.edges
+            .values()
+            .all(|e| e.basis == EdgeBasis::Deterministic)
+    );
+}

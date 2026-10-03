@@ -8,7 +8,7 @@ use super::prompts::{self, Stage};
 use super::queue::{Lease, Outcome};
 use super::store::{Refusal, State, Store};
 use super::wire::{self, Group};
-use crate::online::classifier::MemoryClassifier;
+use crate::online::classifier::{ClassifyError, MemoryClassifier};
 use crate::online::request::StateRequest;
 use crate::online::response::Decision;
 use serde_json::{Value, json};
@@ -33,6 +33,8 @@ pub struct Enriched {
     pub state: EnrichmentState,
     pub requests: usize,
     pub edges: usize,
+    /// The provider refused the credential (401/403).
+    pub auth_failed: bool,
 }
 
 fn tokens(text: &str) -> BTreeSet<String> {
@@ -202,6 +204,75 @@ fn pair_questions(
         .collect()
 }
 
+/// Classifier attempts per job, retries and splits included (PRD jev-mem §8.2).
+pub const MAX_ATTEMPTS: u32 = 4;
+/// The run's deadline; a 429 only waits inside it.
+pub const RUN_DEADLINE: std::time::Duration = std::time::Duration::from_millis(5_000);
+
+/// Why a request got no decisions.
+enum Failure {
+    /// 401/403: the worker stops until reauthorized.
+    Auth,
+    /// A 429 whose wait does not fit the run: try again no sooner than this many ms.
+    Cooldown(u64),
+    /// Out of attempts, of quota, or a failure not worth retrying.
+    GaveUp,
+}
+
+struct Budget {
+    attempts_left: u32,
+    deadline: tokio::time::Instant,
+    sent: usize,
+}
+
+/// One request, with at most one retry: for a transient failure, or a 429 whose wait fits the
+/// run. Every attempt is charged to the 24-hour quota first.
+async fn send(
+    store: &Store,
+    classifier: &dyn MemoryClassifier,
+    req: &StateRequest,
+    now_ms: u64,
+    budget: &mut Budget,
+) -> Result<Vec<Decision>, Failure> {
+    let mut retried = false;
+    loop {
+        if budget.attempts_left == 0 {
+            return Err(Failure::GaveUp);
+        }
+        if store
+            .charge(now_ms, 1, req.questions.0.len() as u32)
+            .is_err()
+        {
+            return Err(Failure::GaveUp);
+        }
+        budget.attempts_left -= 1;
+        budget.sent += 1;
+        let error = match classifier.decide(req).await {
+            Ok(d) => return Ok(d),
+            Err(e) => e,
+        };
+        match error {
+            ClassifyError::Auth(_) => return Err(Failure::Auth),
+            ClassifyError::RateLimited { retry_after } => {
+                let wait = retry_after
+                    .as_deref()
+                    .and_then(|v| {
+                        crate::online::retry_after::parse(v, std::time::SystemTime::now())
+                    })
+                    .unwrap_or(RUN_DEADLINE);
+                let fits = tokio::time::Instant::now() + wait <= budget.deadline;
+                if retried || budget.attempts_left == 0 || !fits {
+                    return Err(Failure::Cooldown(wait.as_millis() as u64));
+                }
+                tokio::time::sleep(wait).await;
+            }
+            e if e.is_transient() && !retried && budget.attempts_left > 0 => {}
+            _ => return Err(Failure::GaveUp),
+        }
+        retried = true;
+    }
+}
+
 /// One run of `lease`'s job. Errors are the store's; a provider failure is an outcome.
 pub async fn enrich(
     store: &Store,
@@ -217,12 +288,17 @@ pub async fn enrich(
             state: EnrichmentState::Complete,
             requests: 0,
             edges: 0,
+            auth_failed: false,
         });
     };
-    let mut requests = 0;
+    let mut budget = Budget {
+        attempts_left: MAX_ATTEMPTS,
+        deadline: tokio::time::Instant::now() + RUN_DEADLINE,
+        sent: 0,
+    };
     let mut partial = false;
 
-    // Typing: four Nouls on the observation alone.
+    // Typing: four Nouls on the observation alone. Without it the run failed.
     let typing = StateRequest::new(
         &cfg.model,
         json!({"observation": node.content}),
@@ -231,9 +307,7 @@ pub async fn enrich(
             .map(|(_, q)| q)
             .collect(),
     );
-    store.charge(now_ms, 1, typing.questions.0.len() as u32)?;
-    requests += 1;
-    let types = match classifier.decide(&typing).await {
+    let types = match send(store, classifier, &typing, now_ms, &mut budget).await {
         Ok(d) => {
             partial |= d.iter().any(|d| d.probability().is_none());
             let p = |i: usize| d.get(i).and_then(Decision::probability);
@@ -244,7 +318,12 @@ pub async fn enrich(
                 preference: p(3),
             }
         }
-        Err(_) => {
+        Err(failure) => {
+            let (wait, auth_failed) = match failure {
+                Failure::Auth => (RETRY_AFTER_MS, true),
+                Failure::Cooldown(ms) => (ms, false),
+                Failure::GaveUp => (RETRY_AFTER_MS, false),
+            };
             store.commit_enrichment(
                 &node.node_id,
                 node.generation,
@@ -255,13 +334,14 @@ pub async fn enrich(
             store.finish(
                 lease,
                 Outcome::Retry {
-                    not_before_ms: now_ms + RETRY_AFTER_MS,
+                    not_before_ms: now_ms + wait,
                 },
             )?;
             return Ok(Enriched {
                 state: EnrichmentState::Failed,
-                requests,
+                requests: budget.sent,
                 edges: 0,
+                auth_failed,
             });
         }
     };
@@ -281,8 +361,13 @@ pub async fn enrich(
         .collect();
     let base = json!({"new_memory": item(&node)});
     let mut answers: Vec<BTreeMap<&str, Decision>> = vec![BTreeMap::new(); chosen.len()];
+    let mut auth_failed = false;
     let batches = wire::batches(&cfg.model, &base, "candidates", groups).unwrap_or_default();
     for batch in batches {
+        if auth_failed {
+            partial = true;
+            break;
+        }
         // Within a request, a pair is `candidates[local]`: ask again with that index.
         let order: Vec<usize> = batch.keys.iter().map(|(g, _)| *g).fold(vec![], |mut v, g| {
             if v.last() != Some(&g) {
@@ -297,16 +382,14 @@ pub async fn enrich(
             .map(|(_, q)| q)
             .collect();
         let req = StateRequest::new(&cfg.model, batch.request.state.clone(), questions);
-        store.charge(now_ms, 1, req.questions.0.len() as u32)?;
-        requests += 1;
-        match classifier.decide(&req).await {
+        match send(store, classifier, &req, now_ms, &mut budget).await {
             Ok(decisions) => {
                 for ((g, name), d) in batch.keys.iter().zip(decisions) {
                     partial |= d.probability().is_none();
-                    let name: &'static str = prompts::name_of(name);
-                    answers[*g].insert(name, d);
+                    answers[*g].insert(prompts::name_of(name), d);
                 }
             }
+            Err(Failure::Auth) => auth_failed = true,
             Err(_) => partial = true,
         }
     }
@@ -316,7 +399,7 @@ pub async fn enrich(
         .flat_map(|(c, a)| pair_edges(&node, c, a, cfg))
         .collect();
     let count = edges.len();
-    let outcome = match partial {
+    let outcome = match partial || auth_failed {
         true => EnrichmentState::Partial,
         false => EnrichmentState::Complete,
     };
@@ -324,7 +407,57 @@ pub async fn enrich(
     store.finish(lease, Outcome::Done)?;
     Ok(Enriched {
         state: outcome,
-        requests,
+        requests: budget.sent,
         edges: count,
+        auth_failed,
     })
+}
+
+/// The process's memory worker (PRD jev-mem §8.1): one job at a time, and nothing more sent
+/// after the provider refused the credential, until `reauthorize` (a new process is one).
+pub struct Worker {
+    store: std::sync::Arc<Store>,
+    classifier: std::sync::Arc<dyn MemoryClassifier>,
+    cfg: Config,
+    suspended: std::sync::atomic::AtomicBool,
+}
+
+impl Worker {
+    pub fn new(
+        store: std::sync::Arc<Store>,
+        classifier: std::sync::Arc<dyn MemoryClassifier>,
+        cfg: Config,
+    ) -> Self {
+        Self {
+            store,
+            classifier,
+            cfg,
+            suspended: Default::default(),
+        }
+    }
+
+    /// Runs the next ready job; `None` when there is none or the worker is suspended.
+    pub async fn run_once(&self, now_ms: u64) -> Result<Option<Enriched>, Refusal> {
+        if self.is_suspended() {
+            return Ok(None);
+        }
+        let Some(lease) = self.store.lease_next(now_ms)? else {
+            return Ok(None);
+        };
+        let ran = enrich(&self.store, &*self.classifier, lease, &self.cfg, now_ms).await?;
+        if ran.auth_failed {
+            self.suspended
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(Some(ran))
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn reauthorize(&self) {
+        self.suspended
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
