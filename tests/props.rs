@@ -1006,3 +1006,39 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// The anchors depend on the snapshot's contents only, never on the order nodes arrived in.
+    #[test]
+    fn ranking_is_a_pure_function_of_the_snapshot(
+        words in prop::collection::vec(prop::sample::select(vec!["cache", "router", "eviction", "src", "table"]), 1..6),
+        nodes in prop::collection::vec(prop::collection::vec(prop::sample::select(vec!["cache", "router", "eviction", "src", "table", "x"]), 0..5), 1..10),
+        seed in any::<u64>(),
+    ) {
+        use ripwire_broker::memory::{index, model::Record, store::State};
+        let rec = |n: usize, content: String| -> Record {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "policy_version": "memory-policy/v1",
+                "node_id": format!("{n:064}"), "content_hash": format!("{n:064}"),
+                "workspace_id": "w", "event_key": "e", "kind": "edit_observation", "content": content,
+                "observed_at_ms": 1, "ingest_seq": n, "timestamp_role": "observation",
+                "expires_at_ms": 9, "generation": 1
+            })).unwrap()
+        };
+        let records: Vec<Record> = nodes.iter().enumerate().map(|(n, w)| rec(n, w.join(" "))).collect();
+        let build = |order: &[usize]| {
+            let mut s = State::default();
+            for &i in order {
+                s.nodes.insert(records[i].node_id.clone(), records[i].clone());
+            }
+            s
+        };
+        let forward: Vec<usize> = (0..records.len()).collect();
+        let mut shuffled = forward.clone();
+        shuffled.rotate_left((seed as usize) % records.len());
+        let query = words.join(" ");
+        prop_assert_eq!(index::anchors(&build(&forward), &query), index::anchors(&build(&shuffled), &query));
+    }
+}
