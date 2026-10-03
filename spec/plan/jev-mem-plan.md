@@ -1,7 +1,8 @@
 # Memória persistente com Jev (`--memory`) — Plano de implementação
 
-**Data:** 2026-10-03 · **Status:** plano validado contra o código; Fase 0 feita
-([D-136](../changelog.md#d-136--fase-0-do---memory-prd-jev-mem-v03)), **nenhum código implementado**.
+**Data:** 2026-10-03 · **Status:** plano validado contra o código; Fases 0 e 1 feitas
+([D-136](../changelog.md#d-136--fase-0-do---memory-prd-jev-mem-v03),
+[D-137](../changelog.md#d-137--fase-1-do---memory-store-e-coleta)); Fase 2 em diante não começada.
 **Spec:** [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) v0.3. Onde este plano diz "PRD §N", é esse documento;
 "PRD principal" é [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md). "CA-N" é o critério
 verificável N do PRD §14.
@@ -178,7 +179,7 @@ valem para todas.
 
 Ainda sem anunciar memória Jev: só coleta, persistência e comandos locais.
 
-- [ ] **T1.1 · `--memory` no parse, implicando online.** CA-2.
+- [x] **T1.1 · `--memory` no parse, implicando online.** CA-2.
   **Vermelho:** `tests/cli.rs::memory_implies_online_and_both_flags_are_equivalent`: as quatro
   combinações do PRD §4; `--memory` e `--online --memory` produzem `ServeArgs` iguais, com
   `online: Some(..)` e `memory: Some(..)`; a origem do online é `Implied` ou `Explicit`; sem
@@ -208,26 +209,26 @@ Ainda sem anunciar memória Jev: só coleta, persistência e comandos locais.
   }
   ```
 
-- [ ] **T1.2 · Faixas das opções `--memory-*`.** CA-2.
+- [x] **T1.2 · Faixas das opções `--memory-*`.** CA-2.
   **Vermelho:** `tests/cli.rs::memory_options_have_defaults_and_refuse_values_out_of_range`:
   defaults 750 / 4 / 4 / 30 / 2000; recusa `--memory-read-deadline-ms 751`, `…-request-limit 5`,
   `…-write-candidates 11`, `…-retention-days 0` e `366`, `…-max-nodes 2001`; aceita
   `…-request-limit 0`; `--memory-*` sem `--memory` é erro de uso; `hook`, `prompt` e `doctor`
   recusam as opções.
   **Verde:** leitura e validação em `Flags`. **Docs:** `USAGE`, README (tabela de flags).
-- [ ] **T1.3 · Sem a feature, `--memory` falha claro; sem credencial, não há downgrade.** CA-2.
+- [x] **T1.3 · Sem a feature, `--memory` falha claro; sem credencial, não há downgrade.** CA-2.
   **Vermelho:** `tests/cli.rs::a_build_without_the_online_feature_refuses_memory_clearly`
   (`cfg(not(feature = "online"))`, código 2, stdout vazio) e
   `memory_without_a_credential_fails_before_publishing_mcp` (`cfg(feature = "online")`).
   **Verde:** `settings` em `src/main.rs` valida a configuração efetiva antes de subir o upstream;
   a mensagem nomeia `--memory`. **Docs:** README.
-- [ ] **T1.4 · Registro `memory/v1` e seus limites.** CA-3.
+- [x] **T1.4 · Registro `memory/v1` e seus limites.** CA-3.
   **Vermelho:** `tests/memory_policy.rs::a_record_round_trips_and_an_oversized_one_is_refused_whole`:
   ida e volta por JSON; `content` com 2.001 bytes, 17 entidades, 17 fontes, 9 referências
   temporais ou registro serializado acima de 16 KiB devolvem `Rejected(reason)` sem truncar;
   `types` ausentes são `None`, nunca `0.0`.
   **Verde:** `src/memory/model.rs`, `pub mod memory` em `src/lib.rs`. **Docs:** PRD §5.1 confere.
-- [ ] **T1.5 · Identidade: workspace, entidades, hashes.** CA-4.
+- [x] **T1.5 · Identidade: workspace, entidades, hashes.** CA-4.
   **Vermelho:** `tests/memory_identity.rs`: `two_worktrees_of_one_repository_have_different_workspace_ids`
   (repositório real com `git worktree add`, via `common::sample_repo`);
   `homonymous_symbols_in_different_files_never_share_an_entity`;
@@ -237,14 +238,14 @@ Ainda sem anunciar memória Jev: só coleta, persistência e comandos locais.
   componente: `("ab","c")` ≠ `("a","bc")`).
   **Verde:** `src/memory/identity.rs`, reutilizando `Workspace` e `sha2`.
   **Docs:** — (contrato já no PRD §5.3).
-- [ ] **T1.6 · Tempo: papel explícito, nada inferido.** CA-5.
+- [x] **T1.6 · Tempo: papel explícito, nada inferido.** CA-5.
   **Vermelho:** `tests/memory_identity.rs::mtime_commit_and_a_clock_rollback_never_become_event_time`:
   observação automática tem `timestamp_role = observation` e `event_time = None`; mudar o mtime
   do arquivo ou a data do commit não muda o registro; com o relógio regredido, `ingest_seq`
   continua crescendo e nenhuma duração negativa aparece. Em `props`:
   `ingest_sequence_is_strictly_monotonic`.
   **Verde:** relógio injetável no store; sequência persistida. **Docs:** —.
-- [ ] **T1.7 · Admissão e renderizador `memory-observation/v1`.** CA-3.
+- [x] **T1.7 · Admissão e renderizador `memory-observation/v1`.** CA-3.
   **Vermelho:** `tests/memory_policy.rs`: `forbidden_sources_never_reach_the_spool` (`.env`,
   arquivo ignorado, binário, symlink para fora, `../` — os valores com cara de segredo são
   montados **no teste**, V12); `a_secret_or_pii_shaped_value_rejects_the_whole_record_and_is_only_counted`;
@@ -253,7 +254,7 @@ Ainda sem anunciar memória Jev: só coleta, persistência e comandos locais.
   `no_generated_path_escapes_the_workspace_into_a_record`.
   **Verde:** `src/memory/admission.rs` sobre `online::reader::WorkspaceReader` e
   `online::redact`. **Docs:** README (o que nunca é guardado).
-- [ ] **T1.8 · Store: escrita durável, permissões, leitura segura.** CA-7.
+- [x] **T1.8 · Store: escrita durável, permissões, leitura segura.** CA-7.
   **Vermelho:** `tests/memory_store.rs`: `the_store_is_private_and_lives_outside_the_repository`
   (0700/0600, sob `<state-dir>/memory/<workspace_id>/`); `a_symlink_or_a_foreign_owner_reads_as_unavailable`;
   `an_unknown_schema_or_a_corrupt_snapshot_is_never_overwritten` (bytes do arquivo iguais depois
@@ -261,7 +262,7 @@ Ainda sem anunciar memória Jev: só coleta, persistência e comandos locais.
   publicações).
   **Verde:** `src/memory/store.rs`: temporário privado, `sync_all`, `rename`, `sync` do diretório
   (V9); abertura com `O_NOFOLLOW | O_NONBLOCK`. **Docs:** —.
-- [ ] **T1.9 · Spool → snapshot, idempotente, com tetos.** CA-4, CA-7.
+- [x] **T1.9 · Spool → snapshot, idempotente, com tetos.** CA-4, CA-7.
   **Vermelho:** `tests/memory_store.rs`: `replaying_the_same_observation_yields_one_node_and_one_increment`;
   `a_crash_between_commit_and_spool_removal_does_not_duplicate` (falha injetada em cada passo:
   antes do rename, depois do rename, antes de remover o spool); `a_full_store_refuses_new_writes_with_a_reason`
@@ -269,29 +270,29 @@ Ainda sem anunciar memória Jev: só coleta, persistência e comandos locais.
   `a_second_writer_does_not_wait_and_reports_the_lock`. Em `props_fs`: `replay_is_idempotent`.
   **Verde:** ingestão numa geração nova, lock de arquivo por workspace, limites.
   **Docs:** —.
-- [ ] **T1.10 · Retenção e relógio regressivo.** CA-11.
+- [x] **T1.10 · Retenção e relógio regressivo.** CA-11.
   **Vermelho:** `tests/memory_store.rs`: `expired_nodes_take_their_edges_jobs_and_derived_notes_with_them`;
   `a_derived_note_never_outlives_its_parents`; `a_clock_rollback_suspends_expiry_by_age_but_keeps_the_caps`.
   **Verde:** varredura no início do worker e a cada hora ativa. **Docs:** README (retenção).
-- [ ] **T1.11 · `forget` e a não ressurreição.** CA-7, CA-11.
+- [x] **T1.11 · `forget` e a não ressurreição.** CA-7, CA-11.
   **Vermelho:** `tests/memory_store.rs`: `forget_by_id_removes_the_node_its_descendants_and_blocks_reingestion`;
   `an_old_spool_entry_cannot_resurrect_a_forgotten_node`; `forget_leaves_no_temporary_or_backup_with_text`
   (varre o diretório por um marcador único do conteúdo). Em `props_fs`:
   `deletion_is_monotonic_across_generations`.
   **Verde:** tombstones e geração. **Docs:** README (o que `forget` não promete: cópias do SO e
   dados já enviados ao provider).
-- [ ] **T1.12 · `forget --all` revoga a coleta; `memory resume` a reativa.** CA-11. PD-4.
+- [x] **T1.12 · `forget --all` revoga a coleta; `memory resume` a reativa.** CA-11. PD-4.
   **Vermelho:** `tests/memory_store.rs::after_forget_all_nothing_is_collected_until_resumed` e
   `tests/cli.rs::memory_resume_is_local_and_clears_the_revocation`.
   **Verde:** marcador de revogação; subcomando `memory resume`, local e sem rede. **Docs:** PRD §6, README.
-- [ ] **T1.13 · Subcomandos locais `memory status | forget | add`.** CA-2. PD-1.
+- [x] **T1.13 · Subcomandos locais `memory status | forget | add`.** CA-2. PD-1.
   **Vermelho:** `tests/cli.rs`: `memory_subcommands_parse`; `memory_status_and_forget_need_no_network_credential_or_feature`
   (binário rodado sem a variável de ambiente, com um `ripwire` inexistente: não inicia upstream nem
   cliente; `status --json` traz filas, schema, tamanhos e o último erro categorizado);
   `memory_add_refuses_a_forbidden_input_path_and_untrusted_text_stays_data`.
   **Verde:** `Command::Memory` em `src/cli.rs`; despacho em `src/main.rs` antes de `settings`.
   **Docs:** `USAGE`, README (seção nova "Memory").
-- [ ] **T1.14 · As tools de edição e conclusão publicam observações.** CA-1, CA-6.
+- [x] **T1.14 · As tools de edição e conclusão publicam observações.** CA-1, CA-6.
   **Vermelho:** `tests/broker.rs`: primeiro a caracterização
   `without_memory_the_three_tools_answer_exactly_as_before` (envelope serializado igual, nenhum
   diretório `memory/` criado); depois `after_edit_and_before_finish_publish_one_observation_after_the_envelope`
@@ -299,14 +300,14 @@ Ainda sem anunciar memória Jev: só coleta, persistência e comandos locais.
   injetado; a resposta volta dentro de 25 ms além da linha de base).
   **Verde:** `BrokerConfig::memory`; publicação depois do envelope estrutural, em executor
   limitado. **Docs:** README; PRD principal fica para a T2.12/T6.2.
-- [ ] **T1.15 · O hook coleta sem rede.** CA-6. PD-3.
+- [x] **T1.15 · O hook coleta sem rede.** CA-6. PD-3.
   **Vermelho:** `tests/hooks.rs`: `a_hook_with_memory_enqueues_and_never_opens_a_socket` (o
   processo roda sem credencial, e uma porta local de sentinela nunca recebe conexão);
   `a_short_lived_hook_leaves_a_recoverable_queue`; `ripwire_off_stops_capture_for_that_session_only`.
   Medição do SLO (p95 ≤ 10 ms, p99 ≤ 25 ms em release): teste `#[ignore]`
   `the_hook_overhead_meets_the_slo`, rodado à mão e registrado.
   **Verde:** `HookArgs::memory`; `src/hook.rs` chama `memory::enqueue`. **Docs:** `USAGE`, README.
-- [ ] **T1.16 · `install`, `doctor` e a prévia dizem os dois efeitos.** CA-2.
+- [x] **T1.16 · `install`, `doctor` e a prévia dizem os dois efeitos.** CA-2.
   **Vermelho:** `tests/cli.rs`: `install_with_memory_writes_the_flag_and_never_the_key` (a prévia
   nomeia persistência local **e** envio de histórico; não acrescenta `--online` redundante);
   `doctor_reports_the_memory_store_without_using_the_network`.
@@ -315,6 +316,11 @@ Ainda sem anunciar memória Jev: só coleta, persistência e comandos locais.
 
 **Saída da Fase 1:** CA-1 a CA-7 e CA-11 cobertos no que não depende de Jev; `handoff.md` e a
 tabela de fases atualizados; PR único.
+
+**Como a Fase 1 saiu ([D-137](../changelog.md#d-137--fase-1-do---memory-store-e-coleta)):** a T1.7 veio antes da
+T1.6, cujo vermelho precisa do construtor de observações; o `serve --memory` ainda não liga a
+publicação das tools (passou para a T2.11, junto com o worker); os testes de processo do hook
+ficaram em `tests/cli.rs`, ao lado da infraestrutura e2e, e rodam só com o ripwire real.
 
 ### Fase 2 — Controle Jev (feature `online`)
 
@@ -382,7 +388,9 @@ tabela de fases atualizados; PR único.
   `online_alone_never_processes_old_memory_jobs`; `the_server_leaves_no_process_with_the_credential_on_exit`;
   `memory_and_online_memory_start_one_worker`. `tests/memory_controller.rs::drain_stops_at_60s_or_20_jobs`
   (tempo pausado do tokio).
-  **Verde:** worker em `BrokerServer::start`; cancelamento na saída; `drain`.
+  **Verde:** worker em `BrokerServer::start`; cancelamento na saída; `drain`; e a ligação do
+  `serve --memory` ao publicador das tools (`BrokerConfig::memory`, vinda da T1.14), com teste de
+  ponta a ponta.
   **Docs:** `USAGE`, README.
 - [ ] **T2.12 · doc · PRD principal autoriza o worker.** V13.
   **Vermelho:** `grep` no §23.1 do PRD principal ainda encontra a regra da ausência só de
@@ -570,3 +578,19 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 |---|---|---|---|---|---|
 | T0.1 | `grep -n "não foram encontrados" docs/jev-mem-prd.md` encontra a linha 13 da v0.2; `shasum -a 256` do PDF dá `413c5924…5e87`, igual ao PRD | PR da Fase 0 (branch `docs/jev-mem-phase-0`): PRD v0.3, §1, §2.2, §2.4 (novo), §15, §17; o `grep` sai com 1 | a verificação rodada contra `git show HEAD:docs/jev-mem-prd.md` (v0.2) volta a encontrar a pendência | PRD v0.3; D-136; este plano | 5 portões verdes: 462 (2 ignorados) e 476 (4 ignorados) |
 | T0.2 | `grep -n "memory resume\|hook .*--memory\|install .*--memory" docs/jev-mem-prd.md` sai com 1; `memory add` fora da tabela do §4 | mesmo PR: §4 (quatro linhas novas, `memory drain` como exceção ao D-064), §6, CA-2, §16; o `grep` encontra as linhas 145–147 | o mesmo `grep` contra a v0.2 conta 0 | PRD v0.3; D-136; este plano | os mesmos 5 portões |
+| T1.1 | `tests/cli.rs::memory_implies_online_and_both_flags_are_equivalent`: `no field memory on type ServeArgs`, `cannot find OnlineOrigin in cli` | `f688c01` | origem `Implied`→`Explicit` (cli.rs:393); `--memory` fora de `Flags::online` (cli.rs:386) | `USAGE` | 463 / 477 |
+| T1.2 | `tests/cli.rs::memory_options_have_defaults_and_refuse_values_out_of_range`: `no field max_nodes/read_request_limit/retention_days/write_candidates on type MemoryArgs` | `79a2e20` | teto 750→751; `--memory-*` sem `--memory` aceito; mínimo da faixa ignorado (`min..`→`0..`) | `USAGE`; README (tabela de flags) | 464 / 478 |
+| T1.3 | `tests/cli.rs`: `a_build_without_the_online_feature_refuses_memory_clearly` e `memory_without_a_credential_fails_before_publishing_mcp` caem em "names the flag asked for" (a mensagem dizia só `--online`) | `9336b1f` | rótulo sempre `--online` (main.rs), nos dois builds | README (linha `--memory`) | 465 / 479 |
+| T1.4 | `tests/memory_policy.rs::a_record_round_trips_and_an_oversized_one_is_refused_whole`: `cannot find memory in ripwire_broker` | `5311488` | teto de bytes ×2; conteúdo em `chars` em vez de bytes; 9 referências aceitas; schema não verificado; `types` sem `default` (o `default` por campo, redundante, saiu) | PRD §5.1 conferido, sem mudança | 466 / 480 |
+| T1.5 | `tests/memory_identity.rs` (cinco testes) e `tests/props.rs::ids_never_collide_for_ambiguous_tuples`: `unresolved import ripwire_broker::memory::identity` | `132fe56` | comprimento fora do hash (props); git-dir e common-dir fora do hash; descritor parcial aceito; fontes fora do `content_hash`; kind fora do `node_id`; workspace fora da entidade de arquivo (sobreviveu; teste ampliado). Mutante equivalente: só o git-dir fora (determinado por raiz + common-dir), mantido pelo PRD §5.1 | — (PRD §5.3) | 473 / 487 |
+| T1.7 (antes da T1.6) | `tests/memory_policy.rs` (três testes; `forbidden_sources_are_refused_before_the_spool`, pois o spool ainda não existe) e `tests/props_fs.rs::no_generated_path_escapes_the_workspace_into_a_record`: `unresolved import ripwire_broker::memory::admission` | `f0e790b` | inelegível ignorado; sem ordenação; sem dedup; e-mail aceito; `sk-`, `AKIA`, `ghp_`, JWT e `password=` desligados um a um; evidência não varrida; "testes passaram" no texto; expiração sem `observed_at`; escopo vazio aceito | README (seção "Persistent memory", o que nunca é guardado) | 477 / 491 |
+| T1.6 (depois da T1.7) | `tests/memory_identity.rs::mtime_commit_and_a_clock_rollback_never_become_event_time` e `tests/props.rs::ingest_sequence_is_strictly_monotonic`: `unresolved import ripwire_broker::memory::time` | `5071a79` | sequência que não avança; duração saturada em vez de `None`; `wrapping_add`; sequência tirada do relógio | — | 479 / 493 |
+| T1.8 | `tests/memory_store.rs` (quatro testes; dono estrangeiro trocado por diretório aberto, `a_symlink_or_an_open_directory_reads_as_unavailable`): `unresolved import ripwire_broker::memory::store` | `5cfba22` | `publish` sem checar o atual; permissão aberta aceita; sem `O_NOFOLLOW`; schema não checado; escrita direta em vez de temporário + rename (o leitor viu geração parcial, 2 de 2). Sem teste: `sync` do diretório (queda de energia) e uid do dono (exige root) | — | 483 / 497 |
+| T1.9 | `tests/memory_store.rs` (quatro testes) e `tests/props_fs.rs::replay_is_idempotent`: `unresolved imports Full, Limits, Refusal, Step`; `no method named enqueue/ingest/...` | `438a190` | duplicata não detectada; `ingest_seq` não atribuído (sobreviveu com o fixture `ingest_seq = n`; fixture corrigido para 0, como o hook manda); teto de nós `>`; spool não removido; teto de entradas `>`; replay ocupando vaga; teto total e teto do snapshot desligados; lock ignorado | — | 488 / 502 |
+| T1.10 | `tests/memory_store.rs`: `expired_nodes_take_their_derived_notes_with_them` (arestas e jobs ficam para a Fase 2, que os cria), `a_derived_note_never_outlives_its_parents`, `a_clock_rollback_suspends_expiry_by_age_but_keeps_the_caps`: `no method named sweep` | `e63edff` | sem suspensão; `<=`→`<`; descendentes só um nível; `any`→`all`; leitura confiável não guardada; geração não avança | README (retenção) | 491 / 505 |
+| T1.11 | `tests/memory_store.rs` (três testes) e `tests/props_fs.rs::deletion_is_monotonic_across_generations`: `no method named forget`, `no field forgotten on Ingested` | `372a626` | tombstone ignorada na ingestão; spool não limpo; tombstone não gravada; tombstone eterna; sem descendentes; geração parada | README (o que `forget` não promete) | 495 / 509 |
+| T1.12 | `tests/memory_store.rs::after_forget_all_nothing_is_collected_until_resumed` e `tests/cli.rs::memory_resume_is_local_and_clears_the_revocation`: `no method named forget_all/is_revoked/resume`, `cannot find MemoryAction in cli`, `no variant Memory` | `258e478` | `enqueue` e `ingest` ignorando o marcador (dois); spool não limpo; sem tombstones; `resume` que não remove o marcador | `USAGE`; README (tabela de comandos, revogação); PRD §6 já na v0.3 | 497 / 511 |
+| T1.13 | `tests/cli.rs`: `memory_subcommands_parse`, `memory_status_and_forget_need_no_network_credential_or_feature`, `memory_add_refuses_a_forbidden_input_path_and_untrusted_text_stays_data`: `no variant named Status/Forget/ForgetAll/Add for MemoryAction` | `e3bb04b` | `--all --id` aceitos juntos; arquivo de entrada sem a política do leitor; texto da nota sem varredura; erro do store omitido no `status`; revogação omitida no texto; atribuição trocada; contagem de nós zerada | `USAGE`; README (tabela de comandos, seção de comandos da memória) | 500 / 514 |
+| T1.14 | `tests/broker.rs`: `without_memory_the_three_tools_answer_exactly_as_before`, `after_edit_and_before_finish_publish_one_observation_after_the_envelope`, `a_slow_spool_reports_enqueue_unconfirmed_and_never_delays_the_envelope`: `unresolved import memory::publish`, `memory::store::Spool`. Depois do verde, `an_unassessed_finish_claims_nothing_and_an_edit_without_files_observes_what_changed` cobriu dois ramos (provado por mutação) | `bc1c8df` | `unknown` publicado; escopo vazio sem `files`; sem teto de escritas em voo; timeout contado como confirmado; espera sem prazo; conclusão sem publicação. O teste de confirmação passou a esperar 10 s (25 ms dependia da velocidade do disco) | README (quando se coleta; o `serve --memory` só liga na T2.11) | 504 / 518 |
+| T1.15 | `tests/cli.rs`: `hook_takes_memory_and_never_implies_online`, `a_hook_with_memory_enqueues_and_never_opens_a_socket`, `a_short_lived_hook_leaves_a_recoverable_queue` (ripwire real; pulados sem ele, como os demais e2e): `no field memory on type HookArgs`. `tests/hooks.rs::a_hook_with_memory_enqueues_its_edit` e `ripwire_off_stops_capture_for_that_session_only` nasceram verdes (o hook já usa o broker da T1.14): caracterização, com mutação | `bbb24bd` | hook sem configuração de memória (2 e2e caem); `HookArgs::memory` sempre falso; publicação da edição removida (caracterização cai). SLO medido à mão em release, ripwire real, 60 pares alternados: p95 +6,9/+4,1 ms, p99 +3,6/−0,9 ms (1ª medição sem alternar deu −97 ms, viés de aquecimento) | `USAGE`; README (coleta pelos hooks) | 509 / 523 (2 ignorados + 1 novo) |
+| T1.16 | `tests/cli.rs::install_with_memory_writes_the_flag_and_never_the_key`: `unknown argument --memory`; `doctor_reports_the_memory_store_without_using_the_network`: `no check memory`. Depois do verde, `install_with_memory_for_codex_forwards_the_key_by_name` cobriu o ramo do Codex (provado por mutação) | `f648c11` | hooks sem `--memory`; `--online` redundante; chave não referenciada; aviso do `--online` no lugar do da memória; checagem do doctor sem o guarda de "sem store"; revogação não avisada; ramo do Codex sem `--memory` e sem `env_vars` | `USAGE`; README (tabela, integração, doctor). `integrations/` sem mudança: nada novo chega ao agente nesta fase (T3.11) | 512 / 526 |
