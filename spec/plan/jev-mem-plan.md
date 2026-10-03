@@ -4,7 +4,7 @@
 **Spec:** [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) v0.2. Onde este plano diz "PRD §N", é esse documento;
 "PRD principal" é [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md). "CA-N" é o critério
 verificável N do PRD §14.
-**Base:** branch `docs/jev-mem-prd`, pacote `0.1.0`, Rust `1.98.1`, edition 2024.
+**Base:** `master` em `60c77b9`, pacote `0.1.0`, Rust `1.98.1`, edition 2024.
 **Decisão que registra este plano:** [D-134](../changelog.md#d-134--plano-de-implementação-do---memory).
 
 **Objetivo:** memória de trabalho entre sessões, isolada por workspace/worktree, atrás de `--memory`
@@ -539,7 +539,7 @@ Roda no fim de cada fase sobre o diff da fase, e no fim de tudo sobre o conjunto
 
 ## 8. Linha de base
 
-Medida em 2026-10-03 no branch `docs/jev-mem-prd`, antes de qualquer código deste plano. A Fase 1
+Medida em 2026-10-03 no `master` em `60c77b9`, antes de qualquer código deste plano. A Fase 1
 começa a partir destes números; uma tarefa nunca os reduz.
 
 | Verificação | Resultado |

@@ -5551,7 +5551,7 @@ supõe:
 
 **Pendente do mantenedor:** PD-1 a PD-5 do plano. Cada uma bloqueia só a tarefa indicada.
 
-**Verificado:** linha de base no branch `docs/jev-mem-prd`: `fmt`, `clippy` (padrão e `online`),
+**Verificado:** linha de base no `master` em `60c77b9`: `fmt`, `clippy` (padrão e `online`),
 462 testes (2 ignorados) e 476 com `online` (4 ignorados), CA-10 e a guarda de fixtures, tudo
 verde. O teste de exemplo do plano (T1.1) foi compilado contra o código e falha pelos motivos que
 o plano declara; `tests/cli.rs` não mudou.
