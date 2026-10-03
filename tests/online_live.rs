@@ -99,3 +99,46 @@ async fn a_real_provider_enriches_a_synthetic_repository() {
     );
     assert!(env.budget.estimated_tokens <= env.budget.requested_tokens);
 }
+
+/// jev-mem T2.0 (V14): the pinned model answers a Choice in the shape PRD jev-mem §7 expects.
+/// Until this has run once and its result is in the changelog, implicit time (T2.7) and the
+/// representation decision (Phase 4) rest on the documented contract only.
+#[tokio::test]
+#[ignore = "calls the real provider; set RIPWIRE_BROKER_JEV_API_KEY"]
+async fn the_pinned_model_answers_a_choice() {
+    use ripwire_broker::online::classifier::MemoryClassifier;
+    use ripwire_broker::online::request::{JevQuestion, StateRequest};
+    use ripwire_broker::online::response::Decision;
+
+    let req = StateRequest::new(
+        "jev-1.13.0",
+        serde_json::json!({
+            "new_memory": {"id": "m2", "content": "Mira bought a new bicycle on 16 May."},
+            "candidates": [{"id": "m1", "content": "Mira's old bicycle broke on 14 May."}]
+        }),
+        vec![JevQuestion::choice(
+            "Which temporal relation holds from new_memory.content to candidates[0].content? \
+             Judge only from the supplied accounts.",
+            &[
+                ("before", "new_memory happened before candidates[0]."),
+                ("after", "new_memory happened after candidates[0]."),
+                ("unknown", "The accounts do not support any relation."),
+            ],
+        )],
+    );
+    let started = Instant::now();
+    let got = live_client().decide(&req).await.expect("a valid response");
+    let Decision::Choice {
+        selected,
+        probabilities,
+        ..
+    } = &got[0]
+    else {
+        panic!("not a valid Choice: {:?}", got[0]);
+    };
+    eprintln!(
+        "choice: {selected}, probabilities {probabilities:?}, {} ms",
+        started.elapsed().as_millis()
+    );
+    assert_eq!(selected, "after", "invented content with an explicit order");
+}
