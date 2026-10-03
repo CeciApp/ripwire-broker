@@ -90,6 +90,31 @@ fn rrf_fuses_lexical_and_entity_ranks_into_at_most_eight_anchors() {
     assert!(index::anchors(&three(), "nothing matches").is_empty());
 }
 
+#[test]
+fn an_entity_is_named_only_by_the_whole_path() {
+    let s = state(vec![rec(1, "x", &["a.rs"]), rec(2, "y", &["src/lib.rs"])]);
+    let named = |q: &str| -> Vec<String> {
+        index::entity_rank(&s, q)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect()
+    };
+    assert!(
+        named("what changed in src/data.rs?").is_empty(),
+        "a.rs is not data.rs"
+    );
+    assert!(
+        named("see src/lib.rs.orig").is_empty(),
+        "nor is a longer path"
+    );
+    assert_eq!(
+        named("see src/lib.rs."),
+        [id(2)],
+        "trailing punctuation is not part of it"
+    );
+    assert_eq!(named("in `src/lib.rs`, and (a.rs)"), [id(1), id(2)]);
+}
+
 // ---------------------------------------------------------------- routing (PRD jev-mem §10, step 4; T3.2)
 
 use ripwire_broker::memory::model::Graph;
@@ -424,6 +449,36 @@ async fn expansion_respects_twelve_sixteen_depth_two_128_and_beam_four() {
     assert!(
         !scored.contains(&id(55)) && !scored.contains(&id(56)),
         "beam 4: {scored:?}"
+    );
+}
+
+#[tokio::test]
+async fn depth_two_expands_only_from_a_beam_of_the_four_strongest_relations() {
+    // One anchor and six neighbours; only the two reached by the weakest relations have
+    // neighbours of their own.
+    let mut records = vec![rec(1, "eviction", &[])];
+    let mut edges = vec![];
+    for n in 2..=7 {
+        records.push(rec(n, "z", &[]));
+        let mut e = edge(1, n, Graph::Semantic);
+        e.score = Some(if n >= 6 { 0.7 } else { 0.9 });
+        edges.push(e);
+    }
+    for (from, to) in [(6, 16), (7, 17)] {
+        records.push(rec(to, "z", &[]));
+        edges.push(edge(from, to, Graph::Semantic));
+    }
+    let s = with_edges(records, edges);
+    let r = reader(&["semantic"], 0.9, |_, _| p(0.9));
+    read(&s, "eviction", &r).await;
+    let scored = r.scored();
+    assert!(
+        scored.contains(&id(7)),
+        "depth 1 is all expanded: {scored:?}"
+    );
+    assert!(
+        !scored.contains(&id(16)) && !scored.contains(&id(17)),
+        "depth 2 starts from the four strongest only: {scored:?}"
     );
 }
 

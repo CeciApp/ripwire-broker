@@ -465,7 +465,7 @@ async fn read_with(
                 *budget -= 1;
                 out.expansions += 1;
                 visited.insert(other.clone());
-                next.push(other.clone());
+                next.push((other.clone(), edge.score.unwrap_or(0.0)));
                 queued.push(Candidate {
                     record: record.clone(),
                     anchor: 0.0,
@@ -473,7 +473,11 @@ async fn read_with(
                 });
             }
         }
-        frontier = next;
+        // The next depth starts from a beam too, never from every node just reached: the ones
+        // reached by the strongest relations, a tie by id.
+        next.sort_by(|a: &(String, f64), b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        next.truncate(BEAM);
+        frontier = next.into_iter().map(|(id, _)| id).collect();
     }
     out.visited = visited.len();
     // The last request goes to stopping: an expansion that would take it waits.

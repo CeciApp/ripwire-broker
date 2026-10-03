@@ -50,8 +50,20 @@ pub fn lexical_rank(state: &State, query: &str) -> Vec<(String, f64)> {
     ordered(scored)
 }
 
-/// Nodes whose entity paths the query names exactly, by how many it names; a tie by id.
+/// The words of `query` that may be paths: split on whitespace, quotes and brackets, with the
+/// punctuation that ends a sentence taken off.
+fn named_paths(query: &str) -> BTreeSet<&str> {
+    query
+        .split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;".contains(c))
+        .map(|w| w.trim_end_matches(['.', ':', '!', '?']))
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Nodes whose entity paths the query names exactly, a whole path and not part of one, by how
+/// many it names; a tie by id.
 pub fn entity_rank(state: &State, query: &str) -> Vec<(String, f64)> {
+    let named_in_query = named_paths(query);
     let scored = state
         .nodes
         .iter()
@@ -59,7 +71,7 @@ pub fn entity_rank(state: &State, query: &str) -> Vec<(String, f64)> {
             let named = r
                 .entities
                 .iter()
-                .filter(|e| !e.path.is_empty() && query.contains(e.path.as_str()))
+                .filter(|e| named_in_query.contains(e.path.as_str()))
                 .count();
             (named > 0).then(|| (id.clone(), named as f64))
         })

@@ -385,11 +385,7 @@ pub fn text_of(structured: &Value) -> String {
             .as_array()
             .map(|s| s.iter().map(|s| s["path"].to_string()).collect())
             .unwrap_or_default();
-        text.push_str(&format!(
-            "- [{}] fontes: {}\n",
-            m["id"],
-            sources.join(", ")
-        ));
+        text.push_str(&format!("- [{}] fontes: {}\n", m["id"], sources.join(", ")));
     }
     text
 }
