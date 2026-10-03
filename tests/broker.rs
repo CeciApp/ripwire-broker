@@ -2251,3 +2251,139 @@ async fn no_item_ever_has_a_memory_role() {
         "ripwire-broker.memory/v1"
     );
 }
+
+// ---------------------------------------------------------------- memory under the budget (PRD jev-mem §8.2, §10.9; T3.8)
+
+/// A read with `n` memories of `tokens` tokens of text each (the rest of a memory's JSON adds
+/// about 95), stopped as `stop`.
+fn read_of(
+    n: usize,
+    tokens: usize,
+    stop: ripwire_broker::memory::retrieve::StopReason,
+) -> ripwire_broker::memory::retrieve::Read {
+    let mut read = a_read();
+    let one = read.memories[0].clone();
+    read.memories = (0..n)
+        .map(|i| {
+            let mut f = one.clone();
+            f.record.node_id = format!("n{i}");
+            f.record.content = "x".repeat(tokens * 4);
+            f
+        })
+        .collect();
+    read.stop = stop;
+    read
+}
+
+async fn task_envelope(budget: u32) -> ripwire_broker::model::Envelope {
+    let (b, _fake, _ws) =
+        broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    let mut req = TaskRequest::new("how are the routes authenticated?");
+    req.budget_tokens = budget;
+    b.context_for_task(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn memory_fits_inside_the_budget_at_most_three_600_tokens_and_20_percent() {
+    use ripwire_broker::memory::retrieve::{self, StopReason};
+    let mut env = task_envelope(10_000).await;
+    retrieve::attach(&mut env, &read_of(5, 20, StopReason::Sufficient), &|_| {
+        false
+    });
+    assert_eq!(env.memories.len(), 3, "three at most");
+
+    let mut env = task_envelope(10_000).await;
+    retrieve::attach(&mut env, &read_of(5, 225, StopReason::Sufficient), &|_| {
+        false
+    });
+    assert_eq!(
+        env.memories.len(),
+        1,
+        "600 tokens at most: two would take about 656"
+    );
+
+    let mut env = task_envelope(1_500).await;
+    let before = ripwire_broker::budget::estimate_tokens(&env);
+    retrieve::attach(&mut env, &read_of(5, 100, StopReason::Sufficient), &|_| {
+        false
+    });
+    assert_eq!(
+        env.memories.len(),
+        1,
+        "20% of 1,500 is 300 tokens: two would take about 406"
+    );
+    let after = ripwire_broker::budget::estimate_tokens(&env);
+    assert!(
+        after <= env.budget.requested_tokens.max(before),
+        "inside the budget, never above it"
+    );
+}
+
+#[tokio::test]
+async fn risks_and_tests_are_never_evicted_to_make_room_for_memory() {
+    use ripwire_broker::memory::retrieve::{self, StopReason};
+    let mut env = task_envelope(10_000).await;
+    // 60 tokens left: memory's share would allow one small memory, the room left does not.
+    env.budget.requested_tokens = ripwire_broker::budget::estimate_tokens(&env) + 60;
+    let (risks, tests, items) = (env.risks.len(), env.tests.len(), env.items.len());
+    retrieve::attach(&mut env, &read_of(2, 1, StopReason::Sufficient), &|_| false);
+    assert!(
+        env.memories.is_empty(),
+        "no room left: memory is what gives way"
+    );
+    assert_eq!(
+        (env.risks.len(), env.tests.len(), env.items.len()),
+        (risks, tests, items)
+    );
+    assert_eq!(
+        env.provenance.memory.as_ref().unwrap().stop_reason,
+        "budget_omitted"
+    );
+}
+
+#[tokio::test]
+async fn truncation_after_stopping_marks_assessment_before_truncation() {
+    use ripwire_broker::memory::retrieve::{self, StopReason};
+    let mut env = task_envelope(10_000).await;
+    retrieve::attach(&mut env, &read_of(5, 100, StopReason::Sufficient), &|_| {
+        false
+    });
+    let p = env.provenance.memory.as_ref().unwrap();
+    assert!(
+        p.assessment_before_truncation,
+        "sufficiency was judged on five, three are delivered"
+    );
+    assert_eq!(p.stop_reason, "sufficient");
+
+    let mut env = task_envelope(10_000).await;
+    retrieve::attach(&mut env, &read_of(2, 100, StopReason::Sufficient), &|_| {
+        false
+    });
+    assert!(
+        !env.provenance
+            .memory
+            .as_ref()
+            .unwrap()
+            .assessment_before_truncation,
+        "nothing cut"
+    );
+}
+
+#[tokio::test]
+async fn a_memory_delivered_in_this_session_is_not_repeated() {
+    use ripwire_broker::memory::retrieve::{self, StopReason};
+    let delivered = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut first = task_envelope(10_000).await;
+    for id in retrieve::attach(&mut first, &read_of(2, 50, StopReason::Sufficient), &|_| {
+        false
+    }) {
+        delivered.lock().unwrap().insert(id);
+    }
+    assert_eq!(first.memories.len(), 2);
+    let mut second = task_envelope(10_000).await;
+    let seen = |id: &str| delivered.lock().unwrap().contains(id);
+    retrieve::attach(&mut second, &read_of(3, 50, StopReason::Sufficient), &seen);
+    let ids: Vec<&str> = second.memories.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["n2"], "the two already delivered are left out");
+    assert!(second.budget.already_delivered >= 2, "and counted as such");
+}

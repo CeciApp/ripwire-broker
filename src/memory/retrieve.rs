@@ -648,3 +648,33 @@ pub fn provenance(read: &Read) -> crate::model::MemoryProvenance {
         assessment_before_truncation: false,
     }
 }
+
+/// Puts `read` into `env` (PRD jev-mem §10.9): what fits memory's share of the budget and was not
+/// delivered to this session before, with `provenance.memory`. A sufficiency judged on memories the
+/// budget then cut is marked; a read whose memories all gave way is `budget_omitted`. Returns the
+/// ids delivered, for the session to remember.
+pub fn attach(
+    env: &mut crate::model::Envelope,
+    read: &Read,
+    seen: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let fit = crate::budget::add_memories(env, items(read), seen);
+    let mut p = provenance(read);
+    if fit.omitted > 0
+        && matches!(
+            read.stop,
+            StopReason::Sufficient | StopReason::LowExpectedGain
+        )
+    {
+        p.assessment_before_truncation = true;
+    }
+    if fit.delivered.is_empty() && fit.omitted > 0 {
+        p.stop_reason = json!(StopReason::BudgetOmitted)
+            .as_str()
+            .unwrap_or_default()
+            .into();
+    }
+    env.budget.already_delivered += fit.already;
+    env.provenance.memory = Some(p);
+    fit.delivered
+}

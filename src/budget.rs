@@ -228,3 +228,57 @@ pub fn add_notes(env: &mut Envelope, notes: Vec<Note>, limitations: Vec<Limitati
     }
     env.budget.estimated_tokens = estimate_tokens(env);
 }
+
+/// Memory's share of an answer (PRD jev-mem §8.2): at most this many memories…
+pub const MEMORY_MAX_ITEMS: usize = 3;
+/// …this many tokens…
+pub const MEMORY_MAX_TOKENS: u32 = 600;
+/// …and this percentage of the requested budget; always inside what is left of it.
+pub const MEMORY_SHARE_PERCENT: u32 = 20;
+
+/// What fitting memories into an envelope did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryFit {
+    pub delivered: Vec<String>,
+    /// Left out for the budget.
+    pub omitted: usize,
+    /// Left out because this session already received them.
+    pub already: usize,
+}
+
+/// Adds `items`, best first, inside memory's share and inside what the envelope has left: memory
+/// is what gives way, never an item, a test or a risk already there. `seen` says which ids this
+/// session already received.
+pub fn add_memories(
+    env: &mut Envelope,
+    items: Vec<crate::model::MemoryItem>,
+    seen: &dyn Fn(&str) -> bool,
+) -> MemoryFit {
+    let requested = env.budget.requested_tokens;
+    let left = requested.saturating_sub(estimate_tokens(env));
+    let cap = MEMORY_MAX_TOKENS
+        .min(requested * MEMORY_SHARE_PERCENT / 100)
+        .min(left);
+    let mut fit = MemoryFit::default();
+    for item in items {
+        if seen(&item.id) {
+            fit.already += 1;
+            continue;
+        }
+        env.memories.push(item);
+        // Measured on the envelope itself: the item, its comma and the `memories` key.
+        let used = estimate_tokens(env).saturating_sub(requested - left);
+        if env.memories.len() > MEMORY_MAX_ITEMS || used > cap {
+            env.memories.pop();
+            fit.omitted += 1;
+            continue;
+        }
+        fit.delivered.push(
+            env.memories
+                .last()
+                .map(|m| m.id.clone())
+                .unwrap_or_default(),
+        );
+    }
+    fit
+}

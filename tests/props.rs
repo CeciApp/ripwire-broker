@@ -1068,3 +1068,31 @@ proptest! {
         prop_assert_eq!(total, if active == 0 { 0 } else { retrieve::EXPANSIONS });
     }
 }
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Memory takes what is left of the budget and never more: the estimate never grows past it.
+    #[test]
+    fn the_memory_budget_is_never_negative_and_never_exceeds_the_total(
+        budget in 256u32..20_000, sizes in prop::collection::vec(1usize..2_000, 0..8),
+    ) {
+        use ripwire_broker::budget::{add_memories, estimate_tokens};
+        use ripwire_broker::model::{MemoryItem, MemoryScores, Untrusted};
+        let mut env = envelope_carrying("x");
+        env.budget.requested_tokens = budget;
+        let before = estimate_tokens(&env);
+        let items = sizes.iter().enumerate().map(|(i, n)| MemoryItem {
+            id: format!("m{i}"),
+            text: Untrusted { untrusted_repository_data: "x".repeat(*n) },
+            kind: "edit_observation".into(), sources: vec![], observed_at_ms: 0,
+            time_basis: "observation".into(), basis: "jev_scored", derived_from: vec![], stale: false,
+            why_included: "w".into(),
+            scores: MemoryScores { relevance: 1.0, new_information: 1.0, relation_usefulness: 1.0, supports_current_evidence: 1.0, score: 1.0 },
+        }).collect();
+        let fit = add_memories(&mut env, items, &|_| false);
+        prop_assert!(env.memories.len() <= 3);
+        prop_assert_eq!(env.memories.len() + fit.omitted, sizes.len());
+        prop_assert!(estimate_tokens(&env) <= budget.max(before), "{} > {}", estimate_tokens(&env), budget);
+    }
+}

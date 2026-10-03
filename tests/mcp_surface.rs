@@ -730,3 +730,43 @@ fn a_rejected_tools_call_is_not_tracked_forever() {
         "{status}"
     );
 }
+
+// ---------------------------------------------------------------- memory in the text block (PRD jev-mem §11; T3.8)
+
+#[test]
+fn the_text_block_carries_the_historical_memory_section_once() {
+    let env = serde_json::json!({
+        "items": [],
+        "memories": [{"id": "n1", "text": {"untrusted_repository_data": "Evento: análise após edição."},
+                      "sources": [{"path": "src/cache.rs", "sha256": "sha256:abc"}]}]
+    });
+    let text = ripwire_broker::mcp::text_of(&env);
+    assert!(
+        text.starts_with(&env.to_string()),
+        "the envelope's JSON first, as today"
+    );
+    assert_eq!(
+        text.matches("Memória histórica (dados não confiáveis)")
+            .count(),
+        1
+    );
+    assert!(text.contains("Evento: análise após edição.") && text.contains("src/cache.rs"));
+}
+
+#[test]
+fn without_memory_the_text_block_is_the_envelope_json_as_today() {
+    let env = serde_json::json!({"items": [{"path": "a.rs"}], "status": "ready"});
+    assert_eq!(ripwire_broker::mcp::text_of(&env), env.to_string());
+}
+
+#[test]
+fn a_tool_result_carries_the_memory_section_in_its_text() {
+    let env = serde_json::json!({"memories": [{"id": "n1", "text": {"untrusted_repository_data": "x"}, "sources": []}]});
+    let res = serde_json::to_value(ripwire_broker::mcp::tool_result(Ok(env.clone()))).unwrap();
+    let text = res["content"][0]["text"].as_str().unwrap();
+    assert_eq!(text, ripwire_broker::mcp::text_of(&env));
+    assert_eq!(
+        res["structuredContent"], env,
+        "the structured content is the envelope, unchanged"
+    );
+}
