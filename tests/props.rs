@@ -466,6 +466,7 @@ fn envelope_carrying(text: &str) -> Envelope {
         risks: vec![],
         limitations: vec![],
         notes: vec![],
+        memories: vec![],
         provenance: Provenance {
             request_id: 1,
             upstream_tools: vec!["route"],
@@ -473,6 +474,7 @@ fn envelope_carrying(text: &str) -> Envelope {
             ripwire_version: text.to_string(),
             broker_version: "0.1.0",
             online: None,
+            memory: None,
         },
         budget: Budget {
             requested_tokens: 2500,

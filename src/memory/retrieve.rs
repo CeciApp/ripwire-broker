@@ -583,3 +583,68 @@ pub async fn read_store(
     out.stale_omitted += present - out.memories.len();
     out
 }
+
+/// The memories of `read` as the envelope carries them (PRD jev-mem §11).
+pub fn items(read: &Read) -> Vec<crate::model::MemoryItem> {
+    use crate::model::{MemoryItem, MemoryScores, MemorySource, Untrusted};
+    let snake = |v: serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    read.memories
+        .iter()
+        .map(|f| MemoryItem {
+            id: f.record.node_id.clone(),
+            text: Untrusted {
+                untrusted_repository_data: f.record.content.clone(),
+            },
+            kind: snake(json!(f.record.kind)),
+            sources: f
+                .record
+                .sources
+                .iter()
+                .map(|s| MemorySource {
+                    path: s.path.clone(),
+                    sha256: s.sha256.clone(),
+                })
+                .collect(),
+            observed_at_ms: f.record.observed_at_ms,
+            time_basis: snake(json!(f.record.timestamp_role)),
+            basis: "jev_scored",
+            derived_from: f
+                .record
+                .derived_from
+                .iter()
+                .map(|p| p.node_id.clone())
+                .collect(),
+            stale: false,
+            why_included: match &f.via {
+                None => "matched the task's words or files".into(),
+                Some(e) => format!(
+                    "related by {} to a memory that matched the task",
+                    snake(json!(e.graph))
+                ),
+            },
+            scores: MemoryScores {
+                relevance: f.scores[0],
+                new_information: f.scores[1],
+                relation_usefulness: f.scores[2],
+                supports_current_evidence: f.scores[3],
+                score: f.score,
+            },
+        })
+        .collect()
+}
+
+/// `provenance.memory` for `read`.
+pub fn provenance(read: &Read) -> crate::model::MemoryProvenance {
+    crate::model::MemoryProvenance {
+        schema_version: "ripwire-broker.memory/v1",
+        stop_reason: json!(read.stop).as_str().unwrap_or_default().to_string(),
+        requests: read.requests,
+        questions: read.questions,
+        visited: read.visited,
+        stale_omitted: read.stale_omitted,
+        pending_writes: read.pending_writes,
+        partial: read.partial,
+        degraded: read.degraded,
+        assessment_before_truncation: false,
+    }
+}

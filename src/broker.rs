@@ -1200,6 +1200,7 @@ impl Broker {
             risks: vec![],
             limitations: vec![],
             notes: vec![],
+            memories: vec![],
             provenance: Provenance {
                 request_id: REQUEST.try_with(|c| c.id).unwrap_or(0),
                 upstream_tools: verbs,
@@ -1207,6 +1208,7 @@ impl Broker {
                 ripwire_version: self.ripwire_version.clone(),
                 broker_version: env!("CARGO_PKG_VERSION"),
                 online,
+                memory: None,
             },
             budget: Budget {
                 requested_tokens: budget,

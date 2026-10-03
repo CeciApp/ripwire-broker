@@ -658,6 +658,16 @@ Notas sobre o envelope implementado:
   O orçamento mínimo é 256
   ([D-007](changelog.md#d-007--orçamento-e-estimativa-de-tokens)).
 
+**Memória histórica** (D-139, só com `--memory`): o envelope pode trazer `memories[]`, um campo
+seu, nunca um item com papel próprio, e `provenance.memory` (`ripwire-broker.memory/v1`: motivo da
+parada, requisições, perguntas, nós visitados, memórias velhas omitidas, escritas pendentes,
+parcial, degradado). Cada memória leva id, texto como `untrusted_repository_data`, tipo, fontes
+com o hash dos bytes de então, `observed_at_ms` com o seu significado (`time_basis`), `basis`,
+os pais quando derivada, `stale: false` (uma memória com fonte mudada é omitida, não entregue),
+`why_included` e as notas do scoring. Sem `--memory`, os dois campos não aparecem e o envelope é
+byte a byte o de antes. Memória é relato do passado: não muda `status` e não substitui itens,
+riscos ou testes.
+
 ### 9.2 Tool `context_after_edit`
 
 **Objetivo:** mostrar o que a edição pode ter afetado sem reler todo o contexto inicial.
