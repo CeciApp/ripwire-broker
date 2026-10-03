@@ -559,7 +559,7 @@ impl Store {
     /// Takes the next job that may run at `now_ms`: a pending one past its time, or a leased
     /// one whose holder is gone (its lease lock can be taken). A job out of runs fails instead.
     pub fn lease_next(&self, now_ms: u64) -> Result<Option<Lease>, Refusal> {
-        let _writer = self.writer()?;
+        let _writer = self.writer_waiting()?;
         let mut state = self.load()?;
         let leases = self.dir.join(LEASES);
         fs::DirBuilder::new()

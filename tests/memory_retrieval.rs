@@ -695,3 +695,122 @@ async fn without_a_valid_stopping_answer_it_is_never_sufficient() {
     );
     assert!(got.partial);
 }
+
+// ---------------------------------------------------------------- deadline and requests (§8.2, §10; T3.5)
+
+/// Answers like `reader`, after `delay` per request.
+struct Slow(Reader, std::time::Duration);
+
+#[async_trait]
+impl MemoryClassifier for Slow {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        tokio::time::sleep(self.1).await;
+        self.0.decide(req).await
+    }
+}
+
+fn expandable() -> State {
+    with_edges(
+        vec![rec(1, "eviction", &[]), rec(2, "b", &[])],
+        vec![edge(1, 2, Graph::Semantic)],
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_deadline_cuts_http_and_local_loops() {
+    let started = tokio::time::Instant::now();
+    let got = retrieve::read(&one(), "eviction", &Silent, &ReadConfig::default()).await;
+    assert_eq!(got.stop, StopReason::Deadline);
+    assert!(
+        started.elapsed() <= std::time::Duration::from_millis(760),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // Two answers at 240 ms each, then the third would start after the 750 ms: never sent.
+    let slow = Slow(
+        reader(&["semantic"], 0.0, |_, _| p(0.9)),
+        std::time::Duration::from_millis(240),
+    );
+    let cfg = ReadConfig {
+        deadline: std::time::Duration::from_millis(480),
+        ..Default::default()
+    };
+    let got = retrieve::read(&expandable(), "eviction", &slow, &cfg).await;
+    assert_eq!((got.stop, got.requests), (StopReason::Deadline, 2));
+    assert_eq!(
+        got.memories.len(),
+        1,
+        "what was validated before the deadline is kept"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_attempt_gets_at_most_250ms_and_there_are_no_automatic_retries() {
+    let slow = Slow(
+        reader(&[], 0.0, |_, _| p(0.9)),
+        std::time::Duration::from_millis(300),
+    );
+    let started = tokio::time::Instant::now();
+    let got = retrieve::read(&one(), "eviction", &slow, &ReadConfig::default()).await;
+    assert_eq!(
+        (got.stop, got.requests),
+        (StopReason::Deadline, 1),
+        "cut at 250 ms, and not tried again"
+    );
+    assert!(
+        started.elapsed() <= std::time::Duration::from_millis(260),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn the_fourth_request_is_reserved_for_stopping() {
+    let is_stopping = |r: &StateRequest| r.state.get("depth").is_some();
+    let r = reader(&["semantic"], 0.0, |_, _| p(0.9));
+    let got = retrieve::read(&expandable(), "eviction", &r, &ReadConfig::default()).await;
+    assert_eq!(got.requests, 4, "routing, anchors, expansion, stopping");
+
+    let r = reader(&["semantic"], 0.0, |_, _| p(0.9));
+    let cfg = ReadConfig {
+        request_limit: 3,
+        ..Default::default()
+    };
+    let got = retrieve::read(&expandable(), "eviction", &r, &cfg).await;
+    let last_is_stopping = is_stopping(r.seen.lock().unwrap().last().unwrap());
+    assert_eq!(got.requests, 3);
+    assert!(last_is_stopping, "the expansion gave way to stopping");
+    assert!(!r.scored().contains(&id(2)));
+}
+
+#[tokio::test]
+async fn request_limit_zero_serves_only_cache_and_says_degraded() {
+    let r = reader(&[], 0.0, |_, _| p(0.9));
+    let cfg = ReadConfig {
+        request_limit: 0,
+        ..Default::default()
+    };
+    let got = retrieve::read(&one(), "eviction", &r, &cfg).await;
+    assert!(got.degraded);
+    assert_eq!(
+        (got.stop, got.requests, got.memories.len()),
+        (StopReason::RequestLimit, 0, 0)
+    );
+    assert!(
+        r.seen.lock().unwrap().is_empty(),
+        "no cache yet, and nothing sent"
+    );
+}
+
+#[test]
+fn memory_takes_at_most_four_slots_of_the_jev_request_limit() {
+    assert_eq!(
+        retrieve::slots(4, 24),
+        (4, 20),
+        "memory, then what discovery keeps"
+    );
+    assert_eq!(retrieve::slots(4, 3), (3, 0), "never beyond the limit");
+    assert_eq!(retrieve::slots(0, 24), (0, 24));
+    assert_eq!(retrieve::slots(9, 24), (4, 20), "four at most");
+}

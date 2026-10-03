@@ -114,6 +114,8 @@ pub struct ReadConfig {
     pub deadline: Duration,
     /// Requests a read may send (`--memory-read-request-limit`); never retried.
     pub request_limit: usize,
+    /// Each request gets at most this, and never more than the time left.
+    pub attempt_timeout: Duration,
     /// Questions a read may ask in all (PRD jev-mem §8.3: 6 + 2 × 32 + 4).
     pub max_questions: usize,
     /// The MCP call's cancellation.
@@ -126,6 +128,7 @@ impl Default for ReadConfig {
             model: "jev-1.13.0".into(),
             deadline: Duration::from_millis(750),
             request_limit: 4,
+            attempt_timeout: Duration::from_millis(250),
             max_questions: 74,
             cancel: None,
         }
@@ -173,6 +176,8 @@ pub struct Read {
     pub edges_seen: usize,
     /// An answer the read depended on was unknown.
     pub partial: bool,
+    /// No request was allowed (`--memory-read-request-limit 0`): only a cache could serve.
+    pub degraded: bool,
 }
 
 /// A candidate to score: the node and, after expansion, the edge that reached it.
@@ -228,6 +233,7 @@ impl Run<'_> {
         if left.is_zero() {
             return Err(StopReason::Deadline);
         }
+        let left = left.min(self.cfg.attempt_timeout);
         let req = StateRequest::new(&self.cfg.model, state, questions);
         self.requests += 1;
         self.questions += req.questions.0.len();
@@ -321,9 +327,16 @@ pub async fn read(
         expansions: 0,
         edges_seen: 0,
         partial: false,
+        degraded: false,
     };
     let anchors = index::anchors(state, query);
     if anchors.is_empty() {
+        return out;
+    }
+    // There is no decision cache yet: with no request allowed, nothing can be validated.
+    if cfg.request_limit == 0 {
+        out.degraded = true;
+        out.stop = StopReason::RequestLimit;
         return out;
     }
 
@@ -425,6 +438,11 @@ pub async fn read(
         frontier = next;
     }
     out.visited = visited.len();
+    // The last request goes to stopping: an expansion that would take it waits.
+    if !queued.is_empty() && run.requests + 2 > cfg.request_limit {
+        queued.clear();
+        limited = true;
+    }
     if !queued.is_empty() {
         let more = match run.score(query, &selected, queued).await {
             Ok(m) => m,
@@ -498,4 +516,11 @@ pub fn fit(read: &mut Read, max_items: usize, max_tokens: u32) {
         read.stop = StopReason::BudgetOmitted;
     }
     read.memories = kept;
+}
+
+/// How a query's `--jev-request-limit` is shared (PRD jev-mem §8.2): memory takes at most four
+/// slots, never more than its own limit nor than there are; discovery keeps the rest.
+pub fn slots(read_limit: usize, jev_request_limit: usize) -> (usize, usize) {
+    let memory = read_limit.min(4).min(jev_request_limit);
+    (memory, jev_request_limit - memory)
 }
