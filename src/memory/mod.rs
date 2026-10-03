@@ -10,6 +10,7 @@ pub mod model;
 pub mod prompts;
 pub mod publish;
 pub mod queue;
+pub mod runtime;
 pub mod store;
 pub mod time;
 pub mod wire;

@@ -95,6 +95,8 @@ pub fn run(cmd: &MemoryCommand) -> Result<String, String> {
             let _ = store.ingest();
             Ok("added 1 note".into())
         }
+        // Needs the provider: the binary runs it, with the `online` feature (PD-2).
+        MemoryAction::Drain => Err("memory drain is run by the server binary".into()),
         MemoryAction::Resume => match store.resume() {
             Ok(true) => Ok("memory collection resumed for this workspace".into()),
             Ok(false) => Ok("memory collection was not revoked for this workspace".into()),

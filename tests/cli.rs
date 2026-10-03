@@ -4382,3 +4382,43 @@ fn memory_add_takes_a_relative_file_and_checks_it_against_the_workspace() {
         assert!(err.contains(why), "{dir}: {err}");
     }
 }
+
+#[test]
+fn memory_drain_needs_online_and_a_credential() {
+    let Ok(Command::Memory(m)) = parse(&["memory", "drain", "--workspace", "/w", "--online"])
+    else {
+        panic!()
+    };
+    assert_eq!(m.action, cli::MemoryAction::Drain);
+    let err = parse(&["memory", "drain", "--workspace", "/w"]).unwrap_err();
+    assert!(err.contains("--online"), "drain says what it needs: {err}");
+
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let args = [
+        "memory",
+        "drain",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        st.path().to_str().unwrap(),
+        "--online",
+    ];
+    let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args(args)
+        .env_remove("RIPWIRE_BROKER_JEV_API_KEY")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_ne!(out.status.code(), Some(0), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    match cfg!(feature = "online") {
+        true => assert!(stderr.contains("RIPWIRE_BROKER_JEV_API_KEY"), "{stderr}"),
+        false => assert!(
+            stderr.contains("built without the online feature"),
+            "{stderr}"
+        ),
+    }
+}

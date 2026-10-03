@@ -1031,3 +1031,153 @@ async fn one_remote_job_per_workspace() {
         "free once the first is gone"
     );
 }
+
+// ---------------------------------------------------------------- lifecycle (PRD jev-mem §4; T2.11)
+
+use ripwire_broker::cli::{self, Command};
+use ripwire_broker::memory::runtime::{self, DrainStop};
+
+fn serve(argv: &[&str]) -> cli::ServeArgs {
+    match cli::parse(argv.iter().map(|s| s.to_string()).collect()) {
+        Ok(Command::Serve(s)) => s,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn online_alone_never_processes_old_memory_jobs() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let w = ws.path().to_str().unwrap();
+    let fake = Scripted::new(vec![]);
+    let online = serve(&["--workspace", w, "--online"]);
+    assert!(
+        runtime::from_serve(&online, state.path(), Some(fake.clone()))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !state.path().join("memory").exists(),
+        "not even a store is opened"
+    );
+    assert_eq!(fake.sent(), 0);
+
+    let memory = serve(&["--workspace", w, "--memory"]);
+    assert!(
+        runtime::from_serve(&memory, state.path(), None).is_err(),
+        "--memory needs the classifier"
+    );
+}
+
+#[tokio::test]
+async fn memory_and_online_memory_start_one_worker() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let w = ws.path().to_str().unwrap();
+    let fake = Scripted::new(vec![]);
+    let a = runtime::from_serve(
+        &serve(&["--workspace", w, "--memory"]),
+        state.path(),
+        Some(fake.clone()),
+    )
+    .unwrap()
+    .unwrap();
+    let b = runtime::from_serve(
+        &serve(&[
+            "--workspace",
+            w,
+            "--online",
+            "--memory",
+            "--memory-write-candidates",
+            "4",
+        ]),
+        state.path(),
+        Some(fake),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(a.workspace_id(), b.workspace_id());
+    assert_eq!(a.config().candidates, b.config().candidates);
+    assert_eq!(a.publish().retention_ms, 30 * 24 * 60 * 60 * 1000);
+}
+
+#[tokio::test]
+async fn the_server_leaves_no_process_with_the_credential_on_exit() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let fake = Scripted::new(vec![]);
+    let args = serve(&["--workspace", ws.path().to_str().unwrap(), "--memory"]);
+    let mut rt = runtime::from_serve(&args, state.path(), Some(fake.clone()))
+        .unwrap()
+        .unwrap();
+    let store = Store::new(state.path(), rt.workspace_id());
+    rt.start(std::time::Duration::from_millis(20));
+
+    store.enqueue(&rec(1, "cache layer", &["e"])).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while store.load().unwrap().enriched == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker incorporated and enriched it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let sent = fake.sent();
+    drop(rt); // the server stops
+
+    store.enqueue(&rec(2, "another layer", &["f"])).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(fake.sent(), sent, "no worker outlives the server");
+    assert_eq!(
+        store.pending().unwrap(),
+        1,
+        "the new one waits, durable, for the next process"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn drain_stops_at_60s_or_20_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let records: Vec<Record> = (1..=25)
+        .map(|n| rec(n, &format!("note {n}"), &[]))
+        .collect();
+    let store = Arc::new(stored(dir.path(), &records));
+    let fast = Scripted::new(vec![]);
+    let w = Worker::new(store.clone(), fast, config(0));
+    let drained = runtime::drain(
+        &store,
+        &w,
+        &ripwire_broker::memory::time::SystemClock,
+        20,
+        runtime::DRAIN_DEADLINE,
+    )
+    .await
+    .unwrap();
+    assert_eq!((drained.jobs, drained.stop), (20, DrainStop::Jobs));
+    assert_eq!(runtime::DRAIN_DEADLINE, std::time::Duration::from_secs(60));
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &records));
+    let slow = Arc::new(Slow(Scripted::new(vec![])));
+    let w = Worker::new(store.clone(), slow, config(0));
+    let started = tokio::time::Instant::now();
+    let drained = runtime::drain(
+        &store,
+        &w,
+        &ripwire_broker::memory::time::SystemClock,
+        20,
+        runtime::DRAIN_DEADLINE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(drained.stop, DrainStop::Deadline);
+    assert!(drained.jobs < 20 && started.elapsed() <= std::time::Duration::from_secs(61));
+}
+
+/// Takes 25 s per request: the third job of a drain straddles its 60 s.
+struct Slow(Arc<Scripted>);
+
+#[async_trait]
+impl MemoryClassifier for Slow {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+        self.0.decide(req).await
+    }
+}
