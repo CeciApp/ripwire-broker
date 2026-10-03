@@ -4,6 +4,7 @@
 
 pub mod admission;
 pub mod command;
+pub mod controller;
 pub mod identity;
 pub mod model;
 pub mod prompts;

@@ -227,3 +227,55 @@ impl Record {
         Ok(())
     }
 }
+
+/// The four relational views over the same nodes (PRD jev-mem §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Graph {
+    Semantic,
+    Temporal,
+    Causal,
+    Entity,
+}
+
+/// Whether an edge is a fact the store establishes or a classifier's inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeBasis {
+    Deterministic,
+    JevInference,
+}
+
+/// A directed, typed relation between two nodes. An inferred one never feeds callers, tests,
+/// contracts or the finish gate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Edge {
+    pub source: String,
+    pub target: String,
+    pub graph: Graph,
+    pub relation: String,
+    pub basis: EdgeBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_version: Option<String>,
+    pub policy: String,
+    pub generation: u64,
+}
+
+impl Edge {
+    /// `(source, target, relation, model, prompt, policy)`: the same inference twice is one edge.
+    pub fn key(&self) -> String {
+        super::identity::hash(&[
+            "memory/v1/edge",
+            &self.source,
+            &self.target,
+            &self.relation,
+            self.model.as_deref().unwrap_or(""),
+            self.prompt_version.as_deref().unwrap_or(""),
+            &self.policy,
+        ])
+    }
+}

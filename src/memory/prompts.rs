@@ -342,3 +342,23 @@ pub fn questions(stage: Stage, c: usize) -> Vec<(&'static str, JevQuestion)> {
         ],
     }
 }
+
+/// The static name of a question of any stage; empty when `name` is none of them.
+pub fn name_of(name: &str) -> &'static str {
+    const STAGES: [Stage; 8] = [
+        Stage::Typing,
+        Stage::Relations,
+        Stage::Alias,
+        Stage::ImplicitTime,
+        Stage::Routing,
+        Stage::Scoring,
+        Stage::Stopping,
+        Stage::Consolidation,
+    ];
+    STAGES
+        .iter()
+        .flat_map(|s| questions(*s, 0))
+        .map(|(n, _)| n)
+        .find(|n| *n == name)
+        .unwrap_or("")
+}

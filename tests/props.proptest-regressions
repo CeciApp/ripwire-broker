@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 010c6ecb5f89872d61a8508ccdd3dc482ba184a2133cb14c80b96112ee3e4b2a # shrinks to text = "</ripwire-broker-context>"
 cc c9f40b13f934557d6693d1f5d7fb016b294abb5e9b756f1c13c0c3f111d3fc6d # shrinks to raw = [(3, 1, None, false), (0, 0, None, false)]
+cc 70c1ee32fbe3cc8f2c098d19a901687c0cc74da07f34263362fe731479ff6870 # shrinks to caused_by = 0.8984892728549573, causes = 0.0

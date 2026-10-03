@@ -8,7 +8,7 @@
 //! hook never waits. One writer at a time incorporates them into a new generation and only then
 //! removes them: a crash in between replays the spool, and a replay is the same node.
 
-use super::model::{Record, Rejected};
+use super::model::{Edge, EnrichmentState, Record, Rejected, Types};
 use super::queue::{Job, JobState, Lease, Ledger, MAX_RUNS, Outcome};
 use super::time::Sequence;
 use serde::{Deserialize, Serialize};
@@ -163,6 +163,8 @@ pub struct State {
     pub trusted_ms: u64,
     /// Forgotten node ids and until when they stay blocked from coming back.
     pub tombstones: BTreeMap<String, u64>,
+    /// Edges by [`Edge::key`].
+    pub edges: BTreeMap<String, Edge>,
     /// Enrichment jobs, by `node_id`.
     pub jobs: BTreeMap<String, Job>,
     pub ledger: Ledger,
@@ -438,6 +440,9 @@ impl Store {
             state.nodes.remove(id);
             state.jobs.remove(id);
         }
+        state
+            .edges
+            .retain(|_, e| !gone.contains(&e.source) && !gone.contains(&e.target));
         if !gone.is_empty() {
             state.generation += 1;
         }
@@ -464,6 +469,9 @@ impl Store {
             state.jobs.remove(id);
             state.tombstones.insert(id.clone(), until_ms);
         }
+        state
+            .edges
+            .retain(|_, e| !gone.contains(&e.source) && !gone.contains(&e.target));
         state.generation += 1;
         self.write_snapshot(&on_disk(&state)?)?;
         let spool = self.dir.join(SPOOL);
@@ -498,6 +506,7 @@ impl Store {
         let mut state = self.load()?;
         let removed = state.nodes.len();
         state.jobs.clear();
+        state.edges.clear();
         for id in std::mem::take(&mut state.nodes).into_keys() {
             state.tombstones.insert(id, until_ms);
         }
@@ -594,6 +603,39 @@ impl Store {
             self.write_snapshot(&on_disk(&state)?)?;
         }
         drop(lease);
+        Ok(())
+    }
+
+    /// Applies what the classifier decided about `node_id`, under the writer lock and never
+    /// while waiting on the network. A node forgotten meanwhile stays forgotten: nothing is
+    /// recreated. Edges to nodes that are gone are dropped.
+    pub fn commit_enrichment(
+        &self,
+        node_id: &str,
+        types: Option<Types>,
+        enrichment: EnrichmentState,
+        edges: Vec<Edge>,
+    ) -> Result<(), Refusal> {
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        let generation = state.generation + 1;
+        let Some(node) = state.nodes.get_mut(node_id) else {
+            return Ok(());
+        };
+        if let Some(types) = types {
+            node.types = types;
+        }
+        node.enrichment.state = enrichment;
+        node.enrichment.prompt_version = Some(super::prompts::VERSION.into());
+        for mut edge in edges {
+            if !state.nodes.contains_key(&edge.source) || !state.nodes.contains_key(&edge.target) {
+                continue;
+            }
+            edge.generation = generation;
+            state.edges.insert(edge.key(), edge);
+        }
+        state.generation = generation;
+        self.write_snapshot(&on_disk(&state)?)?;
         Ok(())
     }
 

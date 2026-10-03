@@ -973,3 +973,36 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// An inferred causal edge always points the way its own question asked.
+    #[test]
+    fn the_two_causal_directions_are_never_confused(caused_by in 0.0f64..=1.0, causes in 0.0f64..=1.0) {
+        use ripwire_broker::memory::controller::{self, Config};
+        use ripwire_broker::memory::model::{Graph, Record};
+        use ripwire_broker::online::response::Decision;
+        let rec = |n: u64| -> Record {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "policy_version": "memory-policy/v1",
+                "node_id": format!("{n:064}"), "content_hash": format!("{n:064}"),
+                "workspace_id": "w", "event_key": "e", "kind": "edit_observation", "content": "c",
+                "observed_at_ms": n, "ingest_seq": n, "timestamp_role": "observation",
+                "expires_at_ms": 9, "generation": 0
+            })).unwrap()
+        };
+        let (new, cand) = (rec(2), rec(1));
+        let answers = [
+            ("caused_by", Decision::Noul { probability: caused_by }),
+            ("causes", Decision::Noul { probability: causes }),
+        ].into();
+        let cfg = Config { model: "m".into(), candidates: 4 };
+        for e in controller::pair_edges(&new, &cand, &answers, &cfg).iter().filter(|e| e.graph == Graph::Causal) {
+            match e.source == new.node_id {
+                true => prop_assert!(causes >= 0.6 && e.target == cand.node_id),
+                false => prop_assert!(caused_by >= 0.6 && e.source == cand.node_id && e.target == new.node_id),
+            }
+        }
+    }
+}
