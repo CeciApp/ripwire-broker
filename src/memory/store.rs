@@ -11,7 +11,7 @@
 use super::model::Record;
 use super::time::Sequence;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -118,6 +118,16 @@ pub struct State {
     pub sequence: Sequence,
     /// By `node_id`.
     pub nodes: BTreeMap<String, Record>,
+    /// The latest wall clock a sweep trusted; an earlier reading means the clock went back.
+    pub trusted_ms: u64,
+}
+
+/// What one retention sweep did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Swept {
+    pub removed: usize,
+    /// The clock is behind the trusted reading: nothing expires by age until it catches up.
+    pub suspended: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -301,6 +311,38 @@ impl Store {
         Ok(done)
     }
 
+    /// Retention (PRD jev-mem §6): removes what expired by `now_ms` and every note derived from
+    /// it, at any depth. A derived note never outlives a parent.
+    pub fn sweep(&self, now_ms: u64) -> Result<Swept, Refusal> {
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        if now_ms < state.trusted_ms {
+            return Ok(Swept {
+                removed: 0,
+                suspended: true,
+            });
+        }
+        let due = state
+            .nodes
+            .values()
+            .filter(|r| r.expires_at_ms <= now_ms)
+            .map(|r| r.node_id.clone())
+            .collect();
+        let gone = with_descendants(&state, due);
+        for id in &gone {
+            state.nodes.remove(id);
+        }
+        if !gone.is_empty() {
+            state.generation += 1;
+        }
+        state.trusted_ms = now_ms;
+        self.write_snapshot(&on_disk(&state)?)?;
+        Ok(Swept {
+            removed: gone.len(),
+            suspended: false,
+        })
+    }
+
     fn spool_files(&self) -> Result<Vec<PathBuf>, Unavailable> {
         let mut files: Vec<PathBuf> = match fs::read_dir(self.dir.join(SPOOL)) {
             Ok(entries) => entries
@@ -363,6 +405,23 @@ impl Store {
         }
         let on_disk: OnDisk = serde_json::from_value(value).map_err(|_| Unavailable::Corrupt)?;
         Ok(Some(on_disk.state))
+    }
+}
+
+/// `ids` and every node derived from one of them, transitively.
+fn with_descendants(state: &State, mut ids: BTreeSet<String>) -> BTreeSet<String> {
+    loop {
+        let more: Vec<String> = state
+            .nodes
+            .values()
+            .filter(|r| !ids.contains(&r.node_id))
+            .filter(|r| r.derived_from.iter().any(|p| ids.contains(&p.node_id)))
+            .map(|r| r.node_id.clone())
+            .collect();
+        if more.is_empty() {
+            return ids;
+        }
+        ids.extend(more);
     }
 }
 

@@ -363,3 +363,116 @@ fn a_second_writer_does_not_wait_and_reports_the_lock() {
     drop(held);
     assert_eq!(store.ingest().unwrap().added, 2);
 }
+
+// ---------------------------------------------------------------- retention (§6, CA-11)
+
+use ripwire_broker::memory::model::{Kind, Parent};
+
+fn expiring(n: u64, at: u64) -> Record {
+    let mut r = record(n);
+    r.expires_at_ms = at;
+    r
+}
+
+fn derived(n: u64, at: u64, parents: &[&Record]) -> Record {
+    let mut r = expiring(n, at);
+    r.kind = Kind::DerivedNote;
+    r.derived_from = parents
+        .iter()
+        .map(|p| Parent {
+            node_id: p.node_id.clone(),
+            content_hash: p.content_hash.clone(),
+        })
+        .collect();
+    r
+}
+
+fn stored(state: &Path, records: &[Record]) -> Store {
+    let store = Store::new(state, &"r".repeat(64));
+    for r in records {
+        store.enqueue(r).unwrap();
+    }
+    store.ingest().unwrap();
+    store
+}
+
+fn ids(store: &Store) -> Vec<u64> {
+    let s = store.load().unwrap();
+    s.nodes
+        .values()
+        .map(|r| r.node_id.parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn expired_nodes_take_their_derived_notes_with_them() {
+    let state = tempfile::tempdir().unwrap();
+    let (old, young) = (expiring(1, 100), expiring(2, 10_000));
+    let note = derived(3, 10_000, &[&old]);
+    let of_note = derived(4, 10_000, &[&note]);
+    let store = stored(state.path(), &[old, young, note, of_note]);
+
+    let swept = store.sweep(99).unwrap();
+    assert_eq!(
+        (swept.removed, swept.suspended),
+        (0, false),
+        "nothing is due yet"
+    );
+    let generation = store.load().unwrap().generation;
+
+    let swept = store.sweep(100).unwrap();
+    assert_eq!(
+        swept.removed, 3,
+        "the node, its note, and the note made from that note"
+    );
+    assert_eq!(ids(&store), [2]);
+    assert_eq!(
+        store.load().unwrap().generation,
+        generation + 1,
+        "a new generation"
+    );
+}
+
+#[test]
+fn a_derived_note_never_outlives_its_parents() {
+    let state = tempfile::tempdir().unwrap();
+    let (a, b) = (expiring(1, 10_000), expiring(2, 100));
+    let note = derived(3, 1_000_000, &[&a, &b]);
+    let store = stored(state.path(), &[a, b, note]);
+    store.sweep(100).unwrap();
+    assert_eq!(ids(&store), [1], "one parent gone is enough");
+}
+
+#[test]
+fn a_clock_rollback_suspends_expiry_by_age_but_keeps_the_caps() {
+    let state = tempfile::tempdir().unwrap();
+    let store = stored(state.path(), &[expiring(1, 500)]);
+    store.sweep(50).unwrap();
+    store.enqueue(&expiring(2, 20)).unwrap();
+    store.ingest().unwrap();
+    let back = store.sweep(30).unwrap();
+    assert!(back.suspended, "the clock went back from 50 to 30");
+    assert_eq!(
+        back.removed, 0,
+        "a node due at 20 waits for a trusted clock"
+    );
+    assert_eq!(ids(&store), [1, 2]);
+
+    let small = Store::with_limits(
+        state.path(),
+        &"r".repeat(64),
+        Limits {
+            max_nodes: 2,
+            ..Limits::default()
+        },
+    );
+    small.enqueue(&record(9)).unwrap();
+    assert_eq!(
+        small.ingest().unwrap().refused,
+        Some(Full::Nodes),
+        "caps still hold"
+    );
+
+    let recovered = store.sweep(600).unwrap();
+    assert_eq!((recovered.suspended, recovered.removed), (false, 2));
+}

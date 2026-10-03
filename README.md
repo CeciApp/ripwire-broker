@@ -281,6 +281,14 @@ and so does a value shaped like a credential (`sk-…`, `AKIA…`, `ghp_…`, a 
 or an e-mail address. The scan is conservative, not a promise to catch every secret; a refusal
 is counted by reason and never logged with its content.
 
+**Where and how long:** `<state-dir>/memory/<workspace id>/`, outside the repository, 0700 and
+0600; two worktrees of one repository never share a store. A memory expires after
+`--memory-retention-days` (30); a note derived from memories goes with the first of them to
+expire. If the wall clock goes back, nothing expires by age until it catches up again, while the
+size caps (2,000 memories, a 1,000-entry spool, 96 MiB in all) keep holding. A store that cannot
+be read (a newer schema, a corrupt file, a link, a directory open to others) is left untouched
+and memory stays off for that workspace.
+
 ## Automatic mode (hooks)
 
 MCP alone only offers tools; the agent still has to call them. Hooks make it automatic
