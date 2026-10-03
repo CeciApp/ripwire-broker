@@ -357,6 +357,46 @@ fn hook_and_prompt_reject_online() {
     }
 }
 
+#[test]
+fn memory_implies_online_and_both_flags_are_equivalent() {
+    let Ok(Command::Serve(off)) = parse(&["--workspace", "/w"]) else {
+        panic!()
+    };
+    assert_eq!(
+        (off.online, off.memory, off.online_origin),
+        (None, None, None),
+        "offline, no memory, by default"
+    );
+
+    let Ok(Command::Serve(only)) = parse(&["--workspace", "/w", "--online"]) else {
+        panic!()
+    };
+    assert!(
+        only.online.is_some() && only.memory.is_none(),
+        "--online alone keeps no history"
+    );
+    assert_eq!(only.online_origin, Some(cli::OnlineOrigin::Explicit));
+
+    let Ok(Command::Serve(m)) = parse(&["--workspace", "/w", "--memory"]) else {
+        panic!()
+    };
+    let Ok(Command::Serve(both)) = parse(&["--workspace", "/w", "--online", "--memory"]) else {
+        panic!()
+    };
+    assert!(
+        m.online.is_some(),
+        "--memory implies --online (PRD jev-mem §4)"
+    );
+    assert_eq!(m.online, both.online);
+    assert_eq!(m.memory, both.memory);
+    assert_eq!(
+        m.memory.as_ref().map(|a| a.read_deadline),
+        Some(Duration::from_millis(750))
+    );
+    assert_eq!(m.online_origin, Some(cli::OnlineOrigin::Implied));
+    assert_eq!(both.online_origin, Some(cli::OnlineOrigin::Explicit));
+}
+
 // --- e2e: the binary's commands against a real ripwire (skipped without it) ---
 
 mod common;

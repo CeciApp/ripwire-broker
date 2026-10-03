@@ -19,6 +19,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                                 [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
                                 [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
                                 [--jev-lookahead-max N]]
+                      [--memory]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
@@ -34,6 +35,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
 
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
 Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
+--memory: implica --online; guarda observações do workspace localmente e envia as elegíveis ao Jev.
 The credential comes only from RIPWIRE_BROKER_JEV_API_KEY in the server's environment.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,25 @@ pub struct ServeArgs {
     pub ripwire_max_rss_mb: Option<u64>,
     /// The remote classifier (PRD §23); `None` keeps the process offline (RF-ONLINE-01).
     pub online: Option<OnlineArgs>,
+    /// Whether `--online` was asked for or implied by `--memory`; `None` when offline.
+    pub online_origin: Option<OnlineOrigin>,
+    /// Persistent memory (PRD jev-mem §4); implies `online`. `None` keeps no history.
+    pub memory: Option<MemoryArgs>,
+}
+
+/// How the effective online mode came about, kept for diagnostics (PRD jev-mem §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnlineOrigin {
+    Explicit,
+    /// `--memory` without `--online`.
+    Implied,
+}
+
+/// `--memory` and its `--memory-*` companions (PRD jev-mem §4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryArgs {
+    /// Longest `context_for_task` waits for memory.
+    pub read_deadline: Duration,
 }
 
 /// `--online` and its `--jev-*` companions (PRD §23.6, D-059). No credential here: it comes
@@ -278,8 +299,9 @@ impl Flags {
         }))
     }
 
+    /// `--memory` counts as `--online` (PRD jev-mem §4).
     fn online(&self) -> Result<Option<OnlineArgs>, String> {
-        if !self.on("--online") {
+        if !self.on("--online") && !self.on("--memory") {
             return match self.jev.is_empty() && !self.on("--jev-no-cache") {
                 true => Ok(None),
                 false => Err(usage("the --jev-* options need --online")),
@@ -319,6 +341,20 @@ impl Flags {
         }))
     }
 
+    fn online_origin(&self) -> Option<OnlineOrigin> {
+        match (self.on("--online"), self.on("--memory")) {
+            (true, _) => Some(OnlineOrigin::Explicit),
+            (false, true) => Some(OnlineOrigin::Implied),
+            (false, false) => None,
+        }
+    }
+
+    fn memory(&self) -> Option<MemoryArgs> {
+        self.on("--memory").then(|| MemoryArgs {
+            read_deadline: Duration::from_millis(750),
+        })
+    }
+
     fn workspace(&self) -> Result<PathBuf, String> {
         self.workspace
             .clone()
@@ -338,6 +374,7 @@ const SWITCHES: &[&str] = &[
     "--detail",
     "--write",
     "--online",
+    "--memory",
     "--jev-no-cache",
     "--jev-probe",
 ];
@@ -464,6 +501,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                         SUMMARIZER[2],
                         SUMMARIZER[3],
                         "--online",
+                        "--memory",
                         "--jev-no-cache",
                     ]
                     .into_iter()
@@ -481,6 +519,8 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 summarizer: f.summarizer()?,
                 ripwire_max_rss_mb: f.max_rss_mb,
                 online: f.online()?,
+                online_origin: f.online_origin(),
+                memory: f.memory(),
             }))
         }
         Some("__supervise") => {
