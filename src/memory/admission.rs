@@ -252,3 +252,81 @@ fn personal_data(text: &str) -> bool {
         None => false,
     })
 }
+
+/// A note the operator supplies with `memory add` (PRD jev-mem §5.2). Its text is untrusted
+/// data: kept verbatim, never followed as an instruction.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Note {
+    pub text: String,
+    /// Workspace-relative paths the note is about.
+    #[serde(default)]
+    pub references: Vec<String>,
+}
+
+/// The `explicit_note` record for `note`, under the same filters as an observation.
+pub fn admit_note(
+    reader: &WorkspaceReader,
+    workspace_id: &str,
+    note: &Note,
+    stamp: Stamp,
+) -> Result<Record, Refused> {
+    for text in std::iter::once(&note.text).chain(&note.references) {
+        if secret_shaped(text) {
+            return Err(Refused::SecretShaped);
+        }
+        if personal_data(text) {
+            return Err(Refused::PersonalData);
+        }
+    }
+    if note.text.trim().is_empty() {
+        return Err(Refused::Empty);
+    }
+    let mut snapshots = Vec::new();
+    for path in &note.references {
+        snapshots.push(reader.snapshot(path).map_err(Refused::Ineligible)?);
+    }
+    snapshots.sort_by(|a, b| a.path.cmp(&b.path));
+    snapshots.dedup_by(|a, b| a.path == b.path);
+    let mut record = Record {
+        schema_version: SCHEMA_VERSION,
+        policy_version: POLICY_VERSION.into(),
+        node_id: String::new(),
+        content_hash: String::new(),
+        workspace_id: workspace_id.into(),
+        event_key: "operator_supplied".into(),
+        kind: Kind::ExplicitNote,
+        content: note.text.clone(),
+        observed_at_ms: stamp.observed_at_ms,
+        ingest_seq: stamp.ingest_seq,
+        event_time: None,
+        timestamp_role: TimestampRole::Observation,
+        temporal_references: vec![],
+        entities: snapshots
+            .iter()
+            .map(|s| identity::file_entity(workspace_id, &s.path))
+            .collect(),
+        sources: snapshots
+            .iter()
+            .map(|s| Source {
+                path: s.path.clone(),
+                sha256: s.content_hash.clone(),
+                symbol: None,
+                lines: None,
+                verb: "memory_add".into(),
+                basis: "operator_supplied".into(),
+                ripwire_version: None,
+            })
+            .collect(),
+        revision: None,
+        assertion: None,
+        types: Default::default(),
+        enrichment: Default::default(),
+        derived_from: vec![],
+        expires_at_ms: stamp.observed_at_ms.saturating_add(stamp.retention_ms),
+        generation: stamp.generation,
+    };
+    record.content_hash = identity::content_hash(&record);
+    record.node_id = identity::node_id(workspace_id, record.kind, &record.content_hash);
+    record.check().map_err(Refused::Record)?;
+    Ok(record)
+}

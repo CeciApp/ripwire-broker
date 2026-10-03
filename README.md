@@ -38,7 +38,10 @@ commands; `ripwire-broker --help` lists them all:
 | `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
 | `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
-| `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory; local, no network or credential ([below](#persistent-memory-being-built)) |
+| `memory status --workspace DIR [--json]` | The workspace's memory: memories, pending observations, generation, sizes, and the category of the error if the store cannot be read |
+| `memory forget --workspace DIR (--all \| --id ID)` | Forgets one memory and what derives from it, or everything (which also revokes collection) |
+| `memory add --workspace DIR --file PATH` | Adds an explicit note from a JSON file, `{"text": "...", "references": ["src/a.rs"]}` |
+| `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
 return a structured error (`upstream_unavailable` / `incompatible_upstream`), and the next
@@ -297,6 +300,14 @@ system made (swap, snapshots, backups of the disk) nor anything already sent to 
 Forgetting everything also revokes collection for the workspace: a `revoked` marker in the store
 wins over `--memory`, across restarts, until `ripwire-broker memory resume --workspace DIR`
 removes it. What was forgotten stays forgotten after resuming.
+
+**Commands:** the four `memory` commands in the [table above](#build-and-run) are local: they
+never start ripwire, open a connection or need the credential or the `online` feature.
+`memory add` is the only way a preference or a free-text note gets in; the broker never infers
+one from an edit. The note's text is untrusted data, kept verbatim and never followed as an
+instruction; the input file and the text pass the same filters as an observation. A forgotten id
+stays blocked for 365 days, the longest retention allowed, since `forget` cannot know the
+retention the server runs with.
 
 ## Automatic mode (hooks)
 

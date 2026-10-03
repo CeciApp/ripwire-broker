@@ -33,6 +33,9 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
        ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online]
        ripwire-broker statusline [--workspace DIR] [--state-dir DIR] [--detail] [--width N] [--color never|always]
+       ripwire-broker memory status --workspace DIR [--state-dir DIR] [--json]
+       ripwire-broker memory forget --workspace DIR [--state-dir DIR] (--all | --id ID)
+       ripwire-broker memory add --workspace DIR [--state-dir DIR] --file PATH
        ripwire-broker memory resume --workspace DIR [--state-dir DIR]
 
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
@@ -199,8 +202,16 @@ pub struct InstallArgs {
 }
 
 /// What `memory` does; every action is local: no network, credential or `online` feature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryAction {
+    /// Queues, sizes, schema and the store's error category, if any.
+    Status { json: bool },
+    /// One memory and every note derived from it.
+    Forget { id: String },
+    /// Everything, and collection is revoked until `Resume`.
+    ForgetAll,
+    /// An explicit note from a JSON file (PD-1).
+    Add { file: PathBuf },
     /// Lifts the revocation `memory forget --all` leaves (PD-4).
     Resume,
 }
@@ -296,6 +307,8 @@ struct Flags {
     edit_interval_ms: Option<u64>,
     width: Option<u64>,
     color: Option<String>,
+    id: Option<String>,
+    file: Option<PathBuf>,
     jev: HashMap<&'static str, String>,
     memory: HashMap<&'static str, String>,
     switches: Vec<&'static str>,
@@ -425,6 +438,7 @@ const SWITCHES: &[&str] = &[
     "--memory",
     "--jev-no-cache",
     "--jev-probe",
+    "--all",
 ];
 
 /// The valued `--jev-*` flags; kept as text until `Flags::online` checks them.
@@ -495,6 +509,8 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             }
             "--width" => f.width = Some(number(&value)?),
             "--color" => f.color = Some(value),
+            "--id" => f.id = Some(value),
+            "--file" => f.file = Some(value.into()),
             jev if JEV.contains(&jev) => {
                 let key = JEV.iter().find(|k| **k == jev).unwrap();
                 f.jev.insert(key, value);
@@ -756,12 +772,36 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             }))
         }
         Some("memory") => {
-            let action = match it.next().as_deref() {
-                Some("resume") => MemoryAction::Resume,
+            let verb = it.next();
+            let extra: &[&str] = match verb.as_deref() {
+                Some("status") => &["--json"],
+                Some("forget") => &["--all", "--id"],
+                Some("add") => &["--file"],
+                Some("resume") => &[],
                 other => return Err(usage(format_args!("unknown memory command {other:?}"))),
             };
-            let f = flags(it, &["--workspace", "--state-dir"])?;
+            let allowed: Vec<&str> = ["--workspace", "--state-dir"]
+                .iter()
+                .chain(extra)
+                .copied()
+                .collect();
+            let f = flags(it, &allowed)?;
             no_words(&f)?;
+            let action = match (verb.as_deref(), f.on("--all"), f.id.clone()) {
+                (Some("status"), ..) => MemoryAction::Status {
+                    json: f.on("--json"),
+                },
+                (Some("forget"), true, None) => MemoryAction::ForgetAll,
+                (Some("forget"), false, Some(id)) => MemoryAction::Forget { id },
+                (Some("forget"), ..) => return Err(usage("memory forget takes --all or --id ID")),
+                (Some("add"), ..) => MemoryAction::Add {
+                    file: f
+                        .file
+                        .clone()
+                        .ok_or_else(|| usage("memory add needs --file PATH"))?,
+                },
+                _ => MemoryAction::Resume,
+            };
             Ok(Command::Memory(MemoryCommand {
                 action,
                 workspace: f.workspace()?,

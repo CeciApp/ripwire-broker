@@ -62,6 +62,29 @@ pub enum Unavailable {
     Io,
 }
 
+impl Unavailable {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Symlink => "symlink",
+            Self::NotPrivate => "not_private",
+            Self::ForeignOwner => "foreign_owner",
+            Self::NotRegular => "not_regular",
+            Self::TooLarge => "too_large",
+            Self::Corrupt => "corrupt",
+            Self::UnknownSchema => "unknown_schema",
+            Self::Io => "io",
+        }
+    }
+}
+
+/// How much a store holds on disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub pending: usize,
+    pub spool_bytes: u64,
+    pub snapshot_bytes: u64,
+}
+
 /// Which cap a write ran into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Full {
@@ -241,6 +264,17 @@ impl Store {
         crate::state::write_private(&spool, &target, &bytes)
             .and_then(|()| fs::File::open(&spool)?.sync_all())
             .map_err(|_| Refusal::Unavailable(Unavailable::Io))
+    }
+
+    /// Sizes on disk, without reading the snapshot.
+    pub fn usage(&self) -> Result<Usage, Unavailable> {
+        let (pending, spool_bytes) = self.spool_usage()?;
+        let snapshot_bytes = fs::symlink_metadata(self.dir.join(SNAPSHOT)).map_or(0, |m| m.len());
+        Ok(Usage {
+            pending,
+            spool_bytes,
+            snapshot_bytes,
+        })
     }
 
     /// Observations waiting in the spool.
