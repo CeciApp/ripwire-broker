@@ -1597,6 +1597,7 @@ A combinação deve aumentar recall sem entregar o repositório inteiro ao agent
 ```text
 ripwire-broker --workspace /repo              # offline, nenhuma rede
 ripwire-broker --workspace /repo --online     # descoberta semântica remota
+ripwire-broker --workspace /repo --memory     # tudo do --online, mais memória persistente
 ```
 
 `--online` é decisão do operador que inicia o processo. Não é exposta como booleano
@@ -1606,16 +1607,20 @@ e somente pelo `env` do servidor MCP é ***sem fonte na v0.1*** (§23.17).
 
 **Invariantes** [v0.1 §3.2]:
 
-1. Ausência de `--online` significa **zero chamada ao classificador** e nenhum
-   cliente HTTP dele inicializado. O CA-10 continua valendo sem alteração.
+1. Ausência de `--online` **e** de `--memory` significa **zero chamada ao
+   classificador** e nenhum cliente HTTP dele inicializado na execução normal.
+   `--memory` implica `--online` ([PRD jev-mem §4](../docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento),
+   D-135); os comandos locais `memory status\|forget\|add\|resume` nunca usam a rede. O
+   CA-10 continua valendo sem alteração no build sem a feature `online`.
 2. Presença de `--online` significa consentimento explícito para enviar somente o
    conteúdo elegível da raiz configurada.
 3. Credencial ausente ou inválida em modo online causa falha clara; não há downgrade
    silencioso para offline.
-4. O classificador participa só de `context_for_task`. `context_after_edit` e
-   `context_before_finish` permanecem estruturais: suas entradas são alterações
-   conhecidas e obrigações para as quais o Ripwire já tem evidência mais precisa
-   [v0.1 §3.3].
+4. A **descoberta** semântica participa só de `context_for_task`. `context_after_edit` e
+   `context_before_finish` permanecem estruturais nas respostas: suas entradas são
+   alterações conhecidas e obrigações para as quais o Ripwire já tem evidência mais
+   precisa [v0.1 §3.3]. Com `--memory`, essas duas tools publicam uma observação
+   **depois** do envelope, sem mudá-lo e sem rede no caminho da resposta (D-137).
 5. Resultados remotos são probabilidades e nunca substituem callers, impacto,
    testes ou contratos produzidos pelo Ripwire.
 6. Falha parcial do classificador pode preservar contexto estrutural e evidência
@@ -1630,6 +1635,20 @@ e somente pelo `env` do servidor MCP é ***sem fonte na v0.1*** (§23.17).
 10. O modo offline padrão e o CA-10 não são afrouxados por nenhuma norma deste
     capítulo.
 11. Uma probabilidade nunca é convertida em caller, teste, impacto ou contrato.
+
+**Memória persistente** (D-138), só com `--memory`, um opt-in novo que amplia este
+capítulo:
+
+12. Um worker de memória roda **fora de `context_for_task`**: incorpora observações
+    pendentes e as enriquece com o classificador em segundo plano, enquanto o processo
+    autorizado vive, e para com ele. Nenhum processo com a credencial sobrevive ao
+    servidor; o que ficou pendente espera em disco pelo próximo processo autorizado ou
+    por `memory drain --online`, o único outro comando que aceita `--online` (D-135). O
+    texto anterior deste capítulo proibia esse worker; ele não estava autorizado pelo
+    contrato de antes.
+13. Os hooks nunca fazem HTTP: `hook --memory` só grava no spool local.
+14. Uma relação inferida entre memórias nunca alimenta callers, testes, contratos ou o
+    gate de conclusão.
 
 **Execução** [v0.1 §3.3]: o broker não pode declarar que usou o modo online sem ao
 menos uma avaliação remota ou um cache hit semanticamente equivalente. A v0.1 exige
@@ -1791,6 +1810,16 @@ interrupted  cancelamento preservou evidência parcial
 `incomplete` não invalida os itens retornados; significa que ausências não podem ser
 lidas como irrelevância.
 
+**Pedidos da memória** (D-138): além do pedido de arquivos desta seção, o mesmo cliente
+envia `StateRequest`, um estado estruturado qualquer (uma observação; uma memória e seus
+candidatos) com perguntas Noul e **Choice** (`type=choice`, `instructions` e `criteria` como
+mapa opção→critério, na ordem dada). A resposta tipada é `Decision::Noul`, `Decision::Choice`
+(opção escolhida, probabilidades por opção e `confidence`; o gate lê a probabilidade da
+escolhida) ou `Decision::Unknown`. Modelo errado ou id desconhecido ou repetido invalida o lote;
+um campo inválido, só a sua decisão; probabilidades de Choice somam 1 com tolerância 1e-3 e
+nunca são renormalizadas. Pedidos de memória têm no máximo 32 perguntas e 38.000 bytes, e um
+par nunca é cortado entre pedidos. O adaptador Noul desta seção e o seu parse não mudaram.
+
 ### 23.3 Prompt `v1`
 
 - As perguntas vivem num módulo versionado, coberto por golden tests
@@ -1814,6 +1843,11 @@ lidas como irrelevância.
 - O nome `prompts/v1` e o **texto literal em inglês** das duas perguntas são
   ***sem fonte na v0.1***: a v0.1 só traz o resumo semântico acima. O texto é fixado
   no Sprint 0 da Fase 4 com golden test (§23.17).
+
+**Prompts da memória** (D-138): `memory-prompts/v1`, independentes de `v1` e de `notes/v1`, com
+oito etapas (typing, relações, alias, tempo implícito, routing, scoring, parada, consolidação),
+critérios verdadeiro/falso explícitos e o aviso de dados não confiáveis em cada instrução. O
+rescore desta seção não muda.
 
 ### 23.4 Composição em `context_for_task`
 
@@ -1977,6 +2011,15 @@ retornar `interrupted` quando ainda for possível responder. A relação com o
 | Thresholds | admissão `> 0,25`; fonte `> 0,50`; lead `(0,25; 0,50]` | v0.1 §6.3, §9.3, §9.6 |
 | Overhead local de batching e merge | p95 < 75 ms em respostas até 5.000 tokens, sem Ripwire e rede | v0.1 §20.1 |
 | Cancelamento observado por task | até 250 ms, salvo chamada bloqueante já no pool dedicado | v0.1 §20.1 |
+
+**Memória** (D-138): descoberta e memória dividem **um** teto de requisições em voo por
+processo (`--jev-max-in-flight`, um cliente compartilhado), sem segunda cota. Um workspace
+tem no máximo um job de memória falando com o provider por vez (lock de arquivo, entre
+processos), no máximo 4 tentativas por job (retries e divisões incluídos), um retry por lote
+para falha transitória, e um 429 só espera dentro do prazo de 5 s do job. 401/403 suspendem o
+worker até um novo processo. Cada workspace tem uma quota persistida de 1.000 tentativas e
+20.000 perguntas em 24 h móveis, cobrada antes de cada tentativa, que reinício e relógio
+atrasado não liberam. O custo aparece por operação no campo `memory` do recurso de status.
 
 ### 23.6 CLI, configuração, credencial e status
 

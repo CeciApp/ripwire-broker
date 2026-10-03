@@ -39,12 +39,79 @@ pub struct JevQuestion {
     #[serde(rename = "type")]
     pub kind: JevQuestionType,
     pub instructions: String,
+    /// Choice only: each option with the criterion that selects it, in the order given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub criteria: Option<Criteria>,
+}
+
+impl JevQuestion {
+    pub fn noul(instructions: &str) -> Self {
+        Self {
+            kind: JevQuestionType::Noul,
+            instructions: instructions.into(),
+            criteria: None,
+        }
+    }
+
+    /// Mutually exclusive options (PRD jev-mem §7): `options` are `(option, criterion)`.
+    pub fn choice(instructions: &str, options: &[(&str, &str)]) -> Self {
+        Self {
+            kind: JevQuestionType::Choice,
+            instructions: instructions.into(),
+            criteria: Some(Criteria(
+                options
+                    .iter()
+                    .map(|(o, c)| (o.to_string(), c.to_string()))
+                    .collect(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JevQuestionType {
     Noul,
+    Choice,
+}
+
+/// Option to criterion, serialized as a JSON object in insertion order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Criteria(pub Vec<(String, String)>);
+
+impl Serialize for Criteria {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(self.0.len()))?;
+        for (option, criterion) in &self.0 {
+            map.serialize_entry(option, criterion)?;
+        }
+        map.end()
+    }
+}
+
+/// A request about an arbitrary structured state, such as a memory and its candidates
+/// (PRD jev-mem §7); independent of `SemanticStage`. Question `qN` is the Nth given.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StateRequest {
+    pub model: String,
+    pub state: serde_json::Value,
+    pub questions: Questions,
+}
+
+impl StateRequest {
+    pub fn new(model: &str, state: serde_json::Value, questions: Vec<JevQuestion>) -> Self {
+        Self {
+            model: model.into(),
+            state,
+            questions: Questions(
+                questions
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, q)| (format!("q{n}"), q))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Questions by id, serialized as a JSON object in insertion order.
@@ -69,10 +136,7 @@ pub fn build(model: &str, query: &str, stage: SemanticStage, items: Vec<StateIte
         .map(|(n, item)| {
             (
                 format!("q{n}"),
-                JevQuestion {
-                    kind: JevQuestionType::Noul,
-                    instructions: prompt::instructions(stage, &item.id),
-                },
+                JevQuestion::noul(&prompt::instructions(stage, &item.id)),
             )
         })
         .collect();
@@ -93,10 +157,7 @@ fn json_len<T: Serialize>(v: &T) -> usize {
 
 /// Bytes the `n`-th item adds to a request (its state entry, its question and the commas).
 fn item_bytes(stage: SemanticStage, n: usize, item: &StateItem) -> usize {
-    let question = JevQuestion {
-        kind: JevQuestionType::Noul,
-        instructions: prompt::instructions(stage, &item.id),
-    };
+    let question = JevQuestion::noul(&prompt::instructions(stage, &item.id));
     let separators = if n == 0 { 0 } else { 2 };
     json_len(item) + format!("\"q{n}\":").len() + json_len(&question) + separators
 }

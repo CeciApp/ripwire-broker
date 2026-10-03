@@ -831,3 +831,261 @@ fn updating_a_cached_decision_evicts_nothing() {
     );
     assert_eq!(cache.get(&keys[MAX_ENTRIES / 2]).unwrap().probability, 0.5);
 }
+
+// --- jev-mem T2.2: Choice and a memory state (PRD jev-mem §7) ---
+
+use ripwire_broker::memory::wire::{self, Group};
+use ripwire_broker::online::request::{JevQuestion, StateRequest};
+
+#[test]
+fn a_choice_question_serializes_type_instructions_and_criteria() {
+    let req = StateRequest::new(
+        "jev-1.13.0",
+        serde_json::json!({
+            "new_memory": {"id": "m2", "content": "Evento: análise após edição. Escopo: src/cache.rs."},
+            "candidates": [{"id": "m1", "content": "Evento: análise antes da conclusão. Escopo: src/cache.rs."}]
+        }),
+        vec![
+            JevQuestion::noul(
+                "Is new_memory.content about the same specific fact as candidates[0].content?",
+            ),
+            JevQuestion::choice(
+                "Which temporal relation holds from new_memory to candidates[0]?",
+                &[
+                    ("before", "new_memory happened before candidates[0]."),
+                    ("after", "new_memory happened after candidates[0]."),
+                    ("unknown", "The accounts do not support any relation."),
+                ],
+            ),
+        ],
+    );
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/jev/memory_choice_request.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&req).unwrap(),
+        fixture.trim(),
+        "ids q0..qn in order, criteria in the order given, state keys sorted (deterministic for the cache)"
+    );
+}
+
+fn pair(n: usize, text_bytes: usize, questions: usize) -> Group {
+    Group {
+        item: serde_json::json!({"id": format!("m{n}"), "content": "x".repeat(text_bytes)}),
+        questions: (0..questions)
+            .map(|k| {
+                (
+                    format!("rel{k}"),
+                    JevQuestion::noul(&format!("relation {k} of candidates[{n}]")),
+                )
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn a_memory_request_is_split_before_32_questions_or_38000_bytes_and_never_cuts_a_pair() {
+    let base = serde_json::json!({"new_memory": {"id": "m0", "content": "new"}});
+    let groups: Vec<Group> = (1..=10).map(|n| pair(n, 10, 4)).collect();
+    let batches = wire::batches("jev-1.13.0", &base, "candidates", groups).unwrap();
+    let sizes: Vec<usize> = batches
+        .iter()
+        .map(|b| b.request.questions.0.len())
+        .collect();
+    assert_eq!(sizes, [32, 8], "eight whole pairs, then two");
+    assert!(
+        batches
+            .iter()
+            .all(|b| b.request.questions.0.len() <= wire::MAX_QUESTIONS)
+    );
+    // Every question maps back to its pair and its name, and the pair's item travels with it.
+    let b = &batches[1];
+    assert_eq!(b.keys[0], (8, "rel0".to_string()));
+    assert_eq!(b.request.state["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(b.request.state["candidates"][0]["id"], "m9");
+    assert_eq!(
+        b.request.state["new_memory"]["id"], "m0",
+        "the shared state goes in every batch"
+    );
+    assert_eq!(b.request.questions.0[0].0, "q0", "ids restart per request");
+
+    let big: Vec<Group> = (1..=6).map(|n| pair(n, 10_000, 4)).collect();
+    let batches = wire::batches("jev-1.13.0", &base, "candidates", big).unwrap();
+    assert!(batches.len() >= 2);
+    for b in &batches {
+        let bytes = serde_json::to_string(&b.request).unwrap().len();
+        assert!(bytes <= wire::MAX_REQUEST_BYTES, "{bytes}");
+        assert_eq!(b.request.questions.0.len() % 4, 0, "a pair is never cut");
+    }
+    let huge = vec![pair(1, 40_000, 4)];
+    assert!(
+        wire::batches("jev-1.13.0", &base, "candidates", huge).is_err(),
+        "an indivisible pair is refused"
+    );
+    let late = vec![pair(1, 10, 4), pair(2, 40_000, 4)];
+    assert!(
+        wire::batches("jev-1.13.0", &base, "candidates", late).is_err(),
+        "nor after a pair that fit"
+    );
+}
+
+// --- jev-mem T2.3: typed decisions (PRD jev-mem §7, CA-8) ---
+
+use ripwire_broker::online::response::{Decision, Unknown, parse_decisions};
+
+/// A request with a Noul `q0` and a Choice `q1` over before/after/unknown.
+fn decision_request() -> StateRequest {
+    StateRequest::new(
+        "jev-1.13.0",
+        serde_json::json!({}),
+        vec![
+            JevQuestion::noul("same fact?"),
+            JevQuestion::choice(
+                "order?",
+                &[("before", "b"), ("after", "a"), ("unknown", "u")],
+            ),
+        ],
+    )
+}
+
+fn answer(q0: &str, q1: &str) -> String {
+    format!(r#"{{"model":"jev-1.13.0","answers":{{"q0":{q0},"q1":{q1}}}}}"#)
+}
+
+const NOUL: &str = r#"{"type":"noul","noul":0.7}"#;
+const CHOICE: &str = r#"{"type":"choice","choice":"before","probabilities":{"before":0.8,"after":0.15,"unknown":0.05},"confidence":0.6}"#;
+
+#[test]
+fn a_decision_is_noul_choice_or_unknown_and_never_zero() {
+    let req = decision_request();
+    let got = parse_decisions(&req, &answer(NOUL, CHOICE)).unwrap();
+    assert_eq!(got[0], Decision::Noul { probability: 0.7 });
+    let Decision::Choice {
+        selected,
+        probabilities,
+        confidence,
+    } = &got[1]
+    else {
+        panic!("{:?}", got[1])
+    };
+    assert_eq!(selected, "before");
+    assert_eq!(probabilities["after"], 0.15);
+    assert_eq!(*confidence, Some(0.6));
+    assert_eq!(
+        got[1].probability(),
+        Some(0.8),
+        "the gate reads probabilities[choice], not confidence"
+    );
+
+    // One bad field: only its own decision is unknown.
+    let cases = [
+        (
+            r#"{"type":"choice","choice":0.7}"#,
+            Unknown::WrongType,
+            "type swapped",
+        ),
+        (
+            r#"{"type":"noul","noul":1.5}"#,
+            Unknown::OutOfRange,
+            "above 1",
+        ),
+        (
+            r#"{"type":"noul","noul":-0.01}"#,
+            Unknown::OutOfRange,
+            "below 0",
+        ),
+        (r#"{"type":"noul"}"#, Unknown::Absent, "no value"),
+    ];
+    for (q0, why, what) in cases {
+        let got = parse_decisions(&req, &answer(q0, CHOICE)).unwrap();
+        assert_eq!(got[0], Decision::Unknown { reason: why }, "{what}");
+        assert!(
+            matches!(got[1], Decision::Choice { .. }),
+            "{what}: the other stands"
+        );
+    }
+    let choices = [
+        (
+            r#"{"type":"choice","choice":"during","probabilities":{"before":0.8,"after":0.15,"unknown":0.05}}"#,
+            "chosen option not asked",
+        ),
+        (
+            r#"{"type":"choice","choice":"before","probabilities":{"before":0.8,"after":0.2}}"#,
+            "an option missing",
+        ),
+        (
+            r#"{"type":"choice","choice":"before","probabilities":{"before":0.8,"after":0.1,"unknown":0.05,"during":0.05}}"#,
+            "an option more",
+        ),
+        (
+            r#"{"type":"choice","choice":"before","probabilities":{"before":0.8,"after":0.15,"unknown":0.06}}"#,
+            "sum off by 1e-2",
+        ),
+        (
+            r#"{"type":"choice","choice":"before","probabilities":{"before":1.2,"after":-0.25,"unknown":0.05}}"#,
+            "out of range though summing to 1",
+        ),
+        (r#"{"type":"noul","noul":0.4}"#, "a noul for a choice"),
+    ];
+    for (q1, what) in choices {
+        let got = parse_decisions(&req, &answer(NOUL, q1)).unwrap();
+        assert!(
+            matches!(got[1], Decision::Unknown { .. }),
+            "{what}: {:?}",
+            got[1]
+        );
+        assert_eq!(got[1].probability(), None, "{what}: unknown is never 0");
+    }
+    let near = r#"{"type":"choice","choice":"after","probabilities":{"before":0.3,"after":0.6995,"unknown":0.0}}"#;
+    let got = parse_decisions(&req, &answer(NOUL, near)).unwrap();
+    assert_eq!(
+        got[1].probability(),
+        Some(0.6995),
+        "within 1e-3, and never renormalized"
+    );
+    let odd = r#"{"type":"choice","choice":"after","probabilities":{"before":0.6,"after":0.4,"unknown":0.0}}"#;
+    let got = parse_decisions(&req, &answer(NOUL, odd)).unwrap();
+    assert_eq!(
+        got[1].probability(),
+        Some(0.4),
+        "the selected option's, even when another is higher"
+    );
+    let missing = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.2}}}"#;
+    assert_eq!(
+        parse_decisions(&req, missing).unwrap()[1],
+        Decision::Unknown {
+            reason: Unknown::Absent
+        }
+    );
+
+    // Model or ids wrong: the whole batch.
+    let other = answer(NOUL, CHOICE).replace("jev-1.13.0", "jev-latest");
+    assert_eq!(
+        parse_decisions(&req, &other),
+        Err(InvalidResponse::WrongModel)
+    );
+    let extra = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.2},"q7":{"type":"noul","noul":0.2}}}"#;
+    assert_eq!(
+        parse_decisions(&req, extra),
+        Err(InvalidResponse::UnknownQuestion)
+    );
+    let twice = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.2},"q0":{"type":"noul","noul":0.9}}}"#;
+    assert_eq!(
+        parse_decisions(&req, twice),
+        Err(InvalidResponse::DuplicateQuestion)
+    );
+    assert_eq!(
+        parse_decisions(&req, "{nope"),
+        Err(InvalidResponse::Malformed)
+    );
+    assert_eq!(
+        parse_decisions(
+            &req,
+            r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":1e400}}}"#
+        ),
+        Err(InvalidResponse::Malformed),
+        "an infinite number is not JSON"
+    );
+}

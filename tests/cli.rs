@@ -4382,3 +4382,117 @@ fn memory_add_takes_a_relative_file_and_checks_it_against_the_workspace() {
         assert!(err.contains(why), "{dir}: {err}");
     }
 }
+
+#[test]
+fn memory_drain_needs_online_and_a_credential() {
+    let Ok(Command::Memory(m)) = parse(&["memory", "drain", "--workspace", "/w", "--online"])
+    else {
+        panic!()
+    };
+    assert_eq!(
+        m.action,
+        cli::MemoryAction::Drain {
+            model: None,
+            candidates: None
+        }
+    );
+    let Ok(Command::Memory(m)) = parse(&[
+        "memory",
+        "drain",
+        "--workspace",
+        "/w",
+        "--online",
+        "--jev-model",
+        "jev-1.14.0",
+        "--memory-write-candidates",
+        "7",
+    ]) else {
+        panic!()
+    };
+    assert_eq!(
+        m.action,
+        cli::MemoryAction::Drain {
+            model: Some("jev-1.14.0".into()),
+            candidates: Some(7)
+        },
+        "the same model and K as the server, so edge keys match"
+    );
+    let err = parse(&["memory", "drain", "--workspace", "/w"]).unwrap_err();
+    assert!(err.contains("--online"), "drain says what it needs: {err}");
+
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let args = [
+        "memory",
+        "drain",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        st.path().to_str().unwrap(),
+        "--online",
+    ];
+    let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args(args)
+        .env_remove("RIPWIRE_BROKER_JEV_API_KEY")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_ne!(out.status.code(), Some(0), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    match cfg!(feature = "online") {
+        true => assert!(stderr.contains("RIPWIRE_BROKER_JEV_API_KEY"), "{stderr}"),
+        false => assert!(
+            stderr.contains("built without the online feature"),
+            "{stderr}"
+        ),
+    }
+}
+
+#[test]
+fn memory_status_shows_the_24h_budget_in_use() {
+    use ripwire_broker::memory::{identity, store::Store};
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = Store::new(st.path(), &identity::workspace_id(ws.path()).unwrap());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    store.charge(now, 2, 9).unwrap();
+    let (code, out, err) = memory_cmd(ws.path(), st.path(), &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (v["attempts_24h"].as_u64(), v["questions_24h"].as_u64()),
+        (Some(2), Some(9))
+    );
+}
+
+#[test]
+fn memory_retry_brings_failed_jobs_back() {
+    use ripwire_broker::memory::queue::{JobState, Outcome};
+    use ripwire_broker::memory::{identity, model::Record, store::Store};
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = Store::new(st.path(), &identity::workspace_id(ws.path()).unwrap());
+    let record: Record = serde_json::from_value(json!({
+        "schema_version": 1, "policy_version": "memory-policy/v1", "node_id": "a1", "content_hash": "a1",
+        "workspace_id": "w", "event_key": "e", "kind": "edit_observation", "content": "c",
+        "observed_at_ms": 1, "ingest_seq": 0, "timestamp_role": "observation",
+        "expires_at_ms": u64::MAX, "generation": 0
+    }))
+    .unwrap();
+    store.enqueue(&record).unwrap();
+    store.ingest().unwrap();
+    let lease = store.lease_next(0).unwrap().unwrap();
+    store.finish(lease, Outcome::Failed).unwrap();
+
+    let (code, out, err) = memory_cmd(ws.path(), st.path(), &["retry"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("1 failed job"), "{out}");
+    assert_eq!(store.load().unwrap().jobs["a1"].state, JobState::Pending);
+    assert!(
+        parse(&["memory", "retry", "--workspace", "/w", "--online"]).is_err(),
+        "local only"
+    );
+}

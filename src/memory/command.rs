@@ -95,6 +95,14 @@ pub fn run(cmd: &MemoryCommand) -> Result<String, String> {
             let _ = store.ingest();
             Ok("added 1 note".into())
         }
+        // Needs the provider: the binary runs it, with the `online` feature (PD-2).
+        MemoryAction::Drain { .. } => Err("memory drain is run by the server binary".into()),
+        MemoryAction::Retry => {
+            let n = store
+                .retry_all_failed()
+                .map_err(|r| format!("memory retry: {}", category(r)))?;
+            Ok(format!("brought back {n} failed job(s)"))
+        }
         MemoryAction::Resume => match store.resume() {
             Ok(true) => Ok("memory collection resumed for this workspace".into()),
             Ok(false) => Ok("memory collection was not revoked for this workspace".into()),
@@ -118,6 +126,8 @@ fn status(store: &Store, as_json: bool) -> String {
         "pending": usage.pending,
         "spool_bytes": usage.spool_bytes,
         "snapshot_bytes": usage.snapshot_bytes,
+        "attempts_24h": state.ledger.used(SystemClock.now_ms()).0,
+        "questions_24h": state.ledger.used(SystemClock.now_ms()).1,
     });
     if as_json {
         return serde_json::to_string_pretty(&v).unwrap_or_default();

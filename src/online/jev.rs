@@ -117,6 +117,30 @@ impl Classifier for JevClient {
     async fn classify(&self, req: &JevRequest) -> Result<Vec<Option<f64>>, ClassifyError> {
         let body = serde_json::to_vec(req)
             .map_err(|_| ClassifyError::Invalid(InvalidResponse::Malformed))?;
+        let text = self.post(body, true).await?;
+        let ids: Vec<String> = req.questions.0.iter().map(|(id, _)| id.clone()).collect();
+        parse_answers(&self.model, &ids, &text).map_err(ClassifyError::Invalid)
+    }
+}
+
+#[async_trait]
+impl super::classifier::MemoryClassifier for JevClient {
+    async fn decide(
+        &self,
+        req: &super::request::StateRequest,
+    ) -> Result<Vec<super::response::Decision>, ClassifyError> {
+        let body = serde_json::to_vec(req)
+            .map_err(|_| ClassifyError::Invalid(InvalidResponse::Malformed))?;
+        let text = self.post(body, false).await?;
+        super::response::parse_decisions(req, &text).map_err(ClassifyError::Invalid)
+    }
+}
+
+impl JevClient {
+    /// One POST to the fixed endpoint, shared by discovery and memory: Bearer, no redirect or
+    /// proxy, the status mapped to a category, and the body capped at [`MAX_RESPONSE_BYTES`].
+    /// `discovery`: the response counts in `jev_response_bytes`; memory has its own metrics.
+    async fn post(&self, body: Vec<u8>, discovery: bool) -> Result<String, ClassifyError> {
         let mut resp = self
             .http
             .post(&self.endpoint)
@@ -157,10 +181,9 @@ impl Classifier for JevClient {
             }
             bytes.extend_from_slice(&chunk);
         }
-        self.received.lock().unwrap().add(bytes.len() as u64);
-        let text = String::from_utf8(bytes)
-            .map_err(|_| ClassifyError::Invalid(InvalidResponse::Malformed))?;
-        let ids: Vec<String> = req.questions.0.iter().map(|(id, _)| id.clone()).collect();
-        parse_answers(&self.model, &ids, &text).map_err(ClassifyError::Invalid)
+        if discovery {
+            self.received.lock().unwrap().add(bytes.len() as u64);
+        }
+        String::from_utf8(bytes).map_err(|_| ClassifyError::Invalid(InvalidResponse::Malformed))
     }
 }

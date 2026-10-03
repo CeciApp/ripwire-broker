@@ -258,6 +258,9 @@ fn a_full_store_refuses_new_writes_with_a_reason() {
             spool_bytes: 16 * 1024 * 1024,
             snapshot_bytes: 64 * 1024 * 1024,
             total_bytes: 96 * 1024 * 1024,
+            max_edges: 32_000,
+            attempts_per_day: 1_000,
+            questions_per_day: 20_000,
         },
         "PRD jev-mem §6"
     );
@@ -734,4 +737,186 @@ fn a_linked_spool_directory_is_never_written_through() {
         Err(Refusal::Unavailable(Unavailable::Symlink))
     );
     assert!(fs::read_dir(elsewhere.path()).unwrap().next().is_none());
+}
+
+// ---------------------------------------------------------------- queue (PRD jev-mem §6, §8.2; T2.6)
+
+use ripwire_broker::memory::queue::{JobState, Outcome};
+
+const DAY: u64 = 24 * 60 * 60 * 1000;
+
+fn queued(state: &Path, n: u64) -> Store {
+    let store = Store::new(state, &"j".repeat(64));
+    for i in 1..=n {
+        store.enqueue(&record(i)).unwrap();
+    }
+    store.ingest().unwrap();
+    store
+}
+
+#[test]
+fn an_abandoned_lease_is_recovered_by_the_lock_not_by_a_pid() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    let id = record(1).node_id;
+    assert_eq!(
+        store.load().unwrap().jobs[&id].state,
+        JobState::Pending,
+        "ingestion schedules typing"
+    );
+
+    let held = store.lease_next(1_000).unwrap().expect("a pending job");
+    assert_eq!((held.node_id(), held.run()), (id.as_str(), 1));
+    assert!(
+        store.lease_next(1_000).unwrap().is_none(),
+        "a live lease is respected"
+    );
+    // Another process, same machine: the lease is still held.
+    let other = Store::new(state.path(), &"j".repeat(64));
+    assert!(other.lease_next(1_000).unwrap().is_none());
+
+    drop(held); // the holder dies without finishing
+    let recovered = other
+        .lease_next(1_000)
+        .unwrap()
+        .expect("recovered through the lock");
+    assert_eq!((recovered.node_id(), recovered.run()), (id.as_str(), 2));
+    drop(recovered); // dies again, on its last run
+    assert!(other.lease_next(1_000).unwrap().is_none(), "no third run");
+    assert_eq!(other.load().unwrap().jobs[&id].state, JobState::Failed);
+}
+
+#[test]
+fn a_job_runs_at_most_twice_and_then_stays_failed_until_asked() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    let id = record(1).node_id;
+
+    let first = store.lease_next(0).unwrap().unwrap();
+    store
+        .finish(first, Outcome::Retry { not_before_ms: 500 })
+        .unwrap();
+    assert!(
+        store.lease_next(499).unwrap().is_none(),
+        "not before its time"
+    );
+    let second = store.lease_next(500).unwrap().unwrap();
+    assert_eq!(second.run(), 2);
+    store
+        .finish(second, Outcome::Retry { not_before_ms: 600 })
+        .unwrap();
+    assert!(
+        store.lease_next(10_000).unwrap().is_none(),
+        "two runs in all, counted on disk"
+    );
+    assert_eq!(store.load().unwrap().jobs[&id].state, JobState::Failed);
+
+    assert!(store.retry_failed(&id).unwrap(), "an explicit action");
+    let again = store.lease_next(10_000).unwrap().unwrap();
+    store.finish(again, Outcome::Done).unwrap();
+    assert_eq!(store.load().unwrap().jobs[&id].state, JobState::Done);
+    assert!(store.lease_next(10_000).unwrap().is_none());
+    store.forget(&id, u64::MAX).unwrap();
+    assert!(
+        !store.load().unwrap().jobs.contains_key(&id),
+        "forget takes the job along (CA-11)"
+    );
+}
+
+#[test]
+fn the_24h_ledger_survives_a_restart_and_a_clock_rollback() {
+    assert_eq!(
+        (
+            Limits::default().attempts_per_day,
+            Limits::default().questions_per_day
+        ),
+        (1_000, 20_000),
+        "PRD jev-mem §8.2"
+    );
+    let state = tempfile::tempdir().unwrap();
+    let limits = Limits {
+        attempts_per_day: 3,
+        questions_per_day: 10,
+        ..Limits::default()
+    };
+    let store = Store::with_limits(state.path(), &"k".repeat(64), limits);
+    let t = 5 * DAY;
+    store.charge(t, 1, 4).unwrap();
+    store.charge(t, 1, 4).unwrap(); // a retry is charged like any attempt
+    assert_eq!(
+        store.charge(t, 1, 4),
+        Err(Refusal::Full(Full::Quota)),
+        "12 questions > 10"
+    );
+    store.charge(t, 1, 2).unwrap();
+    assert_eq!(
+        store.charge(t, 1, 0),
+        Err(Refusal::Full(Full::Quota)),
+        "4 attempts > 3"
+    );
+
+    let restarted = Store::with_limits(state.path(), &"k".repeat(64), limits);
+    assert_eq!(
+        restarted.charge(t + 1, 1, 0),
+        Err(Refusal::Full(Full::Quota)),
+        "a restart keeps it"
+    );
+    assert_eq!(
+        restarted.charge(0, 1, 0),
+        Err(Refusal::Full(Full::Quota)),
+        "so does a clock rollback"
+    );
+    restarted.charge(t + DAY + 1, 1, 4).unwrap();
+    assert_eq!(
+        restarted.charge(t, 3, 0),
+        Err(Refusal::Full(Full::Quota)),
+        "going back after the window moved on does not free it either"
+    );
+
+    // A charge made while the clock was behind counts from the latest time seen, so it does not
+    // expire early once the clock is right again.
+    let state = tempfile::tempdir().unwrap();
+    let two = Limits {
+        attempts_per_day: 2,
+        ..limits
+    };
+    let store = Store::with_limits(state.path(), &"k".repeat(64), two);
+    store.charge(t, 1, 0).unwrap();
+    store.charge(t - 2 * DAY, 1, 0).unwrap();
+    assert_eq!(store.charge(t + 1, 1, 0), Err(Refusal::Full(Full::Quota)));
+}
+
+#[test]
+fn the_worker_bookkeeping_waits_briefly_for_another_writer() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"w".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    // Another process ingests for a moment: a quota charge waits for it instead of failing.
+    let held = store.writer().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+    });
+    assert_eq!(
+        store.charge(5 * DAY, 1, 4),
+        Ok(()),
+        "a brief lock is waited for"
+    );
+    release.join().unwrap();
+    assert_eq!(
+        store.ingest().map(|_| ()),
+        Ok(()),
+        "and the plain writer still never waits"
+    );
+
+    let held = store.writer().unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        store.charge(5 * DAY, 1, 4),
+        Err(Refusal::Locked),
+        "but not forever"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    drop(held);
 }

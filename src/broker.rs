@@ -2,7 +2,7 @@
 
 use crate::budget;
 use crate::memory::admission::Event as MemoryEvent;
-use crate::memory::publish::{Counts as MemoryCounts, MemoryConfig, Publisher};
+use crate::memory::publish::{MemoryConfig, MemoryStatus, Publisher};
 use crate::metrics::{Metrics, RequestRecord, StageSpan, UpstreamSpan};
 use crate::model::*;
 use crate::normalize::{self, Entry};
@@ -345,7 +345,7 @@ pub struct BrokerStatus {
     pub online: Option<OnlineStatus>,
     /// Only for a process started with `--memory`: counts, never content.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory: Option<MemoryCounts>,
+    pub memory: Option<MemoryStatus>,
     pub metrics: Metrics,
 }
 
@@ -511,7 +511,7 @@ impl Broker {
                     metrics: engine.metrics(),
                 }
             }),
-            memory: self.memory.as_ref().map(Publisher::counts),
+            memory: self.memory.as_ref().map(Publisher::status),
             metrics: {
                 let mut m = self.metrics.lock().unwrap().clone();
                 m.session.remembered = self.session.lock().unwrap().len();

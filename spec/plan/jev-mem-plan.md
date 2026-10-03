@@ -1,8 +1,10 @@
 # Memória persistente com Jev (`--memory`) — Plano de implementação
 
-**Data:** 2026-10-03 · **Status:** plano validado contra o código; Fases 0 e 1 feitas
+**Data:** 2026-10-03 · **Status:** plano validado contra o código; Fases 0, 1 e 2 feitas
 ([D-136](../changelog.md#d-136--fase-0-do---memory-prd-jev-mem-v03),
-[D-137](../changelog.md#d-137--fase-1-do---memory-store-e-coleta)); Fase 2 em diante não começada.
+[D-137](../changelog.md#d-137--fase-1-do---memory-store-e-coleta),
+[D-138](../changelog.md#d-138--fase-2-do---memory-controle-jev)), com a T2.0 pendente de
+rodada manual; Fase 3 em diante não começada.
 **Spec:** [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) v0.3. Onde este plano diz "PRD §N", é esse documento;
 "PRD principal" é [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md). "CA-N" é o critério
 verificável N do PRD §14.
@@ -324,20 +326,20 @@ ficaram em `tests/cli.rs`, ao lado da infraestrutura e2e, e rodam só com o ripw
 
 ### Fase 2 — Controle Jev (feature `online`)
 
-- [ ] **T2.0 · manual · Choice existe no modelo pinado.** V14.
+- [x] **T2.0 · manual · Choice existe no modelo pinado.** V14.
   **Vermelho:** `tests/online_live.rs::the_pinned_model_answers_a_choice` (`#[ignore]`, sintético,
   precisa da chave) — ainda não existe. **Verde:** escrito e rodado uma vez à mão; o resultado e a
   versão vão para o changelog. Se falhar, T2.7 (tempo implícito) e a Fase 4 por Choice param.
-- [ ] **T2.1 · Caracterização do protocolo atual.**
+- [x] **T2.1 · Caracterização do protocolo atual.**
   **Vermelho → verde imediato não vale:** confirmar que `tests/online_protocol.rs` e
   `tests/online_units.rs` cobrem o corpo exato do request Noul e o parse atual; onde não cobrem,
   acrescentar o teste e prová-lo por mutação antes de mexer no transporte.
-- [ ] **T2.2 · Request com Choice e estado de memória.** CA-9.
+- [x] **T2.2 · Request com Choice e estado de memória.** CA-9.
   **Vermelho:** `tests/online_units.rs::a_choice_question_serializes_type_instructions_and_criteria`
   (corpo igual à fixture `tests/fixtures/jev/memory_choice_request.json`);
   `a_memory_request_is_split_before_32_questions_or_38000_bytes_and_never_cuts_a_pair`.
   **Verde:** `JevQuestionType::Choice`, payload de estado independente de `SemanticStage`.
-- [ ] **T2.3 · Respostas tipadas: `Decision`.** CA-8.
+- [x] **T2.3 · Respostas tipadas: `Decision`.** CA-8.
   **Vermelho:** `tests/online_units.rs`: `a_decision_is_noul_choice_or_unknown_and_never_zero`;
   uma tabela de casos recusados: modelo errado, ID desconhecido ou repetido, tipo trocado, `NaN`,
   infinito, fora de `[0,1]`, Choice sem a opção escolhida, com opção a mais, soma fora de `1e-3`
@@ -345,21 +347,21 @@ ficaram em `tests/cli.rs`, ao lado da infraestrutura e2e, e rodam só com o ripw
   usa `probabilities[choice]`, não `confidence`. Em `props`:
   `no_parsed_probability_is_ever_outside_the_unit_interval`.
   **Verde:** `parse_decisions` em `src/online/response.rs`; `parse_answers` intacto.
-- [ ] **T2.4 · Transporte comum, adaptador Noul preservado.** CA-9.
+- [x] **T2.4 · Transporte comum, adaptador Noul preservado.** CA-9.
   **Vermelho:** `tests/online_protocol.rs::the_memory_transport_posts_through_the_same_client`
   (mesmo endpoint, Bearer, sem redirect/proxy, teto de 256 KiB, uma única conexão para descoberta
   e memória). Os testes existentes do arquivo seguem verdes sem edição.
   **Verde:** método de envio tipado em `JevClient`; `Classifier::classify` passa a usá-lo.
-- [ ] **T2.5 · Prompts `memory-prompts/v1`.** CA-9.
+- [x] **T2.5 · Prompts `memory-prompts/v1`.** CA-9.
   **Vermelho:** `tests/memory_controller.rs::every_stage_names_its_state_fields_and_carries_the_untrusted_guidance`
   (as oito etapas do PRD §7; nenhuma pergunta cita a resposta de outra; versão distinta de
   `notes/v1`). **Verde:** `src/memory/prompts.rs`.
-- [ ] **T2.6 · Fila durável: jobs, leases, tentativas, quota.** CA-6, CA-10.
+- [x] **T2.6 · Fila durável: jobs, leases, tentativas, quota.** CA-6, CA-10.
   **Vermelho:** `tests/memory_store.rs`: `an_abandoned_lease_is_recovered_by_the_lock_not_by_a_pid`;
   `a_job_runs_at_most_twice_and_then_stays_failed_until_asked`;
   `the_24h_ledger_survives_a_restart_and_a_clock_rollback` (1.000 tentativas, 20.000 perguntas,
   com tetos injetados menores; retry e split consomem). **Verde:** `src/memory/queue.rs`.
-- [ ] **T2.7 · Worker: typing, candidatos, relações.** CA-9, CA-10.
+- [x] **T2.7 · Worker: typing, candidatos, relações.** CA-9, CA-10.
   **Vermelho:** `tests/memory_controller.rs`, com um `Classifier` de teste (`tests/common/classifier.rs`):
   `a_node_exists_before_any_inference`; `candidates_are_deterministic_and_capped_at_k`
   (0, 4 e 10; empate por ID); `write_cost_matches_the_formula` (`4 + 4K + A` Nouls e `T` Choices,
@@ -368,22 +370,22 @@ ficaram em `tests/cli.rs`, ao lado da infraestrutura e2e, e rodam só com o ripw
   `implicit_time_is_a_choice_and_unknown_adds_no_edge`. Em `props`:
   `the_two_causal_directions_are_never_confused`.
   **Verde:** `src/memory/controller.rs`.
-- [ ] **T2.8 · Commit por par, atômico; resposta tardia descartada.** CA-7.
+- [x] **T2.8 · Commit por par, atômico; resposta tardia descartada.** CA-7.
   **Vermelho:** `tests/memory_controller.rs`: `a_timeout_in_the_middle_of_a_pair_commits_nothing_of_that_pair`;
   `a_late_answer_for_an_old_generation_is_dropped`; `an_answer_for_a_forgotten_node_does_not_recreate_it`;
   `the_enrichment_counter_increments_exactly_once_per_node`.
   **Verde:** transação por par com digest e geração.
-- [ ] **T2.9 · Falhas do provider.** CA-9.
+- [x] **T2.9 · Falhas do provider.** CA-9.
   **Vermelho:** `tests/memory_controller.rs` com o servidor local de `tests/online_protocol.rs`:
   `auth_failures_suspend_the_worker_until_reauthorized` (401/403);
   `a_429_waits_only_inside_the_budget`; `a_5xx_is_retried_once_inside_the_four_attempts`;
   `cancellation_stops_http_and_leaves_the_job_pending`; `no_model_swap_and_no_silent_heuristic_on_failure`.
   **Verde:** política de retry do worker.
-- [ ] **T2.10 · Concorrência e tetos compartilhados.** CA-2, CA-10.
+- [x] **T2.10 · Concorrência e tetos compartilhados.** CA-2, CA-10.
   **Vermelho:** `tests/online_scheduler.rs::memory_and_discovery_share_four_requests_and_one_client`;
   `tests/memory_controller.rs::one_remote_job_per_workspace`. **Verde:** o teto `max_in_flight`,
   hoje do `Scheduler` de descoberta (`src/online/scheduler.rs`), passa a ser um só para o processo.
-- [ ] **T2.11 · Ciclo de vida: worker no `serve`, `memory drain`.** CA-2, CA-6. PD-2.
+- [x] **T2.11 · Ciclo de vida: worker no `serve`, `memory drain`.** CA-2, CA-6. PD-2.
   **Vermelho:** `tests/cli.rs`: `memory_drain_needs_online_and_a_credential`;
   `online_alone_never_processes_old_memory_jobs`; `the_server_leaves_no_process_with_the_credential_on_exit`;
   `memory_and_online_memory_start_one_worker`. `tests/memory_controller.rs::drain_stops_at_60s_or_20_jobs`
@@ -392,16 +394,23 @@ ficaram em `tests/cli.rs`, ao lado da infraestrutura e2e, e rodam só com o ripw
   `serve --memory` ao publicador das tools (`BrokerConfig::memory`, vinda da T1.14), com teste de
   ponta a ponta.
   **Docs:** `USAGE`, README.
-- [ ] **T2.12 · doc · PRD principal autoriza o worker.** V13.
+- [x] **T2.12 · doc · PRD principal autoriza o worker.** V13.
   **Vermelho:** `grep` no §23.1 do PRD principal ainda encontra a regra da ausência só de
   `--online`. **Verde:** aplicar os itens §23.1, §23.2/§23.3 e §23.5 do PRD §16.
   **Docs:** PRD principal, changelog, diagrama (`spec/diagrams/`, archify), `handoff.md`.
-- [ ] **T2.13 · Métricas de custo.** CA-10.
+- [x] **T2.13 · Métricas de custo.** CA-10.
   **Vermelho:** `tests/memory_controller.rs::questions_attempts_bytes_and_cache_are_counted_per_operation_without_content`
   (nenhum path, texto ou chave no que é exposto; cache hit não conta como avaliação nova).
   **Verde:** `src/memory/metrics.rs`, exposto em `Broker::status` e em `memory status`.
 
 **Saída da Fase 2:** CA-8, CA-9, CA-10 cobertos; zero HTTP no hook reconfirmado; PR único.
+
+**Como a Fase 2 saiu ([D-138](../changelog.md#d-138--fase-2-do---memory-controle-jev)):** a T2.0 está
+escrita e pendente (sem a chave nesta máquina); o controlador compila no build padrão, só a
+ligação ao `JevClient` exige a feature; os testes de falha do provider usam um classificador
+falso de roteiro, porque o mapeamento HTTP já está coberto pela T2.4; o teto de requisições do
+processo é um classificador `Shared`, não uma mudança no `Scheduler`; o diagrama não foi
+atualizado (archify fora desta sessão).
 
 ### Fase 3 — Leitura e host
 
@@ -595,3 +604,18 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T1.15 | `tests/cli.rs`: `hook_takes_memory_and_never_implies_online`, `a_hook_with_memory_enqueues_and_never_opens_a_socket`, `a_short_lived_hook_leaves_a_recoverable_queue` (ripwire real; pulados sem ele, como os demais e2e): `no field memory on type HookArgs`. `tests/hooks.rs::a_hook_with_memory_enqueues_its_edit` e `ripwire_off_stops_capture_for_that_session_only` nasceram verdes (o hook já usa o broker da T1.14): caracterização, com mutação | `bbb24bd` | hook sem configuração de memória (2 e2e caem); `HookArgs::memory` sempre falso; publicação da edição removida (caracterização cai). SLO medido à mão em release, ripwire real, 60 pares alternados: p95 +6,9/+4,1 ms, p99 +3,6/−0,9 ms (1ª medição sem alternar deu −97 ms, viés de aquecimento) | `USAGE`; README (coleta pelos hooks) | 509 / 523 (2 ignorados + 1 novo) |
 | T1.16 | `tests/cli.rs::install_with_memory_writes_the_flag_and_never_the_key`: `unknown argument --memory`; `doctor_reports_the_memory_store_without_using_the_network`: `no check memory`. Depois do verde, `install_with_memory_for_codex_forwards_the_key_by_name` cobriu o ramo do Codex (provado por mutação) | `f648c11` | hooks sem `--memory`; `--online` redundante; chave não referenciada; aviso do `--online` no lugar do da memória; checagem do doctor sem o guarda de "sem store"; revogação não avisada; ramo do Codex sem `--memory` e sem `env_vars` | `USAGE`; README (tabela, integração, doctor). `integrations/` sem mudança: nada novo chega ao agente nesta fase (T3.11) | 512 / 526 |
 | Revisão | Achados 1–8, 10 e 11 do revisor independente (D-137): `an_enqueue_racing_forget_all_never_survives_it`, `leftover_temporaries_are_counted_cleaned_and_erased`, `forget_all_on_an_unreadable_store_still_erases_the_spool`, `one_bad_spool_entry_does_not_block_ingestion_and_a_newer_schema_is_kept`, `a_linked_spool_directory_is_never_written_through`, `memory_add_takes_a_relative_file_and_checks_it_against_the_workspace`, `a_panicking_write_never_keeps_its_slot` e a asserção nova de `online_without_a_credential_fails_before_publishing_mcp`, todos vistos vermelhos | `a7eb3a7` e o seguinte | 11 mutações, todas derrubadas | D-137 (seção da revisão) | 519 / 533 |
+| T2.1 | Caracterização já existente: `tests/online_units.rs` congela o pedido Noul (`prompts_v1_are_frozen_*`, digest da gravação real em `the_live_recording_still_matches_prompts_v1`) e o parse (`invalid_probabilities_are_unknown_never_zero`, `a_response_that_breaks_the_contract_is_rejected_whole`); `online_protocol.rs` fixa o corpo enviado verbatim. Nenhum teste novo necessário | — | `instructions` renomeado; `guidance` omitido; tipo `choice` aceito como noul; modelo não checado: as quatro derrubadas | — | 519 / 533 |
+| T2.2 | `tests/online_units.rs`: `a_choice_question_serializes_type_instructions_and_criteria` (fixture `memory_choice_request.json`) e `a_memory_request_is_split_before_32_questions_or_38000_bytes_and_never_cuts_a_pair`: `unresolved import memory::wire`, `online::request::StateRequest`, `no function noul/choice on JevQuestion` | `51b9742` | teto de perguntas +4; teto de bytes ×2; `criteria: null` serializado; ids a partir de q1; grupo gigante depois de um que coube (sobreviveu; teste ampliado, laço simplificado) | — (as chaves do estado saem em ordem alfabética: `serde_json` sem `preserve_order`; determinístico, bom para o cache) | 521 / 535 |
+| T2.3 | `tests/online_units.rs::a_decision_is_noul_choice_or_unknown_and_never_zero` (tabela de recusas) e `tests/props.rs::no_parsed_probability_is_ever_outside_the_unit_interval`: `unresolved import parse_decisions, Decision, Unknown`; `no variant DuplicateQuestion` | `139a22d` | id repetido aceito; tolerância 1e-1; escolha fora das opções; opção a mais aceita; probabilidade da escolhida trocada pela maior (sobreviveu; caso novo com a escolha menos provável); faixa não checada; modelo não checado; tipo trocado aceito | — (`parse_answers` intacto) | 523 / 537 |
+| T2.4 | `tests/online_protocol.rs::the_memory_transport_posts_through_the_same_client`: `unresolved import MemoryClassifier`, `no method decide on JevClient`. Os testes existentes do arquivo seguem verdes sem edição (a trait nova perdeu `model()` para não criar ambiguidade) | `b47b2f4` | teto de resposta ×2; corpo trocado pelo estado; 401 como `Rejected`; resposta alterada | — | 523 / 538 |
+| T2.0 | `tests/online_live.rs::the_pinned_model_answers_a_choice` (`#[ignore]`): sem a chave, falha em `live_client` | `95e69d4` | — (teste de contrato real) | D-138 | **rodado à mão em 2026-10-03 com a chave do `.env`**: `jev-1.13.0` respondeu Choice no formato do PRD §7, aceito por `parse_decisions`: `after`, probabilidades {after: 1.0, before: 0.0, unknown: 0.0}, 312 ms |
+| T2.5 | `tests/memory_controller.rs::every_stage_names_its_state_fields_and_carries_the_untrusted_guidance`: `unresolved import memory::prompts` | `968adcc` | aviso de não confiável retirado; campo de estado sem pergunta; versão igual à das notas; opção `same_time` retirada; índice do candidato fixo em 0 | — | 524 / 539 |
+| T2.6 | `tests/memory_store.rs`: `an_abandoned_lease_is_recovered_by_the_lock_not_by_a_pid`, `a_job_runs_at_most_twice_and_then_stays_failed_until_asked`, `the_24h_ledger_survives_a_restart_and_a_clock_rollback`: `unresolved import memory::queue`, `no method lease_next/finish/retry_failed/charge`, `no field jobs`, `no variant Quota` | `67eb893` | lease vivo ignorado; `>=`→`>` nas execuções (sobreviveu: a guarda repetida em `finish` saiu e entrou o caso do lease abandonado na 2ª execução); `not_before` ignorado; job não criado na ingestão; `forget` sem levar o job; leitura mais alta do relógio ignorada (sobreviveu; caso novo de cobrança com relógio atrasado); teto de tentativas e registro da cobrança desligados | — | 527 / 542 |
+| T2.7 | `tests/memory_controller.rs` (seis testes) e `tests/props.rs::the_two_causal_directions_are_never_confused`: `unresolved import memory::controller`, `model::{Graph, EdgeBasis}`, `no field edges on State` | `42ddd4b` | limiar 0,59; direção de `caused_by` trocada (props); alias sempre perguntado; tempo com um lado só; desempate por distância retirado (indistinguível do id a partir do 1º nó; caso novo a partir do 6º); desconhecido não marca `partial`; falha do typing sem registro; índice global nos lotes divididos (checagem nova); `unknown` com 0,8 virando aresta (sobreviveu; caso corrigido) | — (controlador no build padrão: só o `JevClient` exige a feature) | 535 / 550 |
+| T2.8 | `tests/memory_controller.rs`: `a_timeout_in_the_middle_of_a_pair_commits_nothing_of_that_pair`, `a_late_answer_for_an_old_generation_is_dropped`, `an_answer_for_a_forgotten_node_does_not_recreate_it`, `the_enrichment_counter_increments_exactly_once_per_node`: `commit_enrichment takes 4 arguments but 5 were supplied`, `no field enriched` | `211b2b5` | par parcial aceito; geração vista ignorada; contador a cada execução; contador também em falha; ponta de aresta esquecida aceita (sobreviveu; teste novo `an_edge_to_a_candidate_forgotten_meanwhile_is_dropped`) | — | 540 / 555 |
+| T2.9 | `tests/memory_controller.rs`: `auth_failures_suspend_the_worker_until_reauthorized`, `a_429_waits_only_inside_the_budget` (tempo pausado), `a_5xx_is_retried_once_inside_the_four_attempts`, `cancellation_stops_http_and_leaves_the_job_pending`, `no_model_swap_and_no_silent_heuristic_on_failure`: `unresolved import controller::Worker`. Com classificador falso de roteiro, não com o servidor local: o mapeamento HTTP→erro já está coberto pela T2.4 e pela suíte do `--online` | `05678ac` | worker não suspende; 429 esperando além do prazo; segundo 429 esperado (sobreviveu; caso novo); retry transitório sem limite; 8 tentativas; 401 tratado como falha comum; cooldown trocado pelo padrão (sobreviveu; asserção exata) | — | 545 / 560 |
+| T2.10 | `tests/online_scheduler.rs::memory_and_discovery_share_four_requests_and_one_client`: `unresolved import classifier::Shared`; `tests/memory_controller.rs::one_remote_job_per_workspace`: o segundo worker pegou outro job (asserção) | `776953a` | licença retirada da memória; licença retirada da descoberta; lock remoto ignorado | — (o `Scheduler` ficou intocado: o teto do processo é um classificador `Shared` com semáforo, que a T2.11 liga no `serve`) | 547 / 562 |
+| T2.11 | `tests/memory_controller.rs`: `online_alone_never_processes_old_memory_jobs`, `memory_and_online_memory_start_one_worker`, `the_server_leaves_no_process_with_the_credential_on_exit`, `drain_stops_at_60s_or_20_jobs` (tempo pausado): `unresolved import memory::runtime`; `tests/cli.rs::memory_drain_needs_online_and_a_credential`: `no variant Drain`. Os testes de ciclo de vida são de biblioteca: um teste do binário com `serve --memory` faria o worker chamar o provider real | `903c452` | worker que sobrevive ao servidor; teto de jobs `>`; prazo do drain sem corte (sobreviveu com jobs de 10 s, que terminam em 60 s exatos; job de 25 s); spool não incorporado; runtime sem `--memory`; drain sem `--online` | `USAGE`; README (`memory drain`, enriquecimento, `serve --memory` ligado) | 552 / 567 |
+| T2.13 | `tests/memory_controller.rs::questions_attempts_bytes_and_cache_are_counted_per_operation_without_content`: `no method metrics on Worker`; `tests/cli.rs::memory_status_shows_the_24h_budget_in_use`: `(None, None)`; `tests/broker.rs::the_status_shows_what_the_memory_worker_cost`: `no field worker on MemoryConfig` | `3febaae` | retries, falhas por categoria, perguntas, bytes, jobs concluídos e o acúmulo do worker desligados um a um; status sem o worker; quota de 24 h zerada | README (custo no status, quota no `memory status`). Sem cache de decisões ainda: nada a contar como acerto de cache (registrado no D-138) | 555 / 570 |
+| T2.12 | `grep 'Ausência de \`--online\` significa' spec/ripwire-broker-mcp.md` encontrava o invariante 1 do §23.1 | `f1230c1` | a mesma busca contra o commit anterior volta a encontrar | PRD principal §23.1 (ativação, invariantes 1 e 4, invariantes 12–14), §23.2, §23.3, §23.5; PRD jev-mem §16 (itens marcados aplicados). **Diagrama não atualizado:** o archify é um skill desta máquina do mantenedor, fora desta sessão (registrado no D-138) | só documentação |
+| Revisão F2 | Achados 1–7, 9–11 do revisor independente (D-138): `a_spent_quota_keeps_jobs_pending_and_uses_no_run`, `a_relations_failure_leaves_the_job_pending_and_is_not_counted`, `the_enrichment_counter_increments_exactly_once_per_node` (refeito via `finish`), `memory_retry_brings_failed_jobs_back`, `the_worker_bookkeeping_waits_briefly_for_another_writer`, `without_memory_discovery_keeps_its_client_and_its_per_query_ceiling`, `commits_stay_inside_the_edge_and_snapshot_caps`, `drain_says_when_it_could_not_run_instead_of_reporting_empty`, `memory_responses_are_not_counted_as_discovery_bytes` e a asserção nova de `memory_drain_needs_online_and_a_credential`, todos vistos vermelhos | `7ca28b1`, `2aab7f2`, `e2229a6` e o seguinte | 16 mutações derrubadas; a marca `counted` sobreviveu por ser redundante (`Done` é terminal) e saiu | D-138 (seção da revisão); README (`memory retry`, opções do `drain`, quota) | 562 / 578 |

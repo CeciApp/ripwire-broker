@@ -6,6 +6,7 @@ use ripwire_broker::broker::BrokerConfig;
 use ripwire_broker::cli::{self, Command, ServeArgs};
 use ripwire_broker::hook;
 use ripwire_broker::mcp::{BrokerServer, Settings};
+use ripwire_broker::memory::{self, runtime::Runtime};
 use ripwire_broker::state::StateStore;
 use ripwire_broker::summarizer::CommandSummarizer;
 use ripwire_broker::upstream::{UpstreamConfig, ripwire_version};
@@ -20,8 +21,12 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-/// Canonical workspace, ripwire version and the broker/upstream configuration for `serve`.
-fn settings(a: ServeArgs) -> Result<Settings, String> {
+/// The classifier the memory worker uses: the same shared client as discovery.
+type MemoryClient = Arc<dyn ripwire_broker::online::classifier::MemoryClassifier>;
+
+/// Canonical workspace, ripwire version and the broker/upstream configuration for `serve`, and
+/// the memory runtime when `--memory` is on.
+fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
     // The flag the operator typed: `--memory` turns online on by itself (PRD jev-mem §4).
     let asked = match a.memory {
         Some(_) => "--memory",
@@ -36,13 +41,27 @@ fn settings(a: ServeArgs) -> Result<Settings, String> {
     }
     // Checked before anything is published or started (CA-ONLINE-02).
     #[cfg(feature = "online")]
-    let online = match &a.online {
+    let (online, memory_client) = match &a.online {
         // Only `--memory` gets a prefix: the `--online` message stays as it was.
-        Some(o) => Some(online_config(o).map_err(|e| match a.memory {
-            Some(_) => format!("{asked}: {e}"),
-            None => e,
-        })?),
+        Some(o) => {
+            let (config, client) =
+                online_config(o, a.memory.is_some()).map_err(|e| match a.memory {
+                    Some(_) => format!("{asked}: {e}"),
+                    None => e,
+                })?;
+            (Some(config), client)
+        }
+        None => (None, None),
+    };
+    #[cfg(not(feature = "online"))]
+    let memory_client: Option<MemoryClient> = None;
+    let runtime = match &a.memory {
         None => None,
+        Some(_) => {
+            let dir = StateStore::default_dir()
+                .ok_or("--memory: no state directory (set XDG_STATE_HOME or HOME)")?;
+            memory::runtime::from_serve(&a, &dir, memory_client)?
+        }
     };
     let workspace = a
         .workspace
@@ -74,18 +93,26 @@ fn settings(a: ServeArgs) -> Result<Settings, String> {
     {
         broker.online = online;
     }
-    Ok(Settings { upstream, broker })
+    broker.memory = runtime.as_ref().map(|r| r.publish().clone());
+    Ok((Settings { upstream, broker }, runtime))
 }
 
 /// The classifier behind `--online`: the credential from the environment, one shared HTTP
 /// client to the allowlisted endpoint, and the Phase 4 limits (PRD §23.6).
 #[cfg(feature = "online")]
-fn online_config(o: &cli::OnlineArgs) -> Result<ripwire_broker::online::OnlineConfig, String> {
+fn online_config(
+    o: &cli::OnlineArgs,
+    with_memory: bool,
+) -> Result<(ripwire_broker::online::OnlineConfig, Option<MemoryClient>), String> {
+    use ripwire_broker::online::classifier::for_process;
     use ripwire_broker::online::credential::Credential;
     use ripwire_broker::online::jev::JevClient;
     let key = Credential::from_env().map_err(|e| e.to_string())?;
     let client = JevClient::new(key, &o.model, o.timeout)?;
-    let mut config = ripwire_broker::online::OnlineConfig::new(Arc::new(client));
+    // With memory, one client and one ceiling of requests in flight for discovery and memory;
+    // without it, discovery as before (PRD jev-mem §4).
+    let (discovery, memory_client) = for_process(Arc::new(client), o.max_in_flight, with_memory);
+    let mut config = ripwire_broker::online::OnlineConfig::new(discovery);
     config.provider = o.provider.clone();
     config.max_in_flight = o.max_in_flight;
     config.request_limit = o.request_limit;
@@ -94,7 +121,73 @@ fn online_config(o: &cli::OnlineArgs) -> Result<ripwire_broker::online::OnlineCo
     config.deadline = o.deadline;
     config.lookahead_max = o.lookahead_max;
     config.max_source_bytes = o.max_source_bytes.map(|b| b as usize);
-    Ok(config)
+    Ok((config, memory_client))
+}
+
+/// `memory drain --online` (PD-2): the spool incorporated and ready jobs sent, for at most 60 s or
+/// 20 jobs. Needs the `online` feature and the credential; nothing is downgraded.
+async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
+    #[cfg(not(feature = "online"))]
+    {
+        let _ = a;
+        eprintln!(
+            "memory drain --online: this binary was built without the online feature; \
+             rebuild it with `cargo build --release --features online`"
+        );
+        ExitCode::from(2)
+    }
+    #[cfg(feature = "online")]
+    {
+        use memory::controller::{Config, Worker};
+        use memory::runtime::{DEFAULT_MODEL, DRAIN_DEADLINE, DRAIN_JOBS, drain};
+        use ripwire_broker::online::{classifier::Shared, credential::Credential, jev::JevClient};
+        let fail = |e: String| {
+            eprintln!("memory drain --online: {e}");
+            ExitCode::from(2)
+        };
+        let key = match Credential::from_env() {
+            Ok(k) => k,
+            Err(e) => return fail(e.to_string()),
+        };
+        let cli::MemoryAction::Drain { model, candidates } = &a.action else {
+            return ExitCode::from(2);
+        };
+        let model = model.clone().unwrap_or_else(|| DEFAULT_MODEL.into());
+        let client = match JevClient::new(key, &model, std::time::Duration::from_secs(15)) {
+            Ok(c) => c,
+            Err(e) => return fail(e),
+        };
+        let Some(dir) = a.state_dir.clone().or_else(StateStore::default_dir) else {
+            return fail("no state directory: pass --state-dir".into());
+        };
+        let id = match memory::identity::workspace_id(&a.workspace) {
+            Ok(id) => id,
+            Err(e) => return fail(e),
+        };
+        let store = Arc::new(memory::store::Store::new(&dir, &id));
+        let classifier: MemoryClient = Arc::new(Shared::new(Arc::new(client), 4));
+        let config = Config {
+            model,
+            candidates: candidates.unwrap_or(4),
+        };
+        let worker = Worker::new(store.clone(), classifier, config);
+        let clock = memory::time::SystemClock;
+        match drain(&store, &worker, &clock, DRAIN_JOBS, DRAIN_DEADLINE).await {
+            Ok(d) if matches!(d.stop, memory::runtime::DrainStop::Busy) => fail(
+                "a running server holds this workspace's memory worker; it drains it already"
+                    .into(),
+            ),
+            Ok(d) if matches!(d.stop, memory::runtime::DrainStop::Suspended) => fail(format!(
+                "the provider refused the credential after {} jobs",
+                d.jobs
+            )),
+            Ok(d) => {
+                println!("drained {} jobs ({:?})", d.jobs, d.stop);
+                ExitCode::SUCCESS
+            }
+            Err(r) => fail(format!("{r:?}")),
+        }
+    }
 }
 
 #[tokio::main]
@@ -260,6 +353,9 @@ async fn main() -> ExitCode {
             );
             return ExitCode::SUCCESS;
         }
+        Ok(Command::Memory(a)) if matches!(a.action, cli::MemoryAction::Drain { .. }) => {
+            return memory_drain(&a).await;
+        }
         Ok(Command::Memory(a)) => {
             // Dispatched before `settings`: local, never online (PRD jev-mem §4).
             return match ripwire_broker::memory::command::run(&a) {
@@ -278,7 +374,8 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let settings = match settings(serve) {
+    // Held until `main` returns: dropping it stops the worker with the server.
+    let (settings, mut memory) = match settings(serve) {
         Ok(s) => s,
         Err(msg) => {
             eprintln!("{msg}");
@@ -306,6 +403,9 @@ async fn main() -> ExitCode {
         ),
         meta: None,
     };
+    if let Some(runtime) = memory.as_mut() {
+        runtime.start(std::time::Duration::from_secs(5));
+    }
     let handler = BrokerServer::start(settings).await;
     let observer = handler.observer();
     let transport = match StdioTransport::new(TransportOptions::default()) {

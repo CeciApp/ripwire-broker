@@ -42,6 +42,8 @@ commands; `ripwire-broker --help` lists them all:
 | `memory forget --workspace DIR (--all \| --id ID)` | Forgets one memory and what derives from it, or everything (which also revokes collection) |
 | `memory add --workspace DIR --file PATH` | Adds an explicit note from a JSON file, `{"text": "...", "references": ["src/a.rs"]}` |
 | `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
+| `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker or the provider refuses the key |
+| `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back; local |
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
 return a structured error (`upstream_unavailable` / `incompatible_upstream`), and the next
@@ -66,7 +68,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
-| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Being built** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): today it only parses and checks |
+| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Being built** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects and enriches; nothing reads memories back yet |
 | `--memory-read-deadline-ms N` | `750` | 1–750; longest a task waits for memory |
 | `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read; 0 serves only the local index |
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
@@ -283,9 +285,7 @@ answer, never before and never changing it; `context_for_task` collects nothing,
 the broker could not assess (`unknown`) claims nothing. The answer waits at most 25 ms for the
 observation to be durable; past that the write finishes in the background and is counted as
 unconfirmed, and no more than four such writes run at once. The status resource gains a
-`memory` field with these counts (confirmed, unconfirmed, rejected) only when memory is on. In
-this phase the broker core does this, but `serve --memory` does not switch it on yet: the
-server wires it together with the worker that enriches the memories.
+`memory` field with these counts (confirmed, unconfirmed, rejected) only when memory is on. `serve --memory` switches this on.
 
 **From the hooks:** `hook … --memory` collects the same observations after an edit or at
 `Stop`. It only writes to the local spool: it never makes an HTTP request, needs no credential
@@ -309,6 +309,22 @@ size caps (2,000 memories, a 1,000-entry spool, 96 MiB in all) keep holding. A s
 be read (a newer schema, a corrupt file, a link, a directory open to others) is left untouched
 and memory stays off for that workspace.
 
+**Enrichment:** with `--memory`, `serve` runs a worker that incorporates pending observations,
+types each memory (event, fact, procedure, preference) and relates it to at most
+`--memory-write-candidates` earlier ones (shared entity, shared words, the nearest one). An
+inferred relation needs a probability of at least 0.60, and a pair only counts when every one of
+its answers came back; an unknown answer is never read as no. Each job gets four classifier
+attempts at most, one retry for a transient failure, and waits for a 429 only inside its 5 s;
+401/403 stops the worker until the server restarts. One job per workspace talks to the provider
+at a time, memory and discovery share the four requests in flight, and the workspace has a
+persisted budget of 1,000 attempts and 20,000 questions per 24 hours that a restart or a clock
+set back does not reset; with it spent, jobs stay pending and keep their runs. A job runs twice at
+most and then waits for `memory retry`. The worker stops with the server; what it did not
+finish waits on disk.
+The status resource's `memory` field adds what the worker cost, by operation (typing,
+relations): attempts, retries, questions, bytes sent, failures by category and quota refusals,
+counts only. `memory status` shows the attempts and questions spent in the last 24 hours.
+
 **Forgetting:** forgetting a memory removes it, every note derived from it and its pending
 copies, in a new generation, and keeps its id from coming back for the retention period, even
 from an old pending copy. No backup with its text is kept. It cannot reach copies the operating
@@ -317,8 +333,9 @@ Forgetting everything also revokes collection for the workspace: a `revoked` mar
 wins over `--memory`, across restarts, until `ripwire-broker memory resume --workspace DIR`
 removes it. What was forgotten stays forgotten after resuming.
 
-**Commands:** the four `memory` commands in the [table above](#build-and-run) are local: they
-never start ripwire, open a connection or need the credential or the `online` feature.
+**Commands:** `memory status`, `forget`, `add` and `resume` ([table above](#build-and-run)) are
+local: they never start ripwire, open a connection or need the credential or the `online`
+feature. `memory drain --online` is the one that talks to the provider.
 `memory add` is the only way a preference or a free-text note gets in; the broker never infers
 one from an edit. The note's text is untrusted data, kept verbatim and never followed as an
 instruction; the input file and the text pass the same filters as an observation. A forgotten id

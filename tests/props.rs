@@ -942,3 +942,67 @@ proptest! {
         prop_assert!(seq.stamp(&Fixed(0), 1, 0).is_none(), "never wraps around");
     }
 }
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Whatever numbers come back, a decision's probability is unknown or inside `[0, 1]`.
+    #[test]
+    fn no_parsed_probability_is_ever_outside_the_unit_interval(
+        noul in any::<f64>(), a in any::<f64>(), b in any::<f64>(), pick in any::<bool>(),
+    ) {
+        use ripwire_broker::online::request::{JevQuestion, StateRequest};
+        use ripwire_broker::online::response::parse_decisions;
+        let req = StateRequest::new(
+            "m",
+            serde_json::json!({}),
+            vec![JevQuestion::noul("n"), JevQuestion::choice("c", &[("x", "x"), ("y", "y")])],
+        );
+        let body = serde_json::json!({"model": "m", "answers": {
+            "q0": {"type": "noul", "noul": noul},
+            "q1": {"type": "choice", "choice": if pick { "x" } else { "y" },
+                   "probabilities": {"x": a, "y": b}}
+        }})
+        .to_string();
+        if let Ok(decisions) = parse_decisions(&req, &body) {
+            for d in decisions {
+                if let Some(p) = d.probability() {
+                    prop_assert!((0.0..=1.0).contains(&p), "{}", p);
+                }
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// An inferred causal edge always points the way its own question asked.
+    #[test]
+    fn the_two_causal_directions_are_never_confused(caused_by in 0.0f64..=1.0, causes in 0.0f64..=1.0) {
+        use ripwire_broker::memory::controller::{self, Config};
+        use ripwire_broker::memory::model::{Graph, Record};
+        use ripwire_broker::online::response::Decision;
+        let rec = |n: u64| -> Record {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "policy_version": "memory-policy/v1",
+                "node_id": format!("{n:064}"), "content_hash": format!("{n:064}"),
+                "workspace_id": "w", "event_key": "e", "kind": "edit_observation", "content": "c",
+                "observed_at_ms": n, "ingest_seq": n, "timestamp_role": "observation",
+                "expires_at_ms": 9, "generation": 0
+            })).unwrap()
+        };
+        let (new, cand) = (rec(2), rec(1));
+        let answers = [
+            ("caused_by", Decision::Noul { probability: caused_by }),
+            ("causes", Decision::Noul { probability: causes }),
+        ].into();
+        let cfg = Config { model: "m".into(), candidates: 4 };
+        for e in controller::pair_edges(&new, &cand, &answers, &cfg).iter().filter(|e| e.graph == Graph::Causal) {
+            match e.source == new.node_id {
+                true => prop_assert!(causes >= 0.6 && e.target == cand.node_id),
+                false => prop_assert!(caused_by >= 0.6 && e.source == cand.node_id && e.target == new.node_id),
+            }
+        }
+    }
+}

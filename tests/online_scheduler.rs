@@ -799,3 +799,144 @@ fn the_scheduler_keeps_its_limits_and_never_mixes_up_an_answer() {
     )
     .unwrap();
 }
+
+// --- jev-mem T2.10: one ceiling for the process (PRD jev-mem §4, §8.2) ---
+
+use ripwire_broker::online::classifier::{Classifier, MemoryClassifier, Shared};
+use ripwire_broker::online::request::{JevQuestion, JevRequest, StateRequest};
+use ripwire_broker::online::response::Decision;
+use std::sync::atomic::AtomicUsize;
+
+/// Answers after a pause, counting how many calls are inside at once, of both kinds.
+#[derive(Default)]
+struct Probe {
+    now: AtomicUsize,
+    peak: AtomicUsize,
+    calls: AtomicUsize,
+}
+
+impl Probe {
+    async fn enter(&self) {
+        let n = self.now.fetch_add(1, SeqCst) + 1;
+        self.peak.fetch_max(n, SeqCst);
+        self.calls.fetch_add(1, SeqCst);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        self.now.fetch_sub(1, SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl Classifier for Probe {
+    fn model(&self) -> &str {
+        "jev-1.13.0"
+    }
+    async fn classify(&self, req: &JevRequest) -> Result<Vec<Option<f64>>, ClassifyError> {
+        self.enter().await;
+        Ok(vec![Some(0.5); req.questions.0.len()])
+    }
+}
+
+#[async_trait::async_trait]
+impl MemoryClassifier for Probe {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        self.enter().await;
+        Ok(vec![
+            Decision::Noul { probability: 0.5 };
+            req.questions.0.len()
+        ])
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memory_and_discovery_share_four_requests_and_one_client() {
+    let probe = Arc::new(Probe::default());
+    let shared = Arc::new(Shared::new(probe.clone(), 4));
+    let discovery: Arc<dyn Classifier> = shared.clone();
+    let memory: Arc<dyn MemoryClassifier> = shared.clone();
+    assert_eq!(
+        discovery.model(),
+        "jev-1.13.0",
+        "the same client behind both"
+    );
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for n in 0..8 {
+        let d = discovery.clone();
+        tasks.spawn(async move {
+            d.classify(&build(
+                "jev-1.13.0",
+                "q",
+                SemanticStage::FileAdmission,
+                vec![StateItem {
+                    id: format!("i{n}"),
+                    path: "a.rs".into(),
+                    text: "x".into(),
+                }],
+            ))
+            .await
+            .map(|_| ())
+        });
+        let m = memory.clone();
+        tasks.spawn(async move {
+            let req = StateRequest::new(
+                "jev-1.13.0",
+                serde_json::json!({}),
+                vec![JevQuestion::noul("q")],
+            );
+            m.decide(&req).await.map(|_| ())
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done.unwrap().unwrap();
+    }
+    assert_eq!(probe.calls.load(SeqCst), 16);
+    assert!(
+        probe.peak.load(SeqCst) <= 4,
+        "peak {}",
+        probe.peak.load(SeqCst)
+    );
+    assert!(probe.peak.load(SeqCst) >= 2, "they did run together");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_memory_discovery_keeps_its_client_and_its_per_query_ceiling() {
+    use ripwire_broker::online::classifier::for_process;
+    let probe = Arc::new(Probe::default());
+    let (discovery, memory) = for_process(probe.clone(), 4, false);
+    assert!(memory.is_none(), "no memory, no memory client");
+    assert_eq!(
+        Arc::as_ptr(&discovery) as *const () as usize,
+        Arc::as_ptr(&probe) as *const () as usize,
+        "--online alone gets the client as before (PRD jev-mem §4)"
+    );
+    let mut tasks = tokio::task::JoinSet::new();
+    for n in 0..8 {
+        let d = discovery.clone();
+        tasks.spawn(async move {
+            let item = StateItem {
+                id: format!("i{n}"),
+                path: "a.rs".into(),
+                text: "x".into(),
+            };
+            d.classify(&build(
+                "jev-1.13.0",
+                "q",
+                SemanticStage::FileAdmission,
+                vec![item],
+            ))
+            .await
+            .map(|_| ())
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done.unwrap().unwrap();
+    }
+    assert!(
+        probe.peak.load(SeqCst) > 4,
+        "no process-wide ceiling: peak {}",
+        probe.peak.load(SeqCst)
+    );
+
+    let (_, memory) = for_process(Arc::new(Probe::default()), 4, true);
+    assert!(memory.is_some(), "with memory, one shared client for both");
+}

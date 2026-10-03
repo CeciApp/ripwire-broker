@@ -36,6 +36,8 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
        ripwire-broker memory status --workspace DIR [--state-dir DIR] [--json]
        ripwire-broker memory forget --workspace DIR [--state-dir DIR] (--all | --id ID)
        ripwire-broker memory add --workspace DIR [--state-dir DIR] --file PATH
+       ripwire-broker memory drain --workspace DIR [--state-dir DIR] --online [--jev-model MODEL] [--memory-write-candidates N]
+       ripwire-broker memory retry --workspace DIR [--state-dir DIR]
        ripwire-broker memory resume --workspace DIR [--state-dir DIR]
 
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
@@ -217,6 +219,14 @@ pub enum MemoryAction {
     ForgetAll,
     /// An explicit note from a JSON file (PD-1).
     Add { file: PathBuf },
+    /// Incorporates the spool and runs ready jobs against the provider; needs `--online` (PD-2).
+    /// `model` and `candidates` should match the server's, so edge keys do.
+    Drain {
+        model: Option<String>,
+        candidates: Option<usize>,
+    },
+    /// Gives failed enrichment jobs their runs back: the explicit action of PRD jev-mem §8.2.
+    Retry,
     /// Lifts the revocation `memory forget --all` leaves (PD-4).
     Resume,
 }
@@ -786,6 +796,8 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 Some("status") => &["--json"],
                 Some("forget") => &["--all", "--id"],
                 Some("add") => &["--file"],
+                Some("drain") => &["--online", "--jev-model", "--memory-write-candidates"],
+                Some("retry") => &[],
                 Some("resume") => &[],
                 other => return Err(usage(format_args!("unknown memory command {other:?}"))),
             };
@@ -803,12 +815,34 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 (Some("forget"), true, None) => MemoryAction::ForgetAll,
                 (Some("forget"), false, Some(id)) => MemoryAction::Forget { id },
                 (Some("forget"), ..) => return Err(usage("memory forget takes --all or --id ID")),
+                (Some("drain"), ..) => match f.on("--online") {
+                    true => MemoryAction::Drain {
+                        model: f.jev.get("--jev-model").cloned(),
+                        candidates: match f.memory.get("--memory-write-candidates") {
+                            None => None,
+                            Some(v) => match v.parse::<usize>() {
+                                Ok(n) if n <= 10 => Some(n),
+                                _ => {
+                                    return Err(usage(
+                                        "--memory-write-candidates takes a number from 0 to 10",
+                                    ));
+                                }
+                            },
+                        },
+                    },
+                    false => {
+                        return Err(usage(
+                            "memory drain needs --online: it sends memories to the provider",
+                        ));
+                    }
+                },
                 (Some("add"), ..) => MemoryAction::Add {
                     file: f
                         .file
                         .clone()
                         .ok_or_else(|| usage("memory add needs --file PATH"))?,
                 },
+                (Some("retry"), ..) => MemoryAction::Retry,
                 _ => MemoryAction::Resume,
             };
             Ok(Command::Memory(MemoryCommand {
