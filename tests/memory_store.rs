@@ -476,3 +476,94 @@ fn a_clock_rollback_suspends_expiry_by_age_but_keeps_the_caps() {
     let recovered = store.sweep(600).unwrap();
     assert_eq!((recovered.suspended, recovered.removed), (false, 2));
 }
+
+// ---------------------------------------------------------------- forget (§6, CA-7, CA-11)
+
+#[test]
+fn forget_by_id_removes_the_node_its_descendants_and_blocks_reingestion() {
+    let state = tempfile::tempdir().unwrap();
+    let parent = expiring(1, 10_000);
+    let note = derived(2, 10_000, &[&parent]);
+    let store = stored(state.path(), &[parent.clone(), note, expiring(3, 10_000)]);
+    let generation = store.load().unwrap().generation;
+
+    let forgotten = store.forget(&parent.node_id, 5_000).unwrap();
+    assert_eq!(forgotten, 2, "the node and the note derived from it");
+    assert_eq!(ids(&store), [3]);
+    assert!(store.load().unwrap().generation > generation);
+
+    store.enqueue(&seen_again(1)).unwrap();
+    let again = store.ingest().unwrap();
+    assert_eq!(
+        (again.added, again.forgotten),
+        (0, 1),
+        "blocked while the tombstone lasts"
+    );
+    assert_eq!(ids(&store), [3]);
+    assert_eq!(store.pending().unwrap(), 0);
+
+    // A forgotten id that never reached the store is blocked as well.
+    assert_eq!(store.forget(&record(7).node_id, 5_000).unwrap(), 0);
+    store.enqueue(&record(7)).unwrap();
+    assert_eq!(store.ingest().unwrap().forgotten, 1);
+
+    // The tombstone lasts as long as the retention it was given, and no longer.
+    store.sweep(5_000).unwrap();
+    store.enqueue(&record(7)).unwrap();
+    assert_eq!(store.ingest().unwrap().added, 1);
+}
+
+#[test]
+fn an_old_spool_entry_cannot_resurrect_a_forgotten_node() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"s".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    // A copy of the spool entry, as a crash before its removal would have left it.
+    store.enqueue(&seen_again(1)).unwrap();
+    store.forget(&record(1).node_id, 1_000_000).unwrap();
+    assert_eq!(
+        store.pending().unwrap(),
+        0,
+        "forget clears its spool entries too"
+    );
+
+    store.enqueue(&record(1)).unwrap();
+    let late = store.ingest().unwrap();
+    assert_eq!((late.added, late.forgotten), (0, 1));
+    assert!(store.load().unwrap().nodes.is_empty());
+}
+
+#[test]
+fn forget_leaves_no_temporary_or_backup_with_text() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"t".repeat(64));
+    let marker = "unique-marker-5f1c9a";
+    let mut secret = record(1);
+    secret.content = format!("observation {marker}");
+    store.enqueue(&secret).unwrap();
+    store.ingest().unwrap();
+    store.enqueue(&secret).unwrap();
+    store.forget(&secret.node_id, 1_000).unwrap();
+
+    let mut files = vec![];
+    let mut dirs = vec![state.path().to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            match p.is_dir() {
+                true => dirs.push(p),
+                false => files.push(p),
+            }
+        }
+    }
+    assert!(!files.is_empty());
+    for f in files {
+        let text = String::from_utf8_lossy(&fs::read(&f).unwrap()).into_owned();
+        assert!(
+            !text.contains(marker),
+            "{} still holds the text",
+            f.display()
+        );
+    }
+}

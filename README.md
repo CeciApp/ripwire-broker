@@ -289,6 +289,11 @@ size caps (2,000 memories, a 1,000-entry spool, 96 MiB in all) keep holding. A s
 be read (a newer schema, a corrupt file, a link, a directory open to others) is left untouched
 and memory stays off for that workspace.
 
+**Forgetting:** forgetting a memory removes it, every note derived from it and its pending
+copies, in a new generation, and keeps its id from coming back for the retention period, even
+from an old pending copy. No backup with its text is kept. It cannot reach copies the operating
+system made (swap, snapshots, backups of the disk) nor anything already sent to the provider.
+
 ## Automatic mode (hooks)
 
 MCP alone only offers tools; the agent still has to call them. Hooks make it automatic

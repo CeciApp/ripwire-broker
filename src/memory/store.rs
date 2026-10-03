@@ -106,6 +106,8 @@ pub struct Ingested {
     pub duplicates: usize,
     /// Spool entries that did not parse; removed.
     pub rejected: usize,
+    /// Spool entries of forgotten nodes; removed, never incorporated.
+    pub forgotten: usize,
     /// The cap that stopped it; what did not fit stays pending.
     pub refused: Option<Full>,
 }
@@ -120,6 +122,8 @@ pub struct State {
     pub nodes: BTreeMap<String, Record>,
     /// The latest wall clock a sweep trusted; an earlier reading means the clock went back.
     pub trusted_ms: u64,
+    /// Forgotten node ids and until when they stay blocked from coming back.
+    pub tombstones: BTreeMap<String, u64>,
 }
 
 /// What one retention sweep did.
@@ -262,6 +266,11 @@ impl Store {
                 consumed.push(path);
                 continue;
             };
+            if state.tombstones.contains_key(&record.node_id) {
+                done.forgotten += 1;
+                consumed.push(path);
+                continue;
+            }
             if state.nodes.contains_key(&record.node_id) {
                 done.duplicates += 1;
                 consumed.push(path);
@@ -335,12 +344,38 @@ impl Store {
         if !gone.is_empty() {
             state.generation += 1;
         }
+        state.tombstones.retain(|_, until| *until > now_ms);
         state.trusted_ms = now_ms;
         self.write_snapshot(&on_disk(&state)?)?;
         Ok(Swept {
             removed: gone.len(),
             suspended: false,
         })
+    }
+
+    /// Forgets `node_id` and every note derived from it (PRD jev-mem §6): a new generation
+    /// without them, then their spool entries go. A tombstone keeps each id out until `until_ms`,
+    /// including an id that never reached the store. Returns how many nodes were removed.
+    pub fn forget(&self, node_id: &str, until_ms: u64) -> Result<usize, Refusal> {
+        let name = spool_name(node_id)?;
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        let gone = with_descendants(&state, BTreeSet::from([node_id.to_string()]));
+        let mut removed = 0;
+        for id in &gone {
+            removed += usize::from(state.nodes.remove(id).is_some());
+            state.tombstones.insert(id.clone(), until_ms);
+        }
+        state.generation += 1;
+        self.write_snapshot(&on_disk(&state)?)?;
+        let spool = self.dir.join(SPOOL);
+        let _ = fs::remove_file(spool.join(name));
+        for id in gone.iter().filter(|id| *id != node_id) {
+            if let Ok(name) = spool_name(id) {
+                let _ = fs::remove_file(spool.join(name));
+            }
+        }
+        Ok(removed)
     }
 
     fn spool_files(&self) -> Result<Vec<PathBuf>, Unavailable> {

@@ -522,3 +522,47 @@ fn replay_is_idempotent() {
         })
         .unwrap();
 }
+
+#[test]
+fn deletion_is_monotonic_across_generations() {
+    use ripwire_broker::memory::model::Record;
+    use ripwire_broker::memory::store::Store;
+
+    let record = |n: u64| -> Record {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "policy_version": "memory-policy/v1",
+            "node_id": format!("{n:064}"), "content_hash": format!("{n:064}"),
+            "workspace_id": "w", "event_key": "e", "kind": "edit_observation",
+            "content": format!("o{n}"), "observed_at_ms": 1, "ingest_seq": 0,
+            "timestamp_role": "observation", "expires_at_ms": u64::MAX, "generation": 0
+        }))
+        .unwrap()
+    };
+    // 0 enqueues, 1 ingests, 2 forgets; over a small set of ids so they collide.
+    let steps = prop::collection::vec((0u8..3, 0u64..5), 1..30);
+    TestRunner::new(config())
+        .run(&steps, |steps| {
+            let state = tempfile::tempdir().unwrap();
+            let store = Store::new(state.path(), "w");
+            let mut forgotten = std::collections::BTreeSet::new();
+            let mut generation = 0;
+            for (op, n) in steps {
+                match op {
+                    0 => store.enqueue(&record(n)).map(|_| ()).unwrap(),
+                    1 => store.ingest().map(|_| ()).unwrap(),
+                    _ => {
+                        store.forget(&record(n).node_id, u64::MAX).unwrap();
+                        forgotten.insert(record(n).node_id);
+                    }
+                }
+                let s = store.load().unwrap();
+                prop_assert!(s.generation >= generation, "generations never go back");
+                generation = s.generation;
+                for id in &forgotten {
+                    prop_assert!(!s.nodes.contains_key(id), "{} came back", id);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+}
