@@ -5,4 +5,5 @@
 pub mod admission;
 pub mod identity;
 pub mod model;
+pub mod store;
 pub mod time;
