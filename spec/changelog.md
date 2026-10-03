@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-03 17:00 | Fase 2 do plano do `--memory` (controle Jev) feita em TDD (T2.1 a T2.13; T2.0 escrita, pendente de rodada com a chave): Choice e pedidos de estado, decisões tipadas, transporte comum, `memory-prompts/v1`, fila com leases por lock e quota de 24 h, worker com typing, candidatos e relações, commit por par, falhas do provider, teto único de requisições, worker no `serve --memory` e `memory drain --online`, métricas de custo; PRD principal §23.1/§23.2/§23.3/§23.5 autorizam o worker | [D-138](#d-138--fase-2-do---memory-controle-jev) |
 | 2026-10-03 15:12 | Fase 1 do plano do `--memory` feita em TDD (T1.1 a T1.16, um commit por tarefa, mutação em cada uma): `--memory` e `--memory-*` no parse; registro `memory/v1`, identidade, admissão, relógio e sequência; store privado com spool, snapshot, tetos, lock, retenção, `forget` com tombstones e revogação; `memory status\|forget\|add\|resume`; coleta pelas tools e pelo `hook --memory`; `install`/`doctor`. O `serve --memory` ainda não liga a coleta (T2.11) | [D-137](#d-137--fase-1-do---memory-store-e-coleta) |
 | 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
@@ -5707,3 +5708,59 @@ armadilha do `handoff.md`; os testes desta fase não a causam, mas aumentam a ca
   `ingest_seq` 0), as tombstones não têm teto, e `forget`/`sweep` não checam o teto do snapshot.
   Nenhum dos três é alcançável com os limites padrão (2.000 × 16 KiB contra 64 MiB); entram na
   Fase 2, que introduz arestas e jobs e já revisita o tamanho do snapshot.
+
+## D-138 — Fase 2 do `--memory`: controle Jev
+
+**Data:** 2026-10-03 17:00.
+
+**Decisão:** a Fase 2 do [plano](plan/jev-mem-plan.md) está feita em TDD, uma tarefa por commit, com
+o teste vermelho visto falhar, mutação que o derrubou, documentação e os cinco portões. O registro
+de evidência (§9 do plano) tem a linha de cada tarefa. A T2.0 está escrita e **não rodou**: a chave
+da Jev não está nesta máquina.
+
+**O que entrou:** `JevQuestion::choice` e `StateRequest` (estado estruturado qualquer); respostas
+tipadas `Decision::{Noul, Choice, Unknown}` com id repetido detectado e Choice validado sem
+renormalizar; um `post` comum no `JevClient` para descoberta e memória (`MemoryClassifier`);
+`memory-prompts/v1` com as oito etapas; a fila (`memory::queue`) com um job por nó, leases presos a
+lock de arquivo, duas execuções e a quota de 24 h no snapshot; o controlador (typing, até K
+candidatos determinísticos, relações por par, arestas com limiar 0,60 e direção causal); commit
+atômico por par, geração vista no commit, contador de enriquecimento uma vez por nó; falhas do
+provider (401/403 suspendem, 429 só dentro do prazo, um retry, quatro tentativas); um teto de
+requisições em voo por processo (`online::classifier::Shared`) e um job remoto por workspace; o
+worker no `serve --memory` (que agora liga também a coleta das tools, adiada da T1.14) e
+`memory drain --online`; o custo por operação no status e a quota em uso no `memory status`.
+Testes: 519 → 555 no build padrão, 533 → 570 com `online`.
+
+**Decisões tomadas no caminho:**
+
+- **O controlador compila no build padrão.** `online::request`, `response` e `classifier` já
+  compilavam sem a feature (V15); só o `JevClient` a exige. Assim o domínio é testado nos dois
+  builds e o CA-10 continua valendo. O plano previa `controller.rs` sob `cfg(feature = "online")`.
+- **O formato da resposta Choice segue o PRD §7**: `{type: "choice", choice, probabilities,
+  confidence}`. Não validado contra o provider até a T2.0 rodar.
+- **As chaves do estado saem em ordem alfabética** (`serde_json` sem `preserve_order`): deterministas,
+  o que serve à chave de cache futura. Perguntas e critérios mantêm a ordem dada.
+- **Lease por lock de arquivo, não por PID**: `leases/<id>.lock`; quem consegue o lock de um job
+  "leased" sabe que o dono morreu. Um lease abandonado na segunda execução falha o job.
+- **Candidatos:** quem compartilha entidade, quem compartilha palavra e a observação anterior mais
+  próxima; ordem por entidades, palavras, distância na sequência e id. Alias só se pergunta quando
+  os ids não se cruzam; tempo implícito só quando os dois lados têm referência temporal.
+- **Um par conta inteiro ou não conta:** uma decisão desconhecida descarta todas as inferências do
+  par; a aresta determinística (entidade compartilhada) fica.
+- **Lotes divididos renomeiam o candidato**: as perguntas citam `candidates[i]` com o índice dentro
+  do pedido, não o global.
+- **O teto do processo é um classificador `Shared`** com semáforo, que envolve o `JevClient` e é
+  dado à descoberta e ao worker. O `Scheduler` não mudou.
+- **Os testes de ciclo de vida são de biblioteca** (`memory::runtime::from_serve`, `Runtime`,
+  `drain`): um teste do binário com `serve --memory` faria o worker chamar o provider real.
+- **401/403 suspendem até um novo processo**, que é como a credencial muda.
+
+**O que ficou de fora, registrado:** cache de decisões (o PRD §7 o prevê; nada de cache ainda, então
+nada a contar como acerto); arestas temporais determinísticas por sequência de ingestão; a estimativa
+de tamanho do snapshot e o teto de tombstones (do D-137) continuam inalcançáveis com os limites
+padrão; o diagrama de `spec/diagrams/` não foi atualizado, porque o archify é um skill da máquina
+do mantenedor, fora desta sessão.
+
+**Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos (41) e
+`props_fs` verdes; CA-10 sem crate de rede; guarda de fixtures verde; nenhum `reqwest`, `secrecy`,
+`println!` ou `unsafe` em `src/memory/`. Revisão independente do diff: ver abaixo, quando houver.
