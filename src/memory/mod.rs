@@ -8,6 +8,7 @@ pub mod identity;
 pub mod model;
 pub mod prompts;
 pub mod publish;
+pub mod queue;
 pub mod store;
 pub mod time;
 pub mod wire;

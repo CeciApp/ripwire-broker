@@ -9,6 +9,7 @@
 //! removes them: a crash in between replays the spool, and a replay is the same node.
 
 use super::model::{Record, Rejected};
+use super::queue::{Job, JobState, Lease, Ledger, MAX_RUNS, Outcome};
 use super::time::Sequence;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +24,8 @@ const SPOOL: &str = "spool";
 const LOCK: &str = "lock";
 /// Written by `forget --all`; only `memory resume` removes it (PD-4).
 const REVOKED: &str = "revoked";
+/// Lease lock files, one per job; a held lock is a live run.
+const LEASES: &str = "leases";
 /// Older than this, a spool temporary is a dead writer's.
 const DEAD_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -35,6 +38,9 @@ pub struct Limits {
     pub snapshot_bytes: u64,
     /// Spool and snapshot together.
     pub total_bytes: u64,
+    /// Classifier attempts and questions in a moving 24-hour window, for every process.
+    pub attempts_per_day: u32,
+    pub questions_per_day: u32,
 }
 
 impl Default for Limits {
@@ -45,6 +51,8 @@ impl Default for Limits {
             spool_bytes: 16 * 1024 * 1024,
             snapshot_bytes: 64 * 1024 * 1024,
             total_bytes: 96 * 1024 * 1024,
+            attempts_per_day: 1_000,
+            questions_per_day: 20_000,
         }
     }
 }
@@ -95,6 +103,8 @@ pub enum Full {
     SpoolBytes,
     Snapshot,
     Total,
+    /// The 24-hour classifier quota.
+    Quota,
 }
 
 /// Why a write did not happen.
@@ -153,6 +163,9 @@ pub struct State {
     pub trusted_ms: u64,
     /// Forgotten node ids and until when they stay blocked from coming back.
     pub tombstones: BTreeMap<String, u64>,
+    /// Enrichment jobs, by `node_id`.
+    pub jobs: BTreeMap<String, Job>,
+    pub ledger: Ledger,
 }
 
 /// What one retention sweep did.
@@ -375,6 +388,7 @@ impl Store {
                 .map_err(Refusal::Full)?;
             record.generation = state.generation + 1;
             size += grows;
+            state.jobs.insert(record.node_id.clone(), Job::default());
             state.nodes.insert(record.node_id.clone(), record);
             done.added += 1;
             consumed.push(path);
@@ -422,6 +436,7 @@ impl Store {
         let gone = with_descendants(&state, due);
         for id in &gone {
             state.nodes.remove(id);
+            state.jobs.remove(id);
         }
         if !gone.is_empty() {
             state.generation += 1;
@@ -446,6 +461,7 @@ impl Store {
         let mut removed = 0;
         for id in &gone {
             removed += usize::from(state.nodes.remove(id).is_some());
+            state.jobs.remove(id);
             state.tombstones.insert(id.clone(), until_ms);
         }
         state.generation += 1;
@@ -481,6 +497,7 @@ impl Store {
         }
         let mut state = self.load()?;
         let removed = state.nodes.len();
+        state.jobs.clear();
         for id in std::mem::take(&mut state.nodes).into_keys() {
             state.tombstones.insert(id, until_ms);
         }
@@ -504,6 +521,114 @@ impl Store {
             .and_then(|()| fs::File::open(&self.dir)?.sync_all())
             .map_err(|_| Unavailable::Io)?;
         Ok(true)
+    }
+
+    /// Takes the next job that may run at `now_ms`: a pending one past its time, or a leased
+    /// one whose holder is gone (its lease lock can be taken). A job out of runs fails instead.
+    pub fn lease_next(&self, now_ms: u64) -> Result<Option<Lease>, Refusal> {
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        let leases = self.dir.join(LEASES);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&leases)
+            .map_err(|_| Unavailable::Io)?;
+        let mut taken = None;
+        let mut changed = false;
+        for (id, job) in state.jobs.iter_mut() {
+            let ready = match job.state {
+                JobState::Pending => job.not_before_ms <= now_ms,
+                JobState::Leased => true,
+                JobState::Failed | JobState::Done => false,
+            };
+            if !ready {
+                continue;
+            }
+            let name = spool_name(id)?.replace(".json", ".lock");
+            let lock = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(leases.join(name))
+                .map_err(|_| Unavailable::Io)?;
+            // Held: a live process is running it. Free: pending, or its holder died.
+            if lock.try_lock().is_err() {
+                continue;
+            }
+            changed = true;
+            if job.runs >= MAX_RUNS {
+                job.state = JobState::Failed;
+                continue;
+            }
+            job.runs += 1;
+            job.state = JobState::Leased;
+            taken = Some(Lease {
+                node_id: id.clone(),
+                run: job.runs,
+                _lock: lock,
+            });
+            break;
+        }
+        if changed {
+            self.write_snapshot(&on_disk(&state)?)?;
+        }
+        Ok(taken)
+    }
+
+    /// Ends a run. A retry with no run left fails the job.
+    pub fn finish(&self, lease: Lease, outcome: Outcome) -> Result<(), Refusal> {
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        if let Some(job) = state.jobs.get_mut(&lease.node_id) {
+            job.state = match outcome {
+                Outcome::Done => JobState::Done,
+                Outcome::Failed => JobState::Failed,
+                Outcome::Retry { not_before_ms } => {
+                    job.not_before_ms = not_before_ms;
+                    JobState::Pending
+                }
+            };
+            self.write_snapshot(&on_disk(&state)?)?;
+        }
+        drop(lease);
+        Ok(())
+    }
+
+    /// The explicit action that gives a failed job its runs back. `false` when it is not failed.
+    pub fn retry_failed(&self, node_id: &str) -> Result<bool, Refusal> {
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        let Some(job) = state
+            .jobs
+            .get_mut(node_id)
+            .filter(|j| j.state == JobState::Failed)
+        else {
+            return Ok(false);
+        };
+        *job = Job::default();
+        self.write_snapshot(&on_disk(&state)?)?;
+        Ok(true)
+    }
+
+    /// Charges the 24-hour quota before a request is sent; refused, nothing is sent.
+    pub fn charge(&self, now_ms: u64, attempts: u32, questions: u32) -> Result<(), Refusal> {
+        let _writer = self.writer()?;
+        let mut state = self.load()?;
+        let fits = state.ledger.charge(
+            now_ms,
+            attempts,
+            questions,
+            self.limits.attempts_per_day,
+            self.limits.questions_per_day,
+        );
+        self.write_snapshot(&on_disk(&state)?)?;
+        match fits {
+            true => Ok(()),
+            false => Err(Refusal::Full(Full::Quota)),
+        }
     }
 
     /// A temporary older than [`DEAD_TEMPORARY`] belongs to a writer that died between create and
