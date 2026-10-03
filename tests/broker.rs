@@ -2718,6 +2718,45 @@ async fn memory_bookkeeping_never_pushes_the_envelope_past_its_budget() {
 }
 
 #[tokio::test]
+async fn discovery_and_the_memory_read_share_one_jev_request_limit() {
+    use ripwire_broker::online::OnlineConfig;
+    for (jev_limit, memory, discovery) in [(24, 4, 20), (2, 2, 0)] {
+        let fake = FakeUpstream::new().answer("explore", "explore_export_auth");
+        let r = common::memory::remembering_configured(
+            fake,
+            |_| Arc::new(Agreeable::default()),
+            ReadConfig::default(),
+            move |config| {
+                let mut online =
+                    OnlineConfig::new(Arc::new(common::classifier::FakeClassifier::new()));
+                online.request_limit = jev_limit;
+                config.online = Some(online);
+            },
+        )
+        .await;
+        let env = r
+            .broker
+            .context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap();
+        let status = serde_json::to_value(r.broker.status().await).unwrap();
+        assert_eq!(
+            status["online"]["request_limit"], discovery,
+            "{jev_limit}: discovery keeps what memory does not take"
+        );
+        let read = env.provenance.memory.as_ref().unwrap();
+        assert!(
+            read.requests <= memory,
+            "{jev_limit}: memory takes at most {memory}, took {}",
+            read.requests
+        );
+        if memory < 4 {
+            assert_eq!(read.stop_reason, "request_limit", "{jev_limit}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn notes_and_memory_together_stay_inside_the_budget() {
     let note = "the routes check a bearer token before the handler runs; ".repeat(10);
     // Budgets a few tokens apart, so that in some the notes fill the envelope to the brim.

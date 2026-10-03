@@ -388,8 +388,18 @@ pub struct UpstreamStatus {
 impl Broker {
     pub async fn connect(
         upstream: Arc<dyn Upstream>,
-        config: BrokerConfig,
+        mut config: BrokerConfig,
     ) -> Result<Self, BrokerError> {
+        // One `--jev-request-limit` per query for discovery and the memory read together: memory
+        // takes at most four of it, discovery keeps the rest (PRD jev-mem §8.2).
+        if let (Some(online), Some(read)) = (
+            config.online.as_mut(),
+            config.memory.as_mut().and_then(|m| m.read.as_mut()),
+        ) {
+            let (memory, discovery) = retrieve::slots(read.cfg.request_limit, online.request_limit);
+            read.cfg.request_limit = memory;
+            online.request_limit = discovery;
+        }
         check_version(&config.ripwire_version)?;
         let tools = upstream.list_tools().await?;
         let missing: Vec<&str> = REQUIRED_VERBS
