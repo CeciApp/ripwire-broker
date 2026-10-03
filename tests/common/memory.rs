@@ -54,6 +54,16 @@ pub async fn remembering_from(
     classifier: impl FnOnce(&Store) -> Arc<dyn MemoryClassifier>,
     cfg: ReadConfig,
 ) -> Remembering {
+    remembering_configured(fake, classifier, cfg, |_| {}).await
+}
+
+/// [`remembering_from`], with the rest of the configuration changed by `configure`.
+pub async fn remembering_configured(
+    fake: FakeUpstream,
+    classifier: impl FnOnce(&Store) -> Arc<dyn MemoryClassifier>,
+    cfg: ReadConfig,
+    configure: impl FnOnce(&mut BrokerConfig),
+) -> Remembering {
     let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     super::write(ws.path(), "src/cache.rs", "fn get() {}\n");
     let id = identity::workspace_id(ws.path()).unwrap();
@@ -86,6 +96,7 @@ pub async fn remembering_from(
         cfg,
     });
     config.memory = Some(memory);
+    configure(&mut config);
     let broker = Broker::connect(Arc::new(fake), config).await.unwrap();
     Remembering {
         broker,

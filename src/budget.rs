@@ -222,8 +222,9 @@ fn next_step(env: &Envelope) -> Option<String> {
 
 /// Adds notes after the items (peripheral context, PRD 10.2 #9) and the note limitations.
 /// Over budget, the last notes give way first, then the lowest-ranked items, which are
-/// counted as omitted.
-pub fn add_notes(env: &mut Envelope, notes: Vec<Note>, limitations: Vec<Limitation>) {
+/// counted as omitted. `reserve` is room a later step still has to write in, kept free of notes.
+pub fn add_notes(env: &mut Envelope, notes: Vec<Note>, limitations: Vec<Limitation>, reserve: u32) {
+    let limit = env.budget.requested_tokens.saturating_sub(reserve);
     let mut left_out = 0;
     env.notes.extend(notes);
     env.limitations.extend(limitations);
@@ -235,7 +236,7 @@ pub fn add_notes(env: &mut Envelope, notes: Vec<Note>, limitations: Vec<Limitati
             counted = left_out;
         }
         env.budget.estimated_tokens = env.budget.requested_tokens; // widest value while measuring
-        if !over(env) {
+        if estimate_tokens(env) <= limit {
             break;
         }
         if env.notes.pop().is_some() {

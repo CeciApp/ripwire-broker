@@ -2716,3 +2716,36 @@ async fn memory_bookkeeping_never_pushes_the_envelope_past_its_budget() {
         assert!(env.provenance.memory.is_some());
     }
 }
+
+#[tokio::test]
+async fn notes_and_memory_together_stay_inside_the_budget() {
+    let note = "the routes check a bearer token before the handler runs; ".repeat(10);
+    // Budgets a few tokens apart, so that in some the notes fill the envelope to the brim.
+    for budget in (900..1400).step_by(11) {
+        let fake = FakeUpstream::new().answer("explore", "explore_export_auth");
+        let summarizer = Arc::new(common::summarizer::FakeSummarizer::replying(&note));
+        let r = common::memory::remembering_configured(
+            fake,
+            |_| Arc::new(Agreeable::default()),
+            ReadConfig::default(),
+            move |config| {
+                config.summarizer = Some(summarizer);
+                config.summarizer_wait = std::time::Duration::from_secs(5);
+            },
+        )
+        .await;
+        let env = r
+            .broker
+            .context_for_task(TaskRequest {
+                budget_tokens: budget,
+                mode: Mode::Orient,
+                ..TaskRequest::new("how is the cache evicted?")
+            })
+            .await
+            .unwrap();
+        let actual = serde_json::to_string(&env).unwrap().len().div_ceil(4) as u32;
+        assert!(actual <= budget, "{budget}: {actual} tokens");
+        assert_eq!(env.budget.estimated_tokens, actual, "{budget}");
+        assert!(env.provenance.memory.is_some());
+    }
+}

@@ -1154,7 +1154,12 @@ impl Broker {
             env.budget.already_delivered += repeated;
             self.metrics.lock().unwrap().session_hits += repeated as u64;
         }
-        budget::add_notes(env, fresh, limitations);
+        // What a memory read writes comes after the notes: they leave its room alone.
+        let reserve = match self.recall.is_some() {
+            true => budget::memory_reserve(),
+            false => 0,
+        };
+        budget::add_notes(env, fresh, limitations, reserve);
     }
 
     /// Applies the task's switches (docs, bodies) and shapes the envelope.
