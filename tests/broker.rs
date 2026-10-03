@@ -2390,36 +2390,11 @@ async fn a_memory_delivered_in_this_session_is_not_repeated() {
 
 // ---------------------------------------------------------------- context_for_task reads memory (PRD jev-mem §10; T3.10)
 
-use ripwire_broker::memory::admission::{self, Draft, Event, Outcome, Stamp, Tests};
-use ripwire_broker::memory::identity;
-use ripwire_broker::memory::retrieve::{ReadConfig, ReadSetup};
+use common::memory::{Agreeable, remembering_from};
+use ripwire_broker::memory::retrieve::ReadConfig;
 use ripwire_broker::online::classifier::{ClassifyError, MemoryClassifier};
 use ripwire_broker::online::request::StateRequest;
 use ripwire_broker::online::response::Decision;
-
-/// Says yes to everything, and that the evidence is sufficient.
-struct Agreeable;
-
-#[async_trait::async_trait]
-impl MemoryClassifier for Agreeable {
-    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
-        Ok(req
-            .questions
-            .0
-            .iter()
-            .map(|(_, q)| {
-                let t = &q.instructions;
-                let p = match () {
-                    _ if t.starts_with("Does evidence support every factual part") => 0.99,
-                    _ if t.starts_with("Is a fact needed to answer query absent") => 0.0,
-                    _ if t.starts_with("Do items of evidence contradict") => 0.0,
-                    _ => 0.9,
-                };
-                Decision::Noul { probability: p }
-            })
-            .collect())
-    }
-}
 
 struct Refusing;
 
@@ -2442,41 +2417,9 @@ async fn remembering_with(
     classifier: impl FnOnce(&Store) -> Arc<dyn MemoryClassifier>,
     cfg: ReadConfig,
 ) -> (Broker, tempfile::TempDir, tempfile::TempDir, Arc<Store>) {
-    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    common::write(ws.path(), "src/cache.rs", "fn get() {}\n");
-    let id = identity::workspace_id(ws.path()).unwrap();
-    let store = Arc::new(Store::new(st.path(), &id));
-    let reader = ripwire_broker::online::reader::WorkspaceReader::new(ws.path()).unwrap();
-    let draft = Draft {
-        event_key: "e".into(),
-        event: Event::AfterEdit,
-        outcome: Outcome::AnalysisCompleted,
-        tests: Tests::Unknown,
-        scope: vec!["src/cache.rs".into()],
-        evidence: vec!["quality_delta".into()],
-    };
-    let stamp = Stamp {
-        observed_at_ms: 1,
-        ingest_seq: 0,
-        generation: 0,
-        retention_ms: u64::MAX / 2,
-    };
-    store
-        .enqueue(&admission::admit(&reader, &id, &draft, stamp).unwrap())
-        .unwrap();
-    store.ingest().unwrap();
-    let mut config = BrokerConfig::new(ws.path());
-    config.incremental = true;
-    let mut memory = MemoryConfig::new(store.clone(), id, 1_000_000);
-    memory.read = Some(ReadSetup {
-        store: store.clone(),
-        classifier: classifier(&store),
-        cfg,
-    });
-    config.memory = Some(memory);
     let fake = FakeUpstream::new().answer("explore", "explore_export_auth");
-    let b = Broker::connect(Arc::new(fake), config).await.unwrap();
-    (b, ws, st, store)
+    let r = remembering_from(fake, classifier, cfg).await;
+    (r.broker, r.ws, r.st, r.store)
 }
 
 async fn plain_task(ws: &std::path::Path) -> Value {
@@ -2493,7 +2436,8 @@ async fn plain_task(ws: &std::path::Path) -> Value {
 
 #[tokio::test]
 async fn memory_is_read_alongside_the_structural_context() {
-    let (b, ws, _st, _store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let (b, ws, _st, _store) =
+        remembering(Arc::new(Agreeable::default()), ReadConfig::default()).await;
     let out = to_json(
         &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
             .await
@@ -2531,7 +2475,8 @@ async fn a_provider_failure_a_full_disk_or_a_corrupt_store_keeps_the_structural_
         "{out:#}"
     );
 
-    let (b, ws, _st, store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let (b, ws, _st, store) =
+        remembering(Arc::new(Agreeable::default()), ReadConfig::default()).await;
     std::fs::write(store.dir().join("snapshot.json"), "{broken").unwrap();
     let out = to_json(
         &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
@@ -2547,7 +2492,8 @@ async fn a_provider_failure_a_full_disk_or_a_corrupt_store_keeps_the_structural_
 
 #[tokio::test]
 async fn memory_never_changes_ready_or_attention_required() {
-    let (b, ws, _st, _store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let (b, ws, _st, _store) =
+        remembering(Arc::new(Agreeable::default()), ReadConfig::default()).await;
     let out = to_json(
         &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
             .await
@@ -2562,7 +2508,7 @@ async fn a_cold_large_snapshot_omits_memory_with_a_limitation_and_warms_up() {
         deadline: std::time::Duration::from_millis(5),
         ..Default::default()
     };
-    let (b, _ws, _st, store) = remembering(Arc::new(Agreeable), cfg).await;
+    let (b, _ws, _st, store) = remembering(Arc::new(Agreeable::default()), cfg).await;
     // A large store: 2,000 memories of 2 KB each.
     let mut s = store.load().unwrap();
     let one = s.nodes.values().next().unwrap().clone();
@@ -2614,7 +2560,8 @@ async fn a_cold_large_snapshot_omits_memory_with_a_limitation_and_warms_up() {
 
 #[tokio::test]
 async fn the_query_is_never_persisted() {
-    let (b, _ws, st, store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let (b, _ws, st, store) =
+        remembering(Arc::new(Agreeable::default()), ReadConfig::default()).await;
     let marker = "zebra-unique-query-7f3";
     b.context_for_task(TaskRequest::new(&format!("cache {marker}")))
         .await
@@ -2640,7 +2587,8 @@ async fn the_query_is_never_persisted() {
 
 #[tokio::test]
 async fn a_memory_goes_out_once_per_session() {
-    let (b, _ws, _st, _store) = remembering(Arc::new(Agreeable), ReadConfig::default()).await;
+    let (b, _ws, _st, _store) =
+        remembering(Arc::new(Agreeable::default()), ReadConfig::default()).await;
     let ask = || b.context_for_task(TaskRequest::new("how is the cache evicted?"));
     let first = to_json(&ask().await.unwrap());
     assert_eq!(first["memories"].as_array().map(Vec::len), Some(1));
@@ -2672,7 +2620,7 @@ struct Breaking(std::path::PathBuf);
 impl MemoryClassifier for Breaking {
     async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
         std::fs::write(&self.0, "{broken").unwrap();
-        Agreeable.decide(req).await
+        Agreeable::default().decide(req).await
     }
 }
 
@@ -2697,4 +2645,32 @@ async fn a_store_broken_during_the_read_delivers_no_memory() {
         "{out:#}"
     );
     assert_eq!(out["provenance"]["memory"]["partial"], true);
+}
+
+#[tokio::test]
+async fn memory_bookkeeping_never_pushes_the_envelope_past_its_budget() {
+    for budget in [300, 400, 500, 600, 800, 1000, 1500] {
+        let fake = FakeUpstream::new().answer("explore", "explore_export_auth");
+        let r = remembering_from(
+            fake,
+            |_| Arc::new(Agreeable::default()),
+            ReadConfig::default(),
+        )
+        .await;
+        let env = r
+            .broker
+            .context_for_task(TaskRequest {
+                budget_tokens: budget,
+                ..TaskRequest::new("how is the cache evicted?")
+            })
+            .await
+            .unwrap();
+        let actual = serde_json::to_string(&env).unwrap().len().div_ceil(4) as u32;
+        assert!(actual <= budget, "{budget}: {actual} tokens");
+        assert_eq!(
+            env.budget.estimated_tokens, actual,
+            "{budget}: the estimate is the delivered size"
+        );
+        assert!(env.provenance.memory.is_some());
+    }
 }

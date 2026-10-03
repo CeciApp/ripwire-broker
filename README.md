@@ -332,7 +332,15 @@ never changes `status`. When it is missing the answer says why: `memory_cold` (a
 is still loading; the next call finds it warm), `memory_unavailable` (the store cannot be read)
 or `memory_incomplete` (the provider failed, time ran out, or the store changed under the read,
 in which case none goes out). With `--incremental` a memory goes out once per session. The task
-text is sent to the classifier and never written to disk.
+text is sent to the classifier and never written to disk. With memory on, a task answer holds
+back about 150 tokens of its budget for that record, so memory never pushes it past the budget
+nor takes the place of an item; memories only get what is left over.
+
+**In the hooks:** a hook never reads memory, since it makes no HTTP request, so a hook's context
+carries no memories today. The hooks are ready for them: an answer with only memories counts as
+content, a memory the session was not told is news, and the injected context gets the same
+readable section as the MCP text block when it fits the host's 9,000 characters (the memories
+stay in the JSON either way). `#ripwire-off` stops injection for that session only.
 
 **Forgetting:** forgetting a memory removes it, every note derived from it and its pending
 copies, in a new generation, and keeps its id from coming back for the retention period, even

@@ -80,18 +80,14 @@ impl Recall {
             Err(_) => {
                 read.memories.clear();
                 read.partial = true;
-                limitations.push(incomplete("the memories read could not be checked again"));
+                limitations.push(unchecked());
             }
         }
         if matches!(
             read.stop,
             StopReason::ProviderError | StopReason::Deadline | StopReason::Cancelled
         ) {
-            let why = serde_json::json!(read.stop);
-            limitations.push(incomplete(&format!(
-                "the read stopped early ({})",
-                why.as_str().unwrap_or_default()
-            )));
+            limitations.push(stopped_early(read.stop));
         }
         Recalled {
             read: Some(read),
@@ -166,6 +162,24 @@ fn missed(miss: Miss) -> Limitation {
             ),
         ),
     }
+}
+
+fn unchecked() -> Limitation {
+    incomplete("the memories read could not be checked again")
+}
+
+fn stopped_early(stop: StopReason) -> Limitation {
+    let why = serde_json::json!(stop);
+    incomplete(&format!(
+        "the read stopped early ({})",
+        why.as_str().unwrap_or_default()
+    ))
+}
+
+/// The most a read ever adds to `limitations`, for the budget's reserve: both `memory_incomplete`
+/// at once, which is wider than `memory_cold` or `memory_unavailable` alone.
+pub fn widest_limitations() -> Vec<Limitation> {
+    vec![unchecked(), stopped_early(StopReason::ProviderError)]
 }
 
 fn incomplete(why: &str) -> Limitation {

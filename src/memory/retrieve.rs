@@ -664,10 +664,13 @@ pub fn items(read: &Read) -> Vec<crate::model::MemoryItem> {
         .collect()
 }
 
+/// The schema of `provenance.memory`.
+pub const MEMORY_SCHEMA: &str = "ripwire-broker.memory/v1";
+
 /// `provenance.memory` for `read`.
 pub fn provenance(read: &Read) -> crate::model::MemoryProvenance {
     crate::model::MemoryProvenance {
-        schema_version: "ripwire-broker.memory/v1",
+        schema_version: MEMORY_SCHEMA,
         stop_reason: json!(read.stop).as_str().unwrap_or_default().to_string(),
         requests: read.requests,
         questions: read.questions,
@@ -689,8 +692,10 @@ pub fn attach(
     read: &Read,
     seen: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
-    let fit = crate::budget::add_memories(env, items(read), seen);
     let mut p = provenance(read);
+    // In place while memories are fitted, so the room they take is room the record leaves.
+    env.provenance.memory = Some(p.clone());
+    let fit = crate::budget::add_memories(env, items(read), seen);
     if fit.omitted > 0
         && matches!(
             read.stop,

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 pub mod classifier;
 pub mod fake;
+pub mod memory;
 pub mod summarizer;
 use std::path::Path;
 use std::process::Command;

@@ -931,6 +931,7 @@ impl Broker {
             let seen = |id: &str| skip_seen && session.has(&session::memory_fingerprint(id));
             retrieve::attach(env, &read, &seen);
         }
+        env.budget.estimated_tokens = budget::estimate_tokens(env);
     }
 
     async fn structural_task(&self, req: &TaskRequest) -> Result<Envelope, BrokerError> {
@@ -1275,6 +1276,11 @@ impl Broker {
         let reserve = match self.notes.is_some() {
             true => budget::notes_reserve(),
             false => 0,
+        };
+        // The same for what a memory read writes after the entries are fitted.
+        let reserve = match self.recall.is_some() {
+            true => reserve + budget::memory_reserve(),
+            false => reserve,
         };
         if !self.incremental {
             budget::fill(&mut env, entries, reserve);

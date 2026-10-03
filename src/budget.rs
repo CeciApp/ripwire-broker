@@ -74,6 +74,32 @@ pub fn notes_reserve() -> u32 {
     record + tokens(widest_next_step.len())
 }
 
+/// Room held back from the entries of a `context_for_task` that reads memory, for what the read
+/// writes after them (D-103's reasoning; PRD jev-mem §8.2): `provenance.memory` and the memory
+/// limitations, in their widest reachable form, and a digit `estimated_tokens` may gain. Memories
+/// themselves only get what is left over: they give way, never an entry.
+pub fn memory_reserve() -> u32 {
+    let limits = crate::memory::store::Limits::default();
+    let widest = crate::model::MemoryProvenance {
+        schema_version: crate::memory::retrieve::MEMORY_SCHEMA,
+        stop_reason: "low_expected_gain".into(),
+        requests: 4,
+        questions: crate::memory::retrieve::ReadConfig::default().max_questions,
+        visited: crate::memory::retrieve::MAX_VISITED,
+        stale_omitted: limits.max_nodes,
+        pending_writes: limits.spool_entries,
+        partial: false,
+        degraded: false,
+        assessment_before_truncation: false,
+    };
+    let provenance = r#","memory":"#.len() + serde_json::to_string(&widest).map_or(0, |s| s.len());
+    let limitations: usize = crate::memory::recall::widest_limitations()
+        .iter()
+        .map(|l| serde_json::to_string(l).map_or(0, |s| s.len() + 1))
+        .sum();
+    (provenance + limitations + 1).div_ceil(4) as u32
+}
+
 /// Adds entries in priority order while they fit; limitations are always kept (PRD 10.2 #1).
 /// `reserve` is budget held back from the entries, for bookkeeping a later step must be able to
 /// write without evicting anything already decided.

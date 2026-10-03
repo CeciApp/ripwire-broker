@@ -677,6 +677,15 @@ das threads assíncronas, uma por vez. Faltando memória, o envelope diz por qu�
 (o provedor falhou, o prazo acabou, ou o store mudou e as memórias não puderam ser conferidas de
 novo, caso em que nenhuma sai). Uma memória sai uma vez por sessão com `--incremental`, como os
 itens; `include_seen` a manda de novo. A consulta nunca é gravada.
+Com memória ligada, a resposta da tarefa reserva do orçamento a forma mais larga do que a leitura
+escreve depois do encaixe (`provenance.memory` e as limitações de memória, ~150 tokens), pelo
+mesmo motivo do D-103: a memória nunca passa o envelope do orçamento nem toma o lugar de um item;
+as memórias ficam só com a sobra. `estimated_tokens` é o tamanho entregue, memória incluída.
+
+Nos hooks, o contexto injetado traz a mesma seção legível do bloco de texto MCP quando cabe nos
+9.000 caracteres do host; senão, só o JSON, que já contém as memórias. Um envelope só com memórias
+conta como conteúdo, e uma memória que a sessão ainda não recebeu é novidade. Como o hook não faz
+HTTP, na v1 ele não lê memória: o caminho fica pronto para quando houver cache de decisões.
 
 ### 9.2 Tool `context_after_edit`
 
