@@ -135,6 +135,11 @@ pub fn pair_edges(
             ..inferred(n, c, Graph::Entity, "shared_entity", 0.0, cfg)
         });
     }
+    // A pair commits whole (PRD jev-mem §12): one decision missing, and none of its inferences
+    // count. The deterministic edge above stands either way.
+    if answers.is_empty() || answers.values().any(|d| d.probability().is_none()) {
+        return out;
+    }
     let p = |name: &str| {
         answers
             .get(name)
@@ -240,7 +245,13 @@ pub async fn enrich(
             }
         }
         Err(_) => {
-            store.commit_enrichment(&node.node_id, None, EnrichmentState::Failed, vec![])?;
+            store.commit_enrichment(
+                &node.node_id,
+                node.generation,
+                None,
+                EnrichmentState::Failed,
+                vec![],
+            )?;
             store.finish(
                 lease,
                 Outcome::Retry {
@@ -309,7 +320,7 @@ pub async fn enrich(
         true => EnrichmentState::Partial,
         false => EnrichmentState::Complete,
     };
-    store.commit_enrichment(&node.node_id, Some(types), outcome, edges)?;
+    store.commit_enrichment(&node.node_id, node.generation, Some(types), outcome, edges)?;
     store.finish(lease, Outcome::Done)?;
     Ok(Enriched {
         state: outcome,

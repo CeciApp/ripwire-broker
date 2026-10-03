@@ -165,6 +165,8 @@ pub struct State {
     pub tombstones: BTreeMap<String, u64>,
     /// Edges by [`Edge::key`].
     pub edges: BTreeMap<String, Edge>,
+    /// Nodes whose planned enrichment finished: what the consolidation cadence counts.
+    pub enriched: u64,
     /// Enrichment jobs, by `node_id`.
     pub jobs: BTreeMap<String, Job>,
     pub ledger: Ledger,
@@ -612,21 +614,31 @@ impl Store {
     pub fn commit_enrichment(
         &self,
         node_id: &str,
+        seen_generation: u64,
         types: Option<Types>,
         enrichment: EnrichmentState,
         edges: Vec<Edge>,
-    ) -> Result<(), Refusal> {
+    ) -> Result<bool, Refusal> {
         let _writer = self.writer()?;
         let mut state = self.load()?;
         let generation = state.generation + 1;
-        let Some(node) = state.nodes.get_mut(node_id) else {
-            return Ok(());
+        // Answers about a node that is gone, or was replaced since they were asked, are late.
+        let Some(node) = state
+            .nodes
+            .get_mut(node_id)
+            .filter(|n| n.generation == seen_generation)
+        else {
+            return Ok(false);
         };
+        let finished =
+            |s: EnrichmentState| matches!(s, EnrichmentState::Complete | EnrichmentState::Partial);
+        let first = finished(enrichment) && !finished(node.enrichment.state);
         if let Some(types) = types {
             node.types = types;
         }
         node.enrichment.state = enrichment;
         node.enrichment.prompt_version = Some(super::prompts::VERSION.into());
+        state.enriched += u64::from(first);
         for mut edge in edges {
             if !state.nodes.contains_key(&edge.source) || !state.nodes.contains_key(&edge.target) {
                 continue;
@@ -636,7 +648,7 @@ impl Store {
         }
         state.generation = generation;
         self.write_snapshot(&on_disk(&state)?)?;
-        Ok(())
+        Ok(true)
     }
 
     /// The explicit action that gives a failed job its runs back. `false` when it is not failed.

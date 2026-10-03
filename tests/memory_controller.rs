@@ -578,3 +578,175 @@ async fn implicit_time_is_a_choice_and_unknown_adds_no_edge() {
         }
     }
 }
+
+// ---------------------------------------------------------------- pair transactions (PRD jev-mem §12; T2.8)
+
+/// A fake that runs `during` on its first relations request, as another process would.
+struct Meanwhile {
+    inner: Fake,
+    during: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[async_trait]
+impl MemoryClassifier for Meanwhile {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        if req.state.get("candidates").is_some()
+            && let Some(f) = self.during.lock().unwrap().take()
+        {
+            f();
+        }
+        self.inner.decide(req).await
+    }
+}
+
+async fn enrich_node(store: &Store, fake: &dyn MemoryClassifier, n: u64) {
+    let lease = loop {
+        let l = store.lease_next(0).unwrap().unwrap();
+        if l.node_id() == id(n) {
+            break l;
+        }
+        store
+            .finish(l, ripwire_broker::memory::queue::Outcome::Done)
+            .unwrap();
+    };
+    controller::enrich(store, fake, lease, &config(4), 1_000)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_timeout_in_the_middle_of_a_pair_commits_nothing_of_that_pair() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(
+        dir.path(),
+        &[rec(1, "cache layer", &["e"]), rec(9, "cache layer", &["e"])],
+    );
+    let fake = Fake::new(|text| match named(text) {
+        "semantic" => noul(0.9),
+        "caused_by" => Decision::Unknown {
+            reason: ripwire_broker::online::response::Unknown::Absent,
+        },
+        _ => noul(0.0),
+    });
+    enrich_node(&store, &fake, 9).await;
+    let s = store.load().unwrap();
+    assert!(
+        s.edges
+            .values()
+            .all(|e| e.basis == EdgeBasis::Deterministic),
+        "one decision missing, none of the pair's inferences: {:?}",
+        s.edges.values().map(|e| &e.relation).collect::<Vec<_>>()
+    );
+    assert!(
+        s.edges.values().any(|e| e.relation == "shared_entity"),
+        "the deterministic one stays"
+    );
+}
+
+#[tokio::test]
+async fn a_late_answer_for_an_old_generation_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(
+        dir.path(),
+        &[rec(1, "cache layer", &["e"]), rec(9, "cache layer", &["e"])],
+    );
+    let path = dir.path().to_path_buf();
+    let fake = Meanwhile {
+        inner: Fake::new(|_| noul(0.9)),
+        during: Mutex::new(Some(Box::new(move || {
+            // Forgotten, its tombstone over, and observed again: the same id, a new generation.
+            let other = Store::new(&path, &"c".repeat(64));
+            other.forget(&id(9), 5).unwrap();
+            other.sweep(10).unwrap();
+            other.enqueue(&rec(9, "cache layer", &["e"])).unwrap();
+            other.ingest().unwrap();
+        }))),
+    };
+    enrich_node(&store, &fake, 9).await;
+    let s = store.load().unwrap();
+    assert_eq!(
+        s.nodes[&id(9)].types.episodic,
+        None,
+        "the answers were about the old node"
+    );
+    assert!(s.edges.is_empty());
+}
+
+#[tokio::test]
+async fn an_answer_for_a_forgotten_node_does_not_recreate_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(
+        dir.path(),
+        &[rec(1, "cache layer", &["e"]), rec(9, "cache layer", &["e"])],
+    );
+    let path = dir.path().to_path_buf();
+    let fake = Meanwhile {
+        inner: Fake::new(|_| noul(0.9)),
+        during: Mutex::new(Some(Box::new(move || {
+            Store::new(&path, &"c".repeat(64))
+                .forget(&id(9), u64::MAX)
+                .unwrap();
+        }))),
+    };
+    enrich_node(&store, &fake, 9).await;
+    let s = store.load().unwrap();
+    assert!(!s.nodes.contains_key(&id(9)));
+    assert!(
+        s.edges
+            .values()
+            .all(|e| e.source != id(9) && e.target != id(9))
+    );
+}
+
+#[test]
+fn the_enrichment_counter_increments_exactly_once_per_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &[rec(1, "cache layer", &["e"])]);
+    let seen = store.load().unwrap().nodes[&id(1)].generation;
+    store
+        .commit_enrichment(&id(1), seen, None, EnrichmentState::Failed, vec![])
+        .unwrap();
+    assert_eq!(
+        store.load().unwrap().enriched,
+        0,
+        "a failed run is not an enrichment"
+    );
+    store
+        .commit_enrichment(&id(1), seen, None, EnrichmentState::Complete, vec![])
+        .unwrap();
+    store
+        .commit_enrichment(&id(1), seen, None, EnrichmentState::Complete, vec![])
+        .unwrap();
+    assert_eq!(
+        store.load().unwrap().enriched,
+        1,
+        "once per node, however many runs"
+    );
+}
+
+#[tokio::test]
+async fn an_edge_to_a_candidate_forgotten_meanwhile_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(
+        dir.path(),
+        &[rec(1, "cache layer", &["e"]), rec(9, "cache layer", &["e"])],
+    );
+    let path = dir.path().to_path_buf();
+    let fake = Meanwhile {
+        inner: Fake::new(|_| noul(0.9)),
+        during: Mutex::new(Some(Box::new(move || {
+            Store::new(&path, &"c".repeat(64))
+                .forget(&id(1), u64::MAX)
+                .unwrap();
+        }))),
+    };
+    enrich_node(&store, &fake, 9).await;
+    let s = store.load().unwrap();
+    assert!(s.nodes.contains_key(&id(9)), "the node itself stays");
+    assert!(
+        s.edges
+            .values()
+            .all(|e| e.target != id(1) && e.source != id(1)),
+        "nothing points at a forgotten node"
+    );
+}
