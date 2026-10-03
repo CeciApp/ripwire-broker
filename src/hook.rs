@@ -11,6 +11,7 @@ use crate::statusline_state::{Analysis, AnalysisStatus, Delivery};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Both hosts inline about 10k characters of `additionalContext` and move the rest to a
 /// file the model only sees a preview of (D-041). Stay below that.
@@ -26,6 +27,8 @@ fn capped(budget: u32) -> u32 {
 
 pub const OPT_OUT: &str = "#ripwire-off";
 pub const OPT_IN: &str = "#ripwire-on";
+/// A hook has no `--memory-retention-days`: its observations keep the default (PRD jev-mem §4).
+const HOOK_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 /// What the hook remembers between invocations of one host session.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -759,7 +762,17 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
             version: version.clone(),
         });
     }
-    let broker = match crate::local::launch(&workspace, &args.upstream, true, Some(version)).await {
+    // `--memory` (PD-3): observations go to the workspace's spool, under the same state dir. A
+    // hook never enriches or sends them; a revoked store refuses them.
+    let memory = match (args.memory, &root) {
+        (true, Some(r)) => crate::memory::identity::workspace_id(r).ok().map(|id| {
+            let spool = Arc::new(crate::memory::store::Store::new(store.dir(), &id));
+            crate::memory::publish::MemoryConfig::new(spool, id, HOOK_RETENTION_MS)
+        }),
+        _ => None,
+    };
+    let launched = crate::local::launch(&workspace, &args.upstream, true, Some(version), memory);
+    let broker = match launched.await {
         Ok(b) => b,
         Err(e) => {
             // The marker of this prompt needs no ripwire: honour it before reporting (D-126).

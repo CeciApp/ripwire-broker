@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-03 15:12 | Fase 1 do plano do `--memory` feita em TDD (T1.1 a T1.16, um commit por tarefa, mutação em cada uma): `--memory` e `--memory-*` no parse; registro `memory/v1`, identidade, admissão, relógio e sequência; store privado com spool, snapshot, tetos, lock, retenção, `forget` com tombstones e revogação; `memory status\|forget\|add\|resume`; coleta pelas tools e pelo `hook --memory`; `install`/`doctor`. O `serve --memory` ainda não liga a coleta (T2.11) | [D-137](#d-137--fase-1-do---memory-store-e-coleta) |
 | 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
 | 2026-10-03 12:36 | Plano de implementação do `--memory` ([`spec/plan/jev-mem-plan.md`](plan/jev-mem-plan.md)) a partir do PRD `docs/jev-mem-prd.md`: seis fases, TDD obrigatório por tarefa (teste vermelho, código mínimo, mutação, documentação afetada, portões), 16 achados de validação contra o código e 5 decisões pendentes do mantenedor; nenhum código de produção; linha de base 462/476 testes verdes | [D-134](#d-134--plano-de-implementação-do---memory) |
@@ -5613,3 +5614,96 @@ pendência que o D-135 deixou para a T0.2 está fechada.
 **Verificado:** os testes vermelhos do plano falham no PRD v0.2 (`grep "não foram encontrados"`
 encontra; o `grep` das superfícies novas não encontra nada) e passam na v0.3. Portões locais
 verdes; nenhum arquivo de código mudou.
+
+## D-137 — Fase 1 do `--memory`: store e coleta
+
+**Data:** 2026-10-03 15:12.
+
+**Decisão:** a Fase 1 do [plano](plan/jev-mem-plan.md) está feita, uma tarefa por commit, cada
+uma com o teste vermelho visto falhar, o código mínimo, mutação que derrubou o teste, a
+documentação afetada e os cinco portões verdes. O registro de evidência do plano (§9) tem a
+linha de cada tarefa. Nada de rede: tudo no build padrão, e o CA-10 continua valendo.
+
+**O que entrou:** `--memory` (implica `--online`) e as cinco opções `--memory-*` com faixas;
+`src/memory/` com o registro `memory/v1` e seus limites, a identidade (workspace com git-dir e
+common-dir, entidades, `content_hash`, `node_id`), a admissão com o renderizador
+`memory-observation/v1`, o relógio injetável e a sequência, e o store
+(`<state-dir>/memory/<workspace_id>/`, 0700/0600) com spool, snapshot durável, tetos, lock de
+escritor, retenção, `forget` com tombstones e o marcador `revoked`; os comandos locais
+`memory status|forget|add|resume`; a coleta depois do envelope em `context_after_edit` e
+`context_before_finish`; `hook … --memory`; `install --memory` e a linha `memory` do `doctor`.
+Testes: 462 → 512 no build padrão, 476 → 526 com `online`.
+
+**Decisões tomadas no caminho:**
+
+- **A T1.7 veio antes da T1.6.** O vermelho da T1.6 ("mtime e commit não mudam o registro")
+  precisa do construtor de observações, que é a T1.7.
+- **`ingest_seq` é dado na incorporação, sob o lock**, não no hook: o hook não espera lock. O
+  `content_hash` já excluía a sequência, então a identidade não muda.
+- **PII é só e-mail.** Uma regra de sequência longa de dígitos recusaria nomes de migração
+  (`20260101120000_create.exs`), comuns no corpus do A/B. Segredos: prefixos conhecidos
+  (`sk-`, `AKIA`, `ghp_`…), JWT e atribuições (`password=`…). Conservador, sem promessa de pegar
+  tudo, como o PRD §5.2 pede.
+- **A tombstone do `memory forget` dura 365 dias**, a maior retenção permitida: o comando não
+  sabe com que retenção o servidor roda. O hook guarda com a retenção padrão de 30 dias, porque
+  não recebe `--memory-retention-days`.
+- **O marcador `revoked` é gravado antes de apagar** no `forget --all`: uma queda no meio nunca
+  deixa a coleta ligada. Ele vale contra `--memory` depois de reiniciar (achado do CodeRabbit no
+  PR da Fase 0, levado ao PRD §6).
+- **A coleta espera no máximo 25 ms** e nunca mais de 4 escritas em voo; o que passa disso conta
+  como `unconfirmed`, nunca como durável. Uma resposta `unknown` não vira observação.
+- **O `serve --memory` ainda não liga a coleta das tools.** Ligar no binário pede credencial e
+  uma sessão MCP de ponta a ponta para testar; vai para a T2.11, junto com o worker. Nesta fase o
+  binário coleta pelos hooks; as tools coletam no núcleo do broker, que está testado.
+- **Os testes de processo do hook ficaram em `tests/cli.rs`**, ao lado da infraestrutura e2e, e
+  rodam só com o ripwire real (pulados sem ele, como os demais e2e). Os testes em processo
+  (`tests/hooks.rs`) rodam no CI; dois deles nasceram verdes, porque o hook já usa o broker da
+  T1.14, e ficaram como caracterização, com mutação provando que mordem.
+- **`integrations/` não mudou:** nada novo chega ao agente nesta fase. A T3.11 atualiza a skill
+  quando `memories[]` existir.
+
+**O que ficou sem teste, e por quê:** a comparação de uid do dono do store (exige root para criar
+um arquivo de outro usuário) e o `sync` do diretório (exige queda de energia). Um mutante
+equivalente: o git-dir no `workspace_id`, que é determinado pela raiz e pelo common-dir; fica
+porque o PRD §5.1 o nomeia.
+
+**SLO do hook (PRD §8.2), medido à mão em release com o ripwire real:** 60 pares alternados, p95
++6,9 e +4,1 ms, p99 +3,6 e −0,9 ms sobre um hook de cerca de 80 ms. A primeira medição, sem
+alternar a ordem, deu −97 ms: o primeiro hook depois de uma mudança paga o aquecimento do
+ripwire. Teste `#[ignore]` `the_hook_overhead_meets_the_slo`.
+
+**Nota de método:** a família `shell_edits` de `tests/cli.rs` (prazos de 50 e 500 ms, D-129)
+falhou três vezes nos portões desta fase, sempre sob carga, e passou em todas as repetições
+isoladas, inclusive seis rodadas da suíte `cli` com e sem os testes novos de hook. É a
+armadilha do `handoff.md`; os testes desta fase não a causam, mas aumentam a carga do binário
+`cli`. Se aparecer no CI, a folga desses testes é o lugar de mexer.
+
+**Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos (39) e
+`props_fs` (10) verdes; CA-10 sem crate de rede; guarda de fixtures verde; nenhum `reqwest`,
+`secrecy`, `println!` ou `unsafe` em `src/memory/`.
+
+**Revisão independente do diff (plano §7, item 6), feita por um agente revisor só de leitura:**
+11 achados, 3 médios. Dez corrigidos em TDD (teste vermelho, correção, mutação que derrubou):
+
+- **Médio — `forget --all` perdia a corrida para um `enqueue` em curso:** o hook passava pela
+  checagem do marcador, o `forget --all` listava e apagava o spool, e o arquivo do hook aparecia
+  depois, sem tombstone. Agora o `enqueue` confere o marcador de novo depois de escrever e retira o
+  que escreveu (`an_enqueue_racing_forget_all_never_survives_it`, com o ponto de injeção
+  `Store::enqueue_with`).
+- **Médio — temporários de escritores mortos ficavam para sempre,** fora dos tetos e fora do
+  `forget --all` (o PRD §6 pede excluí-los). Agora contam no espaço do spool, a incorporação apaga
+  os com mais de 60 s, e o `forget --all` apaga todos, também os do snapshot.
+- **Médio — `forget --all` sobre um snapshot ilegível revogava e deixava o spool:** agora o spool
+  sai antes de ler o snapshot, que continua intocado.
+- **Baixo:** a mensagem do `--online` sem chave ganhara o prefixo `--online:` (saída mudada sem
+  `--memory`; agora só `--memory` ganha prefixo); `memory add --file note.json` relativo falhava;
+  o arquivo do `memory add` dentro do workspace só tinha o nome checado (agora o caminho inteiro
+  passa pela política, então `.private/` e `target/` são recusados); uma escrita que entrasse em
+  pânico prendia sua vaga em voo para sempre (agora um guarda devolve a vaga, e a reserva é
+  atômica); uma entrada ruim no spool (link, diretório) travava toda incorporação (agora é
+  descartada sem ser seguida); uma entrada de schema mais novo era apagada (agora fica); um
+  `spool/` trocado por link era escrito através dele (agora é recusado).
+- **Não corrigido, registrado:** a estimativa de tamanho do snapshot usa os bytes do spool (com
+  `ingest_seq` 0), as tombstones não têm teto, e `forget`/`sweep` não checam o teto do snapshot.
+  Nenhum dos três é alcançável com os limites padrão (2.000 × 16 KiB contra 64 MiB); entram na
+  Fase 2, que introduz arestas e jobs e já revisita o tamanho do snapshot.

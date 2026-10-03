@@ -1831,3 +1831,247 @@ fn the_budget_bookkeeping_stays_consistent_at_any_budget() {
         )
         .unwrap();
 }
+
+// ---------------------------------------------------------------- memory: collection (PRD jev-mem §8.1)
+
+use ripwire_broker::memory::model::{Kind, Record};
+use ripwire_broker::memory::publish::MemoryConfig;
+use ripwire_broker::memory::store::{Refusal, Spool, Store};
+
+/// The three tools, in order, against the same recorded answers.
+async fn three_calls(b: &Broker, ws: &std::path::Path) -> Vec<Value> {
+    common::write(ws, "src/auth.py", "changed");
+    vec![
+        to_json(
+            &b.context_for_task(TaskRequest::new("how are the routes authenticated?"))
+                .await
+                .unwrap(),
+        ),
+        to_json(
+            &b.context_after_edit(EditRequest {
+                files: vec!["src/auth.py".into()],
+                ..EditRequest::default()
+            })
+            .await
+            .unwrap(),
+        ),
+        to_json(
+            &b.context_before_finish(FinishRequest::default())
+                .await
+                .unwrap(),
+        ),
+    ]
+}
+
+fn memory_fake() -> FakeUpstream {
+    FakeUpstream::new()
+        .answer("explore", "explore_export_auth")
+        .answer("situational_awareness", "situational_awareness_files")
+        .answer("quality_delta", "quality_delta_clean")
+        .answer("affected", "affected_auth")
+}
+
+async fn with_memory(ws: &std::path::Path, spool: Arc<dyn Spool>) -> Broker {
+    with_memory_waiting(ws, spool, std::time::Duration::from_millis(25)).await
+}
+
+/// A long wait makes "durable before the answer" independent of the disk's speed.
+async fn with_memory_waiting(
+    ws: &std::path::Path,
+    spool: Arc<dyn Spool>,
+    wait: std::time::Duration,
+) -> Broker {
+    let mut config = BrokerConfig::new(ws);
+    let mut memory = MemoryConfig::new(spool, "w".repeat(64), 1_000_000);
+    memory.wait = wait;
+    config.memory = Some(memory);
+    Broker::connect(Arc::new(memory_fake()), config)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn without_memory_the_three_tools_answer_exactly_as_before() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let plain = Broker::connect(Arc::new(memory_fake()), BrokerConfig::new(ws.path()))
+        .await
+        .unwrap();
+    let before = three_calls(&plain, ws.path()).await;
+    assert!(
+        std::fs::read_dir(state.path()).unwrap().next().is_none(),
+        "no memory directory without --memory"
+    );
+    assert!(
+        to_json(&plain.status().await).get("memory").is_none(),
+        "nor a status field"
+    );
+
+    let store = Arc::new(Store::new(state.path(), &"w".repeat(64)));
+    let remembering = with_memory(ws.path(), store).await;
+    let after = three_calls(&remembering, ws.path()).await;
+    assert_eq!(before, after, "collecting memory changes no answer");
+}
+
+#[tokio::test]
+async fn after_edit_and_before_finish_publish_one_observation_after_the_envelope() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = Arc::new(Store::new(state.path(), &"w".repeat(64)));
+    let b = with_memory_waiting(ws.path(), store.clone(), std::time::Duration::from_secs(10)).await;
+    three_calls(&b, ws.path()).await;
+
+    assert_eq!(
+        store.pending().unwrap(),
+        2,
+        "one per edit and finish; none for the task"
+    );
+    store.ingest().unwrap();
+    let s = store.load().unwrap();
+    let kinds: Vec<Kind> = s.nodes.values().map(|r| r.kind).collect();
+    assert!(kinds.contains(&Kind::EditObservation) && kinds.contains(&Kind::FinishObservation));
+    for r in s.nodes.values() {
+        assert_eq!(r.sources[0].path, "src/auth.py", "{}", r.content);
+        assert!(!r.content.contains("changed"), "never the file's body");
+    }
+    let finish = s
+        .nodes
+        .values()
+        .find(|r| r.kind == Kind::FinishObservation)
+        .unwrap();
+    assert!(
+        finish.content.contains("quality_delta"),
+        "{}",
+        finish.content
+    );
+    let counts = to_json(&b.status().await)["memory"].clone();
+    assert_eq!(
+        (counts["confirmed"].as_u64(), counts["unconfirmed"].as_u64()),
+        (Some(2), Some(0))
+    );
+}
+
+/// A spool that takes a second per write, and counts the writes that started.
+struct Slow(Store, std::sync::atomic::AtomicUsize);
+
+impl Spool for Slow {
+    fn enqueue(&self, record: &Record) -> Result<(), Refusal> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        self.0.enqueue(record)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_spool_reports_enqueue_unconfirmed_and_never_delays_the_envelope() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(ws.path(), "src/auth.py", "changed");
+    let slow = Arc::new(Slow(
+        Store::new(state.path(), &"w".repeat(64)),
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    let b = with_memory(ws.path(), slow.clone()).await;
+    let edit = || EditRequest {
+        files: vec!["src/auth.py".into()],
+        ..EditRequest::default()
+    };
+
+    let started = std::time::Instant::now();
+    for _ in 0..6 {
+        b.context_after_edit(edit()).await.unwrap();
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "six answers did not wait for a one-second spool: {:?}",
+        started.elapsed()
+    );
+    let counts = to_json(&b.status().await)["memory"].clone();
+    assert_eq!(counts["confirmed"], 0);
+    assert_eq!(
+        counts["unconfirmed"], 6,
+        "a timeout is never counted as durable"
+    );
+    assert!(
+        slow.1.load(std::sync::atomic::Ordering::SeqCst) <= 4,
+        "no unbounded pile of blocked writes"
+    );
+}
+
+#[tokio::test]
+async fn an_unassessed_finish_claims_nothing_and_an_edit_without_files_observes_what_changed() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(ws.path(), "src/auth.py", "changed");
+    let store = Arc::new(Store::new(state.path(), &"w".repeat(64)));
+    // A change with no forgotten partner, so a missing quality answer leaves it unknown.
+    let situation =
+        std::fs::read_to_string("tests/fixtures/ripwire/situational_awareness_clean.txt")
+            .unwrap()
+            .replace(
+                r#""changed_files":[]"#,
+                r#""changed_files":[{"file":"src/auth.py"}]"#,
+            );
+    let fake = FakeUpstream::new()
+        .answer_text("situational_awareness", &situation)
+        .answer("affected", "affected_auth")
+        .fail(
+            "quality_delta",
+            UpstreamError::Refused("baseline unreadable".into()),
+        );
+    let mut config = BrokerConfig::new(ws.path());
+    let mut memory = MemoryConfig::new(store.clone(), "w".repeat(64), 1_000_000);
+    memory.wait = std::time::Duration::from_secs(10);
+    config.memory = Some(memory);
+    let b = Broker::connect(Arc::new(fake), config).await.unwrap();
+
+    let finish = to_json(
+        &b.context_before_finish(FinishRequest::default())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(finish["status"], "unknown");
+    assert_eq!(store.pending().unwrap(), 0, "no evidence, no observation");
+
+    b.context_after_edit(EditRequest::default()).await.unwrap();
+    store.ingest().unwrap();
+    let s = store.load().unwrap();
+    let r = s.nodes.values().next().expect("one observation");
+    assert_eq!(
+        r.sources[0].path, "src/auth.py",
+        "the file ripwire saw change"
+    );
+}
+
+/// A spool that panics on its first `n` writes.
+struct Panicky(Store, std::sync::atomic::AtomicUsize);
+
+impl Spool for Panicky {
+    fn enqueue(&self, record: &Record) -> Result<(), Refusal> {
+        if self.1.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            panic!("a write that blew up");
+        }
+        self.0.enqueue(record)
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_write_never_keeps_its_slot() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(ws.path(), "src/auth.py", "changed");
+    let spool = Arc::new(Panicky(
+        Store::new(state.path(), &"w".repeat(64)),
+        std::sync::atomic::AtomicUsize::new(5),
+    ));
+    let b = with_memory_waiting(ws.path(), spool, std::time::Duration::from_secs(10)).await;
+    for _ in 0..6 {
+        b.context_after_edit(EditRequest {
+            files: vec!["src/auth.py".into()],
+            ..EditRequest::default()
+        })
+        .await
+        .unwrap();
+    }
+    let counts = to_json(&b.status().await)["memory"].clone();
+    assert_eq!(counts["rejected"], 5, "{counts}");
+    assert_eq!(
+        counts["confirmed"], 1,
+        "five dead writes left no slot taken: {counts}"
+    );
+}

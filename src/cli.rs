@@ -19,21 +19,28 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                                 [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
                                 [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
                                 [--jev-lookahead-max N]]
+                      [--memory [--memory-read-deadline-ms N] [--memory-read-request-limit N]
+                                [--memory-write-candidates N] [--memory-retention-days N] [--memory-max-nodes N]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
-                      [--edit-interval-ms N]
+                      [--edit-interval-ms N] [--memory]
        ripwire-broker hook-log --session ID [--state-dir DIR]
        ripwire-broker hook-stats [--state-dir DIR] [--json]
        ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--jev-probe [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
-       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online]
+       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online] [--memory]
        ripwire-broker statusline [--workspace DIR] [--state-dir DIR] [--detail] [--width N] [--color never|always]
+       ripwire-broker memory status --workspace DIR [--state-dir DIR] [--json]
+       ripwire-broker memory forget --workspace DIR [--state-dir DIR] (--all | --id ID)
+       ripwire-broker memory add --workspace DIR [--state-dir DIR] --file PATH
+       ripwire-broker memory resume --workspace DIR [--state-dir DIR]
 
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
 Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
+--memory: implica --online; guarda observações do workspace localmente e envia as elegíveis ao Jev.
 The credential comes only from RIPWIRE_BROKER_JEV_API_KEY in the server's environment.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +85,31 @@ pub struct ServeArgs {
     pub ripwire_max_rss_mb: Option<u64>,
     /// The remote classifier (PRD §23); `None` keeps the process offline (RF-ONLINE-01).
     pub online: Option<OnlineArgs>,
+    /// Whether `--online` was asked for or implied by `--memory`; `None` when offline.
+    pub online_origin: Option<OnlineOrigin>,
+    /// Persistent memory (PRD jev-mem §4); implies `online`. `None` keeps no history.
+    pub memory: Option<MemoryArgs>,
+}
+
+/// How the effective online mode came about, kept for diagnostics (PRD jev-mem §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnlineOrigin {
+    Explicit,
+    /// `--memory` without `--online`.
+    Implied,
+}
+
+/// `--memory` and its `--memory-*` companions (PRD jev-mem §4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryArgs {
+    /// Longest `context_for_task` waits for memory.
+    pub read_deadline: Duration,
+    /// Classifier requests one read may send; 0 serves only the cache and the index.
+    pub read_request_limit: usize,
+    /// Existing memories a new one is compared with.
+    pub write_candidates: usize,
+    pub retention_days: u32,
+    pub max_nodes: usize,
 }
 
 /// `--online` and its `--jev-*` companions (PRD §23.6, D-059). No credential here: it comes
@@ -130,6 +162,9 @@ pub struct HookArgs {
     pub log_refs: bool,
     /// Absent: the default coalescing window. `0` answers every edit on its own.
     pub edit_interval_ms: Option<u64>,
+    /// Publish observations to the workspace's memory spool (PD-3): local only, never HTTP,
+    /// and never implies `--online`.
+    pub memory: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +202,31 @@ pub struct InstallArgs {
     /// Start the server with `--online`, the credential referenced from the host's
     /// environment, never written (D-064). Hooks stay offline.
     pub online: bool,
+    /// `--memory` on the server and the hooks (PD-3); implies online on the server only.
+    pub memory: bool,
+}
+
+/// What `memory` does; every action is local: no network, credential or `online` feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryAction {
+    /// Queues, sizes, schema and the store's error category, if any.
+    Status { json: bool },
+    /// One memory and every note derived from it.
+    Forget { id: String },
+    /// Everything, and collection is revoked until `Resume`.
+    ForgetAll,
+    /// An explicit note from a JSON file (PD-1).
+    Add { file: PathBuf },
+    /// Lifts the revocation `memory forget --all` leaves (PD-4).
+    Resume,
+}
+
+/// `memory <action> --workspace DIR [--state-dir DIR]` (PRD jev-mem §4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryCommand {
+    pub action: MemoryAction,
+    pub workspace: PathBuf,
+    pub state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,6 +256,8 @@ pub enum Command {
     Install(InstallArgs),
     /// Prints the Claude Code status line from the hooks' projection; never starts ripwire.
     Statusline(StatuslineArgs),
+    /// The workspace's persistent memory, locally.
+    Memory(MemoryCommand),
     /// `--help` or `--version`: print and exit successfully.
     Info(String),
     /// Internal: run `argv` under a memory limit (how the server starts ripwire, D-050).
@@ -250,7 +312,10 @@ struct Flags {
     edit_interval_ms: Option<u64>,
     width: Option<u64>,
     color: Option<String>,
+    id: Option<String>,
+    file: Option<PathBuf>,
     jev: HashMap<&'static str, String>,
+    memory: HashMap<&'static str, String>,
     switches: Vec<&'static str>,
     words: Vec<String>,
 }
@@ -278,8 +343,9 @@ impl Flags {
         }))
     }
 
+    /// `--memory` counts as `--online` (PRD jev-mem §4).
     fn online(&self) -> Result<Option<OnlineArgs>, String> {
-        if !self.on("--online") {
+        if !self.on("--online") && !self.on("--memory") {
             return match self.jev.is_empty() && !self.on("--jev-no-cache") {
                 true => Ok(None),
                 false => Err(usage("the --jev-* options need --online")),
@@ -319,6 +385,42 @@ impl Flags {
         }))
     }
 
+    fn online_origin(&self) -> Option<OnlineOrigin> {
+        match (self.on("--online"), self.on("--memory")) {
+            (true, _) => Some(OnlineOrigin::Explicit),
+            (false, true) => Some(OnlineOrigin::Implied),
+            (false, false) => None,
+        }
+    }
+
+    fn memory(&self) -> Result<Option<MemoryArgs>, String> {
+        if !self.on("--memory") {
+            return match self.memory.is_empty() {
+                true => Ok(None),
+                false => Err(usage("the --memory-* options need --memory")),
+            };
+        }
+        // Each option with its default and its range (PRD jev-mem §4).
+        let within = |k: &str, default: u64, min: u64, max: u64| -> Result<u64, String> {
+            let Some(v) = self.memory.get(k) else {
+                return Ok(default);
+            };
+            match v.parse::<u64>() {
+                Ok(n) if (min..=max).contains(&n) => Ok(n),
+                _ => Err(usage(format_args!(
+                    "{k} takes a number from {min} to {max}"
+                ))),
+            }
+        };
+        Ok(Some(MemoryArgs {
+            read_deadline: Duration::from_millis(within("--memory-read-deadline-ms", 750, 1, 750)?),
+            read_request_limit: within("--memory-read-request-limit", 4, 0, 4)? as usize,
+            write_candidates: within("--memory-write-candidates", 4, 0, 10)? as usize,
+            retention_days: within("--memory-retention-days", 30, 1, 365)? as u32,
+            max_nodes: within("--memory-max-nodes", 2000, 1, 2000)? as usize,
+        }))
+    }
+
     fn workspace(&self) -> Result<PathBuf, String> {
         self.workspace
             .clone()
@@ -338,8 +440,10 @@ const SWITCHES: &[&str] = &[
     "--detail",
     "--write",
     "--online",
+    "--memory",
     "--jev-no-cache",
     "--jev-probe",
+    "--all",
 ];
 
 /// The valued `--jev-*` flags; kept as text until `Flags::online` checks them.
@@ -353,6 +457,15 @@ const JEV: &[&str] = &[
     "--jev-max-candidates",
     "--jev-deadline-ms",
     "--jev-lookahead-max",
+];
+
+/// The valued `--memory-*` flags; kept as text until `Flags::memory` checks them.
+const MEMORY: &[&str] = &[
+    "--memory-read-deadline-ms",
+    "--memory-read-request-limit",
+    "--memory-write-candidates",
+    "--memory-retention-days",
+    "--memory-max-nodes",
 ];
 
 /// `allowed` lists the switches and valued flags this command accepts.
@@ -401,9 +514,15 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             }
             "--width" => f.width = Some(number(&value)?),
             "--color" => f.color = Some(value),
+            "--id" => f.id = Some(value),
+            "--file" => f.file = Some(value.into()),
             jev if JEV.contains(&jev) => {
                 let key = JEV.iter().find(|k| **k == jev).unwrap();
                 f.jev.insert(key, value);
+            }
+            memory if MEMORY.contains(&memory) => {
+                let key = MEMORY.iter().find(|k| **k == memory).unwrap();
+                f.memory.insert(key, value);
             }
             _ => return Err(usage(format_args!("unknown argument '{a}'"))),
         }
@@ -464,10 +583,12 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                         SUMMARIZER[2],
                         SUMMARIZER[3],
                         "--online",
+                        "--memory",
                         "--jev-no-cache",
                     ]
                     .into_iter()
                     .chain(JEV.iter().copied())
+                    .chain(MEMORY.iter().copied())
                     .collect::<Vec<_>>(),
                 ),
             )?;
@@ -481,6 +602,8 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 summarizer: f.summarizer()?,
                 ripwire_max_rss_mb: f.max_rss_mb,
                 online: f.online()?,
+                online_origin: f.online_origin(),
+                memory: f.memory()?,
             }))
         }
         Some("__supervise") => {
@@ -527,6 +650,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     "--gate",
                     "--log-refs",
                     "--edit-interval-ms",
+                    "--memory",
                 ]),
             )?;
             no_words(&f)?;
@@ -540,6 +664,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 gate: f.on("--gate"),
                 log_refs: f.on("--log-refs"),
                 edit_interval_ms: f.edit_interval_ms,
+                memory: f.on("--memory"),
             }))
         }
         Some("hook-log") => {
@@ -608,6 +733,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     "--write",
                     "--codex-home",
                     "--online",
+                    "--memory",
                 ],
             )?;
             no_words(&f)?;
@@ -622,6 +748,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 write: f.on("--write"),
                 codex_home: f.codex_home.clone(),
                 online: f.on("--online"),
+                memory: f.on("--memory"),
             }))
         }
         Some("statusline") => {
@@ -651,6 +778,43 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 detail: f.on("--detail"),
                 width: f.width.map(|w| w as usize),
                 color,
+            }))
+        }
+        Some("memory") => {
+            let verb = it.next();
+            let extra: &[&str] = match verb.as_deref() {
+                Some("status") => &["--json"],
+                Some("forget") => &["--all", "--id"],
+                Some("add") => &["--file"],
+                Some("resume") => &[],
+                other => return Err(usage(format_args!("unknown memory command {other:?}"))),
+            };
+            let allowed: Vec<&str> = ["--workspace", "--state-dir"]
+                .iter()
+                .chain(extra)
+                .copied()
+                .collect();
+            let f = flags(it, &allowed)?;
+            no_words(&f)?;
+            let action = match (verb.as_deref(), f.on("--all"), f.id.clone()) {
+                (Some("status"), ..) => MemoryAction::Status {
+                    json: f.on("--json"),
+                },
+                (Some("forget"), true, None) => MemoryAction::ForgetAll,
+                (Some("forget"), false, Some(id)) => MemoryAction::Forget { id },
+                (Some("forget"), ..) => return Err(usage("memory forget takes --all or --id ID")),
+                (Some("add"), ..) => MemoryAction::Add {
+                    file: f
+                        .file
+                        .clone()
+                        .ok_or_else(|| usage("memory add needs --file PATH"))?,
+                },
+                _ => MemoryAction::Resume,
+            };
+            Ok(Command::Memory(MemoryCommand {
+                action,
+                workspace: f.workspace()?,
+                state_dir: f.state_dir.clone(),
             }))
         }
         Some(other) => Err(usage(format_args!("unknown command '{other}'"))),

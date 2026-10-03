@@ -99,7 +99,8 @@ pub async fn run(args: &DoctorArgs) -> Report {
         ),
     }
     let broker = match (&workspace, upstream_ok) {
-        (Some(ws), true) => match crate::local::launch(ws, &args.upstream, false, None).await {
+        (Some(ws), true) => match crate::local::launch(ws, &args.upstream, false, None, None).await
+        {
             Ok(b) => {
                 r.add(
                     "required_verbs",
@@ -127,6 +128,7 @@ pub async fn run(args: &DoctorArgs) -> Report {
         None => r.add("git_history", Outcome::Skip, ""),
     }
     state_dir(&mut r, args);
+    memory(&mut r, args);
     summarizer(&mut r, args);
     match broker {
         Some(b) => {
@@ -351,5 +353,47 @@ fn summarizer(r: &mut Report, args: &DoctorArgs) {
             Outcome::Warn,
             format!("version command failed: {e}"),
         ),
+    }
+}
+
+/// The workspace's memory store, read locally (PRD jev-mem §4). Only when there is one: a
+/// workspace that never used `--memory` gets no extra line.
+fn memory(r: &mut Report, args: &DoctorArgs) {
+    use crate::memory::{identity, store::Store};
+    let Some(dir) = args.state_dir.clone().or_else(StateStore::default_dir) else {
+        return;
+    };
+    let Ok(id) = identity::workspace_id(&args.workspace) else {
+        return;
+    };
+    let store = Store::new(&dir, &id);
+    if std::fs::symlink_metadata(store.dir()).is_err() {
+        return;
+    }
+    match store.load() {
+        Err(why) => r.add(
+            "memory",
+            Outcome::Warn,
+            format!(
+                "store unavailable ({}): memory stays off for this workspace",
+                why.as_str()
+            ),
+        ),
+        Ok(state) => {
+            let pending = store.pending().unwrap_or(0);
+            let detail = format!(
+                "{} memories, {pending} pending, generation {}",
+                state.nodes.len(),
+                state.generation
+            );
+            match store.is_revoked() {
+                true => r.add(
+                    "memory",
+                    Outcome::Warn,
+                    format!("{detail}; collection revoked: run `memory resume`"),
+                ),
+                false => r.add("memory", Outcome::Ok, detail),
+            }
+        }
     }
 }

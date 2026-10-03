@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
-Estado em 2026-10-02, até o
-[D-133](spec/changelog.md#d-133--auditoria-da-documentação-contra-o-código).
+Estado em 2026-10-03, até o
+[D-137](spec/changelog.md#d-137--fase-1-do---memory-store-e-coleta).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -24,6 +24,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
 | barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
+| `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 e 1 feitas (D-136, D-137): store, coleta pelos hooks e comandos locais; o `serve --memory` ainda não coleta (T2.11). Fase 2 (controle Jev) não começada; **experimental** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
 [changelog de decisões](spec/changelog.md), que é a fonte da verdade sobre o porquê de cada coisa.
@@ -31,8 +32,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 462 testes, 2 ignorados (opt-in)
-cargo test --all-targets --features online  # 476 testes, 4 ignorados
+cargo test --all-targets                    # 519 testes, 3 ignorados (opt-in)
+cargo test --all-targets --features online  # 533 testes, 5 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -42,7 +43,8 @@ cargo fmt --check
   sintéticas e as propriedades.
 - **`cargo-deny`:** agendado às segundas no `master` (`supply-chain.yml`), nunca em PR (D-108).
 - **Ignorados:** precisam de algo externo — modelo local (`RIPWIRE_BROKER_TEST_MODEL`), chave da Jev
-  (`RIPWIRE_BROKER_JEV_API_KEY`) ou um benchmark.
+  (`RIPWIRE_BROKER_JEV_API_KEY`) ou um benchmark. O SLO do `hook --memory` também é medição manual em
+  release (`the_hook_overhead_meets_the_slo`).
 
 ## Onde está o quê
 
@@ -54,6 +56,8 @@ cargo fmt --check
   mudou arquivos (D-129). Com prazo, teto de entradas e desligamento pela sessão; o hook a dispensa
   quando o próprio Claude Code manda a lista de arquivos (`bashEditDiff`, D-131).
 - **`src/online/`:** o adaptador `--online`.
+- **`src/memory/`:** a memória do `--memory` (registro, identidade, admissão, store, coleta, comandos
+  `memory …`). Só o build padrão por enquanto; o controle Jev entra na Fase 2 do plano.
 - **`src/eval/` e `src/bin/ripwire-eval.rs`:** o instrumento do A/B, um segundo binário que o broker
   nunca chama.
 - **`src/usage.rs`:** o `hook-stats`.
@@ -65,7 +69,7 @@ cargo fmt --check
   `online*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-133, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-137, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
