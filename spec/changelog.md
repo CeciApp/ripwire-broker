@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
 | 2026-10-03 12:36 | Plano de implementação do `--memory` ([`spec/plan/jev-mem-plan.md`](plan/jev-mem-plan.md)) a partir do PRD `docs/jev-mem-prd.md`: seis fases, TDD obrigatório por tarefa (teste vermelho, código mínimo, mutação, documentação afetada, portões), 16 achados de validação contra o código e 5 decisões pendentes do mantenedor; nenhum código de produção; linha de base 462/476 testes verdes | [D-134](#d-134--plano-de-implementação-do---memory) |
 | 2026-10-02 12:15 | Auditoria da documentação contra o código: README e PRD §8.4 ganham a coalescência de edições do D-106 (`--edit-interval-ms`) e os orçamentos dos hooks; o README ganha `prompt --budget`, `--jev-provider`, as flags de binário e prazo do `ripwire-eval` e a procedência atual das fixtures | [D-133](#d-133--auditoria-da-documentação-contra-o-código) |
@@ -5574,3 +5575,41 @@ o plano declara; `tests/cli.rs` não mudou.
 **Consequência:** nenhuma tarefa do plano fica bloqueada por decisão. As superfícies novas
 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) ainda
 não estão no PRD jev-mem §4: levá-las para lá é a T0.2 do plano. Nenhum código mudou.
+
+## D-136 — Fase 0 do `--memory`: PRD jev-mem v0.3
+
+**Data:** 2026-10-03 13:05.
+
+**Decisão:** as duas tarefas da Fase 0 do [plano](plan/jev-mem-plan.md) estão feitas, sem código.
+O PRD [`docs/jev-mem-prd.md`](../docs/jev-mem-prd.md) passa à v0.3.
+
+**T0.1, estudo reconciliado.** A v0.2 dava o estudo e o PDF como ausentes. Os dois estão no
+repositório, e o PDF tem o mesmo SHA-256 da cópia lida (`413c5924…5e87`). O estudo
+[`docs/jev-mem.md`](../docs/jev-mem.md) foi confrontado seção por seção com o PDF (texto extraído,
+Tabelas 1–2, Appendix B), com o código e com o PRD. O resultado é o novo §2.4 do PRD:
+
+- **O que confere:** os números do LoCoMo e os baselines de cada um (+11,0% e −36,7% sobre MAGMA,
+  6,6× sobre Nemori), o algoritmo de escrita, consolidação e leitura com todos os limiares e
+  limites, a descrição do `--online` atual (D-046, `src/notes.rs`, `src/broker.rs`), a
+  impossibilidade de o servidor MCP chamar o modelo da sessão e as referências internas.
+- **Duas imprecisões do estudo:** a consolidação é a cada 20 escritas Jev *bem-sucedidas*, e o
+  timestamp do paper é de observação, não do evento (Appendix B.1). O PRD já tratava as duas
+  (§9, §5.4).
+- **Seis divergências, todas decididas a favor do PRD:** a flag fora do `serve` (D-135); a
+  consulta e a preferência tiradas do prompt, que o PRD não persiste (§5.2, §10); sqlite e o hash
+  do workspace sem worktree (§3, §5.1); tempo por mtime/commit (§5.4); `role: memory` (§11);
+  `--memory` *exigir* `--online` em vez de implicá-lo, e a comparação com Mem0 (§4, §14).
+- **Dois pontos do §2.2 atacavam a transcrição, não o estudo:** ele diz que um System One local
+  não existe *no broker*, o que é verdade, e registra a escrita sem filtro como a do paper.
+
+O §1, a última linha do §2.2, o §15 e o §17 deixam de falar em pendência.
+
+**T0.2, superfícies do D-135 no PRD.** A tabela do §4 ganha `memory add`, `memory resume`,
+`hook … --memory` e `install … --memory`, e a linha de `memory drain` diz que é a exceção ao
+[D-064](#d-064--cache-diagnóstico-e-integração-proposta). O §6 nomeia o marcador `revoked`; o
+CA-2 e o §16 passam a cobrir os quatro subcomandos locais e as duas portas de `--online`. A
+pendência que o D-135 deixou para a T0.2 está fechada.
+
+**Verificado:** os testes vermelhos do plano falham no PRD v0.2 (`grep "não foram encontrados"`
+encontra; o `grep` das superfícies novas não encontra nada) e passam na v0.3. Portões locais
+verdes; nenhum arquivo de código mudou.

@@ -1,7 +1,8 @@
 # Memória persistente com Jev (`--memory`) — Plano de implementação
 
-**Data:** 2026-10-03 · **Status:** plano validado contra o código, **nada implementado**.
-**Spec:** [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) v0.2. Onde este plano diz "PRD §N", é esse documento;
+**Data:** 2026-10-03 · **Status:** plano validado contra o código; Fase 0 feita
+([D-136](../changelog.md#d-136--fase-0-do---memory-prd-jev-mem-v03)), **nenhum código implementado**.
+**Spec:** [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) v0.3. Onde este plano diz "PRD §N", é esse documento;
 "PRD principal" é [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md). "CA-N" é o critério
 verificável N do PRD §14.
 **Base:** `master` em `60c77b9`, pacote `0.1.0`, Rust `1.98.1`, edition 2024.
@@ -93,7 +94,7 @@ decisão pendente; nenhum ficou só aqui.
 
 As cinco propostas foram **aceitas pelo mantenedor em 2026-10-03**
 ([D-135](../changelog.md#d-135--decisões-pd-1-a-pd-5-do---memory)). Nenhuma tarefa está mais
-bloqueada por elas; falta levar ao PRD §4 as superfícies que elas criam (T0.2).
+bloqueada por elas, e as superfícies que elas criam já estão no PRD §4 (T0.2, D-136).
 
 | ID | Pergunta | Decisão | Tarefa |
 |---|---|---|---|
@@ -160,13 +161,13 @@ valem para todas.
 
 ### Fase 0 — Contratos (sem código de produção)
 
-- [ ] **T0.1 · doc · Reconciliar o PRD com o estudo presente.**
+- [x] **T0.1 · doc · Reconciliar o PRD com o estudo presente.**
   **Vermelho:** `shasum -a 256 docs/2026-10-03_Jev-Mem.pdf` confere com o PRD §1, e
   `grep -n "não foram encontrados" docs/jev-mem-prd.md` ainda encontra a pendência.
   **Verde:** confrontar `docs/jev-mem.md` com o PRD §2; reescrever o §1 (pendência fechada), o §2.2
   (última linha) e o §17; registrar V2. O `grep` deixa de encontrar.
   **Docs:** PRD v0.3; `D-NNN`.
-- [ ] **T0.2 · doc · Levar PD-1 a PD-5 (aceitas, D-135) ao PRD.**
+- [x] **T0.2 · doc · Levar PD-1 a PD-5 (aceitas, D-135) ao PRD.**
   **Vermelho:** `grep -n "memory resume\|hook .*--memory\|install .*--memory" docs/jev-mem-prd.md`
   não encontra nada, e `memory add` não está na tabela do §4.
   **Verde:** o PRD §4 ganha as linhas que faltam (`memory add`, `memory resume`, `hook --memory`,
@@ -567,4 +568,5 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 
 | Tarefa | Falha vermelha (teste e mensagem) | Verde (commit) | Mutação que derrubou | Docs atualizadas | Portões |
 |---|---|---|---|---|---|
-| T0.1 | | | | | |
+| T0.1 | `grep -n "não foram encontrados" docs/jev-mem-prd.md` encontra a linha 13 da v0.2; `shasum -a 256` do PDF dá `413c5924…5e87`, igual ao PRD | PR da Fase 0 (branch `docs/jev-mem-phase-0`): PRD v0.3, §1, §2.2, §2.4 (novo), §15, §17; o `grep` sai com 1 | a verificação rodada contra `git show HEAD:docs/jev-mem-prd.md` (v0.2) volta a encontrar a pendência | PRD v0.3; D-136; este plano | 5 portões verdes: 462 (2 ignorados) e 476 (4 ignorados) |
+| T0.2 | `grep -n "memory resume\|hook .*--memory\|install .*--memory" docs/jev-mem-prd.md` sai com 1; `memory add` fora da tabela do §4 | mesmo PR: §4 (quatro linhas novas, `memory drain` como exceção ao D-064), §6, CA-2, §16; o `grep` encontra as linhas 145–147 | o mesmo `grep` contra a v0.2 conta 0 | PRD v0.3; D-136; este plano | os mesmos 5 portões |
