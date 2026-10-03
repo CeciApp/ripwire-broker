@@ -9,3 +9,4 @@ pub mod model;
 pub mod publish;
 pub mod store;
 pub mod time;
+pub mod wire;

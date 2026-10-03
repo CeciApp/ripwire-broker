@@ -831,3 +831,102 @@ fn updating_a_cached_decision_evicts_nothing() {
     );
     assert_eq!(cache.get(&keys[MAX_ENTRIES / 2]).unwrap().probability, 0.5);
 }
+
+// --- jev-mem T2.2: Choice and a memory state (PRD jev-mem §7) ---
+
+use ripwire_broker::memory::wire::{self, Group};
+use ripwire_broker::online::request::{JevQuestion, StateRequest};
+
+#[test]
+fn a_choice_question_serializes_type_instructions_and_criteria() {
+    let req = StateRequest::new(
+        "jev-1.13.0",
+        serde_json::json!({
+            "new_memory": {"id": "m2", "content": "Evento: análise após edição. Escopo: src/cache.rs."},
+            "candidates": [{"id": "m1", "content": "Evento: análise antes da conclusão. Escopo: src/cache.rs."}]
+        }),
+        vec![
+            JevQuestion::noul(
+                "Is new_memory.content about the same specific fact as candidates[0].content?",
+            ),
+            JevQuestion::choice(
+                "Which temporal relation holds from new_memory to candidates[0]?",
+                &[
+                    ("before", "new_memory happened before candidates[0]."),
+                    ("after", "new_memory happened after candidates[0]."),
+                    ("unknown", "The accounts do not support any relation."),
+                ],
+            ),
+        ],
+    );
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/jev/memory_choice_request.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&req).unwrap(),
+        fixture.trim(),
+        "ids q0..qn in order, criteria in the order given, state keys sorted (deterministic for the cache)"
+    );
+}
+
+fn pair(n: usize, text_bytes: usize, questions: usize) -> Group {
+    Group {
+        item: serde_json::json!({"id": format!("m{n}"), "content": "x".repeat(text_bytes)}),
+        questions: (0..questions)
+            .map(|k| {
+                (
+                    format!("rel{k}"),
+                    JevQuestion::noul(&format!("relation {k} of candidates[{n}]")),
+                )
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn a_memory_request_is_split_before_32_questions_or_38000_bytes_and_never_cuts_a_pair() {
+    let base = serde_json::json!({"new_memory": {"id": "m0", "content": "new"}});
+    let groups: Vec<Group> = (1..=10).map(|n| pair(n, 10, 4)).collect();
+    let batches = wire::batches("jev-1.13.0", &base, "candidates", groups).unwrap();
+    let sizes: Vec<usize> = batches
+        .iter()
+        .map(|b| b.request.questions.0.len())
+        .collect();
+    assert_eq!(sizes, [32, 8], "eight whole pairs, then two");
+    assert!(
+        batches
+            .iter()
+            .all(|b| b.request.questions.0.len() <= wire::MAX_QUESTIONS)
+    );
+    // Every question maps back to its pair and its name, and the pair's item travels with it.
+    let b = &batches[1];
+    assert_eq!(b.keys[0], (8, "rel0".to_string()));
+    assert_eq!(b.request.state["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(b.request.state["candidates"][0]["id"], "m9");
+    assert_eq!(
+        b.request.state["new_memory"]["id"], "m0",
+        "the shared state goes in every batch"
+    );
+    assert_eq!(b.request.questions.0[0].0, "q0", "ids restart per request");
+
+    let big: Vec<Group> = (1..=6).map(|n| pair(n, 10_000, 4)).collect();
+    let batches = wire::batches("jev-1.13.0", &base, "candidates", big).unwrap();
+    assert!(batches.len() >= 2);
+    for b in &batches {
+        let bytes = serde_json::to_string(&b.request).unwrap().len();
+        assert!(bytes <= wire::MAX_REQUEST_BYTES, "{bytes}");
+        assert_eq!(b.request.questions.0.len() % 4, 0, "a pair is never cut");
+    }
+    let huge = vec![pair(1, 40_000, 4)];
+    assert!(
+        wire::batches("jev-1.13.0", &base, "candidates", huge).is_err(),
+        "an indivisible pair is refused"
+    );
+    let late = vec![pair(1, 10, 4), pair(2, 40_000, 4)];
+    assert!(
+        wire::batches("jev-1.13.0", &base, "candidates", late).is_err(),
+        "nor after a pair that fit"
+    );
+}
