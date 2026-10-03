@@ -31,7 +31,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--jev-probe [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
-       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online]
+       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online] [--memory]
        ripwire-broker statusline [--workspace DIR] [--state-dir DIR] [--detail] [--width N] [--color never|always]
        ripwire-broker memory status --workspace DIR [--state-dir DIR] [--json]
        ripwire-broker memory forget --workspace DIR [--state-dir DIR] (--all | --id ID)
@@ -202,6 +202,8 @@ pub struct InstallArgs {
     /// Start the server with `--online`, the credential referenced from the host's
     /// environment, never written (D-064). Hooks stay offline.
     pub online: bool,
+    /// `--memory` on the server and the hooks (PD-3); implies online on the server only.
+    pub memory: bool,
 }
 
 /// What `memory` does; every action is local: no network, credential or `online` feature.
@@ -731,6 +733,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     "--write",
                     "--codex-home",
                     "--online",
+                    "--memory",
                 ],
             )?;
             no_words(&f)?;
@@ -745,6 +748,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 write: f.on("--write"),
                 codex_home: f.codex_home.clone(),
                 online: f.on("--online"),
+                memory: f.on("--memory"),
             }))
         }
         Some("statusline") => {

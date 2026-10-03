@@ -1763,6 +1763,7 @@ fn install_refuses_a_binary_path_that_is_not_utf8() {
             write: false,
             codex_home: Some(codex_home.path().to_path_buf()),
             online: false,
+            memory: false,
         };
 
         let Err(err) = ripwire_broker::install::plan(&args, &binary) else {
@@ -1789,6 +1790,7 @@ fn install_refuses_a_workspace_path_that_is_not_utf8() {
         write: false,
         codex_home: None,
         online: false,
+        memory: false,
     };
 
     let Err(err) = ripwire_broker::install::plan(&args, &PathBuf::from("/opt/ripwire-broker"))
@@ -4185,4 +4187,163 @@ fn the_hook_overhead_meets_the_slo() {
     eprintln!("hook overhead of --memory: p95 {p95:.1} ms, p99 {p99:.1} ms (60 runs each)");
     assert!(p95 <= 10.0, "p95 {p95:.1} ms");
     assert!(p99 <= 25.0, "p99 {p99:.1} ms");
+}
+
+#[test]
+fn install_with_memory_writes_the_flag_and_never_the_key() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let base = [
+        "install",
+        "claude-code",
+        "--workspace",
+        root.to_str().unwrap(),
+        "--hooks",
+        "--memory",
+    ];
+
+    let (code, preview, err) = run_with_key(&base);
+    assert_eq!(code, 0, "{err}");
+    assert!(preview.contains("--memory: implica --online"), "{preview}");
+    assert!(
+        preview.contains("guarda localmente"),
+        "names the local persistence: {preview}"
+    );
+    assert!(
+        preview.contains("envia as elegíveis ao provider Jev"),
+        "and the history sent: {preview}"
+    );
+    assert!(!root.join(".mcp.json").exists(), "a dry run writes nothing");
+
+    let mut write = base.to_vec();
+    write.push("--write");
+    let (code, out, err) = run_with_key(&write);
+    assert_eq!(code, 0, "{err}");
+    let server = read_json(&root.join(".mcp.json"))["mcpServers"]["ripwire-broker"].clone();
+    assert_eq!(
+        server["args"],
+        json!(["--workspace", root.to_str().unwrap(), "--memory"]),
+        "no redundant --online"
+    );
+    assert_eq!(
+        server["env"],
+        json!({"RIPWIRE_BROKER_JEV_API_KEY": "${RIPWIRE_BROKER_JEV_API_KEY}"})
+    );
+    let settings = read_json(&root.join(".claude/settings.json"));
+    for event in ["UserPromptSubmit", "PostToolUse", "Stop"] {
+        for c in commands(&settings, event) {
+            assert!(c.contains("--memory") && !c.contains("--online"), "{c}");
+        }
+    }
+    let written = std::fs::read_to_string(root.join(".mcp.json")).unwrap()
+        + &std::fs::read_to_string(root.join(".claude/settings.json")).unwrap();
+    for text in [&preview, &out, &written] {
+        assert!(
+            !text.contains("tok-install-secret"),
+            "the key is never printed or written"
+        );
+    }
+
+    // Reinstalling without --memory turns it off everywhere.
+    let plain = [
+        "install",
+        "claude-code",
+        "--workspace",
+        root.to_str().unwrap(),
+        "--hooks",
+        "--write",
+    ];
+    run_with_key(&plain);
+    let server = read_json(&root.join(".mcp.json"))["mcpServers"]["ripwire-broker"].clone();
+    assert_eq!(
+        server["args"],
+        json!(["--workspace", root.to_str().unwrap()])
+    );
+    let settings = read_json(&root.join(".claude/settings.json"));
+    assert!(
+        commands(&settings, "Stop")
+            .iter()
+            .all(|c| !c.contains("--memory"))
+    );
+}
+
+#[test]
+fn doctor_reports_the_memory_store_without_using_the_network() {
+    use ripwire_broker::memory::{identity, store::Store};
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let report = |st: &std::path::Path| -> Value {
+        let args = [
+            "doctor",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            st.to_str().unwrap(),
+            "--json",
+        ];
+        let (_, out, err) =
+            run_with_env(&args, "", &[("PATH", std::ffi::OsStr::new("/nonexistent"))]);
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out} {err}"))
+    };
+    let names = |r: &Value| -> Vec<String> {
+        r["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(
+        !names(&report(st.path())).contains(&"memory".to_string()),
+        "no store, no check"
+    );
+
+    let store = Store::new(st.path(), &identity::workspace_id(ws.path()).unwrap());
+    store.forget_all(1).unwrap();
+    let r = report(st.path());
+    let memory = check(&r, "memory");
+    assert_eq!(memory["status"], "warn", "{memory}");
+    assert!(
+        memory["detail"].as_str().unwrap().contains("revoked"),
+        "{memory}"
+    );
+
+    store.resume().unwrap();
+    let r = report(st.path());
+    assert_eq!(check(&r, "memory")["status"], "ok");
+
+    std::fs::write(store.dir().join("snapshot.json"), "{broken").unwrap();
+    let r = report(st.path());
+    let memory = check(&r, "memory");
+    assert_eq!(memory["status"], "warn");
+    assert!(
+        memory["detail"].as_str().unwrap().contains("corrupt"),
+        "{memory}"
+    );
+}
+
+#[test]
+fn install_with_memory_for_codex_forwards_the_key_by_name() {
+    let (ws, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let root = ws.path().canonicalize().unwrap();
+    let (code, out, err) = run_with_key(&[
+        "install",
+        "codex",
+        "--workspace",
+        root.to_str().unwrap(),
+        "--codex-home",
+        home.path().to_str().unwrap(),
+        "--hooks",
+        "--memory",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains(r#""--memory"]"#)
+            && out.contains(r#"env_vars = ["RIPWIRE_BROKER_JEV_API_KEY"]"#),
+        "{out}"
+    );
+    assert!(
+        !out.contains(r#""--online""#),
+        "no redundant --online: {out}"
+    );
+    assert!(!out.contains("tok-install-secret"));
 }

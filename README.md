@@ -36,7 +36,7 @@ commands; `ripwire-broker --help` lists them all:
 | `hook-stats [--json]` | Every saved hook session (one with no events and nothing remembered is skipped) reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
 | `prompt --workspace DIR [--budget N] TASK...` | Prints the task followed by its context, for clients without hooks (`--budget` defaults to `context_for_task`'s 2500) |
 | `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
-| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
+| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online] [--memory]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
 | `memory status --workspace DIR [--json]` | The workspace's memory: memories, pending observations, generation, sizes, and the category of the error if the store cannot be read |
 | `memory forget --workspace DIR (--all \| --id ID)` | Forgets one memory and what derives from it, or everything (which also revokes collection) |
@@ -324,6 +324,8 @@ one from an edit. The note's text is untrusted data, kept verbatim and never fol
 instruction; the input file and the text pass the same filters as an observation. A forgotten id
 stays blocked for 365 days, the longest retention allowed, since `forget` cannot know the
 retention the server runs with.
+`doctor` adds a `memory` line when the workspace has a store: its size, or a warning when it is revoked
+or cannot be read. It reads the store locally and never uses the network.
 
 ## Automatic mode (hooks)
 
@@ -463,6 +465,10 @@ ripwire-broker install codex --workspace /repo --hooks --write
   (`[mcp_servers.ripwire-broker]`, and `[features] hooks = true`), and never edits TOML.
 - `--online` adds the flag to the server and references the key by name: `${RIPWIRE_BROKER_JEV_API_KEY}` in
   `.mcp.json`, `env_vars = ["RIPWIRE_BROKER_JEV_API_KEY"]` in the Codex snippet. Hooks stay offline.
+- `--memory` adds `--memory` to the server, without a redundant `--online`, and references the key the
+  same way; with `--hooks`, the hook commands get `--memory` too, which only writes the local spool. The
+  preview names both effects: memories kept on this machine and eligible ones sent to the provider.
+  Reinstalling without it takes the flag off everywhere.
 - Hook commands quote every path for the host's shell, so a directory name cannot run as code.
 - Merges keep your other keys and hooks, are idempotent, and back up a changed file once as `<name>.bak`.
   JSON key order is normalized.
