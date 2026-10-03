@@ -2,4 +2,5 @@
 //! and the store compile in the default build, without a network stack (CA-10); the Jev
 //! controller lives behind the `online` feature.
 
+pub mod identity;
 pub mod model;

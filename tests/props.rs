@@ -12,6 +12,7 @@ use proptest::test_runner::{FileFailurePersistence, TestCaseError};
 use ripwire_broker::cli::{self, Command};
 use ripwire_broker::local;
 use ripwire_broker::markup;
+use ripwire_broker::memory::identity as memory_identity;
 use ripwire_broker::model::{Budget, Envelope, Item, Provenance, Role, Source, Status, Untrusted};
 use ripwire_broker::notes;
 use ripwire_broker::online::cache::{self, KeyParts};
@@ -885,4 +886,29 @@ fn nesting_past_the_cap_is_read_as_text_instead_of_exhausting_the_stack() {
     let balanced = format!("{}{}", "<a>".repeat(5_000), "</a>".repeat(5_000));
     let node = markup::parse(&balanced).expect("a balanced document still parses");
     assert!(tree_depth(&node) <= markup::MAX_DEPTH + 1);
+}
+
+// ---------------------------------------------------------------- memory identity (PRD jev-mem §5.3)
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Each component is hashed with its length, so moving a boundary is another identity:
+    /// `("ab", "c")` and `("a", "bc")` never share a hash.
+    #[test]
+    fn ids_never_collide_for_ambiguous_tuples(
+        a in ".{0,12}", b in ".{0,12}", c in ".{0,12}", d in ".{0,12}",
+    ) {
+        prop_assume!((a.as_str(), b.as_str()) != (c.as_str(), d.as_str()));
+        prop_assert_ne!(
+            memory_identity::hash(&[&a, &b]),
+            memory_identity::hash(&[&c, &d])
+        );
+        let joined = format!("{a}{b}");
+        prop_assert_ne!(
+            memory_identity::hash(&[&joined]),
+            memory_identity::hash(&[&joined, ""]),
+            "an empty component still counts"
+        );
+    }
 }
