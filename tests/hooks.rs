@@ -1691,10 +1691,12 @@ async fn the_injected_context_has_the_untrusted_memory_section() {
         .as_str()
         .unwrap();
     let section = text.split_once(SECTION).unwrap().1;
+    let id = env["memories"][0]["id"].as_str().unwrap();
     assert!(
-        section.contains(memory) && section.contains("src/cache.rs"),
+        section.contains(id) && section.contains("src/cache.rs"),
         "{section}"
     );
+    assert_eq!(text.matches(memory).count(), 1, "the text goes out once");
     assert!(
         out["systemMessage"]
             .as_str()

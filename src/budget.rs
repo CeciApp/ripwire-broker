@@ -274,26 +274,30 @@ pub struct MemoryFit {
 
 /// Adds `items`, best first, inside memory's share and inside what the envelope has left: memory
 /// is what gives way, never an item, a test or a risk already there. `seen` says which ids this
-/// session already received.
+/// session already received; they are counted in `already_delivered` before anything is fitted,
+/// so the count is room taken like the rest.
 pub fn add_memories(
     env: &mut Envelope,
     items: Vec<crate::model::MemoryItem>,
     seen: &dyn Fn(&str) -> bool,
 ) -> MemoryFit {
+    let (already, items): (Vec<_>, Vec<_>) = items.into_iter().partition(|m| seen(&m.id));
+    let mut fit = MemoryFit {
+        already: already.len(),
+        ..MemoryFit::default()
+    };
+    env.budget.already_delivered += fit.already;
     let requested = env.budget.requested_tokens;
-    let left = requested.saturating_sub(estimate_tokens(env));
+    env.budget.estimated_tokens = requested; // widest value while measuring
+    let base = estimate_tokens(env);
+    let left = requested.saturating_sub(base);
     let cap = MEMORY_MAX_TOKENS
         .min(requested * MEMORY_SHARE_PERCENT / 100)
         .min(left);
-    let mut fit = MemoryFit::default();
     for item in items {
-        if seen(&item.id) {
-            fit.already += 1;
-            continue;
-        }
         env.memories.push(item);
         // Measured on the envelope itself: the item, its comma and the `memories` key.
-        let used = estimate_tokens(env).saturating_sub(requested - left);
+        let used = estimate_tokens(env).saturating_sub(base);
         if env.memories.len() > MEMORY_MAX_ITEMS || used > cap {
             env.memories.pop();
             fit.omitted += 1;
@@ -306,5 +310,6 @@ pub fn add_memories(
                 .unwrap_or_default(),
         );
     }
+    env.budget.estimated_tokens = estimate_tokens(env);
     fit
 }

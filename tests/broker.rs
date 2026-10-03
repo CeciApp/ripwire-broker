@@ -2388,6 +2388,48 @@ async fn a_memory_delivered_in_this_session_is_not_repeated() {
     assert!(second.budget.already_delivered >= 2, "and counted as such");
 }
 
+#[tokio::test]
+async fn memory_and_the_count_of_those_left_out_never_pass_the_budget_by_a_token() {
+    use ripwire_broker::budget::estimate_tokens;
+    use ripwire_broker::memory::retrieve::{self, StopReason};
+    let task = task_envelope(10_000).await;
+    // Padded too, so that the budget is on either side of 1,000: the estimate may gain a digit.
+    let unpadded = ripwire_broker::budget::memory_reserve() + estimate_tokens(&task);
+    for pad in [0, 4 * (990 - unpadded as usize)] {
+        let mut base = task.clone();
+        base.limitations.push(ripwire_broker::model::Limitation {
+            kind: "pad",
+            detail: "y".repeat(pad),
+            source: ripwire_broker::model::Source {
+                verb: "test",
+                basis: ripwire_broker::model::Basis::BrokerInference,
+            },
+        });
+        base.budget.estimated_tokens = estimate_tokens(&base);
+        // The entries left the reserve for the read's bookkeeping, as `context_for_task` does. Every
+        // room past it and every memory size near the edge, with a memory already delivered whose
+        // count is written too: `already_delivered` may gain a digit.
+        let before = base.budget.estimated_tokens + ripwire_broker::budget::memory_reserve();
+        for room in 0..40 {
+            for bytes in (1..240).step_by(5) {
+                let mut env = base.clone();
+                env.budget.requested_tokens = before + room;
+                env.budget.already_delivered = 9;
+                let mut read = read_of(2, 0, StopReason::Sufficient);
+                read.memories[1].record.content = "x".repeat(bytes);
+                retrieve::attach(&mut env, &read, &|id| id == "n0");
+                env.budget.estimated_tokens = estimate_tokens(&env);
+                assert!(
+                    env.budget.estimated_tokens <= env.budget.requested_tokens,
+                    "room {room}, {bytes} bytes: {} > {}",
+                    env.budget.estimated_tokens,
+                    env.budget.requested_tokens
+                );
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- context_for_task reads memory (PRD jev-mem §10; T3.10)
 
 use common::memory::{Agreeable, remembering_from};

@@ -710,7 +710,6 @@ pub fn attach(
             .unwrap_or_default()
             .into();
     }
-    env.budget.already_delivered += fit.already;
     env.provenance.memory = Some(p);
     fit.delivered
 }
