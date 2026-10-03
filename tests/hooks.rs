@@ -1481,3 +1481,70 @@ fn a_state_that_was_never_bound_serializes_without_the_status_line_field() {
     let bound = serde_json::to_value(bound()).unwrap();
     assert!(bound.get("statusline").is_some(), "{bound}");
 }
+
+// ---------------------------------------------------------------- memory collection (PRD jev-mem §8.1)
+
+use ripwire_broker::memory::publish::MemoryConfig;
+use ripwire_broker::memory::store::Store;
+
+async fn remembering_broker(store: Arc<Store>) -> (Broker, tempfile::TempDir) {
+    let ws = tempfile::tempdir().unwrap();
+    let mut config = BrokerConfig::new(ws.path());
+    config.incremental = true;
+    let mut memory = MemoryConfig::new(store, "w".repeat(64), 1_000_000);
+    memory.wait = std::time::Duration::from_secs(10);
+    config.memory = Some(memory);
+    let b = Broker::connect(Arc::new(edit_fake()), config)
+        .await
+        .unwrap();
+    (b, ws)
+}
+
+#[tokio::test]
+async fn a_hook_with_memory_enqueues_its_edit() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::new(state_dir.path(), &"w".repeat(64)));
+    let (b, ws) = remembering_broker(store.clone()).await;
+    std::fs::write(ws.path().join("a.txt"), "hello.").unwrap();
+    let input = event("claude_code_post_tool_use", ws.path());
+
+    post_tool_use(Host::ClaudeCode, &input, &b, &mut SessionState::default()).await;
+
+    assert_eq!(
+        store.pending().unwrap(),
+        1,
+        "queued, not incorporated: no worker in a hook"
+    );
+    assert!(store.load().unwrap().nodes.is_empty());
+}
+
+#[tokio::test]
+async fn ripwire_off_stops_capture_for_that_session_only() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::new(state_dir.path(), &"w".repeat(64)));
+    let (b, ws) = remembering_broker(store.clone()).await;
+    std::fs::write(ws.path().join("a.txt"), "hello.").unwrap();
+    let mut prompt = event("claude_code_user_prompt_submit", ws.path());
+    prompt["prompt"] = "#ripwire-off on my own".into();
+    let edit = event("claude_code_post_tool_use", ws.path());
+
+    let mut quiet = SessionState::default();
+    hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &prompt,
+        &b,
+        &mut quiet,
+        &Policy::default(),
+    )
+    .await;
+    post_tool_use(Host::ClaudeCode, &edit, &b, &mut quiet).await;
+    assert_eq!(
+        store.pending().unwrap(),
+        0,
+        "the opted-out session captures nothing"
+    );
+
+    post_tool_use(Host::ClaudeCode, &edit, &b, &mut SessionState::default()).await;
+    assert_eq!(store.pending().unwrap(), 1, "another session still does");
+}

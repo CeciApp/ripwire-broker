@@ -69,7 +69,13 @@ fn quote(p: &Path) -> String {
 }
 
 /// Replaces this broker's hooks in `settings` and keeps everything else.
-fn merge_hooks(mut settings: Value, host: Host, binary: &Path, workspace: Option<&Path>) -> Value {
+fn merge_hooks(
+    mut settings: Value,
+    host: Host,
+    binary: &Path,
+    workspace: Option<&Path>,
+    memory: bool,
+) -> Value {
     let host_name = match host {
         Host::ClaudeCode => "claude-code",
         Host::Codex => "codex",
@@ -105,6 +111,10 @@ fn merge_hooks(mut settings: Value, host: Host, binary: &Path, workspace: Option
         let mut command = format!("{} hook {host_name} {arg}", quote(binary));
         if let Some(ws) = workspace {
             command.push_str(&format!(" --workspace {}", quote(ws)));
+        }
+        // Local spool only: a hook never gets --online (D-064, PD-3).
+        if memory {
+            command.push_str(" --memory");
         }
         let mut group = Map::new();
         if let Some(m) = matcher {
@@ -288,6 +298,17 @@ The key is never written here: export RIPWIRE_BROKER_JEV_API_KEY in the environm
 starts from. The binary must be built with `--features online`; check it with
 `ripwire-broker doctor --workspace DIR --jev-probe`.";
 
+/// Shown with every `--memory` install: both effects, local persistence and history sent
+/// (PRD jev-mem §4).
+const MEMORY_CONSENT: &str =
+    "--memory: implica --online. Além do que o modo online envia, guarda localmente observações
+deste workspace entre sessões (no state dir, fora do repositório)
+e envia as elegíveis ao provider Jev para classificá-las e relacioná-las. Os hooks só gravam localmente; nunca fazem HTTP.
+Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
+The key is never written here: export RIPWIRE_BROKER_JEV_API_KEY in the environment the host
+starts from. The binary must be built with `--features online`. To erase and stop collecting:
+`ripwire-broker memory forget --workspace DIR --all`.";
+
 pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
     // Both host configs are text (JSON, TOML). A path they cannot carry is refused for what
     // it is, before the disk is touched, rather than panicking in `json!` or being written
@@ -322,11 +343,15 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                     }
                     let mut server =
                         json!({"command": binary_text, "args": ["--workspace", workspace_text]});
+                    let flags = server["args"].as_array_mut().unwrap();
                     if args.online {
-                        server["args"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push("--online".into());
+                        flags.push("--online".into());
+                    }
+                    // `--memory` implies online on the server: no redundant `--online`.
+                    if args.memory {
+                        flags.push("--memory".into());
+                    }
+                    if args.online || args.memory {
                         // Expanded by Claude Code from its own environment: a reference, never
                         // the value.
                         server["env"] = json!({ KEY_VAR: format!("${{{KEY_VAR}}}") });
@@ -403,7 +428,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 let (mut foreign, mut hooked) = (false, false);
                 plan.changes.push(change(settings_path.clone(), |mut v| {
                     if args.hooks {
-                        v = merge_hooks(v, Host::ClaudeCode, binary, Some(&workspace));
+                        v = merge_hooks(v, Host::ClaudeCode, binary, Some(&workspace), args.memory);
                     }
                     if shadowing && let Some(o) = v.as_object_mut() {
                         o.remove("statusLine");
@@ -431,9 +456,16 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 .clone()
                 .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
                 .ok_or("no HOME: pass --codex-home")?;
-            let online = match args.online {
+            let mut extra = String::new();
+            if args.online {
+                extra.push_str(", \"--online\"");
+            }
+            if args.memory {
+                extra.push_str(", \"--memory\"");
+            }
+            let online = match args.online || args.memory {
                 // Forwarded by name from Codex's environment, never the value.
-                true => format!(", \"--online\"]\nenv_vars = [\"{KEY_VAR}\"]"),
+                true => format!("{extra}]\nenv_vars = [\"{KEY_VAR}\"]"),
                 false => "]".into(),
             };
             let mut toml = format!(
@@ -446,13 +478,15 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 toml.push_str("\n[features]\nhooks = true\n");
                 // Global hooks: no --workspace, so each session uses its own cwd.
                 plan.changes.push(change(home.join("hooks.json"), |v| {
-                    merge_hooks(v, Host::Codex, binary, None)
+                    merge_hooks(v, Host::Codex, binary, None, args.memory)
                 })?);
             }
             plan.notes.push(toml);
         }
     }
-    if args.online {
+    if args.memory {
+        plan.notes.push(MEMORY_CONSENT.into());
+    } else if args.online {
         plan.notes.push(CONSENT.into());
     }
     Ok(plan)

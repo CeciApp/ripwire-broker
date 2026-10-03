@@ -430,3 +430,139 @@ fn a_listing_offers_names_but_only_eligible_files_can_be_read() {
     );
     let _ = Path::new("unused");
 }
+
+// ---------------------------------------------------------------- memory admission (PRD jev-mem §5.2)
+
+#[test]
+fn no_generated_path_escapes_the_workspace_into_a_record() {
+    use ripwire_broker::memory::admission::{self, Draft, Event, Outcome, Stamp, Tests};
+
+    let dir = guarded_root();
+    let root = dir.path().canonicalize().unwrap();
+    let reader = WorkspaceReader::new(&root).unwrap();
+    let stamp = Stamp {
+        observed_at_ms: 1,
+        ingest_seq: 1,
+        generation: 1,
+        retention_ms: 1,
+    };
+
+    TestRunner::new(config())
+        .run(&path_strategy(), |path| {
+            // Only ever asked about. Never created, never written, never removed.
+            let draft = Draft {
+                event_key: "e".into(),
+                event: Event::AfterEdit,
+                outcome: Outcome::AnalysisCompleted,
+                tests: Tests::Unknown,
+                scope: vec![path.clone()],
+                evidence: vec![],
+            };
+            let Ok(record) = admission::admit(&reader, "w", &draft, stamp) else {
+                return Ok(());
+            };
+            for source in &record.sources {
+                let joined = root.join(&source.path);
+                prop_assert!(
+                    !Path::new(&source.path)
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_))),
+                    "{:?} was admitted as {:?}",
+                    path,
+                    source.path
+                );
+                prop_assert!(
+                    joined.canonicalize().unwrap().starts_with(&root),
+                    "{:?} resolves outside the root",
+                    path
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn replay_is_idempotent() {
+    use ripwire_broker::memory::model::Record;
+    use ripwire_broker::memory::store::Store;
+
+    let record = |n: u64, again: bool| -> Record {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "policy_version": "memory-policy/v1",
+            "node_id": format!("{n:064}"), "content_hash": format!("{n:064}"),
+            "workspace_id": "w", "event_key": if again { "b" } else { "a" },
+            "kind": "edit_observation", "content": format!("o{n}"),
+            "observed_at_ms": if again { 9 } else { 1 }, "ingest_seq": 0,
+            "timestamp_role": "observation", "expires_at_ms": 10, "generation": 0
+        }))
+        .unwrap()
+    };
+    // Each step enqueues an observation (from a small set, so replays happen) or ingests.
+    let steps = prop::collection::vec((0u64..6, any::<bool>(), any::<bool>()), 1..24);
+    TestRunner::new(config())
+        .run(&steps, |steps| {
+            let state = tempfile::tempdir().unwrap();
+            let store = Store::new(state.path(), "w");
+            let mut seen = std::collections::BTreeSet::new();
+            for (n, again, ingest) in steps {
+                store.enqueue(&record(n, again)).unwrap();
+                seen.insert(n);
+                if ingest {
+                    store.ingest().unwrap();
+                }
+            }
+            store.ingest().unwrap();
+            let s = store.load().unwrap();
+            prop_assert_eq!(s.nodes.len(), seen.len());
+            let mut seqs: Vec<u64> = s.nodes.values().map(|r| r.ingest_seq).collect();
+            seqs.sort();
+            prop_assert_eq!(seqs, (1..=seen.len() as u64).collect::<Vec<_>>());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn deletion_is_monotonic_across_generations() {
+    use ripwire_broker::memory::model::Record;
+    use ripwire_broker::memory::store::Store;
+
+    let record = |n: u64| -> Record {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "policy_version": "memory-policy/v1",
+            "node_id": format!("{n:064}"), "content_hash": format!("{n:064}"),
+            "workspace_id": "w", "event_key": "e", "kind": "edit_observation",
+            "content": format!("o{n}"), "observed_at_ms": 1, "ingest_seq": 0,
+            "timestamp_role": "observation", "expires_at_ms": u64::MAX, "generation": 0
+        }))
+        .unwrap()
+    };
+    // 0 enqueues, 1 ingests, 2 forgets; over a small set of ids so they collide.
+    let steps = prop::collection::vec((0u8..3, 0u64..5), 1..30);
+    TestRunner::new(config())
+        .run(&steps, |steps| {
+            let state = tempfile::tempdir().unwrap();
+            let store = Store::new(state.path(), "w");
+            let mut forgotten = std::collections::BTreeSet::new();
+            let mut generation = 0;
+            for (op, n) in steps {
+                match op {
+                    0 => store.enqueue(&record(n)).map(|_| ()).unwrap(),
+                    1 => store.ingest().map(|_| ()).unwrap(),
+                    _ => {
+                        store.forget(&record(n).node_id, u64::MAX).unwrap();
+                        forgotten.insert(record(n).node_id);
+                    }
+                }
+                let s = store.load().unwrap();
+                prop_assert!(s.generation >= generation, "generations never go back");
+                generation = s.generation;
+                for id in &forgotten {
+                    prop_assert!(!s.nodes.contains_key(id), "{} came back", id);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+}

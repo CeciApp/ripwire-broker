@@ -23,6 +23,7 @@ pub mod local;
 /// rather than through a broker. Internal: no stability promise.
 pub mod markup;
 pub mod mcp;
+pub mod memory;
 pub mod metrics;
 pub mod model;
 mod normalize;

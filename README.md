@@ -36,8 +36,12 @@ commands; `ripwire-broker --help` lists them all:
 | `hook-stats [--json]` | Every saved hook session (one with no events and nothing remembered is skipped) reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
 | `prompt --workspace DIR [--budget N] TASK...` | Prints the task followed by its context, for clients without hooks (`--budget` defaults to `context_for_task`'s 2500) |
 | `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
-| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
+| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online] [--memory]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
+| `memory status --workspace DIR [--json]` | The workspace's memory: memories, pending observations, generation, sizes, and the category of the error if the store cannot be read |
+| `memory forget --workspace DIR (--all \| --id ID)` | Forgets one memory and what derives from it, or everything (which also revokes collection) |
+| `memory add --workspace DIR --file PATH` | Adds an explicit note from a JSON file, `{"text": "...", "references": ["src/a.rs"]}` |
+| `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
 return a structured error (`upstream_unavailable` / `incompatible_upstream`), and the next
@@ -62,6 +66,12 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
+| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Being built** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): today it only parses and checks |
+| `--memory-read-deadline-ms N` | `750` | 1–750; longest a task waits for memory |
+| `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read; 0 serves only the local index |
+| `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
+| `--memory-retention-days N` | `30` | 1–365 |
+| `--memory-max-nodes N` | `2000` | 1–2000 memories per workspace |
 
 ### How an MCP host passes configuration
 
@@ -255,6 +265,68 @@ The mode is **experimental** until the A/B evaluation of
 [PRD §23.15](spec/ripwire-broker-mcp.md#2315-avaliação-e-barras-de-merge) shows it keeps or
 improves correctness.
 
+## Persistent memory (being built)
+
+`--memory` keeps observations of the workspace between sessions
+([PRD](docs/jev-mem-prd.md), [plan](spec/plan/jev-mem-plan.md)). It is being built in phases
+and is not usable yet; this section grows with it.
+
+**What an automatic memory holds:** which analysis ran (after an edit, before finishing), its
+outcome as the broker saw it, the files in scope with the SHA-256 of their bytes, and the names
+of the analyses. The text is rendered from those fields (`memory-observation/v1`), for example
+`Evento: análise após edição. Escopo: src/cache.rs. Observado pelo broker: análise concluída;
+execução de testes desconhecida. …`. The broker never runs the tests, so it never records that
+they passed, that a bug was fixed or that a merge is safe.
+
+**When it is collected:** after `context_after_edit` and `context_before_finish` build their
+answer, never before and never changing it; `context_for_task` collects nothing, and an answer
+the broker could not assess (`unknown`) claims nothing. The answer waits at most 25 ms for the
+observation to be durable; past that the write finishes in the background and is counted as
+unconfirmed, and no more than four such writes run at once. The status resource gains a
+`memory` field with these counts (confirmed, unconfirmed, rejected) only when memory is on. In
+this phase the broker core does this, but `serve --memory` does not switch it on yet: the
+server wires it together with the worker that enriches the memories.
+
+**From the hooks:** `hook … --memory` collects the same observations after an edit or at
+`Stop`. It only writes to the local spool: it never makes an HTTP request, needs no credential
+and does not imply `--online`. The observation waits in the spool until a process with
+`--memory` incorporates it, so a hook that exits leaves nothing half done. `#ripwire-off` stops
+collection for that session only. Measured on a laptop in release, with the real ripwire, the
+flag adds about 4–7 ms at p95 to a hook of about 80 ms (the PRD's bar is 10 ms).
+
+**What is never kept:** the prompt, the transcript, a diff, a file's body, shell output or
+anything a model generated. A source the online policy refuses (`.env` and other sensitive
+names, ignored, hidden, binary, symlinked or outside the root) refuses the whole observation,
+and so does a value shaped like a credential (`sk-…`, `AKIA…`, `ghp_…`, a JWT, `password=…`)
+or an e-mail address. The scan is conservative, not a promise to catch every secret; a refusal
+is counted by reason and never logged with its content.
+
+**Where and how long:** `<state-dir>/memory/<workspace id>/`, outside the repository, 0700 and
+0600; two worktrees of one repository never share a store. A memory expires after
+`--memory-retention-days` (30); a note derived from memories goes with the first of them to
+expire. If the wall clock goes back, nothing expires by age until it catches up again, while the
+size caps (2,000 memories, a 1,000-entry spool, 96 MiB in all) keep holding. A store that cannot
+be read (a newer schema, a corrupt file, a link, a directory open to others) is left untouched
+and memory stays off for that workspace.
+
+**Forgetting:** forgetting a memory removes it, every note derived from it and its pending
+copies, in a new generation, and keeps its id from coming back for the retention period, even
+from an old pending copy. No backup with its text is kept. It cannot reach copies the operating
+system made (swap, snapshots, backups of the disk) nor anything already sent to the provider.
+Forgetting everything also revokes collection for the workspace: a `revoked` marker in the store
+wins over `--memory`, across restarts, until `ripwire-broker memory resume --workspace DIR`
+removes it. What was forgotten stays forgotten after resuming.
+
+**Commands:** the four `memory` commands in the [table above](#build-and-run) are local: they
+never start ripwire, open a connection or need the credential or the `online` feature.
+`memory add` is the only way a preference or a free-text note gets in; the broker never infers
+one from an edit. The note's text is untrusted data, kept verbatim and never followed as an
+instruction; the input file and the text pass the same filters as an observation. A forgotten id
+stays blocked for 365 days, the longest retention allowed, since `forget` cannot know the
+retention the server runs with.
+`doctor` adds a `memory` line when the workspace has a store: its size, or a warning when it is revoked
+or cannot be read. It reads the store locally and never uses the network.
+
 ## Automatic mode (hooks)
 
 MCP alone only offers tools; the agent still has to call them. Hooks make it automatic
@@ -393,6 +465,10 @@ ripwire-broker install codex --workspace /repo --hooks --write
   (`[mcp_servers.ripwire-broker]`, and `[features] hooks = true`), and never edits TOML.
 - `--online` adds the flag to the server and references the key by name: `${RIPWIRE_BROKER_JEV_API_KEY}` in
   `.mcp.json`, `env_vars = ["RIPWIRE_BROKER_JEV_API_KEY"]` in the Codex snippet. Hooks stay offline.
+- `--memory` adds `--memory` to the server, without a redundant `--online`, and references the key the
+  same way; with `--hooks`, the hook commands get `--memory` too, which only writes the local spool. The
+  preview names both effects: memories kept on this machine and eligible ones sent to the provider.
+  Reinstalling without it takes the flag off everywhere.
 - Hook commands quote every path for the host's shell, so a directory name cannot run as code.
 - Merges keep your other keys and hooks, are idempotent, and back up a changed file once as `<name>.bak`.
   JSON key order is normalized.

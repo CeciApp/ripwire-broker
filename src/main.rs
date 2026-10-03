@@ -22,18 +22,26 @@ use std::sync::Arc;
 
 /// Canonical workspace, ripwire version and the broker/upstream configuration for `serve`.
 fn settings(a: ServeArgs) -> Result<Settings, String> {
+    // The flag the operator typed: `--memory` turns online on by itself (PRD jev-mem §4).
+    let asked = match a.memory {
+        Some(_) => "--memory",
+        None => "--online",
+    };
     // Never a silent downgrade to offline (PRD §23.1, invariant 3).
     if a.online.is_some() && !cfg!(feature = "online") {
-        return Err(
-            "--online: this binary was built without the online feature; \
+        return Err(format!(
+            "{asked}: this binary was built without the online feature; \
              rebuild it with `cargo build --release --features online`"
-                .into(),
-        );
+        ));
     }
     // Checked before anything is published or started (CA-ONLINE-02).
     #[cfg(feature = "online")]
     let online = match &a.online {
-        Some(o) => Some(online_config(o)?),
+        // Only `--memory` gets a prefix: the `--online` message stays as it was.
+        Some(o) => Some(online_config(o).map_err(|e| match a.memory {
+            Some(_) => format!("{asked}: {e}"),
+            None => e,
+        })?),
         None => None,
     };
     let workspace = a
@@ -251,6 +259,19 @@ async fn main() -> ExitCode {
                 statusline::render(&input, snapshot.as_ref(), &options, hook::now())
             );
             return ExitCode::SUCCESS;
+        }
+        Ok(Command::Memory(a)) => {
+            // Dispatched before `settings`: local, never online (PRD jev-mem §4).
+            return match ripwire_broker::memory::command::run(&a) {
+                Ok(text) => {
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            };
         }
         Err(msg) => {
             eprintln!("{msg}");
