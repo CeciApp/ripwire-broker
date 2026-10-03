@@ -2038,3 +2038,40 @@ async fn an_unassessed_finish_claims_nothing_and_an_edit_without_files_observes_
         "the file ripwire saw change"
     );
 }
+
+/// A spool that panics on its first `n` writes.
+struct Panicky(Store, std::sync::atomic::AtomicUsize);
+
+impl Spool for Panicky {
+    fn enqueue(&self, record: &Record) -> Result<(), Refusal> {
+        if self.1.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            panic!("a write that blew up");
+        }
+        self.0.enqueue(record)
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_write_never_keeps_its_slot() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(ws.path(), "src/auth.py", "changed");
+    let spool = Arc::new(Panicky(
+        Store::new(state.path(), &"w".repeat(64)),
+        std::sync::atomic::AtomicUsize::new(5),
+    ));
+    let b = with_memory_waiting(ws.path(), spool, std::time::Duration::from_secs(10)).await;
+    for _ in 0..6 {
+        b.context_after_edit(EditRequest {
+            files: vec!["src/auth.py".into()],
+            ..EditRequest::default()
+        })
+        .await
+        .unwrap();
+    }
+    let counts = to_json(&b.status().await)["memory"].clone();
+    assert_eq!(counts["rejected"], 5, "{counts}");
+    assert_eq!(
+        counts["confirmed"], 1,
+        "five dead writes left no slot taken: {counts}"
+    );
+}

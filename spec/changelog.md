@@ -5681,3 +5681,29 @@ armadilha do `handoff.md`; os testes desta fase não a causam, mas aumentam a ca
 **Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos (39) e
 `props_fs` (10) verdes; CA-10 sem crate de rede; guarda de fixtures verde; nenhum `reqwest`,
 `secrecy`, `println!` ou `unsafe` em `src/memory/`.
+
+**Revisão independente do diff (plano §7, item 6), feita por um agente revisor só de leitura:**
+11 achados, 3 médios. Dez corrigidos em TDD (teste vermelho, correção, mutação que derrubou):
+
+- **Médio — `forget --all` perdia a corrida para um `enqueue` em curso:** o hook passava pela
+  checagem do marcador, o `forget --all` listava e apagava o spool, e o arquivo do hook aparecia
+  depois, sem tombstone. Agora o `enqueue` confere o marcador de novo depois de escrever e retira o
+  que escreveu (`an_enqueue_racing_forget_all_never_survives_it`, com o ponto de injeção
+  `Store::enqueue_with`).
+- **Médio — temporários de escritores mortos ficavam para sempre,** fora dos tetos e fora do
+  `forget --all` (o PRD §6 pede excluí-los). Agora contam no espaço do spool, a incorporação apaga
+  os com mais de 60 s, e o `forget --all` apaga todos, também os do snapshot.
+- **Médio — `forget --all` sobre um snapshot ilegível revogava e deixava o spool:** agora o spool
+  sai antes de ler o snapshot, que continua intocado.
+- **Baixo:** a mensagem do `--online` sem chave ganhara o prefixo `--online:` (saída mudada sem
+  `--memory`; agora só `--memory` ganha prefixo); `memory add --file note.json` relativo falhava;
+  o arquivo do `memory add` dentro do workspace só tinha o nome checado (agora o caminho inteiro
+  passa pela política, então `.private/` e `target/` são recusados); uma escrita que entrasse em
+  pânico prendia sua vaga em voo para sempre (agora um guarda devolve a vaga, e a reserva é
+  atômica); uma entrada ruim no spool (link, diretório) travava toda incorporação (agora é
+  descartada sem ser seguida); uma entrada de schema mais novo era apagada (agora fica); um
+  `spool/` trocado por link era escrito através dele (agora é recusado).
+- **Não corrigido, registrado:** a estimativa de tamanho do snapshot usa os bytes do spool (com
+  `ingest_seq` 0), as tombstones não têm teto, e `forget`/`sweep` não checam o teto do snapshot.
+  Nenhum dos três é alcançável com os limites padrão (2.000 × 16 KiB contra 64 MiB); entram na
+  Fase 2, que introduz arestas e jobs e já revisita o tamanho do snapshot.

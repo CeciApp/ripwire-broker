@@ -94,10 +94,18 @@ impl Publisher {
             self.count(|c| c.rejected += 1);
             return;
         };
-        if self.in_flight.load(Ordering::SeqCst) >= self.config.max_in_flight {
+        // Reserved in one step, so concurrent answers never go past the cap.
+        let max = self.config.max_in_flight;
+        let reserved = self
+            .in_flight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < max).then_some(n + 1)
+            });
+        if reserved.is_err() {
             self.count(|c| c.unconfirmed += 1);
             return;
         }
+        let slot = Slot(self.in_flight.clone());
         let draft = Draft {
             event_key,
             event,
@@ -121,14 +129,11 @@ impl Publisher {
             retention_ms: self.config.retention_ms,
         };
         let (spool, workspace_id) = (self.config.spool.clone(), self.config.workspace_id.clone());
-        let in_flight = self.in_flight.clone();
-        in_flight.fetch_add(1, Ordering::SeqCst);
         let write = tokio::task::spawn_blocking(move || {
-            let done = admission::admit(&reader, &workspace_id, &draft, stamp)
+            let _slot = slot;
+            admission::admit(&reader, &workspace_id, &draft, stamp)
                 .map_err(|_| ())
-                .and_then(|record| spool.enqueue(&record).map_err(|_| ()));
-            in_flight.fetch_sub(1, Ordering::SeqCst);
-            done
+                .and_then(|record| spool.enqueue(&record).map_err(|_| ()))
         });
         match tokio::time::timeout(self.config.wait, write).await {
             Ok(Ok(Ok(()))) => self.count(|c| c.confirmed += 1),
@@ -143,5 +148,14 @@ impl Publisher {
 
     fn count(&self, f: impl FnOnce(&mut Counts)) {
         f(&mut self.counts.lock().unwrap());
+    }
+}
+
+/// A write's place under `max_in_flight`, given back when the write ends, even by a panic.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }

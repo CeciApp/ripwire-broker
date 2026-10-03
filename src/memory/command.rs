@@ -59,13 +59,24 @@ pub fn run(cmd: &MemoryCommand) -> Result<String, String> {
         }
         MemoryAction::Add { file } => {
             let refused = |why: &str| format!("memory add: refused ({why})");
-            let (parent, name) = match (file.parent(), file.file_name().and_then(|n| n.to_str())) {
-                (Some(p), Some(n)) => (p, n),
-                _ => return Err(refused("outside")),
-            };
-            let input = WorkspaceReader::new(parent)?
-                .snapshot(name)
-                .map_err(|why| refused(why.as_str()))?;
+            // A file inside the workspace passes the whole policy on its path from the root
+            // (hidden and dependency directories included); one outside, on its own name.
+            let file = std::path::absolute(file).map_err(|_| refused("outside"))?;
+            let root = cmd
+                .workspace
+                .canonicalize()
+                .map_err(|e| format!("workspace {}: {e}", cmd.workspace.display()))?;
+            let parent = file.parent().ok_or_else(|| refused("outside"))?;
+            let parent = parent.canonicalize().map_err(|_| refused("unreadable"))?;
+            let name = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| refused("outside"))?;
+            let input = match parent.strip_prefix(&root) {
+                Ok(rel) => WorkspaceReader::new(&root)?.snapshot(&rel.join(name).to_string_lossy()),
+                Err(_) => WorkspaceReader::new(&parent)?.snapshot(name),
+            }
+            .map_err(|why| refused(why.as_str()))?;
             let note: Note = serde_json::from_str(input.preview_at(usize::MAX))
                 .map_err(|_| refused("malformed"))?;
             let stamp = Stamp {

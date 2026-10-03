@@ -37,7 +37,11 @@ fn settings(a: ServeArgs) -> Result<Settings, String> {
     // Checked before anything is published or started (CA-ONLINE-02).
     #[cfg(feature = "online")]
     let online = match &a.online {
-        Some(o) => Some(online_config(o).map_err(|e| format!("{asked}: {e}"))?),
+        // Only `--memory` gets a prefix: the `--online` message stays as it was.
+        Some(o) => Some(online_config(o).map_err(|e| match a.memory {
+            Some(_) => format!("{asked}: {e}"),
+            None => e,
+        })?),
         None => None,
     };
     let workspace = a

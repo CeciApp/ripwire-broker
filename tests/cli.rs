@@ -597,6 +597,10 @@ fn online_without_a_credential_fails_before_publishing_mcp() {
             "{key:?}: {stderr}"
         );
         assert!(
+            stderr.starts_with("RIPWIRE_BROKER_JEV_API_KEY"),
+            "{key:?}: --online keeps the message it had before --memory: {stderr}"
+        );
+        assert!(
             !stderr.contains("en-123"),
             "the credential is never echoed: {stderr}"
         );
@@ -4346,4 +4350,35 @@ fn install_with_memory_for_codex_forwards_the_key_by_name() {
         "no redundant --online: {out}"
     );
     assert!(!out.contains("tok-install-secret"));
+}
+
+#[test]
+fn memory_add_takes_a_relative_file_and_checks_it_against_the_workspace() {
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let note = r#"{"text": "prefer small PRs"}"#;
+    let add = |file: &str| {
+        let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+            .args(["memory", "add", "--workspace", ".", "--state-dir"])
+            .arg(st.path())
+            .args(["--file", file])
+            .current_dir(ws.path())
+            .env_remove("RIPWIRE_BROKER_JEV_API_KEY")
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    std::fs::write(ws.path().join("note.json"), note).unwrap();
+    let (code, err) = add("note.json");
+    assert_eq!(code, Some(0), "a bare relative name: {err}");
+
+    for (dir, why) in [(".private", "hidden"), ("target", "dependency_or_build")] {
+        std::fs::create_dir_all(ws.path().join(dir)).unwrap();
+        std::fs::write(ws.path().join(dir).join("n.json"), note).unwrap();
+        let (code, err) = add(&format!("{dir}/n.json"));
+        assert_ne!(code, Some(0), "{dir}");
+        assert!(err.contains(why), "{dir}: {err}");
+    }
 }
