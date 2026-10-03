@@ -97,6 +97,8 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
+| 2026-10-03 12:36 | Plano de implementação do `--memory` ([`spec/plan/jev-mem-plan.md`](plan/jev-mem-plan.md)) a partir do PRD `docs/jev-mem-prd.md`: seis fases, TDD obrigatório por tarefa (teste vermelho, código mínimo, mutação, documentação afetada, portões), 16 achados de validação contra o código e 5 decisões pendentes do mantenedor; nenhum código de produção; linha de base 462/476 testes verdes | [D-134](#d-134--plano-de-implementação-do---memory) |
 | 2026-10-02 12:15 | Auditoria da documentação contra o código: README e PRD §8.4 ganham a coalescência de edições do D-106 (`--edit-interval-ms`) e os orçamentos dos hooks; o README ganha `prompt --budget`, `--jev-provider`, as flags de binário e prazo do `ripwire-eval` e a procedência atual das fixtures | [D-133](#d-133--auditoria-da-documentação-contra-o-código) |
 | 2026-10-01 23:40 | Documentação alinhada ao D-131: o exemplo `integrations/claude-code/settings.json` ganha `Bash` no matcher do `PostToolUse` (como o `install` grava desde o D-129), o PRD deixa de dar a validação da barra como pendente, o `handoff.md` vai até o D-131, com o campo `agent` como pendência, e o diagrama ganha a barra de status e o `git` | [D-132](#d-132--documentação-alinhada-ao-d-131) |
 | 2026-10-01 23:16 | Fecha a pendência `bashEditDiff` do D-129: a lista de arquivos que o próprio Claude Code manda no `PostToolUse` do Bash substitui a impressão do git; depois do primeiro payload com o campo, a sessão não chama mais o `git`, e a impressão fica para versões que não o mandam | [D-131](#d-131--a-lista-do-próprio-claude-code-substitui-a-impressão-do-git) |
@@ -5514,3 +5516,61 @@ ficam assim: o PRD não é referência de CLI.
 
 **Nota de método:** o primeiro laço que comparou as flags usou `for f in $flags` no zsh, que não
 divide a variável, e respondeu "nada faltando". É a armadilha já listada no `handoff.md`.
+
+## D-134 — Plano de implementação do `--memory`
+
+**Data:** 2026-10-03 12:36.
+
+**Decisão:** o PRD [`docs/jev-mem-prd.md`](../docs/jev-mem-prd.md) (v0.2) ganha um plano de
+implementação, [`spec/plan/jev-mem-plan.md`](plan/jev-mem-plan.md). Nenhum código de produção entra
+com ele.
+
+**O que o plano fixa:**
+
+- **TDD por tarefa, como condição de "feito":** teste vermelho na costura pública, visto falhar
+  pelo motivo esperado; o menor código que o faz passar; mutação que prova que o teste morde; a
+  documentação afetada; os portões locais. Só então a tarefa é marcada, com a linha dela no
+  registro de evidência.
+- **Seis fases**, na ordem do PRD §15: contratos; store e coleta (build padrão, sem rede);
+  controle Jev (feature `online`); leitura e host; consolidação; avaliação; e um fechamento com
+  auditoria e incorporação ao PRD principal. Cada critério verificável do PRD §14 tem tarefa.
+- **Fica em `spec/plan/`**, com os planos das outras fases; o PRD que ele implementa continua em
+  `docs/`, por ainda ser proposta.
+
+**Achados da validação contra o código** (tabela V1 a V16 do plano). Os que mudam o que o PRD
+supõe:
+
+- o estudo que o PRD §1 dá como ausente está no checkout (`docs/jev-mem.md` e o PDF, com o mesmo
+  SHA-256); a reconciliação é a primeira tarefa;
+- `memory drain --online` colide com o D-064 (`--online` só no `serve`);
+- o PRD não diz como o hook liga a coleta, nem o que reativa a coleta depois de `forget --all`;
+- o texto MCP hoje é o próprio JSON do envelope (`src/mcp.rs`), então a seção legível do PRD §11
+  muda o bloco de texto;
+- o portão de fixtures do CI recusa strings com cara de credencial: os dados sensíveis dos testes
+  de admissão são montados dentro do teste, não em arquivo.
+
+**Pendente do mantenedor:** PD-1 a PD-5 do plano. Cada uma bloqueia só a tarefa indicada.
+
+**Verificado:** linha de base no branch `docs/jev-mem-prd`: `fmt`, `clippy` (padrão e `online`),
+462 testes (2 ignorados) e 476 com `online` (4 ignorados), CA-10 e a guarda de fixtures, tudo
+verde. O teste de exemplo do plano (T1.1) foi compilado contra o código e falha pelos motivos que
+o plano declara; `tests/cli.rs` não mudou.
+
+## D-135 — Decisões PD-1 a PD-5 do `--memory`
+
+**Data:** 2026-10-03 12:50.
+
+**Decisão:** o mantenedor aceitou as cinco propostas que o plano
+([D-134](#d-134--plano-de-implementação-do---memory)) deixou pendentes.
+
+| ID | Decisão | Tarefa do plano |
+| --- | --- | --- |
+| PD-1 | `memory add --workspace PATH --file PATH` entra neste incremento, na Fase 1, local e sem rede, como no PRD jev-mem §5.2 | T1.13 |
+| PD-2 | `--online` passa a valer para `serve` **e** `memory drain`, e só para eles; é uma exceção explícita ao [D-064](#d-064--cache-diagnóstico-e-integração-proposta), não a revogação dele | T2.11 |
+| PD-3 | O hook liga a coleta com `hook … --memory`: publica no spool local, nunca faz HTTP e não implica `--online`; o instalador grava a flag só com `install --memory` | T1.15, T1.16 |
+| PD-4 | Depois de `forget --all`, um marcador `revoked` no store impede a coleta; só o comando novo e local `memory resume --workspace PATH` o remove | T1.12 |
+| PD-5 | A Fase 2 (controle Jev) pode começar antes de fechar as medições do `--online`, atrás de `--memory` e declarada experimental | Fase 2 |
+
+**Consequência:** nenhuma tarefa do plano fica bloqueada por decisão. As superfícies novas
+(`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) ainda
+não estão no PRD jev-mem §4: levá-las para lá é a T0.2 do plano. Nenhum código mudou.
