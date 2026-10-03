@@ -24,7 +24,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
 | barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
-| `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 2 feitas (D-136 a D-138): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory` e `memory drain --online`. **Falta rodar a T2.0** (Choice no modelo pinado, precisa da chave). Fase 3 (leitura) não começada; nada lê memórias ainda; **experimental** |
+| `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 2 feitas (D-136 a D-138): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory` e `memory drain --online`. A T2.0 (Choice no modelo pinado) rodou com a chave real. Fase 3 (leitura) não começada; nada lê memórias ainda; **experimental** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
 [changelog de decisões](spec/changelog.md), que é a fonte da verdade sobre o porquê de cada coisa.

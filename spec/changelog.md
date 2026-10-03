@@ -5715,8 +5715,10 @@ armadilha do `handoff.md`; os testes desta fase não a causam, mas aumentam a ca
 
 **Decisão:** a Fase 2 do [plano](plan/jev-mem-plan.md) está feita em TDD, uma tarefa por commit, com
 o teste vermelho visto falhar, mutação que o derrubou, documentação e os cinco portões. O registro
-de evidência (§9 do plano) tem a linha de cada tarefa. A T2.0 está escrita e **não rodou**: a chave
-da Jev não está nesta máquina.
+de evidência (§9 do plano) tem a linha de cada tarefa. A T2.0 rodou à mão com a chave real
+(o mantenedor a pôs no `.env`, fora do git): `jev-1.13.0` respondeu um Choice no formato do PRD §7,
+aceito pelo parser, escolhendo `after` com probabilidade 1.0 em 312 ms (conteúdo inventado). O
+contrato do Choice deixa de ser só documentado.
 
 **O que entrou:** `JevQuestion::choice` e `StateRequest` (estado estruturado qualquer); respostas
 tipadas `Decision::{Noul, Choice, Unknown}` com id repetido detectado e Choice validado sem
@@ -5737,7 +5739,7 @@ Testes: 519 → 555 no build padrão, 533 → 570 com `online`.
   compilavam sem a feature (V15); só o `JevClient` a exige. Assim o domínio é testado nos dois
   builds e o CA-10 continua valendo. O plano previa `controller.rs` sob `cfg(feature = "online")`.
 - **O formato da resposta Choice segue o PRD §7**: `{type: "choice", choice, probabilities,
-  confidence}`. Não validado contra o provider até a T2.0 rodar.
+  confidence}`, confirmado contra o provider pela T2.0.
 - **As chaves do estado saem em ordem alfabética** (`serde_json` sem `preserve_order`): deterministas,
   o que serve à chave de cache futura. Perguntas e critérios mantêm a ordem dada.
 - **Lease por lock de arquivo, não por PID**: `leases/<id>.lock`; quem consegue o lock de um job
