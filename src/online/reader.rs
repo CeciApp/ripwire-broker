@@ -204,7 +204,7 @@ impl WorkspaceReader {
                 return Err(Ineligible::Ignored);
             }
         }
-        let bytes = std::fs::read(&path).map_err(|_| Ineligible::Unreadable)?;
+        let bytes = read_opened(&path)?;
         if bytes.len() > MAX_READ_BYTES {
             return Err(Ineligible::TooLarge);
         }
@@ -256,6 +256,34 @@ impl WorkspaceReader {
         self.snapshot(&snap.path)
             .is_ok_and(|now| now.content_hash == snap.content_hash)
     }
+}
+
+/// The bytes of `path`, checked again on what was opened: the checks above looked at a name, and
+/// the name can be replaced before the read. Opened without following a link and without
+/// blocking on a FIFO; nothing but a regular file within [`MAX_READ_BYTES`] is read (D-146).
+fn read_opened(path: &Path) -> Result<Vec<u8>, Ineligible> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) => Ineligible::Symlink,
+            _ => Ineligible::Unreadable,
+        })?;
+    let meta = file.metadata().map_err(|_| Ineligible::Unreadable)?;
+    if !meta.is_file() {
+        return Err(Ineligible::NotRegular);
+    }
+    if meta.len() > MAX_READ_BYTES as u64 {
+        return Err(Ineligible::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_READ_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Ineligible::Unreadable)?;
+    Ok(bytes)
 }
 
 /// `rel` as normal components; `None` for absolute paths and any `..`.

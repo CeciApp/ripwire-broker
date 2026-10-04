@@ -1229,6 +1229,108 @@ fn install_codex_merges_hooks_json_and_prints_the_toml_snippet() {
     );
 }
 
+/// A ripwire that never answers `--version` costs at most the version timeout (D-146): one that
+/// keeps running, and one that exits but leaves a process holding its stdout open. `doctor` is one
+/// of the four callers; `serve`, `hook` and `prompt` read the version through the same function.
+#[test]
+fn a_ripwire_that_hangs_on_version_is_unavailable_within_the_timeout() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    for (name, version) in [
+        ("running", "sleep 30; echo 'ripwire 0.6.4'"),
+        ("left-behind", "(sleep 30 &); exit 0"),
+    ] {
+        let hang = bin.path().join(name);
+        common::write_executable(
+            &hang,
+            format!("#!/bin/sh\ncase \"$1\" in --version) {version};; esac\nexit 1\n"),
+        );
+        let started = std::time::Instant::now();
+
+        let (_, report, _) = doctor(ws.path(), &["--ripwire", hang.to_str().unwrap()]);
+
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(15),
+            "{name}: {took:?}"
+        );
+        assert_eq!(
+            check(&report, "ripwire_binary")["status"],
+            "fail",
+            "{name}: {report}"
+        );
+    }
+}
+
+/// `doctor` keeps the provider key out of what it starts: ripwire's `--version`, `git` and the
+/// summarizer's version command (D-146). Spies write what they received.
+#[test]
+fn doctor_starts_nothing_with_the_provider_key() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let seen = bin.path().join("seen");
+    let real_git = String::from_utf8(
+        Proc::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let spy = |name: &str, then: &str| {
+        let p = bin.path().join(name);
+        common::write_executable(
+            &p,
+            format!(
+                "#!/bin/sh\nprintf '%s key=%s\\n' {name} \"${{RIPWIRE_BROKER_JEV_API_KEY-}}\" >> '{}'\n{then}\n",
+                seen.display()
+            ),
+        );
+        p.to_str().unwrap().to_string()
+    };
+    let fake = common::slow_ripwire(bin.path());
+    let ripwire = spy("ripwire-spy", &format!("exec '{}' \"$@\"", fake.display()));
+    spy("git", &format!("exec '{}' \"$@\"", real_git.trim()));
+    let llm = spy("llm", "echo never");
+    let version = spy("llm-version", "echo v1");
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let state = tempfile::tempdir().unwrap();
+
+    run_with_env(
+        &[
+            "doctor",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--ripwire",
+            &ripwire,
+            "--summarizer-cmd",
+            &llm,
+            "--summarizer-version-cmd",
+            &version,
+        ],
+        "",
+        &[
+            ("PATH", std::ffi::OsStr::new(&path)),
+            (
+                "RIPWIRE_BROKER_JEV_API_KEY",
+                std::ffi::OsStr::new("tok-doctor-leak"),
+            ),
+        ],
+    );
+
+    let seen = std::fs::read_to_string(&seen).unwrap();
+    for name in ["ripwire-spy key", "git key", "llm-version key"] {
+        assert!(seen.contains(name), "{name} never ran:\n{seen}");
+    }
+    assert!(!seen.contains("tok-doctor-leak"), "{seen}");
+}
+
 #[test]
 fn doctor_checks_the_configured_local_model_without_running_it() {
     let ws = tempfile::tempdir().unwrap();

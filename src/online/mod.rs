@@ -22,6 +22,10 @@ pub mod scheduler;
 
 pub use coordinator::{OnlineConfig, OnlineEngine, OnlineTotals};
 
+/// The variable that carries the provider key. Defined outside the `online` feature: every build
+/// keeps it out of the processes it starts, since the variable can be set either way (D-146).
+pub const KEY_VAR: &str = "RIPWIRE_BROKER_JEV_API_KEY";
+
 use crate::model::{Item, Role};
 use serde::Serialize;
 

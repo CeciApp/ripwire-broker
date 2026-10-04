@@ -620,6 +620,74 @@ async fn evidence_stale_at_output_is_dropped_and_marked_incomplete() {
     );
 }
 
+/// Every read of the workspace (the planner's files, the lookahead, the recheck before each
+/// attempt and the one before the output) runs off the async thread (D-146). A `.gitignore` that
+/// is a FIFO holds each walk until something opens its other end; on a single-threaded runtime,
+/// only a task on that thread does, so a read made on it never ends.
+#[test]
+fn workspace_reads_never_hold_the_async_thread() {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ws = workspace();
+    common::write(
+        ws.path(),
+        "src/session.py",
+        "def renew(token):\n    return token\n",
+    );
+    let fifo = ws.path().join(".gitignore");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = runtime.block_on(async move {
+            let done = Arc::new(AtomicBool::new(false));
+            // Opens the FIFO for writing only when a walk waits on it, and closes it: the walk
+            // reads an empty ignore file and goes on.
+            let releaser = tokio::spawn({
+                let done = done.clone();
+                async move {
+                    let mut released = 0;
+                    while !done.load(Ordering::Relaxed) {
+                        let writer = std::fs::OpenOptions::new()
+                            .write(true)
+                            .custom_flags(libc::O_NONBLOCK)
+                            .open(&fifo);
+                        if writer.is_ok() {
+                            released += 1;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                        drop(writer);
+                    }
+                    released
+                }
+            });
+            let s = online_in(ws, explore(), login_is_evidence()).await;
+            let out = s.broker.context_for_task(TaskRequest::new(TASK)).await;
+            done.store(true, Ordering::Relaxed);
+            (out.map(|o| json(&o)), releaser.await.unwrap())
+        });
+        let _ = tx.send(out);
+    });
+
+    let (out, released) = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a workspace read held the async thread");
+
+    let out = out.unwrap();
+    assert!(released > 0, "no walk ever waited on the FIFO");
+    let login = items(&out).iter().find(|i| i["symbol"] == "login").unwrap();
+    assert!(login.get("semantic").is_some(), "{out:#}");
+}
+
 // --- S5.5: discovery deadline and rendered source cap ---
 
 async fn online_with(

@@ -178,3 +178,50 @@ async fn a_real_local_model_writes_a_note() {
     assert!(!note.is_empty());
     assert!(note.chars().count() <= 600);
 }
+
+/// The model never sees the provider key (D-146). This test runs its own binary again with the key
+/// in the child's environment only, so the environment of this process is never changed; the
+/// child is the ignored test below.
+#[test]
+fn the_model_never_inherits_the_provider_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = dir.path().join("seen");
+    let llm = script(
+        dir.path(),
+        "llm",
+        &format!(
+            "cat >/dev/null; printf 'key=%s\\n' \"${{RIPWIRE_BROKER_JEV_API_KEY-}}\" >> '{}'; echo ok",
+            seen.display()
+        ),
+    );
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "the_model_runs_with_the_key_in_this_process",
+            "--ignored",
+        ])
+        .env("RIPWIRE_BROKER_JEV_API_KEY", "tok-model-leak")
+        .env("RIPWIRE_BROKER_TEST_SPY", &llm)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let seen = std::fs::read_to_string(&seen).unwrap();
+    assert_eq!(seen, "key=\n", "the model saw the key");
+}
+
+/// Only meaningful when started by the test above.
+#[tokio::test]
+#[ignore = "started by the_model_never_inherits_the_provider_key"]
+async fn the_model_runs_with_the_key_in_this_process() {
+    let Ok(llm) = std::env::var("RIPWIRE_BROKER_TEST_SPY") else {
+        return;
+    };
+    assert!(std::env::var("RIPWIRE_BROKER_JEV_API_KEY").is_ok());
+
+    let out = model(&llm, 5_000).summarize("a note").await;
+
+    assert_eq!(out.unwrap().trim(), "ok");
+}

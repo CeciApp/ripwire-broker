@@ -2148,7 +2148,9 @@ diagnóstico pode fazer a verificação sintética; o nome `doctor --jev-probe` 
 - guardar em tipo com redaction, como `secrecy::SecretString`;
 - nunca serializar em log, métrica, panic ou mensagem MCP;
 - variável explicitamente vazia conta como ausente;
-- não persistir a credencial.
+- não persistir a credencial;
+- não repassar a processos filhos: ripwire, summarizer, comando de versão e `git` rodam sem ela,
+  em qualquer build (D-146).
 
 **Endpoint** [v0.1 §13.4]: allowlisted, sem URL arbitrária. Endpoint customizado
 fica para fase futura, com confirmação explícita, HTTPS obrigatório e proteção

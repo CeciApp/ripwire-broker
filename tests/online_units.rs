@@ -509,6 +509,70 @@ fn ineligible_files_are_never_read_for_sending() {
     }
 }
 
+/// The checks and the read are made on one opened file: a name swapped for a link to a file
+/// outside the workspace, or for a FIFO, after the checks is never read (D-146). The swap races
+/// the reader, so the test reads until a deadline; reading by path again after the checks leaked
+/// within it.
+#[test]
+fn a_file_swapped_after_the_checks_is_never_read() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    put(&root, "src/a.py", b"inside = 1\n");
+    let outside = tempfile::tempdir().unwrap();
+    put(outside.path(), "secret.py", b"outside = 1\n");
+    let fifo = outside.path().join("pipe");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let reader = WorkspaceReader::new(&root).unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, src) = (stop.clone(), root.join("src"));
+        let secret = outside.path().join("secret.py");
+        std::thread::spawn(move || {
+            // Renames replace the name atomically: it always exists, as a file, a link or a FIFO
+            // (a hard link to one made once). The file comes back between the two, so the checks
+            // can pass on it right before either swap.
+            let staged = |name: &str| src.join(name);
+            let target = src.join("a.py");
+            let file = || {
+                std::fs::write(staged("a.file"), b"inside = 1\n").unwrap();
+                std::fs::rename(staged("a.file"), &target).unwrap();
+            };
+            while !stop.load(Ordering::Relaxed) {
+                file();
+                std::os::unix::fs::symlink(&secret, staged("a.link")).unwrap();
+                std::fs::rename(staged("a.link"), &target).unwrap();
+                file();
+                std::fs::hard_link(&fifo, staged("a.fifo")).unwrap();
+                std::fs::rename(staged("a.fifo"), &target).unwrap();
+            }
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (mut reads, mut wrong) = (0, 0);
+    while std::time::Instant::now() < deadline {
+        if let Ok(snap) = reader.snapshot("src/a.py") {
+            reads += 1;
+            wrong += usize::from(snap.preview() != "inside = 1\n");
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+
+    assert_eq!(
+        wrong, 0,
+        "{wrong} of {reads} reads were not the regular file"
+    );
+    assert!(reads > 0, "the regular file was never read");
+}
+
 #[test]
 fn a_snapshot_binds_preview_and_ranges_to_its_hash() {
     let ws = tempfile::tempdir().unwrap();

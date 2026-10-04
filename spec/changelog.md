@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-04 14:00 | Revisão de 2026-10-04: os cinco achados de maior impacto em produção corrigidos em TDD — leitura e hash do online no pool bloqueante, snapshot lido pelo arquivo verificado (TOCTOU), chave do provedor fora dos processos filhos, prazo de 5 s no `ripwire --version` e erros do worker de memória ditos uma vez no stderr | [D-146](#d-146--revisão-de-2026-10-04-os-cinco-de-maior-impacto) |
 | 2026-10-04 11:04 | Documentação sincronizada com o código depois da auditoria: status do `--memory` no PRD jev-mem, no README e no PRD principal; os seis braços do eval; o resumo com "found"; os tetos de `Retry-After`; o mapa de arquivos e a evidência do plano; a ordem do índice do changelog; o handoff | [D-145](#d-145--documentação-sincronizada-com-o-código-depois-da-auditoria) |
 | 2026-10-04 04:40 | Achados médios da auditoria corrigidos em TDD (16, mais um achado no caminho): roteador por início de palavra, hook que só lança o ripwire quando vai perguntar, variáveis de diretório vazias ou relativas ignoradas, três do online, três da memória, quatro do eval, o TOML do Codex, o dedup de corpos e de riscos e o resumo; a leitura bloqueante do online fica registrada, sem teste determinístico | [D-144](#d-144--auditoria-de-2026-10-04-os-achados-médios) |
 | 2026-10-04 03:40 | Auditoria do sistema (ferramentas do ripwire, clippy pedante e cinco revisores só de leitura, ~100 achados): os cinco defeitos mais graves corrigidos em TDD — o corpus por caminho relativo e as edições commitadas no eval, a sessão restaurada que deixava de lembrar, o `Retry-After` que derrubava o worker e o símbolo desconhecido que derrubava o `context_after_edit`; o resto registrado | [D-143](#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves) |
@@ -6302,3 +6303,86 @@ eram descrições de estado e de comportamento.
 - **CI e código:** o comentário do workflow fala nos três testes de `online_live.rs`; os
   comentários de módulo de `src/cli.rs` (o subcomando `memory`) e de `src/memory/mod.rs` (o
   controlador compila no build padrão) estavam desatualizados.
+
+## D-146 — Revisão de 2026-10-04: os cinco de maior impacto
+
+**Data:** 2026-10-04 14:00.
+
+**Contexto:** uma revisão de código só de leitura, pedida pelo mantenedor com um roteiro de Rust
+(correção, edition 2024, runtime, FFI, MCP, segredos, HTTP, código morto, testes, custo), listou
+achados com evidência por arquivo e símbolo. Fechou por evidência o que o `Cargo.toml` não diz: o
+`rust-mcp-sdk` 2.0.0 liga o tokio com `full` (o `cargo tree` mostra `fs`, `net` e `signal` em todo
+build), o build padrão segue sem crate de rede (CA-10), e o `libc` só fornece constantes
+(`#![forbid(unsafe_code)]` nas duas raízes) e já vinha no grafo pelo tokio. O mantenedor pediu os
+cinco de maior impacto em produção.
+
+**Decisão:** os cinco corrigidos em TDD, um commit por achado, com o teste vermelho visto falhar e
+mutações que o derrubaram:
+
+- **Leitura do online na thread assíncrona** (registrada sem correção no D-144): a descoberta
+  percorria os arquivos de ignore, lia até 8 MiB e calculava o sha256 na thread assíncrona, para os
+  arquivos do planner, os vizinhos do lookahead, a conferência de frescura antes de cada tentativa
+  (no scheduler) e a de antes da saída. Agora o coordenador usa `OnlineEngine::on_disk`
+  (`spawn_blocking`), e o scheduler aguarda a frescura no pool bloqueante antes de lançar a
+  tentativa, com a mesma ordem e a mesma contagem de requests; uma conferência que entra em pânico
+  conta como fonte mudada. O teste que faltava no D-144: um `.gitignore` que é uma FIFO segura cada
+  travessia até alguém abrir a outra ponta, e num runtime de uma thread só uma task dessa thread
+  abre; uma leitura feita nela nunca termina.
+- **TOCTOU no `WorkspaceReader::snapshot`:** os componentes eram conferidos por
+  `symlink_metadata` e o arquivo lido de novo pelo nome. Um nome trocado entre os dois era lido
+  assim mesmo: um link para fora do workspace era seguido (e o conteúdo podia ir ao classificador),
+  e uma FIFO travava a leitura. O teste de corrida achou o link em 6 a 40 de cerca de 3.000 leituras.
+  Agora o arquivo é aberto uma vez com `O_NOFOLLOW | O_NONBLOCK`, e as conferências de arquivo
+  regular e de tamanho valem para o que foi aberto, como no `read_checked` do store. Fica um
+  resíduo: um diretório intermediário trocado por link ainda é seguido; fechar isso pede `openat`.
+- **Chave do provedor nos processos filhos:** `RIPWIRE_BROKER_JEV_API_KEY` era herdada pelo
+  ripwire (`--version` e servidor MCP), pelo summarizer (programa de terceiros) e seu comando de
+  versão, e pelo `git` (do `doctor` e da impressão da árvore). Como `remove_var` é `unsafe` na
+  edition 2024 e o crate proíbe `unsafe`, a variável fica no ambiente do broker. Cada filho criado
+  por `Command` a remove com `env_remove`. O lançamento do ripwire MCP pelo SDK só sabe acrescentar
+  variáveis, então recebe a variável vazia, que conta como ausente. O nome virou uma constante só,
+  `online::KEY_VAR`, fora da feature `online`. Os testes de reexecução rodam o próprio binário de
+  teste com a chave só no ambiente do filho; o ambiente do processo de teste nunca muda.
+- **`ripwire --version` sem prazo:** `serve` (antes de responder ao host), todo hook que pergunta,
+  `prompt` e `doctor` travavam com um binário parado no `--version`; o `doctor` levou 60 s no teste
+  vermelho. O laço com prazo do `git` da impressão da árvore virou `bounded::output`, usado pelos
+  dois. Ele lê o stdout numa thread, espera a resposta só até o prazo, mata o filho que ainda roda e
+  abandona o processo que ele deixou segurando o pipe. O `--version` tem 5 s.
+- **Worker de memória silencioso:** o laço descartava todo erro, e um enriquecimento que falhava
+  encerrava o laço de jobs sem dizer nada. Um store inutilizável deixava a memória coletando sem
+  nunca processar. Agora cada etapa (retenção, ingestão, enriquecimento, consolidação) diz no stderr
+  quando começa a falhar ou falha de outro jeito, uma vez, e um sucesso limpa o registro; `Locked`
+  não é falha. Retenção e ingestão, que fazem `fsync`, passaram ao pool bloqueante; essa mudança não
+  tem teste vermelho determinístico, porque o store não abre nada que possa bloquear. Achado do
+  CodeRabbit no PR #57: um 401/403 volta como execução (`Enriched.auth_failed`), não como recusa, e
+  suspende o worker até o servidor reiniciar; as chamadas seguintes voltam vazias, e nada era dito.
+  Agora o worker suspenso diz isso uma vez, na etapa `provider`. O teste usa
+  `Runtime::start_reporting`, que recebe as linhas em vez do stderr.
+
+**Mutações:** três no leitor (sem `O_NOFOLLOW`, sem `O_NONBLOCK`, sem a conferência de arquivo
+regular); três na leitura fora da thread (o `on_disk` inline, a frescura final inline, a frescura do
+scheduler inline); seis na chave (cada um dos seis pontos); três no prazo (o prazo de 60 s, a espera
+sem prazo pelo leitor, o filho não morto no prazo); três no worker (sem o `eprintln!`, sem a
+deduplicação, a ingestão silenciosa) e duas na suspensão (sem o aviso, sem a deduplicação). Todas
+derrubadas.
+
+**Registrado sem correção:**
+- o pânico do worker de memória fora do pool bloqueante segue sem ser observado (não há costura
+  para provocá-lo);
+- o enriquecimento e a consolidação ainda gravam na thread assíncrona;
+- os achados restantes da revisão: `unwrap` de mutex dentro de `Drop`, `StateStore::load` sem
+  `O_NOFOLLOW`/`O_NONBLOCK`, entradas do `Inflight` sem guarda de drop, stdout do summarizer sem
+  limite, o `__watch` que pode matar um pid reaproveitado, `--budget` truncado em `u32`;
+- no eval, `is_error` sem distinguir falha de infraestrutura (falta um transcript real de erro de
+  API) e o `run_agent` que escreve o prompt antes de ler.
+
+**Falha intermitente, 4ª ocorrência:** `shell_edits::a_fast_fingerprint_resets_the_slow_count`
+falhou uma vez nos gates locais e uma vez em cinco execuções isoladas logo depois, sempre na primeira
+asserção. Depois disso, não se repetiu em 30 execuções isoladas nem em 6 execuções do binário `cli`
+inteiro, nem no `master` (15 isoladas, 6 inteiras). O teste põe um `git` atrás de `sleep 0.06` nas
+duas chamadas e conta com terminar nos 500 ms do orçamento; sob carga de processos, estourar o
+orçamento desliga a detecção em vez de contar uma impressão lenta. O `bounded::output` repete o laço
+anterior (o mesmo poll de 2 ms), então a falha fica registrada como sensível a carga, sem correção.
+
+**Testes:** 694 → 702 no build padrão, 710 → 719 com `online` (mais dois ignorados, os filhos dos testes de reexecução).
+

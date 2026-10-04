@@ -140,7 +140,10 @@ async fn launch(config: &UpstreamConfig) -> Result<Arc<ClientRuntime>, UpstreamE
         timeout: config.timeout * 2,
         ..Default::default()
     };
-    let transport = StdioTransport::create_with_server_launch(program, args, None, options)
+    // The SDK only adds variables to the inherited environment: the key is overridden with an
+    // empty value, which reads as unset, so ripwire never receives it (D-146).
+    let env = std::collections::HashMap::from([(crate::online::KEY_VAR.into(), String::new())]);
+    let transport = StdioTransport::create_with_server_launch(program, args, Some(env), options)
         .map_err(|e| UpstreamError::Unavailable(e.to_string()))?;
     let details = ClientDetails {
         client_info: Implementation {
@@ -251,7 +254,10 @@ impl Upstream for RipwireUpstream {
     }
 }
 
-/// `ripwire --version` → "0.6.4", or "unavailable". Run with an argument array, never a shell.
+/// How long `ripwire --version` may take: it runs before `serve` answers its host and in every
+/// hook that asks ripwire, so a binary that hangs there must not hang them (D-146).
+const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// `binary` as an absolute path: taken as given when it names a directory component, looked up on
 /// `PATH` otherwise. `None` when nothing executable answers to it.
 pub fn resolve(binary: &Path) -> Option<PathBuf> {
@@ -283,12 +289,15 @@ pub fn binary_stamp(binary: &Path) -> Option<(String, u64, u64)> {
     Some((path.to_string_lossy().into_owned(), meta.len(), mtime))
 }
 
+/// `ripwire --version` → "0.6.4", or "unavailable", also after [`VERSION_TIMEOUT`]. Run with an
+/// argument array, never a shell.
 pub fn ripwire_version(binary: &std::path::Path) -> String {
-    std::process::Command::new(binary)
-        .arg("--version")
-        .output()
+    let mut command = std::process::Command::new(binary);
+    command.arg("--version").env_remove(crate::online::KEY_VAR);
+    let deadline = std::time::Instant::now() + VERSION_TIMEOUT;
+    crate::bounded::output(command, deadline)
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|(_, out)| String::from_utf8(out).ok())
         .and_then(|s| s.split_whitespace().nth(1).map(str::to_string))
         .unwrap_or_else(|| "unavailable".into())
 }

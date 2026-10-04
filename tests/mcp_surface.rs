@@ -568,7 +568,6 @@ fn finished_calls_and_late_cancels_leave_nothing_behind() {
 }
 
 /// Starts the binary with extra environment variables.
-#[cfg(feature = "online")]
 async fn start_broker_with_env(args: Vec<String>, env: &[(&str, &str)]) -> Arc<ClientRuntime> {
     let env = env
         .iter()
@@ -685,6 +684,56 @@ async fn an_online_server_says_so_in_its_status_without_the_credential() {
     let schema = serde_json::to_value(&task.input_schema).unwrap();
     assert_eq!(schema["properties"]["budget_tokens"]["minimum"], 512);
     client.shut_down().await.unwrap();
+}
+
+/// The provider key belongs to the broker: no process it starts inherits it (D-146). Spies stand
+/// in for ripwire (its `--version` and its MCP server) and for the summarizer's version command,
+/// and write what they received.
+#[tokio::test]
+async fn no_process_the_server_starts_inherits_the_provider_key() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let seen = bin.path().join("seen");
+    let spy = |name: &str, then: &str| {
+        let p = bin.path().join(name);
+        common::write_executable(
+            &p,
+            format!(
+                "#!/bin/sh\nprintf '%s [%s] key=%s\\n' {name} \"$*\" \"${{RIPWIRE_BROKER_JEV_API_KEY-}}\" >> '{}'\n{then}\n",
+                seen.display()
+            ),
+        );
+        p
+    };
+    let fake = common::slow_ripwire(bin.path());
+    let ripwire = spy("ripwire-spy", &format!("exec '{}' \"$@\"", fake.display()));
+    let llm = spy("llm", "cat >/dev/null; echo 'A note.'");
+    let version = spy("llm-version", "echo v1");
+    let args = [
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--ripwire",
+        ripwire.to_str().unwrap(),
+        "--summarizer-cmd",
+        llm.to_str().unwrap(),
+        "--summarizer-version-cmd",
+        version.to_str().unwrap(),
+    ];
+    let client = start_broker_with_env(
+        args.iter().map(|a| a.to_string()).collect(),
+        &[("RIPWIRE_BROKER_JEV_API_KEY", "tok-child-leak")],
+    )
+    .await;
+
+    let (is_error, out) = call(&client, "context_before_finish", json!({})).await;
+    client.shut_down().await.unwrap();
+
+    assert!(!is_error, "{out}");
+    let seen = std::fs::read_to_string(&seen).unwrap();
+    for launch in ["ripwire-spy [--version]", "--mcp]", "llm-version []"] {
+        assert!(seen.contains(launch), "{launch} never ran:\n{seen}");
+    }
+    assert!(!seen.contains("tok-child-leak"), "{seen}");
 }
 
 // --- D-052 #9: a tools/call the SDK rejects before the handler leaves nothing behind ---

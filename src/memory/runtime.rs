@@ -14,6 +14,7 @@ use crate::online::classifier::MemoryClassifier;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 
 /// `memory drain` stops after this long, or after [`DRAIN_JOBS`] jobs (PRD jev-mem §4).
@@ -116,27 +117,60 @@ impl Runtime {
 
     /// Runs the worker in the background until the runtime is dropped: incorporate the spool,
     /// run every ready job and a consolidation round that came due, then wait `tick`. With
-    /// `--memory-selection deterministic` only the spool and retention run: nothing is sent.
+    /// `--memory-selection deterministic` only the spool and retention run: nothing is sent. The
+    /// disk work (spool, retention) runs in the blocking pool, and a stage that starts failing is
+    /// said on stderr (D-146).
     pub fn start(&mut self, tick: Duration) {
+        self.start_reporting(tick, |line| eprintln!("{line}"));
+    }
+
+    /// [`Runtime::start`], with what the worker says going to `say` instead of stderr.
+    pub fn start_reporting(&mut self, tick: Duration, say: impl Fn(&str) + Send + 'static) {
         let (store, worker, cancel) =
             (self.store.clone(), self.worker.clone(), self.cancel.clone());
         let enrich = self.selection == Selection::Jev;
         self.task = Some(tokio::spawn(async move {
             let mut swept_at: Option<u64> = None;
+            let mut said = Said::new(say);
             loop {
                 let now = SystemClock.now_ms();
                 if swept_at.is_none_or(|at| now.saturating_sub(at) >= SWEEP_EVERY_MS) {
-                    let _ = store.sweep(now);
+                    let s = store.clone();
+                    said.note(
+                        "retention",
+                        tokio::task::spawn_blocking(move || s.sweep(now)).await,
+                    );
                     swept_at = Some(now);
                 }
-                let _ = store.ingest();
-                while enrich && let Ok(Some(_)) = worker.run_once(SystemClock.now_ms()).await {
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                }
+                let s = store.clone();
+                said.note(
+                    "ingest",
+                    tokio::task::spawn_blocking(move || s.ingest()).await,
+                );
                 if enrich {
-                    let _ = worker.consolidate(SystemClock.now_ms()).await;
+                    loop {
+                        let ran = worker.run_once(SystemClock.now_ms()).await;
+                        let done = !matches!(ran, Ok(Some(_)));
+                        said.note("enrichment", Ok(ran));
+                        if done {
+                            break;
+                        }
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                    }
+                    let round = worker.consolidate(SystemClock.now_ms()).await;
+                    said.note("consolidation", Ok(round));
+                    // A 401/403 comes back as a run, not a refusal, and suspends the worker for
+                    // the life of the process.
+                    if worker.is_suspended() {
+                        said.failed(
+                            "provider",
+                            "the provider refused the credential (401/403); jobs wait for a \
+                             server restart"
+                                .into(),
+                        );
+                    }
                 }
                 tokio::select! {
                     _ = cancel.cancelled() => return,
@@ -144,6 +178,41 @@ impl Runtime {
                 }
             }
         }));
+    }
+}
+
+/// What each stage of the worker last said: a store that stays broken is said once, when the
+/// stage starts failing or fails differently, and a success clears it. A store held by another
+/// writer is not a failure.
+struct Said {
+    last: std::collections::HashMap<&'static str, String>,
+    say: Box<dyn Fn(&str) + Send>,
+}
+
+impl Said {
+    fn new(say: impl Fn(&str) + Send + 'static) -> Self {
+        Self {
+            last: Default::default(),
+            say: Box::new(say),
+        }
+    }
+
+    fn note<T>(&mut self, stage: &'static str, ran: Result<Result<T, Refusal>, JoinError>) {
+        match ran {
+            Ok(Ok(_)) | Ok(Err(Refusal::Locked)) => {
+                self.last.remove(stage);
+            }
+            Ok(Err(refusal)) => self.failed(stage, format!("{refusal:?}")),
+            Err(_) => self.failed(stage, "panicked".into()),
+        }
+    }
+
+    /// Says `why` for `stage`, unless it is what the stage said last.
+    fn failed(&mut self, stage: &'static str, why: String) {
+        if self.last.get(stage) != Some(&why) {
+            (self.say)(&format!("ripwire-broker: memory worker: {stage}: {why}"));
+            self.last.insert(stage, why);
+        }
     }
 }
 

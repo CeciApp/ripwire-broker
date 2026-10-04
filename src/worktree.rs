@@ -2,9 +2,8 @@
 //! that edited files is told apart from one that only read, before ripwire starts.
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// Past this many `git status` entries the tree is "too dirty to follow" and has no fingerprint,
@@ -156,7 +155,8 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, Unusabl
     if Instant::now() >= deadline {
         return Err(Unusable::TooSlow);
     }
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(root)
         .args(args)
@@ -165,51 +165,10 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, Unusabl
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| Unusable::NotGit)?;
-    // Read on a thread: a long listing would fill the pipe and stall the child past the deadline.
-    // The answer comes back over a channel with the same deadline: a process that git (or a
-    // wrapper) left behind can hold the pipe open long after git exits, and a plain `join` would
-    // wait for it. Such a reader is abandoned; it ends when the pipe closes.
-    let mut stdout = child.stdout.take().ok_or(Unusable::NotGit)?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = tx.send(stdout.read_to_end(&mut buf).map(|_| buf));
-    });
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                let out = match rx.recv_timeout(left) {
-                    Ok(read) => read.map_err(|_| Unusable::NotGit)?,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        return Err(Unusable::TooSlow);
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        return Err(Unusable::NotGit);
-                    }
-                };
-                return if status.success() {
-                    Ok(out)
-                } else {
-                    Err(Unusable::NotGit)
-                };
-            }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Unusable::TooSlow);
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Unusable::NotGit);
-            }
-        }
+        .env_remove(crate::online::KEY_VAR);
+    match crate::bounded::output(command, deadline) {
+        Ok((status, out)) if status.success() => Ok(out),
+        Ok(_) | Err(crate::bounded::Stop::Failed) => Err(Unusable::NotGit),
+        Err(crate::bounded::Stop::Late) => Err(Unusable::TooSlow),
     }
 }

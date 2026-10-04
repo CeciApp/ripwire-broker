@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::print_stdout, clippy::dbg_macro)]
 
+mod bounded;
 pub mod broker;
 /// Public for the property that memory never pushes an envelope past its budget (PRD jev-mem
 /// §8.2). Internal: no stability promise.
