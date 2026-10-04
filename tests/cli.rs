@@ -4670,3 +4670,60 @@ fn an_empty_or_relative_directory_variable_never_puts_state_in_the_workspace() {
         );
     }
 }
+
+#[test]
+fn the_codex_snippet_is_valid_toml_for_any_workspace_path() {
+    // A decomposed name (as macOS keeps them), a quote and a backslash in the path.
+    let parent = tempfile::tempdir().unwrap();
+    let ws = parent.path().join("Ac\u{327}a\u{303}o \"x\\y\"");
+    std::fs::create_dir_all(&ws).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run(
+        &[
+            "install",
+            "codex",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--codex-home",
+            home.path().to_str().unwrap(),
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "{err}");
+    let start = out
+        .find("[mcp_servers.ripwire-broker]")
+        .expect("the snippet");
+    let snippet: String = out[start..]
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let check = Proc::new("python3")
+        .args([
+            "-c",
+            "import sys, tomllib, json; t = tomllib.loads(sys.stdin.read()); \
+             print(json.dumps(t['mcp_servers']['ripwire-broker']['args']))",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write as _;
+            c.stdin.take().unwrap().write_all(snippet.as_bytes())?;
+            c.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{snippet}\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let args: Vec<String> = serde_json::from_slice(&check.stdout).unwrap();
+    let canonical = ws.canonicalize().unwrap();
+    assert!(
+        args.iter()
+            .any(|a| std::path::Path::new(a) == canonical || std::path::Path::new(a) == ws),
+        "the path comes back as it is: {args:?}"
+    );
+}
