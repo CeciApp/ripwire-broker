@@ -1884,6 +1884,70 @@ fn a_second_hook_event_does_not_ask_ripwire_for_its_version_again() {
 }
 
 #[test]
+fn a_hook_event_that_will_ask_nothing_starts_no_ripwire() {
+    let state = tempfile::tempdir().unwrap();
+    let ws = common::sample_repo();
+    let stub_dir = tempfile::tempdir().unwrap();
+    let counter = stub_dir.path().join("version-asks");
+    let ripwire = common::counting_ripwire(stub_dir.path(), &counter);
+    let launches = || {
+        std::fs::read_to_string(stub_dir.path().join("version-asks.launches"))
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    };
+    let fixture = |name: &str| {
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/hooks/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+        .replace("__WORKSPACE__", &ws.path().display().to_string())
+    };
+    let hook = |event: &str, extra: &[&str]| {
+        let mut args = vec![
+            "hook",
+            "claude-code",
+            event,
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--ripwire",
+            ripwire.to_str().unwrap(),
+        ];
+        args.extend(extra);
+        args.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+    };
+    let call = |args: Vec<String>, ev: &str| {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (code, _, err) = run(&args, ev);
+        assert_eq!(code, 0, "{err}");
+    };
+
+    // The first prompt of a session asks; the next ones (no --every-prompt) do not.
+    let prompt = fixture("claude_code_user_prompt_submit");
+    call(hook("user-prompt-submit", &[]), &prompt);
+    assert_eq!(launches(), 1);
+    call(hook("user-prompt-submit", &[]), &prompt);
+    call(hook("user-prompt-submit", &[]), &prompt);
+    assert_eq!(launches(), 1, "prompts after the first ask nothing");
+
+    // An edit inside the coalescing window is held for the next answer, not asked.
+    common::write(ws.path(), "src/auth.py", "changed\n");
+    let edit = fixture("claude_code_post_tool_use");
+    call(
+        hook("post-tool-use", &["--edit-interval-ms", "600000"]),
+        &edit,
+    );
+    let after_first_edit = launches();
+    call(
+        hook("post-tool-use", &["--edit-interval-ms", "600000"]),
+        &edit,
+    );
+    assert_eq!(launches(), after_first_edit, "a held edit asks nothing");
+}
+
+#[test]
 fn a_swapped_ripwire_is_read_again() {
     let state = tempfile::tempdir().unwrap();
     let ws = common::sample_repo();
@@ -1913,6 +1977,8 @@ fn a_swapped_ripwire_is_read_again() {
         ws.path().to_str().unwrap(),
         "--ripwire",
         ripwire.to_str().unwrap(),
+        // Each prompt asks, so each one needs ripwire's version.
+        "--every-prompt",
     ];
 
     run(&args, &ev);
@@ -2161,6 +2227,7 @@ fn a_launch_failure_is_published_as_an_error_and_the_hook_still_answers() {
 fn a_marker_is_honoured_even_when_ripwire_cannot_launch() {
     let ws = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
+    // Every prompt asks, so the resume below is one that needs ripwire.
     let args = [
         "hook",
         "claude-code",
@@ -2171,6 +2238,7 @@ fn a_marker_is_honoured_even_when_ripwire_cannot_launch() {
         state.path().to_str().unwrap(),
         "--ripwire",
         "/nonexistent/ripwire",
+        "--every-prompt",
     ];
     let snapshot = || {
         let Read::Valid(s) = bar_snapshot(state.path(), "s-1", ws.path()) else {
@@ -2203,8 +2271,8 @@ fn a_marker_is_honoured_even_when_ripwire_cannot_launch() {
     assert!(!s.opted_out, "the resume is saved");
     assert_eq!(s.last_analysis.unwrap().status, AnalysisStatus::Error);
     assert_eq!(
-        s.stats.events, 0,
-        "D4: counters unchanged by a launch failure"
+        s.stats.events, 2,
+        "D4: the two events that needed no ripwire count; the one whose launch failed does not"
     );
 }
 

@@ -450,14 +450,33 @@ pub async fn handle(
     state: &mut SessionState,
     policy: &Policy,
 ) -> Option<Value> {
-    broker.restore_session(state.memory.clone());
-    broker.resume_request_ids(state.next_request);
-    let hits_before = broker.session_hits();
+    count(state);
+    match plan(event, input, state, policy, &|p| broker.in_workspace(p)) {
+        Plan::Done(out) => out,
+        ask => ask_with(event, ask, broker, state, policy).await,
+    }
+}
+
+/// One more event of the session.
+fn count(state: &mut SessionState) {
     if state.stats.started_at == 0 {
         state.stats.started_at = now();
     }
     state.stats.events += 1;
-    let out = match respond(event, input, broker, state, policy).await {
+}
+
+/// Sends what `plan` asked for, with the session restored around it.
+async fn ask_with(
+    event: Event,
+    planned: Plan,
+    broker: &Broker,
+    state: &mut SessionState,
+    policy: &Policy,
+) -> Option<Value> {
+    broker.restore_session(state.memory.clone());
+    broker.resume_request_ids(state.next_request);
+    let hits_before = broker.session_hits();
+    let out = match ask(event, planned, broker, state, policy).await {
         Ok(out) => out,
         Err(e) => {
             analysed(state, event, AnalysisStatus::Error, Some(e.error));
@@ -519,41 +538,43 @@ fn toggle(state: &mut SessionState, marker: Option<&str>) -> Option<Value> {
     }
 }
 
-async fn respond(
+/// What an event comes to before any ripwire: an answer already (silence, an acknowledgement),
+/// or the one request it has to send. Only the latter starts ripwire.
+enum Plan {
+    Done(Option<Value>),
+    Prompt(TaskRequest),
+    Edit(EditRequest),
+    Finish { looping: bool },
+}
+
+/// Decides `event` from the session alone, updating it as the event does (the prompt count, a
+/// marker, the edits held back); `in_workspace` maps a path to the workspace or `None`.
+fn plan(
     event: Event,
     input: &Value,
-    broker: &Broker,
     state: &mut SessionState,
     policy: &Policy,
-) -> Result<Option<Value>, BrokerError> {
+    in_workspace: &dyn Fn(&str) -> Option<String>,
+) -> Plan {
     match event {
         Event::UserPromptSubmit => {
             let Some(prompt) = input.get("prompt").and_then(Value::as_str) else {
-                return Ok(None);
+                return Plan::Done(None);
             };
             let first = state.prompts_seen == 0;
             state.prompts_seen += 1;
             let (marker, task) = marker(prompt);
             if let Some(paused) = toggle(state, marker) {
-                return Ok(Some(paused));
+                return Plan::Done(Some(paused));
             }
             if state.opted_out || (!first && !policy.every_prompt) {
-                return Ok(None);
+                return Plan::Done(None);
             }
             let mut req = TaskRequest::new(task);
             req.budget_tokens = capped(policy.prompt_budget);
-            let env = broker.context_for_task(req).await?;
-            analysed(state, event, status_of(env.status), None);
-            // An envelope with only limitations ("found nothing, route uncertain") costs the model
-            // tokens and tells it nothing to act on; like an edit without news, it stays out
-            // (D-130). The analysis above still reaches the status line.
-            if !carries_content(&env) {
-                return Ok(None);
-            }
-            record(state, event, &env, policy);
-            Ok(Some(inject(event, &env)))
+            Plan::Prompt(req)
         }
-        Event::PostToolUse | Event::Stop if state.opted_out => Ok(None),
+        Event::PostToolUse | Event::Stop if state.opted_out => Plan::Done(None),
         Event::PostToolUse => {
             let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
             let shell = is_shell(event, input);
@@ -565,13 +586,13 @@ async fn respond(
             let mut files: Vec<String> = named
                 .iter()
                 .map(|f| std::path::Path::new(cwd).join(f))
-                .filter_map(|p| broker.in_workspace(&p.to_string_lossy()))
+                .filter_map(|p| in_workspace(&p.to_string_lossy()))
                 .collect();
             if shell {
                 files.truncate(MAX_BASH_EDIT_FILES);
             }
             if files.is_empty() {
-                return Ok(None);
+                return Plan::Done(None);
             }
             // A burst of edits is one ask. Past the first, an edit almost never carries anything
             // the session has not been told, and each ask costs real ripwire work (D-106). The
@@ -587,7 +608,7 @@ async fn respond(
                             state.held_edits.push(f);
                         }
                     }
-                    return Ok(None);
+                    return Plan::Done(None);
                 }
                 state.last_edit_ms = now;
             }
@@ -596,11 +617,44 @@ async fn respond(
                     files.push(held);
                 }
             }
-            let req = EditRequest {
+            Plan::Edit(EditRequest {
                 files,
                 budget_tokens: capped(policy.edit_budget),
                 ..EditRequest::default()
-            };
+            })
+        }
+        Event::Stop => Plan::Finish {
+            looping: input
+                .get("stop_hook_active")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+    }
+}
+
+/// Sends the request `plan` decided on and turns its envelope into the host's output.
+async fn ask(
+    event: Event,
+    planned: Plan,
+    broker: &Broker,
+    state: &mut SessionState,
+    policy: &Policy,
+) -> Result<Option<Value>, BrokerError> {
+    match planned {
+        Plan::Done(out) => Ok(out),
+        Plan::Prompt(req) => {
+            let env = broker.context_for_task(req).await?;
+            analysed(state, event, status_of(env.status), None);
+            // An envelope with only limitations ("found nothing, route uncertain") costs the model
+            // tokens and tells it nothing to act on; like an edit without news, it stays out
+            // (D-130). The analysis above still reaches the status line.
+            if !carries_content(&env) {
+                return Ok(None);
+            }
+            record(state, event, &env, policy);
+            Ok(Some(inject(event, &env)))
+        }
+        Plan::Edit(req) => {
             let env = broker.context_after_edit(req).await?;
             analysed(state, event, status_of(env.status), None);
             if !has_news(&env, &state.memory) {
@@ -609,20 +663,13 @@ async fn respond(
             record(state, event, &env, policy);
             Ok(Some(inject(event, &env)))
         }
-        Event::Stop => {
-            if !input.is_object() {
-                return Ok(None);
-            }
+        Plan::Finish { looping } => {
             let req = FinishRequest {
                 budget_tokens: capped(FinishRequest::default().budget_tokens),
                 ..FinishRequest::default()
             };
             let env = broker.context_before_finish(req).await?;
             analysed(state, event, status_of(env.status), None);
-            let looping = input
-                .get("stop_hook_active")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
             Ok(match env.status {
                 Status::Ready => None,
                 Status::AttentionRequired if policy.gate && !looping => {
@@ -756,6 +803,25 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
             .map(|d| d.as_millis() as u64),
         ..default
     };
+    // Decided before ripwire is touched: an event that asks nothing (a prompt past the first, an
+    // opted-out session, an edit held back or outside the workspace) neither launches it nor
+    // reads its version. Should the launch fail, the session goes back to how it was, as if the
+    // event had not come.
+    let before_plan = state.clone();
+    let planned = match crate::workspace::Workspace::new(&workspace) {
+        Ok(ws) => {
+            count(&mut state);
+            let planned = plan(args.event, &input, &mut state, &policy, &|p| {
+                ws.relative(p).ok()
+            });
+            if let Plan::Done(out) = planned {
+                finish(&state);
+                return out;
+            }
+            Some(planned)
+        }
+        Err(_) => None,
+    };
     // The version of a binary that has not changed is the version we already read. A ripwire
     // swapped mid-session keeps the old reading until the next session, which costs a stale
     // string in `provenance` and a stale compatibility check; the alternative is a whole process
@@ -796,6 +862,9 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     let broker = match launched.await {
         Ok(b) => b,
         Err(e) => {
+            if planned.is_some() {
+                state = before_plan;
+            }
             // The marker of this prompt needs no ripwire: honour it before reporting (D-126).
             let prompt = input.get("prompt").and_then(Value::as_str);
             let marker = prompt
@@ -817,7 +886,10 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
             return Some(failure(&e));
         }
     };
-    let out = handle(args.host, args.event, &input, &broker, &mut state, &policy).await;
+    let out = match planned {
+        Some(planned) => ask_with(args.event, planned, &broker, &mut state, &policy).await,
+        None => handle(args.host, args.event, &input, &broker, &mut state, &policy).await,
+    };
     finish(&state);
     out
 }

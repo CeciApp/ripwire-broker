@@ -152,6 +152,7 @@ import json, sys
 if "--version" in sys.argv:
     open("{counter}", "a").write("asked\n")
     print("ripwire 0.6.5"); sys.exit(0)
+open("{counter}.launches", "a").write("launched\n")
 for line in sys.stdin:
     msg = json.loads(line)
     if "id" not in msg:
