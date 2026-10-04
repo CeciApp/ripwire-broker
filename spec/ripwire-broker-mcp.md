@@ -723,7 +723,8 @@ HTTP, na v1 ele não lê memória: o caminho fica pronto para quando houver cach
 #### Operações upstream
 
 - `situational_awareness` para raio de impacto, testes e co-change;
-- `edit_check` para cada símbolo informado, até limite configurável;
+- `edit_check` para cada símbolo informado, até limite configurável; os que passam do limite
+  são nomeados na limitação `symbols_truncated` (D-148);
 - `impact` apenas quando necessário para esclarecer uma alteração de alto risco.
 
 Um símbolo que o Ripwire recusa nesses dois verbos (o agente o renomeou ou apagou) vira a

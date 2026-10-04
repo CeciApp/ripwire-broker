@@ -163,7 +163,9 @@ whole answer. The minimum budget is 256; with `--online`, `context_for_task` nee
 
 When `context_for_task` reads a word as a symbol that the repository doesn't have (for
 example a host's tool name in the prompt), it explores the task instead and adds the
-limitation `symbol_not_found`.
+limitation `symbol_not_found`. An empty `task` is `invalid_input`. `context_after_edit` checks at
+most five `symbols`; the rest are named in a `symbols_truncated` limitation. An `item_truncated`
+limitation appears only for a body the answer actually shows.
 
 ### Incremental context
 
