@@ -363,6 +363,23 @@ async fn words_inside_other_words_do_not_route_a_task() {
 }
 
 #[tokio::test]
+async fn two_symbols_with_the_same_body_are_both_kept() {
+    // Two different symbols whose bodies happen to be identical, in two files.
+    let pack = r#"<ctx schema="ripwire.pack-task/v1" task="t" route="subtoken+body" est_tokens="100" budget_tokens="2000"><sigs><d l="1" n="default" p="src/a.rs" r="1">fn default() -> Self</d><d l="1" n="default" p="src/b.rs" r="2">fn default() -> Self</d></sigs><bodies shown="2" total="2" capped="0"><b t="fn" l="1" p="src/a.rs" n="default"><![CDATA[fn default() -> Self { Self::new() }]]></b><b t="fn" l="1" p="src/b.rs" n="default"><![CDATA[fn default() -> Self { Self::new() }]]></b></bodies></ctx>"#;
+    let (b, _fake, _ws) = broker(FakeUpstream::new().answer_text("explore", pack)).await;
+    let out = to_json(
+        &b.context_for_task(orient("how are defaults built?"))
+            .await
+            .unwrap(),
+    );
+    let items = out["items"].as_array().unwrap();
+    let at = |path: &str| items.iter().filter(|i| i["path"] == path).count();
+    assert_eq!((at("src/a.rs"), at("src/b.rs")), (1, 1), "{out:#}");
+    let bodies = items.iter().filter(|i| i.get("content").is_some()).count();
+    assert_eq!(bodies, 1, "the body itself goes out once: {out:#}");
+}
+
+#[tokio::test]
 async fn an_explicit_mode_overrides_the_router() {
     let (b, fake, _ws) = broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
     let mut req = TaskRequest::new("how does `login` work?");
