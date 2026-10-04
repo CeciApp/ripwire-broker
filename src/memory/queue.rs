@@ -49,6 +49,8 @@ pub enum Outcome {
 pub struct Lease {
     pub(crate) node_id: String,
     pub(crate) run: u32,
+    /// When it was taken.
+    pub(crate) at_ms: u64,
     pub(crate) _lock: File,
 }
 

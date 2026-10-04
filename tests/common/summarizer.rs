@@ -11,6 +11,7 @@ pub struct FakeSummarizer {
     reply: Result<String, String>,
     gate: Option<Arc<Notify>>,
     prompts: Mutex<Vec<String>>,
+    versioned: bool,
 }
 
 impl FakeSummarizer {
@@ -20,6 +21,7 @@ impl FakeSummarizer {
             reply: Ok(text.into()),
             gate: None,
             prompts: Mutex::new(vec![]),
+            versioned: false,
         }
     }
 
@@ -32,6 +34,12 @@ impl FakeSummarizer {
 
     pub fn model(mut self, id: &str) -> Self {
         self.model = id.into();
+        self
+    }
+
+    /// As if a `--summarizer-version-cmd` pinned its weights.
+    pub fn versioned(mut self) -> Self {
+        self.versioned = true;
         self
     }
 
@@ -63,5 +71,9 @@ impl Summarizer for FakeSummarizer {
 
     fn program(&self) -> String {
         "fake".into()
+    }
+
+    fn trusted_version(&self) -> bool {
+        self.versioned
     }
 }

@@ -4,6 +4,7 @@
 
 pub mod admission;
 pub mod command;
+pub mod consolidate;
 pub mod controller;
 pub mod identity;
 pub mod index;

@@ -100,6 +100,11 @@ impl Runtime {
         &self.config
     }
 
+    /// `--summarizer-cmd`: consolidation rounds may write derived notes with it.
+    pub fn set_summarizer(&self, summarizer: Arc<dyn crate::summarizer::Summarizer>) {
+        self.worker.set_summarizer(summarizer);
+    }
+
     /// What the broker's tools publish to.
     pub fn publish(&self) -> &MemoryConfig {
         &self.publish
@@ -124,6 +129,7 @@ impl Runtime {
                         return;
                     }
                 }
+                let _ = worker.consolidate(SystemClock.now_ms()).await;
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = tokio::time::sleep(tick) => {}
@@ -162,9 +168,27 @@ pub struct Drained {
     pub stop: DrainStop,
 }
 
+/// No job is ready: a consolidation round that came due runs, if a whole round's time is left
+/// (none while the worker is suspended). It is bounded by its own deadline and never cut: a
+/// round cut after it paid would be bought again by the next drain. Then how the drain stops.
+async fn idle(
+    worker: &Worker,
+    clock: &dyn Clock,
+    until: tokio::time::Instant,
+) -> Result<DrainStop, Refusal> {
+    let left = until.saturating_duration_since(tokio::time::Instant::now());
+    if left >= super::consolidate::DEADLINE {
+        worker.consolidate(clock.now_ms()).await?;
+    }
+    Ok(match worker.is_suspended() {
+        true => DrainStop::Suspended,
+        false => DrainStop::Empty,
+    })
+}
+
 /// `memory drain`: incorporates the spool and runs ready jobs, at most `max_jobs` and for at
-/// most `deadline`. A job cut by the deadline has used its run (runs are counted on disk), and
-/// its lease is free for the next process.
+/// most `deadline`, then a consolidation round if one came due. A job cut by the deadline has
+/// used its run (runs are counted on disk), and its lease is free for the next process.
 pub async fn drain(
     store: &Store,
     worker: &Worker,
@@ -204,10 +228,7 @@ pub async fn drain(
             }
             Ok(Ok(Some(_))) => jobs += 1,
             Ok(Ok(None)) => {
-                let stop = match worker.is_suspended() {
-                    true => DrainStop::Suspended,
-                    false => DrainStop::Empty,
-                };
+                let stop = idle(worker, clock, until).await?;
                 return Ok(Drained { jobs, stop });
             }
             Ok(Err(e)) => return Err(e),

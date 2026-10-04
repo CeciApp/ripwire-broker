@@ -8,6 +8,7 @@
 //! hook never waits. One writer at a time incorporates them into a new generation and only then
 //! removes them: a crash in between replays the spool, and a replay is the same node.
 
+use super::consolidate::{self, Consolidation, Decided};
 use super::model::{Edge, EnrichmentState, Record, Rejected, Types};
 use super::queue::{Job, JobState, Lease, Ledger, MAX_RUNS, Outcome};
 use super::time::Sequence;
@@ -185,6 +186,8 @@ pub struct State {
     pub jobs: BTreeMap<String, Job>,
     /// Where the quota was before it had a file of its own; read only for such a store.
     pub ledger: Ledger,
+    /// The consolidation cadence, cursor and decisions (PRD jev-mem §9).
+    pub consolidation: Consolidation,
 }
 
 /// What one retention sweep did.
@@ -516,6 +519,7 @@ impl Store {
             state.nodes.remove(id);
             state.jobs.remove(id);
         }
+        state.consolidation.drop_nodes(&gone);
         state
             .edges
             .retain(|_, e| !gone.contains(&e.source) && !gone.contains(&e.target));
@@ -545,6 +549,7 @@ impl Store {
             state.jobs.remove(id);
             state.tombstones.insert(id.clone(), until_ms);
         }
+        state.consolidation.drop_nodes(&gone);
         state
             .edges
             .retain(|_, e| !gone.contains(&e.source) && !gone.contains(&e.target));
@@ -583,6 +588,7 @@ impl Store {
         let removed = state.nodes.len();
         state.jobs.clear();
         state.edges.clear();
+        state.consolidation = Consolidation::default();
         for id in std::mem::take(&mut state.nodes).into_keys() {
             state.tombstones.insert(id, until_ms);
         }
@@ -653,6 +659,7 @@ impl Store {
             taken = Some(Lease {
                 node_id: id.clone(),
                 run: job.runs,
+                at_ms: now_ms,
                 _lock: lock,
             });
             break;
@@ -707,6 +714,13 @@ impl Store {
             }
         };
         state.enriched += u64::from(newly_counted);
+        if newly_counted {
+            // Its pairs wait from now; an older wait is kept.
+            state
+                .consolidation
+                .pending_since_ms
+                .get_or_insert(lease.at_ms);
+        }
         self.write_snapshot(state.generation, &on_disk(&state)?)?;
         drop(lease);
         Ok(())
@@ -741,6 +755,7 @@ impl Store {
         types: Option<Types>,
         enrichment: EnrichmentState,
         edges: Vec<Edge>,
+        neighbours: &[String],
     ) -> Result<bool, Refusal> {
         let _writer = self.writer_waiting()?;
         let mut state = self.load()?;
@@ -758,6 +773,15 @@ impl Store {
         }
         node.enrichment.state = enrichment;
         node.enrichment.prompt_version = Some(super::prompts::VERSION.into());
+        // What consolidation will pair it with (derived notes are left out there).
+        for n in neighbours.iter().filter(|n| *n != node_id) {
+            if state.nodes.contains_key(n) {
+                state
+                    .consolidation
+                    .pairs
+                    .insert(consolidate::Pair::of(node_id, n));
+            }
+        }
         let mut added = Vec::new();
         for mut edge in edges {
             if !state.nodes.contains_key(&edge.source) || !state.nodes.contains_key(&edge.target) {
@@ -787,6 +811,114 @@ impl Store {
         }
         self.write_snapshot(state.generation, &bytes)?;
         Ok(true)
+    }
+
+    /// Ends a consolidation round in one new snapshot: the decisions about pairs whose
+    /// memories are still there unchanged, with their links and derived notes, the counter at `seen_enriched`,
+    /// the cursor when the pairs were asked, and the wait restarted while pairs are still
+    /// pending. Returns how many pairs were decided.
+    pub fn commit_round(
+        &self,
+        seen_enriched: u64,
+        cursor: Option<String>,
+        decided: Vec<Decided>,
+        model: &str,
+        now_ms: u64,
+    ) -> Result<usize, Refusal> {
+        let _writer = self.writer_waiting()?;
+        let mut state = self.load()?;
+        let generation = state.generation + 1;
+        let intact = |state: &State, id: &str, hash: &str| {
+            state.nodes.get(id).is_some_and(|r| r.content_hash == hash)
+        };
+        let mut count = 0;
+        let mut added = Vec::new();
+        let mut added_notes: Vec<String> = Vec::new();
+        let before = state.consolidation.decisions.clone();
+        for d in decided {
+            let p = &d.decision;
+            if !intact(&state, &p.pair.first, &p.hashes.0)
+                || !intact(&state, &p.pair.second, &p.hashes.1)
+            {
+                continue;
+            }
+            if let Some(mut link) = d.link {
+                let key = link.key();
+                if state.edges.len() < self.limits.max_edges || state.edges.contains_key(&key) {
+                    link.generation = generation;
+                    if state.edges.insert(key.clone(), link).is_none() {
+                        added.push(key);
+                    }
+                }
+            }
+            let mut decision = d.decision;
+            if let Some(mut note) = d.note {
+                let id = note.node_id.clone();
+                let blocked = state.tombstones.contains_key(&id);
+                if !blocked
+                    && !state.nodes.contains_key(&id)
+                    && state.nodes.len() < self.limits.max_nodes
+                {
+                    note.ingest_seq = state
+                        .sequence
+                        .advance()
+                        .ok_or(Full::Nodes)
+                        .map_err(Refusal::Full)?;
+                    note.generation = generation;
+                    state.nodes.insert(id.clone(), note);
+                    added_notes.push(id.clone());
+                }
+                // Cached only when the note is there to be reused.
+                if let Some(key) = d.cache.filter(|_| state.nodes.contains_key(&id)) {
+                    state.consolidation.notes.insert(key, id);
+                }
+            }
+            // A note that could not be added, or was forgotten meanwhile, is not pointed at.
+            if decision
+                .note
+                .as_ref()
+                .is_some_and(|n| !state.nodes.contains_key(n))
+            {
+                decision.note = None;
+            }
+            state.consolidation.decisions.insert(d.key, decision);
+            count += 1;
+        }
+        let still = !consolidate::pending(&state, model).is_empty();
+        let c = &mut state.consolidation;
+        c.counted = c.counted.max(seen_enriched);
+        if cursor.is_some() {
+            c.cursor = cursor;
+        }
+        c.pending_since_ms = still.then_some(now_ms);
+        if !added.is_empty() || !added_notes.is_empty() {
+            state.generation = generation;
+        }
+        let mut bytes = on_disk(&state)?;
+        if bytes.len() as u64 > self.limits.snapshot_bytes {
+            // The links and notes would overflow the snapshot: keep the decisions without them.
+            for key in &added {
+                state.edges.remove(key);
+            }
+            let gone: BTreeSet<String> = added_notes.into_iter().collect();
+            for id in &gone {
+                state.nodes.remove(id);
+            }
+            state.consolidation.drop_nodes(&gone);
+            bytes = on_disk(&state)?;
+        }
+        if bytes.len() as u64 > self.limits.snapshot_bytes {
+            // Not even the decisions fit: the cadence alone is written, so the round is not
+            // bought again at the next tick.
+            state.consolidation.decisions = before;
+            count = 0;
+            bytes = on_disk(&state)?;
+            if bytes.len() as u64 > self.limits.snapshot_bytes {
+                return Err(Refusal::Full(Full::Snapshot));
+            }
+        }
+        self.write_snapshot(state.generation, &bytes)?;
+        Ok(count)
     }
 
     /// The explicit action that gives a failed job its runs back. `false` when it is not failed.

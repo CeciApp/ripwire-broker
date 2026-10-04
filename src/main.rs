@@ -83,7 +83,12 @@ fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
         match CommandSummarizer::from_command_line(&m.command, m.timeout, m.version_cmd.as_deref())
         {
             Ok(model) => {
-                broker.summarizer = Some(Arc::new(model));
+                let model = Arc::new(model);
+                // The same model writes the derived notes of memory consolidation.
+                if let Some(rt) = &runtime {
+                    rt.set_summarizer(model.clone());
+                }
+                broker.summarizer = Some(model);
                 broker.summarizer_wait = m.wait;
             }
             Err(e) => eprintln!("ripwire-broker: notes disabled: {e}"),

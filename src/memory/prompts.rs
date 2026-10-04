@@ -27,7 +27,8 @@ pub enum Stage {
 pub fn state_fields(stage: Stage) -> &'static [&'static str] {
     match stage {
         Stage::Typing => &["observation"],
-        Stage::Relations | Stage::Alias | Stage::Consolidation => &["new_memory", "candidates"],
+        Stage::Relations | Stage::Alias => &["new_memory", "candidates"],
+        Stage::Consolidation => &["pairs"],
         Stage::ImplicitTime => &["new_memory", "candidates", "temporal_references"],
         Stage::Routing => &["query"],
         Stage::Scoring => &["query", "evidence", "candidates"],
@@ -49,9 +50,13 @@ fn choice(question: &str, options: &[(&str, &str)]) -> JevQuestion {
     JevQuestion::choice(&text, options)
 }
 
-/// The named questions of `stage`; per-candidate stages are about `candidates[c]`.
+/// The named questions of `stage`; per-candidate stages are about `candidates[c]`, and
+/// consolidation about `pairs[c]`, so one request can carry several pairs.
 pub fn questions(stage: Stage, c: usize) -> Vec<(&'static str, JevQuestion)> {
-    let pair = format!("new_memory.content and candidates[{c}].content");
+    let pair = match stage {
+        Stage::Consolidation => format!("pairs[{c}].newer.content and pairs[{c}].older.content"),
+        _ => format!("new_memory.content and candidates[{c}].content"),
+    };
     match stage {
         Stage::Typing => vec![
             (
@@ -302,7 +307,9 @@ pub fn questions(stage: Stage, c: usize) -> Vec<(&'static str, JevQuestion)> {
             (
                 "obsolescence",
                 noul(
-                    &format!("Does new_memory.content make candidates[{c}].content obsolete?"),
+                    &format!(
+                        "Does pairs[{c}].newer.content make pairs[{c}].older.content obsolete?"
+                    ),
                     "the newer account supersedes the older one.",
                     "both still hold.",
                 ),

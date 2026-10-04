@@ -14,6 +14,11 @@ pub trait Summarizer: Send + Sync + std::fmt::Debug {
     fn model_id(&self) -> String;
     /// The program's name for the status resource (no arguments, no paths).
     fn program(&self) -> String;
+    /// Whether [`Summarizer::model_id`] pins the weights (a `--summarizer-version-cmd` ran):
+    /// only then may a generated note be reused from disk.
+    fn trusted_version(&self) -> bool {
+        false
+    }
 }
 
 /// A local model CLI (`ollama run phi4`, `llama-cli ...`): prompt on stdin, note on stdout.
@@ -24,6 +29,7 @@ pub struct CommandSummarizer {
     argv: Vec<String>,
     hard_timeout: Duration,
     model_id: String,
+    trusted_version: bool,
 }
 
 fn split_command(command: &str) -> Result<Vec<String>, String> {
@@ -62,6 +68,7 @@ impl CommandSummarizer {
             argv,
             hard_timeout,
             model_id,
+            trusted_version: version_cmd.is_some(),
         })
     }
 }
@@ -97,6 +104,10 @@ impl Summarizer for CommandSummarizer {
 
     fn model_id(&self) -> String {
         self.model_id.clone()
+    }
+
+    fn trusted_version(&self) -> bool {
+        self.trusted_version
     }
 
     fn program(&self) -> String {
