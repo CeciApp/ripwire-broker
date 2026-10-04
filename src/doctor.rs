@@ -99,25 +99,27 @@ pub async fn run(args: &DoctorArgs) -> Report {
         ),
     }
     let broker = match (&workspace, upstream_ok) {
-        (Some(ws), true) => match crate::local::launch(ws, &args.upstream, false, None, None).await
-        {
-            Ok(b) => {
-                r.add(
-                    "required_verbs",
-                    Outcome::Ok,
-                    format!("{} read-only verbs available", REQUIRED_VERBS.len()),
-                );
-                Some(b)
+        (Some(ws), true) => {
+            match crate::local::launch(ws, &args.upstream, false, Some(version.clone()), None).await
+            {
+                Ok(b) => {
+                    r.add(
+                        "required_verbs",
+                        Outcome::Ok,
+                        format!("{} read-only verbs available", REQUIRED_VERBS.len()),
+                    );
+                    Some(b)
+                }
+                Err(e) => {
+                    r.add(
+                        "required_verbs",
+                        Outcome::Fail,
+                        format!("{}: {}", e.error, e.message),
+                    );
+                    None
+                }
             }
-            Err(e) => {
-                r.add(
-                    "required_verbs",
-                    Outcome::Fail,
-                    format!("{}: {}", e.error, e.message),
-                );
-                None
-            }
-        },
+        }
         _ => {
             r.add("required_verbs", Outcome::Skip, "");
             None

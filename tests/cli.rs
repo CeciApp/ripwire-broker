@@ -5174,3 +5174,18 @@ fn the_watcher_never_kills_a_process_that_only_reuses_the_pid() {
     assert!(status.success());
     assert!(alive, "a process with another start time was killed");
 }
+
+/// `doctor` asks ripwire its version once (D-147): the launch it then makes reused nothing and
+/// asked again.
+#[test]
+fn doctor_asks_the_version_once() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let counter = bin.path().join("versions");
+    let ripwire = common::counting_ripwire(bin.path(), &counter);
+
+    doctor(ws.path(), &["--ripwire", ripwire.to_str().unwrap()]);
+
+    let asked = std::fs::read_to_string(&counter).unwrap_or_default();
+    assert_eq!(asked.lines().count(), 1, "{asked:?}");
+}
