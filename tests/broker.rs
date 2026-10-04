@@ -467,6 +467,42 @@ fn edit_fake() -> FakeUpstream {
 }
 
 #[tokio::test]
+async fn an_unknown_symbol_after_an_edit_is_a_limitation_not_a_failed_call() {
+    // What ripwire answers for a symbol it does not know: the agent renamed or deleted it.
+    let refused = || UpstreamError::Refused("symbol not found: login".into());
+    for (verb, fake) in [
+        ("edit_check", edit_fake().fail("edit_check", refused())),
+        ("impact", edit_fake().fail("impact", refused())),
+    ] {
+        let (b, _fake, ws) = broker(fake).await;
+        common::write(ws.path(), "src/auth.py", "changed");
+        let req = EditRequest {
+            files: vec!["src/auth.py".into()],
+            symbols: vec!["login".into()],
+            ..EditRequest::default()
+        };
+        let out = to_json(
+            &b.context_after_edit(req)
+                .await
+                .unwrap_or_else(|e| panic!("{verb}: the whole call failed: {e:?}")),
+        );
+        assert!(
+            out["items"].as_array().is_some_and(|i| !i.is_empty()),
+            "{verb}: the situation already fetched is kept: {out:#}"
+        );
+        let missing = out["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["kind"] == "evidence_missing")
+            .unwrap_or_else(|| panic!("{verb}: says what is missing: {out:#}"));
+        assert_eq!(missing["source"]["verb"], verb, "{missing}");
+        let detail = missing["detail"].as_str().unwrap();
+        assert!(!detail.contains("gate"), "no gate after an edit: {detail}");
+    }
+}
+
+#[tokio::test]
 async fn after_an_edit_the_broken_contract_and_its_callers_are_reported() {
     let (b, fake, ws) = broker(edit_fake()).await;
     common::write(ws.path(), "src/auth.py", "changed");

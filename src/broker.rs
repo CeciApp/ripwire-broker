@@ -709,18 +709,28 @@ impl Broker {
         if !symbols.is_empty() {
             push_once(&mut verbs, "edit_check");
         }
-        let checks = futures_util::future::join_all(
-            symbols
-                .iter()
-                .map(|symbol| self.call("edit_check", json!({"symbol": symbol}))),
-        )
+        // A symbol ripwire refuses (the agent renamed or deleted it) is missing evidence, not a
+        // failed call: the situation already fetched still answers. Only an unavailable
+        // upstream fails the tool.
+        let checks = futures_util::future::join_all(symbols.iter().map(|symbol| {
+            self.evidence_or(
+                "edit_check",
+                json!({"symbol": symbol}),
+                normalize::unchecked,
+            )
+        }))
         .await;
         let mut impact_needed = Vec::new();
         for (symbol, answer) in symbols.iter().zip(checks) {
-            let (found, changed) = normalize::edit_check(&answer?);
-            entries.extend(found);
-            if changed {
-                impact_needed.push(*symbol);
+            match answer? {
+                Ok(payload) => {
+                    let (found, changed) = normalize::edit_check(&payload);
+                    entries.extend(found);
+                    if changed {
+                        impact_needed.push(*symbol);
+                    }
+                }
+                Err(missing) => entries.push(missing),
             }
         }
         // `impact` only to clarify a high-risk change: a contract that actually changed. Also
@@ -731,14 +741,15 @@ impl Broker {
         if !impact_needed.is_empty() {
             push_once(&mut verbs, "impact");
         }
-        let impacts = futures_util::future::join_all(
-            impact_needed
-                .iter()
-                .map(|symbol| self.call("impact", json!({"symbol": symbol}))),
-        )
+        let impacts = futures_util::future::join_all(impact_needed.iter().map(|symbol| {
+            self.evidence_or("impact", json!({"symbol": symbol}), normalize::unchecked)
+        }))
         .await;
         for answer in impacts {
-            entries.extend(normalize::impact(&answer?));
+            match answer? {
+                Ok(payload) => entries.extend(normalize::impact(&payload)),
+                Err(missing) => entries.push(missing),
+            }
         }
         let attention = entries
             .iter()
@@ -805,10 +816,21 @@ impl Broker {
         verb: &'static str,
         args: Value,
     ) -> Result<Result<String, Entry>, BrokerError> {
+        self.evidence_or(verb, args, normalize::missing_evidence)
+            .await
+    }
+
+    /// [`Broker::evidence`], with the limitation a refusal becomes chosen by the caller.
+    async fn evidence_or(
+        &self,
+        verb: &'static str,
+        args: Value,
+        missing: fn(&'static str, &str) -> Entry,
+    ) -> Result<Result<String, Entry>, BrokerError> {
         match self.guarded_call(verb, args).await {
             Ok(p) => Ok(Ok(p)),
             Err(e @ UpstreamError::Unavailable(_)) => Err(e.into()),
-            Err(e) => Ok(Err(normalize::missing_evidence(verb, &e.to_string()))),
+            Err(e) => Ok(Err(missing(verb, &e.to_string()))),
         }
     }
 
