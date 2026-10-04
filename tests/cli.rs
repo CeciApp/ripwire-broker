@@ -4829,3 +4829,32 @@ fn the_codex_snippet_is_valid_toml_for_any_workspace_path() {
         "the path comes back as it is: {args:?}"
     );
 }
+
+/// A hook whose host stopped reading still exits 0 (PRD §21.4): its answer goes to a closed
+/// stdout, which `println!` turned into a panic and exit 101.
+#[test]
+fn a_hook_exits_zero_when_its_stdout_is_closed() {
+    use std::io::Write;
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let input = serde_json::json!({"session_id": "s", "cwd": ws.path(),
+        "hook_event_name": "UserPromptSubmit", "prompt": "#ripwire-off"});
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args(["hook", "claude-code", "user-prompt-submit", "--workspace"])
+        .arg(ws.path())
+        .arg("--state-dir")
+        .arg(state.path())
+        .args(["--ripwire", "/nonexistent/ripwire"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input.to_string().as_bytes()).unwrap();
+    drop(stdin);
+
+    let status = child.wait().unwrap();
+
+    assert_eq!(status.code(), Some(0));
+}

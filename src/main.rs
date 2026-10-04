@@ -219,7 +219,10 @@ async fn main() -> ExitCode {
             let mut input = String::new();
             let _ = std::io::stdin().read_to_string(&mut input);
             if let Some(out) = hook::run(&a, &input).await {
-                println!("{out}");
+                // A host that stopped reading (EPIPE) must not turn into exit 101: `println!`
+                // would panic.
+                use std::io::Write;
+                let _ = writeln!(std::io::stdout(), "{out}");
             }
             return ExitCode::SUCCESS;
         }
