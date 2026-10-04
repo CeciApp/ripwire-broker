@@ -168,10 +168,14 @@ fn run_agent(
     stderr: &Path,
     timeout: Duration,
 ) -> Result<AgentRun, String> {
+    use std::os::unix::process::CommandExt as _;
     let (program, args) = argv.split_first().ok_or("empty agent command")?;
     let err = std::fs::File::create(stderr).map_err(|e| e.to_string())?;
+    // A group of its own, so that a timeout ends whatever the agent started: a child left
+    // holding its stdout would keep the run waiting for an end of file that never comes.
     let mut child = Command::new(program)
         .args(args)
+        .process_group(0)
         .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(workdir)
         .stdin(Stdio::piped())
@@ -208,7 +212,7 @@ fn run_agent(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 timed_out = true;
-                let _ = child.kill();
+                score::kill_group(child.id());
                 break;
             }
         }

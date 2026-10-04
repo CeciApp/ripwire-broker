@@ -1687,3 +1687,60 @@ fn edits_the_agent_committed_still_count_and_any_file_name_matches() {
         "measured against the task's base, names exact: {record}"
     );
 }
+
+#[test]
+fn a_timeout_ends_the_agent_and_the_check_with_everything_they_started() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    // An agent whose child keeps its stdout open, and a check that leaves a process behind.
+    let agent = work.path().join("hanging-agent");
+    common::write_executable(
+        &agent,
+        r##"#!/bin/sh
+cat > /dev/null
+echo '{"type":"system","subtype":"init","tools":[],"mcp_servers":[]}'
+sleep 30
+"##,
+    );
+    let pidfile = work.path().join("check.pid");
+    let mut task = auth_task("t", repo.path(), &head, None);
+    task["check"] = json!(format!("sleep 30 & echo $! > {}; wait", pidfile.display()));
+    std::fs::write(
+        work.path().join("corpus.json"),
+        json!({ "tasks": [task] }).to_string(),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .args([
+            "run",
+            "--corpus",
+            work.path().join("corpus.json").to_str().unwrap(),
+            "--out",
+            work.path().join("out").to_str().unwrap(),
+            "--arms",
+            "none",
+            "--timeout-s",
+            "1",
+            "--check-timeout-s",
+            "1",
+            "--agent-cmd",
+            agent.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the run ended at its timeouts, not when the children did: {:?}",
+        started.elapsed()
+    );
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    let alive = Command::new("kill")
+        .args(["-0", pid.trim()])
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "the check's process went with it");
+}

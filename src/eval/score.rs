@@ -95,10 +95,22 @@ pub fn modified_files(workdir: &Path, base: &str) -> Vec<String> {
     files
 }
 
+/// Kills `pid`'s process group: what a timed-out command started goes with it (a test runner
+/// holding a database, a child holding a pipe open). Without `unsafe`, through `kill(1)`.
+pub(crate) fn kill_group(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-KILL", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// Runs `command` (a task's `setup`, `check` or `teardown`, already pointed at the copy): exit 0
 /// within `timeout` passes, anything else, including a timeout, fails. Its stdout and stderr go
-/// to `log`, or nowhere.
+/// to `log`, or nowhere. It runs in a process group of its own, killed whole on a timeout.
 pub fn passes(mut command: Command, timeout: Duration, log: Option<&Path>) -> bool {
+    use std::os::unix::process::CommandExt as _;
     let file = log.and_then(|p| std::fs::File::create(p).ok());
     let (out, err) = match file
         .as_ref()
@@ -107,7 +119,7 @@ pub fn passes(mut command: Command, timeout: Duration, log: Option<&Path>) -> bo
         Some((o, e)) => (Stdio::from(o), Stdio::from(e)),
         None => (Stdio::null(), Stdio::null()),
     };
-    let Ok(mut child) = command.stdout(out).stderr(err).spawn() else {
+    let Ok(mut child) = command.stdout(out).stderr(err).process_group(0).spawn() else {
         return false;
     };
     let start = std::time::Instant::now();
@@ -116,7 +128,7 @@ pub fn passes(mut command: Command, timeout: Duration, log: Option<&Path>) -> bo
             Ok(Some(status)) => return status.success(),
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
+                kill_group(child.id());
                 let _ = child.wait();
                 return false;
             }
