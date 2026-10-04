@@ -18,8 +18,8 @@ pub struct SessionMemory {
     seen: BTreeSet<String>,
     /// Insertion order of what this process remembered, oldest first, so eviction drops the
     /// oldest rather than an arbitrary fingerprint. Deliberately not serialized: the state
-    /// file's shape is unchanged, and a memory restored from disk therefore carries no order,
-    /// so its entries are evicted in fingerprint order until this process refills the queue.
+    /// file's shape is unchanged, and a memory restored from disk therefore carries no order;
+    /// its entries count as older than anything this process adds, in fingerprint order.
     #[serde(skip)]
     order: VecDeque<String>,
 }
@@ -126,17 +126,36 @@ impl SessionMemory {
     /// Down to `MAX_REMEMBERED`, oldest first. Forgetting a fingerprint only costs a repeated
     /// delivery of that one item, never a wrong answer.
     pub(crate) fn trim(&mut self) {
+        if self.seen.len() <= MAX_REMEMBERED {
+            return;
+        }
+        self.adopt_restored();
         while self.seen.len() > MAX_REMEMBERED {
-            let oldest = self
-                .order
-                .pop_front()
-                .or_else(|| self.seen.iter().next().cloned());
-            match oldest {
+            match self.order.pop_front() {
                 Some(f) => {
                     self.seen.remove(&f);
                 }
                 None => break,
             }
+        }
+    }
+
+    /// Puts what was restored from disk, and so is not in the queue, ahead of everything this
+    /// process remembered: otherwise a full session would evict each new fingerprint as soon as
+    /// it arrived. Once done, the queue holds every fingerprint.
+    fn adopt_restored(&mut self) {
+        if self.order.len() >= self.seen.len() {
+            return;
+        }
+        let queued: std::collections::HashSet<&String> = self.order.iter().collect();
+        let restored: Vec<String> = self
+            .seen
+            .iter()
+            .filter(|f| !queued.contains(f))
+            .cloned()
+            .collect();
+        for f in restored.into_iter().rev() {
+            self.order.push_front(f);
         }
     }
 }

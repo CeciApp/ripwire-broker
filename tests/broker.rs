@@ -1490,6 +1490,35 @@ async fn the_session_memory_stops_at_its_ceiling() {
     );
 }
 
+#[tokio::test]
+async fn a_full_session_restored_from_disk_still_remembers_what_it_sends_next() {
+    use ripwire_broker::session::{MAX_REMEMBERED, SessionMemory};
+    // A hook's session at its ceiling: every event restores it, works, and saves it again.
+    let seen: Vec<String> = (0..MAX_REMEMBERED).map(|i| format!("{i:064x}")).collect();
+    let full: SessionMemory = serde_json::from_value(json!({ "seen": seen })).unwrap();
+    let (b, _fake, _ws) =
+        incremental_broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    b.restore_session(full);
+
+    b.context_for_task(orient("how are the routes authenticated?"))
+        .await
+        .unwrap();
+    let second = to_json(
+        &b.context_for_task(orient("how are the routes authenticated?"))
+            .await
+            .unwrap(),
+    );
+    let lead = &second["items"][0];
+    assert!(
+        lead["why_included"]
+            .as_str()
+            .unwrap()
+            .contains("already delivered in this session"),
+        "what was just sent is remembered, and older entries make room: {lead}"
+    );
+    assert_eq!(b.session_snapshot().len(), MAX_REMEMBERED);
+}
+
 // --- D-098: the availability probe is shared between back-to-back status reads ---
 
 #[tokio::test]
