@@ -160,7 +160,8 @@ impl Consolidation {
     }
 }
 
-/// `None` when either node is gone.
+/// Both parents, the model, the prompt, the policy and the schema (PRD jev-mem §7); `None`
+/// when either node is gone.
 fn decision_key(state: &State, pair: &Pair, model: &str) -> Option<String> {
     let (a, b) = (
         state.nodes.get(&pair.first)?,
@@ -174,6 +175,8 @@ fn decision_key(state: &State, pair: &Pair, model: &str) -> Option<String> {
         &b.content_hash,
         model,
         prompts::VERSION,
+        POLICY_VERSION,
+        &SCHEMA_VERSION.to_string(),
     ]))
 }
 
