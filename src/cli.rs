@@ -28,7 +28,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--edit-interval-ms N] [--memory]
        ripwire-broker hook-log --session ID [--state-dir DIR]
        ripwire-broker hook-stats [--state-dir DIR] [--json]
-       ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] TASK...
+       ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] [--] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--jev-probe [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
@@ -495,13 +495,20 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
     let mut f = Flags::default();
     let mut args = args.peekable();
     while let Some(a) = args.next() {
+        if a == "--" {
+            // The flags end here: a task may name one (`prompt -- what does --budget do`).
+            f.words.extend(args.by_ref());
+            break;
+        }
         if !a.starts_with("--") {
             f.words.push(a);
             continue;
         }
         if !allowed.contains(&a.as_str()) {
             if a == "--online" {
-                return Err(usage("--online is only available to serve (D-064)"));
+                return Err(usage(
+                    "--online is only available to serve, install and memory drain (D-064)",
+                ));
             }
             return Err(usage(format_args!("unknown argument '{a}'")));
         }
@@ -523,7 +530,12 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             "--state-dir" => f.state_dir = Some(value.into()),
             "--session" => f.session = Some(value),
             "--codex-home" => f.codex_home = Some(value.into()),
-            "--budget" => f.budget = Some(number(&value)? as u32),
+            "--budget" => {
+                f.budget = Some(
+                    u32::try_from(number(&value)?)
+                        .map_err(|_| usage(format_args!("{a} is too large")))?,
+                )
+            }
             "--summarizer-cmd" => f.summarizer_cmd = Some(value),
             "--ripwire-max-rss-mb" | "--max-rss-mb" => f.max_rss_mb = Some(number(&value)?),
             "--edit-interval-ms" => f.edit_interval_ms = Some(number(&value)?),
@@ -572,15 +584,37 @@ fn no_words(f: &Flags) -> Result<(), String> {
     }
 }
 
+/// Whether `own` asks for one of `wanted` as an argument of its own: never as the value of a flag
+/// (`--workspace -h`) nor among the words of a task, which start at `prompt`'s first word
+/// (`prompt explain the -h flag`).
+fn asks(own: &[String], wanted: &[&str]) -> bool {
+    let task_words = own.first().is_some_and(|s| s == "prompt");
+    let mut value_next = false;
+    for a in own.iter().skip(usize::from(task_words)) {
+        if std::mem::take(&mut value_next) {
+            continue;
+        }
+        if wanted.contains(&a.as_str()) {
+            return true;
+        }
+        if a.starts_with("--") {
+            value_next = !SWITCHES.contains(&a.as_str());
+        } else if task_words {
+            return false;
+        }
+    }
+    false
+}
+
 pub fn parse(args: Vec<String>) -> Result<Command, String> {
     let own = args
         .iter()
         .position(|a| a == "--")
         .map_or(&args[..], |i| &args[..i]);
-    if own.iter().any(|a| a == "-h" || a == "--help") {
+    if asks(own, &["-h", "--help"]) {
         return Ok(Command::Info(USAGE.into()));
     }
-    if own.iter().any(|a| a == "--version") {
+    if asks(own, &["--version"]) {
         return Ok(Command::Info(format!(
             "ripwire-broker {}",
             env!("CARGO_PKG_VERSION")
@@ -655,9 +689,12 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     .and_then(|v| v.parse::<u64>().ok())
                     .ok_or_else(|| usage(format_args!("__watch needs {k}")))
             };
+            let pid = |k: &str| {
+                u32::try_from(num(k)?).map_err(|_| usage(format_args!("__watch: {k} is too large")))
+            };
             Ok(Command::Watch {
-                parent: num("--parent")? as u32,
-                child: num("--child")? as u32,
+                parent: pid("--parent")?,
+                child: pid("--child")?,
                 max_rss_mb: num("--max-rss-mb")?,
                 program: values.get("--program").cloned().unwrap_or_default(),
             })

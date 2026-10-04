@@ -351,9 +351,104 @@ fn hook_and_prompt_reject_online() {
     ] {
         let err = parse(bad).expect_err(&format!("{bad:?}"));
         assert!(
-            err.contains("--online is only available to serve"),
+            err.contains("--online is only available to serve, install and memory drain"),
             "{bad:?}: {err}"
         );
+    }
+}
+
+/// The message names every command that takes `--online` (D-147): it said "only serve", and
+/// `install` and `memory drain` take it too.
+#[test]
+fn the_commands_the_online_message_names_take_online() {
+    assert!(parse(&["--workspace", "/w", "--online"]).is_ok());
+    assert!(parse(&["install", "claude-code", "--workspace", "/w", "--online"]).is_ok());
+    assert!(parse(&["memory", "drain", "--workspace", "/w", "--online"]).is_ok());
+}
+
+/// A number that does not fit is refused, never wrapped (D-147): `--budget 4294967296` was 0.
+#[test]
+fn numbers_past_their_width_are_refused() {
+    let err = parse(&["prompt", "--workspace", "/w", "--budget", "4294967296", "t"])
+        .expect_err("past u32");
+    assert!(err.contains("--budget"), "{err}");
+    for (k, v) in [("--parent", "4294967297"), ("--child", "4294967297")] {
+        let mut args = vec![
+            "__watch",
+            "--parent",
+            "1",
+            "--child",
+            "2",
+            "--max-rss-mb",
+            "9",
+        ];
+        let at = args.iter().position(|a| *a == k).unwrap();
+        args[at + 1] = v;
+        assert!(parse(&args).is_err(), "{k} {v}");
+    }
+}
+
+/// `-h`, `--help` and `--version` count as arguments of their own, never inside the words of a
+/// task nor as the value of a flag (D-147); `--` ends the flags, so a task can name one.
+#[test]
+fn help_inside_a_task_or_a_value_is_task_text() {
+    let task = |args: &[&str]| match parse(args) {
+        Ok(Command::Prompt(p)) => p.task,
+        other => panic!("{args:?}: {other:?}"),
+    };
+    assert_eq!(
+        task(&[
+            "prompt",
+            "--workspace",
+            "/w",
+            "explain",
+            "the",
+            "-h",
+            "flag"
+        ]),
+        "explain the -h flag"
+    );
+    // A word that looks like a flag is one, unless it comes after `--`.
+    assert!(matches!(
+        parse(&["prompt", "--workspace", "/w", "what", "does", "--version", "print"]),
+        Err(e) if e.contains("unknown argument '--version'")
+    ));
+    assert_eq!(
+        task(&[
+            "prompt",
+            "--workspace",
+            "/w",
+            "--",
+            "what",
+            "does",
+            "--version"
+        ]),
+        "what does --version"
+    );
+    assert_eq!(
+        task(&[
+            "prompt",
+            "--workspace",
+            "/w",
+            "--",
+            "what",
+            "does",
+            "--budget",
+            "do"
+        ]),
+        "what does --budget do"
+    );
+    assert!(matches!(
+        parse(&["prompt", "--workspace", "-h", "t"]),
+        Ok(Command::Prompt(_))
+    ));
+    for help in [
+        &["--help"][..],
+        &["prompt", "--help"],
+        &["prompt", "--workspace", "/w", "-h", "t"],
+        &["hook", "claude-code", "stop", "--help"],
+    ] {
+        assert!(matches!(parse(help), Ok(Command::Info(_))), "{help:?}");
     }
 }
 
