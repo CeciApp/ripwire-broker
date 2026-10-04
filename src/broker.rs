@@ -548,8 +548,6 @@ impl Broker {
         }
     }
 
-    /// `path` (absolute, or relative to the root) as workspace-relative, or `None` if it
-    /// resolves outside (CA-08).
     /// Every entry of the semantic cache as stored (CA-ONLINE-13): hex digest keys and
     /// validated probabilities only. Empty without `--online`.
     pub fn inspect_semantic_cache(&self) -> Vec<String> {
@@ -566,6 +564,8 @@ impl Broker {
         }
     }
 
+    /// `path` (absolute, or relative to the root) as workspace-relative, or `None` if it
+    /// resolves outside (CA-08).
     pub fn in_workspace(&self, path: &str) -> Option<String> {
         self.workspace.relative(path).ok()
     }

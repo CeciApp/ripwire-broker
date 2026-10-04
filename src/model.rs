@@ -33,6 +33,9 @@ pub enum Intent {
     Review,
 }
 
+/// An item's part in the task. `Test`, `Config` and `Risk` are reserved in schema v1 and never
+/// built today: tests go to `tests[]`, risks to `risks[]`, and no verb tells a configuration file
+/// apart (PRD §10.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
