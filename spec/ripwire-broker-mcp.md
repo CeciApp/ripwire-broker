@@ -2294,7 +2294,10 @@ estágios); `JevRequestBuilder` (`state` e perguntas puras e versionadas);
 `jev_rate_limit_total`, `jev_retry_total`, `jev_split_total`,
 `semantic_candidates_total`, `semantic_selected_ranges_total`,
 `semantic_only_candidates_total` (ganho além do Ripwire inicial) e
-`online_context_tokens_estimated`.
+`online_context_tokens_estimated`. Com `--memory`, descoberta e memória dividem um teto de
+pedidos em voo, e as métricas `jev_*` da descoberta contam a partir de quando o pedido entra na
+fila desse teto: `jev_latency_ms` e `jev_in_flight` incluem a espera, e um pedido cancelado
+ainda na fila já está em `jev_requests_total` (D-149).
 
 **Tracing** [v0.1 §18.2]: cada chamada tem correlation ID local (o
 `provenance.request_id` do §14.2). Spans: `ripwire.initial`, `semantic.discovery`,
