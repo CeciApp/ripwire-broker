@@ -98,7 +98,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked --features online -- -D warnings
       # The #[ignore] tests stay ignored: nextest does not run them without --run-ignored,
-      # and the two in online_live.rs need RIPWIRE_BROKER_JEV_API_KEY, which no PR run has.
+      # and the three in online_live.rs need RIPWIRE_BROKER_JEV_API_KEY, which no PR run has.
       - name: Tests
         # Shorter than the job's: a step that runs out ends with its log kept, where a job
         # cancelled at its own limit keeps none, and the hung test could not be named.

@@ -35,7 +35,7 @@ commands; `ripwire-broker --help` lists them all:
 | `hook-log --session ID` | What the hooks injected in a session (counts only) |
 | `hook-stats [--json]` | Every saved hook session (one with no events and nothing remembered is skipped) reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
 | `prompt --workspace DIR [--budget N] TASK...` | Prints the task followed by its context, for clients without hooks (`--budget` defaults to `context_for_task`'s 2500) |
-| `doctor --workspace DIR [--jev-probe]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
+| `doctor --workspace DIR [--json] [--jev-probe [--jev-model M]]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
 | `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online] [--memory]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
 | `memory status --workspace DIR [--json]` | The workspace's memory: memories, pending observations, generation, sizes, and the category of the error if the store cannot be read |
@@ -44,6 +44,10 @@ commands; `ripwire-broker --help` lists them all:
 | `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
 | `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker or the provider refuses the key |
 | `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back; local |
+
+Every command that keeps state (`hook`, `hook-log`, `hook-stats`, `doctor`, `statusline`, `memory …`)
+also takes `--state-dir DIR`; without it, `$XDG_STATE_HOME/ripwire-broker` or
+`~/.local/state/ripwire-broker` (an empty or relative `XDG_STATE_HOME` counts as unset).
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
 return a structured error (`upstream_unavailable` / `incompatible_upstream`), and the next
@@ -68,7 +72,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
-| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Being built** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects, enriches and reads memories back in `context_for_task`; the hooks do not deliver them yet |
+| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Experimental** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects, enriches, consolidates and reads memories back in `context_for_task`; the hooks do not deliver them yet, and no host has been validated (T3.11) |
 | `--memory-read-deadline-ms N` | `750` | 1–750; longest a task waits for memory |
 | `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read, taken out of `--jev-request-limit` (discovery keeps the rest); 0 serves only the local index |
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
@@ -256,7 +260,8 @@ say so (`semantic_skipped`).
 (`interrupted` after it), `--jev-max-candidates 16`, `--jev-lookahead-max 32` (0 turns the
 lookahead off), `--jev-max-source-bytes` (source rendered, not evaluated), `--jev-no-cache`,
 `--jev-model` (pinned; `jev-latest` is never a default), `--jev-provider typesafe` (the only
-provider). Transient failures are retried by stage, a 429 waits for its `Retry-After`, and a client cancel aborts the HTTP requests.
+provider). Transient failures are retried by stage, a 429 waits for its `Retry-After` up to 30 s (a longer one is
+not waited for, and the discovery ends incomplete), and a client cancel aborts the HTTP requests.
 Decisions are cached in memory, keyed by digests only.
 
 **Status:** `online` in `ripwire-broker://status` carries the
@@ -268,11 +273,12 @@ The mode is **experimental** until the A/B evaluation of
 [PRD §23.15](spec/ripwire-broker-mcp.md#2315-avaliação-e-barras-de-merge) shows it keeps or
 improves correctness.
 
-## Persistent memory (being built)
+## Persistent memory (experimental)
 
 `--memory` keeps observations of the workspace between sessions
-([PRD](docs/jev-mem-prd.md), [plan](spec/plan/jev-mem-plan.md)). It is being built in phases
-and is not usable yet; this section grows with it.
+([PRD](docs/jev-mem-prd.md), [plan](spec/plan/jev-mem-plan.md)). Phases 0 to 5 are built: collection,
+enrichment, consolidation, reading in `context_for_task`, and the evaluation arms. It stays
+experimental until it is validated in real hosts (T3.11) and measured (T5.3).
 
 **What an automatic memory holds:** which analysis ran (after an edit, before finishing), its
 outcome as the broker saw it, the files in scope with the SHA-256 of their bytes, and the names
@@ -315,7 +321,8 @@ types each memory (event, fact, procedure, preference) and relates it to at most
 `--memory-write-candidates` earlier ones (shared entity, shared words, the nearest one). An
 inferred relation needs a probability of at least 0.60, and a pair only counts when every one of
 its answers came back; an unknown answer is never read as no. Each job gets four classifier
-attempts at most, one retry for a transient failure, and waits for a 429 only inside its 5 s;
+attempts at most, one retry for a transient failure, and waits for a 429 only inside its 5 s (a longer
+`Retry-After` sets the job aside for at most an hour);
 401/403 stops the worker until the server restarts. One job per workspace talks to the provider
 at a time, memory and discovery share the four requests in flight, and the workspace has a
 persisted budget of 1,000 attempts and 20,000 questions per 24 hours, shared with the reads and
@@ -387,7 +394,7 @@ Forgetting everything also revokes collection for the workspace: a `revoked` mar
 wins over `--memory`, across restarts, until `ripwire-broker memory resume --workspace DIR`
 removes it. What was forgotten stays forgotten after resuming.
 
-**Commands:** `memory status`, `forget`, `add` and `resume` ([table above](#build-and-run)) are
+**Commands:** `memory status`, `forget`, `add`, `retry` and `resume` ([table above](#build-and-run)) are
 local: they never start ripwire, open a connection or need the credential or the `online`
 feature. `memory drain --online` is the one that talks to the provider.
 `memory add` is the only way a preference or a free-text note gets in; the broker never infers
@@ -437,11 +444,14 @@ hook contract, so the same command serves both:
 - **Never in the way:** a hook always exits 0. A broker failure becomes a notice, never a block. Injected
   context stays under 9,000 characters, because both hosts show only a preview beyond ~10,000.
 - **State:** one private file per session (`0600`, named by the sha256 of the session id) in `--state-dir`,
-  by default `$XDG_STATE_HOME/ripwire-broker` or `~/.local/state/ripwire-broker`. It holds fingerprints and
+  by default `$XDG_STATE_HOME/ripwire-broker` or `~/.local/state/ripwire-broker` (an empty or relative
+  `XDG_STATE_HOME` counts as unset, so state never lands in the workspace). It holds fingerprints and
   counts, never prompts or code. In a git workspace it can also hold the working-tree fingerprint: up to 5,000
   entries, each an absolute path anywhere in the repository with its mtime and size.
-- **Cost:** each hook starts ripwire for one event (about 0.1–0.5 s on a small repository). `doctor` shows the
-  timing of a smoke call.
+- **Cost:** a hook starts ripwire only for an event that asks it something (about 0.1–0.5 s on a small
+  repository): not for a prompt after the first one (without `--every-prompt`), an event of a paused session,
+  an edit held back by the coalescing window, or an edit outside the workspace. `doctor` shows the timing of a
+  smoke call.
 
 ### Measuring the session cache
 
@@ -620,8 +630,9 @@ cargo build --release
   worker dies with the session, so the next one pays for them), and the agent's own duration. Other arms
   have none of these fields, never zeros; arm A sits beside B and C for its `context_for_task` wait. The report's "Custo da memória" table averages them; questions are not turned into
   dollars without verified pricing.
-- **Bars:** each one reads `passa`, `falha` or `insuficiente`. They stay `insuficiente` below 30 tasks in 3
-  repositories.
+- **Bars:** each one reads `passa`, `falha` or `insuficiente`. A bar compares two arms over the (task, repeat)
+  pairs valid in both, so a task one arm failed to run weighs on neither side; it stays `insuficiente` below 30
+  such tasks in 3 repositories. A task whose reference names no tests has no test recall, rather than a full one.
 - **Binaries and timeouts:** `--broker BIN` defaults to the `ripwire-broker` next to `ripwire-eval` (then
   `PATH`), `--ripwire BIN` to `ripwire` on `PATH`. `--timeout-s` caps one agent run (default 1800) and
   `--check-timeout-s` one setup or check (default 600, also for `validate`).

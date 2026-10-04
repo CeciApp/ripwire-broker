@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
-Estado em 2026-10-03, até o
-[D-144](spec/changelog.md#d-144--auditoria-de-2026-10-04-os-achados-médios).
+Estado em 2026-10-04, até o
+[D-145](spec/changelog.md#d-145--documentação-sincronizada-com-o-código-depois-da-auditoria).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -24,7 +24,8 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
 | barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
-| `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 5 feitas (D-136 a D-142): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory`, `memory drain --online`, a leitura em `context_for_task` (`memories[]`, `provenance.memory`, seção legível no texto MCP) a consolidação (cadência de 20 enriquecimentos ou 24 h, decisões e ligações por par, nota derivada pelo `--summarizer-cmd` só com o gate de 0,85) e o instrumento da avaliação (`--memory-selection deterministic`, braços `broker-memory` e `broker-memory-deterministic`, sequências no corpus, custo da memória no relatório). A T2.0 (Choice no modelo pinado) rodou com a chave real. Pendente: a T3.11, validar num Claude Code e num Codex reais que os hosts usam as memórias; os hooks não as trazem na v1 (não fazem HTTP e não há cache de decisões). Pendente também a T5.3, a rodada da avaliação (≥ 30 tarefas em sequências, fora do repositório; o plano lista o que o instrumento ainda não faz). Fase 6 (fechamento) não começada; **experimental** |
+| auditoria de 2026-10-04 (D-143, D-144) | os cinco defeitos mais graves e os achados médios corrigidos em TDD; ficam os baixos, o código morto e as simplificações (lista abaixo) |
+| `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 5 feitas (D-136 a D-142): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory`, `memory drain --online`, a leitura em `context_for_task` (`memories[]`, `provenance.memory`, seção legível no texto MCP), a consolidação (cadência de 20 enriquecimentos ou 24 h, decisões e ligações por par, nota derivada pelo `--summarizer-cmd` só com o gate de 0,85) e o instrumento da avaliação (`--memory-selection deterministic`, braços `broker-memory` e `broker-memory-deterministic`, sequências no corpus, custo da memória no relatório). A T2.0 (Choice no modelo pinado) rodou com a chave real. Pendente: a T3.11, validar num Claude Code e num Codex reais que os hosts usam as memórias; os hooks não as trazem na v1 (não fazem HTTP e não há cache de decisões). Pendente também a T5.3, a rodada da avaliação (≥ 30 tarefas em sequências, fora do repositório; o plano lista o que o instrumento ainda não faz). Fase 6 (fechamento) não começada; **experimental** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
 [changelog de decisões](spec/changelog.md), que é a fonte da verdade sobre o porquê de cada coisa.
@@ -67,10 +68,10 @@ cargo fmt --check
   e workspace (`statusline/<hash>.json` no state-dir) e que o comando só lê. `src/hook.rs` publica,
   `src/install.rs` registra com `--statusline`.
 - **`tests/`:** um arquivo por costura pública (`broker`, `mcp_surface`, `hooks`, `cli`, `statusline`,
-  `online*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
+  `notes`, `summarizer`, `worktree`, `upstream_ripwire`, `online*`, `memory_*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-144, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-145, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -82,8 +83,9 @@ Os instrumentos estão prontos; as medições, não.
 
 ### 1. A/B (PRD §16.2, §17, §23.15)
 
-- **Instrumento:** `ripwire-eval` roda um corpus em quatro braços (`none`, `ripwire`, `broker`,
-  `broker-online`) com Claude Code headless isolado, reduz cada transcript a contagens, pontua
+- **Instrumento:** `ripwire-eval` roda um corpus em seis braços (`none`, `ripwire`, `broker`,
+  `broker-online` e, para a memória, `broker-memory` e `broker-memory-deterministic`, D-141) com
+  Claude Code headless isolado, reduz cada transcript a contagens, pontua
   contra o commit de referência e julga as barras. Uso no [README](README.md#ab-evaluation).
 - **Corpus:** 32 tarefas de commits reais em três repositórios (dois privados, A e B, e este). Mora
   **fora deste repositório**, em `~/projects/ai/CECI/ab-eval/` **noutra máquina** do mantenedor,
@@ -124,6 +126,23 @@ Os instrumentos estão prontos; as medições, não.
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.
+- **Auditoria de 2026-10-04, o que ficou (D-143, D-144):**
+  - a leitura e o hash de arquivos do modo online rodam na thread assíncrona (sem leitor
+    injetável, não há teste vermelho determinístico);
+  - cerca de 35 achados baixos: `println!` do hook que entra em pânico com o pipe fechado (sai com
+    101), `--budget` acima de `u32` que vira 0, `--help` reconhecido dentro do texto da tarefa,
+    arquivos de lease e de sessão nunca apagados, `--summarizer-version-cmd` sem timeout,
+    cancelamento MCP que pode se perder numa janela curta, status que acusa o upstream fora do ar
+    durante um lock rápido, gasto de quota de leitura não gravado e nunca refeito, leitura com um
+    só pedido que paga e não entrega, temporários de snapshot que sobrevivem ao `forget <id>`, e no
+    eval `{repo}`/`{fix}` sem aspas nos comandos, ids de tarefa não validados e a guarda de
+    ferramentas de contexto contornável (`timeout`, `nice`, `bash -lc`);
+  - código que nunca executa (`admission::RENDERER_VERSION`, `transcript::read`,
+    `Role::{Config, Test, Risk}`, entre outros), cerca de 25 itens de API pública usados só por
+    testes, e as simplificações listadas no D-143.
+- **Memória, registrado nas Fases 2 a 5 (D-138 a D-142):** o cache de decisões (sem ele os hooks
+  não entregam memória e `--memory-read-request-limit 0` não serve nada), as notas derivadas fora
+  dos 5 s da rodada, a cadência fora do `memory status`, e os demais itens dos D-140 e D-142.
 - **Diagrama:** `spec/diagrams/` não se atualiza sozinho. Quem mudar a topologia edita o JSON e roda
   `deliver` do archify de novo (D-115, D-132). O archify é um skill, em `~/.agents/skills/archify/`,
   não um comando no `PATH`.

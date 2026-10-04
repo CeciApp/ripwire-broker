@@ -7,7 +7,10 @@
 [D-139](../changelog.md#d-139--fase-3-do---memory-leitura-e-entrega),
 [D-140](../changelog.md#d-140--fase-4-do---memory-consolidação),
 [D-142](../changelog.md#d-142--fase-5-do---memory-avaliação)), com a T3.11 (hosts) e a T5.3 (rodada
-da avaliação) pendentes e manuais; Fase 6 não começada.
+da avaliação) pendentes e manuais; Fase 6 não começada. A auditoria do sistema de 2026-10-04
+([D-143](../changelog.md#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves),
+[D-144](../changelog.md#d-144--auditoria-de-2026-10-04-os-achados-médios)) corrigiu também código da
+memória; ela cobre parte da T6.1, que continua aberta.
 **Spec:** [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) v0.3. Onde este plano diz "PRD §N", é esse documento;
 "PRD principal" é [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md). "CA-N" é o critério
 verificável N do PRD §14.
@@ -128,29 +131,37 @@ Do PRD e das convenções do repositório; valem em todas as tarefas.
 
 ## 4. Mapa de arquivos
 
-Proposta do PRD §13, confirmada contra o código. "novo" não existe hoje.
+Proposta do PRD §13, confirmada contra o código; todos os arquivos abaixo existem, salvo os marcados
+como pendentes.
 
 | Arquivo | Papel | Fase |
 |---|---|---|
-| `src/memory/mod.rs` (novo) | API interna: `admit`, `enqueue`, `drain`, `retrieve`, `forget`, `status` | 1 |
-| `src/memory/model.rs` (novo) | registro `memory/v1`, limites, serialização | 1 |
-| `src/memory/identity.rs` (novo) | `workspace_id`, entidades, `content_hash`, `node_id` | 1 |
-| `src/memory/admission.rs` (novo) | elegibilidade, varredura de segredo/PII, renderizador `memory-observation/v1` | 1 |
-| `src/memory/store.rs` (novo) | spool, snapshot, lock, limites, retenção, tombstones, escrita durável | 1 |
-| `src/memory/queue.rs` (novo) | jobs, leases, tentativas, ledger de quota de 24 h | 1–2 |
-| `src/memory/prompts.rs` (novo) | `memory-prompts/v1` | 2 |
-| `src/memory/controller.rs` (novo, `cfg(feature = "online")`) | worker: typing, candidatos, relações, commit por par | 2 |
-| `src/memory/index.rs` (novo) | tokenização, idf, entidades, RRF | 3 |
-| `src/memory/retrieve.rs` (novo) | routing, expansão, scoring, parada | 3 |
-| `src/memory/consolidate.rs` (novo) | cadência, pares, `RepresentationDecision`, nota derivada | 4 |
-| `src/memory/metrics.rs` (novo) | contadores por workspace/operação | 1–4 |
-| `src/cli.rs`, `src/main.rs` | `--memory`, `--memory-*`, subcomando `memory` | 1–2 |
+| `src/memory/mod.rs` | os módulos da memória | 1 |
+| `src/memory/model.rs` | registro `memory/v1`, limites, serialização | 1 |
+| `src/memory/identity.rs` | `workspace_id`, entidades, `content_hash`, `node_id` | 1 |
+| `src/memory/admission.rs` | elegibilidade, varredura de segredo/PII, renderizador `memory-observation/v1` | 1 |
+| `src/memory/time.rs` | relógio e sequência de ingestão | 1 |
+| `src/memory/store.rs` | spool, snapshot, lock, limites, retenção, tombstones, escrita durável, quota | 1–4 |
+| `src/memory/queue.rs` | jobs, leases, tentativas, ledger de quota de 24 h | 1–2 |
+| `src/memory/publish.rs` | publicação das observações pelas tools e pelos hooks | 1 |
+| `src/memory/command.rs` | `memory status\|forget\|add\|retry\|resume`, locais | 1 |
+| `src/memory/prompts.rs` | `memory-prompts/v1` | 2 |
+| `src/memory/wire.rs` | divisão dos pedidos (32 perguntas, 38.000 bytes, sem cortar um par) | 2 |
+| `src/memory/controller.rs` | worker: typing, candidatos, relações, commit por par; compila no build padrão, e só a ligação ao `JevClient` exige a feature `online` | 2 |
+| `src/memory/runtime.rs` | ciclo de vida do worker no `serve`, `memory drain` | 2 |
+| `src/memory/index.rs` | tokenização, idf, entidades, RRF | 3 |
+| `src/memory/retrieve.rs` | routing, expansão, scoring, parada; seleção determinística (T5.0) | 3, 5 |
+| `src/memory/recall.rs` | leitura ao lado de `context_for_task`, snapshot quente, quota das leituras | 3 |
+| `src/memory/consolidate.rs` | cadência, pares, `RepresentationDecision`, nota derivada | 4 |
+| `src/memory/metrics.rs` | contadores por workspace/operação | 1–4 |
+| `src/cli.rs`, `src/main.rs` | `--memory`, `--memory-*`, subcomando `memory` | 1–2, 5 |
 | `src/online/{request,response,jev,classifier}.rs` | Choice, `Decision`, transporte comum | 2 |
 | `src/broker.rs` | publicação nas tools de edição/conclusão; leitura em `context_for_task` | 1, 3 |
 | `src/model.rs`, `src/budget.rs`, `src/session.rs`, `src/mcp.rs`, `src/hook.rs` | `memories[]`, orçamento, fingerprint, texto, `carries_content` | 3 |
 | `src/install.rs`, `src/doctor.rs` | opt-in, prévia, diagnóstico local | 1 |
-| `src/eval/arm.rs`, `src/eval/report.rs`, `src/bin/ripwire-eval.rs` | braços B e C | 5 |
-| `tests/memory_{policy,identity,store,controller,retrieval,consolidation,hosts}.rs` (novos) | uma costura por arquivo | 1–4 |
+| `src/eval/{arm,corpus,runner,report,transcript,score}.rs`, `src/bin/ripwire-eval.rs` | braços B e C, sequências, custo da memória | 5 |
+| `tests/memory_{policy,identity,store,controller,retrieval,consolidation}.rs` | uma costura por arquivo | 1–4 |
+| `tests/memory_hosts.rs` | **pendente** (T3.11): fixtures gravadas de Claude Code e Codex | 3 |
 | `tests/{cli,broker,hooks,mcp_surface,online_units,online_protocol,eval,props,props_fs}.rs` | suítes existentes, estendidas | 1–5 |
 
 Antes de tocar `Envelope`, `Classifier`, `NoteEngine`, `SessionMemory` ou os hooks, mapear os
@@ -548,7 +559,10 @@ recall de apresentados nos braços B e C; a versão do agente sai do evento `ini
 
 ### Fase 6 — Fechamento
 
-- [ ] **T6.1 · Auditoria do código incluído.** Roteiro no §7.
+- [ ] **T6.1 · Auditoria do código incluído.** Roteiro no §7. A auditoria do sistema de 2026-10-04
+  (D-143, D-144) cobriu os itens 1, 4, 6 e parte do 3 e do 5, e a sincronização dos documentos
+  (D-145) o item 7; faltam o item 2 (TDD conferido no histórico) e a mutação por amostragem de cada
+  módulo novo.
 - [ ] **T6.2 · doc · Incorporar ao PRD principal** os itens restantes do PRD §16, e atualizar
   `handoff.md`, README, diagrama e a tabela de fases.
 
@@ -682,3 +696,4 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T5.1 | `tests/eval.rs`: `the_memory_arms_parse_and_start_the_right_server`, `contamination_is_detected_for_the_new_arms`, `each_round_gets_an_isolated_store`, `a_sequence_runs_in_order_in_one_place_and_shares_its_store`: `no variant BrokerMemory/BrokerMemoryDeterministic`, `no method needs_credential`, `mcp_config takes 2 arguments` | `6c0b839` | credencial sem o braço B; sem o `XDG_STATE_HOME`; o C sem `--memory-selection`; sequência não agrupada; cópia não refeita entre sessões; lugar novo a cada sessão; store não removido (sobreviveu: o agente falso não criava o store; passou a criar): todas mortas | README (corpus `sequence`, braços, isolamento) | (idem) |
 | T5.2 | `tests/eval.rs::the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versions`: o resultado nem era lido (o `echo` do `sh` do macOS quebrava a linha), depois `presented_recall` nulo (o JSON seguido da seção de memória), depois a seção ausente | `3dbd8a4` | `from_str` de volta; espera não somada; requests e memórias entregues não somados; ingestão sem descontar as leituras; campos de memória nos braços sem memória; sem a medida de antes; seção fora; modelo trocado; agente sem o modelo; versões fora do relatório: todas mortas. Rodar o agente com `--version` contava como execução (e deixou `src/auth.py` na raiz, removido na revisão) | README (saída, custo da memória) | (idem) |
 | Revisão F5 | Achados do revisor independente (D-142): `a_sequence_partly_recorded_is_refused_not_resumed_in_part`, `a_sequence_stays_in_one_repository`, `a_session_after_an_invalid_one_says_its_history_is_incomplete`, `versions_that_change_between_runs_are_refused`, e o teste do relatório ampliado (jobs deixados, braço A, `--json`, células exatas), todos vistos vermelhos | `9722f9f`, `b442be8`, `41bf6fd`, `7600d15` | rodada parcial aceita; repositório e nome vazio da sequência; histórico incompleto não marcado; versões trocadas aceitas; `jobs_pending` zerado; braço A fora; custo fora do `--json`; `basis` sem a seleção: todas mortas | D-142; README; PRD jev-mem §10 (`deterministic`); este plano (T5.3) | 675 / 691 |
+| Auditoria (D-143, D-144) | Fora das tarefas do plano: a auditoria do sistema de 2026-10-04 corrigiu em TDD, na memória, o `Retry-After` sem teto que derrubava o worker (`a_huge_retry_after_neither_crashes_the_worker_nor_pins_the_job`), o `Quota`/`Busy` depois da tipagem paga (`a_run_that_paid_for_typing_keeps_its_count_when_the_quota_runs_out`), a geração gravada depois do snapshot (`a_crash_between_the_snapshot_and_its_generation_never_keeps_the_old_version`, novo `Step::MidPublish`) e o `ingest` ocioso que pegava o lock (`an_ingest_with_nothing_waiting_never_contends_for_the_writer`); no eval, os achados dos D-143/D-144 | PRs #54 e #55 | ver os D-143 e D-144 | D-143, D-144 | 694 / 710 |
