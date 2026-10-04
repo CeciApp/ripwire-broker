@@ -958,3 +958,19 @@ fn a_crash_between_the_snapshot_and_its_generation_never_keeps_the_old_version()
         "a reader keyed by the old version sees that the memories changed"
     );
 }
+
+#[test]
+fn an_ingest_with_nothing_waiting_never_contends_for_the_writer() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"w".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    // `memory forget` (or another process) holds the writer; the worker's idle tick comes by.
+    let held = Store::new(state.path(), &"w".repeat(64)).writer().unwrap();
+    assert_eq!(
+        store.ingest(),
+        Ok(Default::default()),
+        "nothing waits in the spool: nothing to lock, load or rewrite"
+    );
+    drop(held);
+}

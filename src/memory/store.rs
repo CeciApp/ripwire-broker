@@ -441,6 +441,14 @@ impl Store {
     }
 
     fn ingest_until(&self, crash: Option<Step>) -> Result<Ingested, Refusal> {
+        // The worker comes by every few seconds: with nothing in the spool (not even a temporary
+        // to clean up) there is nothing to lock, load or rewrite.
+        if self.is_revoked() {
+            return Err(Refusal::Revoked);
+        }
+        if self.spool_entries()?.is_empty() {
+            return Ok(Ingested::default());
+        }
         let _writer = self.writer()?;
         if self.is_revoked() {
             return Err(Refusal::Revoked);
