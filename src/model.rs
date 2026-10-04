@@ -33,6 +33,20 @@ pub enum Intent {
     Review,
 }
 
+impl Intent {
+    /// As serialized.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Orient => "orient",
+            Self::Symbol => "symbol",
+            Self::Change => "change",
+            Self::Debug => "debug",
+            Self::Docs => "docs",
+            Self::Review => "review",
+        }
+    }
+}
+
 /// An item's part in the task. `Test`, `Config` and `Risk` are reserved in schema v1 and never
 /// built today: tests go to `tests[]`, risks to `risks[]`, and no verb tells a configuration file
 /// apart (PRD §10.1).

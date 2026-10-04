@@ -25,6 +25,17 @@ pub enum UpstreamError {
     Timeout,
 }
 
+impl UpstreamError {
+    /// The tool error it becomes, and the status's `last_error`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Refused(_) => "upstream_refused",
+            Self::Timeout => "upstream_timeout",
+            Self::Unavailable(_) => "upstream_unavailable",
+        }
+    }
+}
+
 impl std::fmt::Display for UpstreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

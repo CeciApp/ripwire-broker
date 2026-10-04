@@ -218,7 +218,7 @@ impl BrokerServer {
                     "schema_version": SCHEMA_VERSION,
                     "offline": self.settings.broker.online.is_none(),
                     "telemetry": "none",
-                    "workspace": if self.settings.broker.redact_workspace { "<redacted>".to_string() } else { self.settings.broker.workspace.display().to_string() },
+                    "workspace": crate::broker::shown_workspace(&self.settings.broker.workspace, self.settings.broker.redact_workspace),
                     "upstream": {
                         "ripwire_version": self.settings.broker.ripwire_version,
                         "available": false,

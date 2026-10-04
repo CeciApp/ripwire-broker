@@ -221,13 +221,8 @@ impl std::fmt::Display for BrokerError {
 
 impl From<UpstreamError> for BrokerError {
     fn from(e: UpstreamError) -> Self {
-        let error = match e {
-            UpstreamError::Refused(_) => "upstream_refused",
-            UpstreamError::Timeout => "upstream_timeout",
-            UpstreamError::Unavailable(_) => "upstream_unavailable",
-        };
         Self {
-            error,
+            error: e.kind(),
             message: e.to_string(),
         }
     }
@@ -491,11 +486,7 @@ impl Broker {
             broker_version: env!("CARGO_PKG_VERSION"),
             schema_version: SCHEMA_VERSION,
             mcp_protocol: rust_mcp_sdk::schema::ProtocolVersion::latest().to_string(),
-            workspace: if self.redact_workspace {
-                "<redacted>".into()
-            } else {
-                self.workspace.root().display().to_string()
-            },
+            workspace: shown_workspace(self.workspace.root(), self.redact_workspace),
             offline: self.online.is_none(),
             telemetry: "none",
             upstream: UpstreamStatus {
@@ -512,15 +503,7 @@ impl Broker {
             }),
             summarizer: match &self.notes {
                 Some(engine) => engine.status(),
-                None => SummarizerStatus {
-                    enabled: false,
-                    program: None,
-                    generated: 0,
-                    cache_hits: 0,
-                    pending: 0,
-                    failures: 0,
-                    cached_notes: 0,
-                },
+                None => SummarizerStatus::default(),
             },
             online: self.online.as_ref().map(|engine| {
                 let (config, totals) = (engine.config(), engine.totals());
@@ -765,9 +748,7 @@ impl Broker {
                 Err(missing) => entries.push(missing),
             }
         }
-        let attention = entries
-            .iter()
-            .any(|e| matches!(e, Entry::Risk(_, r) if GATE_RISKS.contains(&r.kind)));
+        let attention = has_gate_risk(&entries);
         let status = if attention {
             Status::AttentionRequired
         } else {
@@ -808,7 +789,7 @@ impl Broker {
         let outcome = match &result {
             Ok(_) => "ok",
             Err(e) => {
-                let kind = BrokerError::from(e.clone()).error;
+                let kind = e.kind();
                 *self.last_error.lock().unwrap() = Some(kind);
                 kind
             }
@@ -923,9 +904,7 @@ impl Broker {
                 }
             }
         }
-        let open_obligation = entries
-            .iter()
-            .any(|e| matches!(e, Entry::Risk(_, r) if GATE_RISKS.contains(&r.kind)));
+        let open_obligation = has_gate_risk(&entries);
         let status = if regressions > 0 || (req.strict && minor > 0) || open_obligation {
             Status::AttentionRequired
         } else if unknown {
@@ -1116,11 +1095,7 @@ impl Broker {
         };
         let provider = engine.config().provider.clone();
         if !verbs.contains(&"explore") {
-            let route = serde_json::to_value(intent)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default();
-            entries.push(online_merge::skipped(&route));
+            entries.push(online_merge::skipped(intent.as_str()));
             return (
                 entries,
                 Some(online_merge::provenance(&provider, engine.model(), None)),
@@ -1294,16 +1269,7 @@ impl Broker {
             suppress_seen,
             online,
         } = shape;
-        let lead = match intent {
-            Some(i) => serde_json::to_value(i)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default(),
-            None => serde_json::to_value(status)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default(),
-        };
+        let lead = intent.map_or(status.as_str(), Intent::as_str).to_string();
         let mut env = Envelope {
             schema_version: SCHEMA_VERSION,
             tool,
@@ -1411,6 +1377,21 @@ impl Broker {
             .collect();
         (env, included)
     }
+}
+
+/// The workspace as the status shows it: the path, or `<redacted>` with `--redact-workspace`.
+pub fn shown_workspace(root: &std::path::Path, redact: bool) -> String {
+    match redact {
+        true => "<redacted>".into(),
+        false => root.display().to_string(),
+    }
+}
+
+/// Whether `entries` hold a risk that decides a gate's status.
+fn has_gate_risk(entries: &[Entry]) -> bool {
+    entries
+        .iter()
+        .any(|e| matches!(e, Entry::Risk(_, r) if GATE_RISKS.contains(&r.kind)))
 }
 
 /// Keeps an `item_truncated` limitation only for an item the answer still shows with content: the

@@ -247,7 +247,7 @@ pub struct NoteStats {
     pub failures: AtomicU64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct SummarizerStatus {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
