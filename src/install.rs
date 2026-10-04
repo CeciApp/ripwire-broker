@@ -32,15 +32,22 @@ fn events(host: Host) -> [(&'static str, &'static str, Option<&'static str>); 3]
     ]
 }
 
-/// A hook command this broker installed, whatever binary path it had then.
-fn is_ours(hook: &Value) -> bool {
-    hook.get("command")
+/// A hook command this broker installed: its program is a broker (see `is_broker_name`) or
+/// `binary`, the one installing now, whatever it is called, and its first argument is `hook`. How
+/// the status line is recognised, too; a command that merely mentions both words is foreign.
+fn is_ours(hook: &Value, binary: &Path) -> bool {
+    let words = hook
+        .get("command")
         .and_then(Value::as_str)
-        .is_some_and(|c| c.contains("ripwire-broker") && c.contains(" hook "))
+        .map(shell_words)
+        .unwrap_or_default();
+    let program = words.first().map(Path::new);
+    program.is_some_and(|p| p == binary || p.file_name().is_some_and(is_broker_name))
+        && words.get(1).is_some_and(|w| w == "hook")
 }
 
 /// Whether `settings` holds hooks installed by this broker, whatever their event.
-fn has_our_hooks(settings: &Value) -> bool {
+fn has_our_hooks(settings: &Value, binary: &Path) -> bool {
     settings
         .get("hooks")
         .and_then(Value::as_object)
@@ -51,7 +58,7 @@ fn has_our_hooks(settings: &Value) -> bool {
                 .flatten()
                 .filter_map(|g| g.get("hooks")?.as_array())
                 .flatten()
-                .any(is_ours)
+                .any(|h| is_ours(h, binary))
         })
 }
 
@@ -98,15 +105,13 @@ fn merge_hooks(
             *groups = json!([]);
         }
         let groups = groups.as_array_mut().unwrap();
-        for g in groups.iter_mut() {
-            if let Some(list) = g.get_mut("hooks").and_then(Value::as_array_mut) {
-                list.retain(|h| !is_ours(h));
+        // Only a group this removal empties goes: one that was empty already is the user's.
+        groups.retain_mut(|g| match g.get_mut("hooks").and_then(Value::as_array_mut) {
+            Some(list) if list.iter().any(|h| is_ours(h, binary)) => {
+                list.retain(|h| !is_ours(h, binary));
+                !list.is_empty()
             }
-        }
-        groups.retain(|g| {
-            g.get("hooks")
-                .and_then(Value::as_array)
-                .is_none_or(|l| !l.is_empty())
+            _ => true,
         });
         let mut command = format!("{} hook {host_name} {arg}", quote(binary));
         if let Some(ws) = workspace {
@@ -456,7 +461,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                         foreign = matches!(bar(&v), Bar::Foreign);
                         v = merge_statusline(v, &command);
                     }
-                    hooked = has_our_hooks(&v);
+                    hooked = has_our_hooks(&v, binary);
                     v
                 })?);
                 if foreign {

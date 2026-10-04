@@ -881,3 +881,13 @@ async fn a_note_never_costs_an_item_that_was_already_evidence() {
         );
     }
 }
+
+/// A note's key is the same bytes it always was (D-147): its hash now comes from the one framed
+/// SHA-256 the crate has, and keys already cached must still match.
+#[test]
+fn a_note_key_is_unchanged() {
+    assert_eq!(
+        ripwire_broker::notes::key("model", "scope", "evidence"),
+        "3ba0304eb583877497abef6760a4fd1bca13a24ad502a605ad97ed9da3f8e426"
+    );
+}

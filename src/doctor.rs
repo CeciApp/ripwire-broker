@@ -99,25 +99,27 @@ pub async fn run(args: &DoctorArgs) -> Report {
         ),
     }
     let broker = match (&workspace, upstream_ok) {
-        (Some(ws), true) => match crate::local::launch(ws, &args.upstream, false, None, None).await
-        {
-            Ok(b) => {
-                r.add(
-                    "required_verbs",
-                    Outcome::Ok,
-                    format!("{} read-only verbs available", REQUIRED_VERBS.len()),
-                );
-                Some(b)
+        (Some(ws), true) => {
+            match crate::local::launch(ws, &args.upstream, false, Some(version.clone()), None).await
+            {
+                Ok(b) => {
+                    r.add(
+                        "required_verbs",
+                        Outcome::Ok,
+                        format!("{} read-only verbs available", REQUIRED_VERBS.len()),
+                    );
+                    Some(b)
+                }
+                Err(e) => {
+                    r.add(
+                        "required_verbs",
+                        Outcome::Fail,
+                        format!("{}: {}", e.error, e.message),
+                    );
+                    None
+                }
             }
-            Err(e) => {
-                r.add(
-                    "required_verbs",
-                    Outcome::Fail,
-                    format!("{}: {}", e.error, e.message),
-                );
-                None
-            }
-        },
+        }
         _ => {
             r.add("required_verbs", Outcome::Skip, "");
             None
@@ -219,8 +221,12 @@ async fn probe_from_env(args: &DoctorArgs) -> Check {
         Ok(k) => k,
         Err(e) => return fail(e.to_string()),
     };
-    let model = args.jev_model.as_deref().unwrap_or("jev-1.13.0");
-    match JevClient::new(key, model, std::time::Duration::from_secs(15)) {
+    let model = args
+        .jev_model
+        .as_deref()
+        .unwrap_or(crate::online::DEFAULT_MODEL);
+    let timeout = std::time::Duration::from_millis(crate::online::DEFAULT_TIMEOUT_MS);
+    match JevClient::new(key, model, timeout) {
         Ok(client) => jev_probe(&client).await,
         Err(e) => fail(e),
     }

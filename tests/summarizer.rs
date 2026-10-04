@@ -225,3 +225,41 @@ async fn the_model_runs_with_the_key_in_this_process() {
 
     assert_eq!(out.unwrap().trim(), "ok");
 }
+
+/// The prompt is written while the answer is read (D-147): a model that prints before it reads
+/// filled its stdout pipe while the broker was still writing a large prompt, and both waited until
+/// the hard timeout.
+#[tokio::test]
+async fn a_model_that_prints_before_reading_a_large_prompt_still_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let chatty = script(
+        dir.path(),
+        "chatty",
+        "head -c 300000 /dev/zero | tr '\\0' 'x'; echo; cat >/dev/null; echo done",
+    );
+    let prompt = "p".repeat(300_000);
+
+    let out = model(chatty.to_str().unwrap(), 5_000)
+        .summarize(&prompt)
+        .await;
+
+    assert!(out.unwrap().ends_with("done\n"));
+}
+
+/// A model's answer is read up to 1 MiB (D-147): a note is at most 600 characters, and a model
+/// that printed without end was read whole into memory.
+#[tokio::test]
+async fn an_answer_past_the_cap_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let flood = script(
+        dir.path(),
+        "flood",
+        "cat >/dev/null; head -c 10000000 /dev/zero | tr '\\0' 'x'",
+    );
+
+    let out = model(flood.to_str().unwrap(), 5_000)
+        .summarize("a note")
+        .await;
+
+    assert!(out.is_err_and(|e| e.contains("too large")));
+}

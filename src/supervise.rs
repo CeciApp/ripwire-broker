@@ -11,14 +11,22 @@ use std::time::Duration;
 
 const POLL: Duration = Duration::from_millis(200);
 
-/// Resident set size of `pid` in MiB, or `None` once it is gone.
-fn rss_mb(pid: u32) -> Option<u64> {
+/// Resident set size of `pid` in MiB and when it started (`ps -o lstart=`, its spaces folded), or
+/// `None` once it is gone. The start time tells ripwire from a later process that reuses its pid.
+fn probe(pid: u32) -> Option<(u64, String)> {
     let out = Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .args(["-o", "rss=,lstart=", "-p", &pid.to_string()])
         .output()
         .ok()?;
-    let kib: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
-    Some(kib / 1024)
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut words = text.split_whitespace();
+    let kib: u64 = words.next()?.parse().ok()?;
+    Some((kib / 1024, words.collect::<Vec<_>>().join(" ")))
+}
+
+/// `ps -o lstart=` with its spaces folded, so two readings compare equal.
+fn fold(started: &str) -> String {
+    started.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn kill(pid: u32) {
@@ -40,6 +48,8 @@ pub fn run(max_rss_mb: u64, argv: &[String]) -> ExitCode {
             return ExitCode::from(127);
         }
     };
+    // Started at once, before anything else: a supervisor killed before its watcher exists leaves
+    // ripwire unwatched. The watcher reads the child's start time itself.
     let watcher = std::env::current_exe().and_then(|me| {
         Command::new(me)
             .args([
@@ -77,12 +87,27 @@ pub fn run(max_rss_mb: u64, argv: &[String]) -> ExitCode {
     }
 }
 
-/// `__watch`: kills `child` above the limit or once `parent` (the supervisor) is gone.
-pub fn watch(parent: u32, child: u32, max_rss_mb: u64, program: &str) -> ExitCode {
+/// `__watch`: kills `child` above the limit or once `parent` (the supervisor) is gone. Only the
+/// process that started at `started` (when given; otherwise as read when the watch begins, while
+/// the supervisor still waits on ripwire) is ever killed: a process that reuses the pid after
+/// ripwire ended is not ripwire (D-147).
+pub fn watch(
+    parent: u32,
+    child: u32,
+    max_rss_mb: u64,
+    program: &str,
+    started: Option<&str>,
+) -> ExitCode {
+    let Some(born) = started.map(fold).or_else(|| probe(child).map(|(_, s)| s)) else {
+        return ExitCode::SUCCESS; // ripwire ended before the watch began
+    };
     loop {
-        let Some(rss) = rss_mb(child) else {
+        let Some((rss, at)) = probe(child) else {
             return ExitCode::SUCCESS; // ripwire ended on its own
         };
+        if at != born {
+            return ExitCode::SUCCESS; // ripwire ended, and its pid went to another process
+        }
         if std::os::unix::process::parent_id() != parent {
             kill(child); // the supervisor was killed: never leave ripwire unwatched
             return ExitCode::SUCCESS;

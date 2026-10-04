@@ -153,7 +153,7 @@ pub struct ReadConfig {
 impl Default for ReadConfig {
     fn default() -> Self {
         Self {
-            model: "jev-1.13.0".into(),
+            model: crate::online::DEFAULT_MODEL.into(),
             deadline: Duration::from_millis(750),
             request_limit: 4,
             attempt_timeout: Duration::from_millis(250),

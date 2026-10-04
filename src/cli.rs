@@ -14,7 +14,7 @@ pub enum Color {
 
 pub const USAGE: &str = "\
 usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [--redact-workspace] [--incremental]
-                      [--ripwire-max-rss-mb N]
+                      [--ripwire-max-rss-mb N] [--state-dir DIR]
                       [--online [--jev-provider typesafe] [--jev-model MODEL] [--jev-max-in-flight N]
                                 [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
                                 [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
@@ -28,7 +28,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--edit-interval-ms N] [--memory]
        ripwire-broker hook-log --session ID [--state-dir DIR]
        ripwire-broker hook-stats [--state-dir DIR] [--json]
-       ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] TASK...
+       ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] [--] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--jev-probe [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
@@ -89,18 +89,10 @@ pub struct ServeArgs {
     pub ripwire_max_rss_mb: Option<u64>,
     /// The remote classifier (PRD §23); `None` keeps the process offline (RF-ONLINE-01).
     pub online: Option<OnlineArgs>,
-    /// Whether `--online` was asked for or implied by `--memory`; `None` when offline.
-    pub online_origin: Option<OnlineOrigin>,
     /// Persistent memory (PRD jev-mem §4); implies `online`. `None` keeps no history.
     pub memory: Option<MemoryArgs>,
-}
-
-/// How the effective online mode came about, kept for diagnostics (PRD jev-mem §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnlineOrigin {
-    Explicit,
-    /// `--memory` without `--online`.
-    Implied,
+    /// Where memory lives, as for the hooks and the `memory` commands; `None`: the default.
+    pub state_dir: Option<PathBuf>,
 }
 
 /// `--memory` and its `--memory-*` companions (PRD jev-mem §4).
@@ -285,6 +277,8 @@ pub enum Command {
         child: u32,
         max_rss_mb: u64,
         program: String,
+        /// When the child started, as `ps -o lstart=` prints it: only that process is killed.
+        child_started: Option<String>,
     },
 }
 
@@ -384,10 +378,16 @@ impl Flags {
         }
         Ok(Some(OnlineArgs {
             provider,
-            model: text("--jev-model", "jev-1.13.0"),
-            max_in_flight: positive("--jev-max-in-flight", 4)? as usize,
+            model: text("--jev-model", crate::online::DEFAULT_MODEL),
+            max_in_flight: positive(
+                "--jev-max-in-flight",
+                crate::online::DEFAULT_MAX_IN_FLIGHT as u64,
+            )? as usize,
             request_limit: positive("--jev-request-limit", 24)? as usize,
-            timeout: Duration::from_millis(positive("--jev-timeout-ms", 15_000)?),
+            timeout: Duration::from_millis(positive(
+                "--jev-timeout-ms",
+                crate::online::DEFAULT_TIMEOUT_MS,
+            )?),
             no_cache: self.on("--jev-no-cache"),
             max_source_bytes: match self.jev.contains_key("--jev-max-source-bytes") {
                 true => Some(positive("--jev-max-source-bytes", 0)?),
@@ -399,11 +399,16 @@ impl Flags {
         }))
     }
 
-    fn online_origin(&self) -> Option<OnlineOrigin> {
-        match (self.on("--online"), self.on("--memory")) {
-            (true, _) => Some(OnlineOrigin::Explicit),
-            (false, true) => Some(OnlineOrigin::Implied),
-            (false, false) => None,
+    /// The `--memory-*` option `k`, or `default`; a value outside `min..=max` is refused.
+    fn within(&self, k: &str, default: u64, min: u64, max: u64) -> Result<u64, String> {
+        let Some(v) = self.memory.get(k) else {
+            return Ok(default);
+        };
+        match v.parse::<u64>() {
+            Ok(n) if (min..=max).contains(&n) => Ok(n),
+            _ => Err(usage(format_args!(
+                "{k} takes a number from {min} to {max}"
+            ))),
         }
     }
 
@@ -415,21 +420,16 @@ impl Flags {
             };
         }
         // Each option with its default and its range (PRD jev-mem §4).
-        let within = |k: &str, default: u64, min: u64, max: u64| -> Result<u64, String> {
-            let Some(v) = self.memory.get(k) else {
-                return Ok(default);
-            };
-            match v.parse::<u64>() {
-                Ok(n) if (min..=max).contains(&n) => Ok(n),
-                _ => Err(usage(format_args!(
-                    "{k} takes a number from {min} to {max}"
-                ))),
-            }
-        };
+        let within = |k: &str, default: u64, min: u64, max: u64| self.within(k, default, min, max);
         Ok(Some(MemoryArgs {
             read_deadline: Duration::from_millis(within("--memory-read-deadline-ms", 750, 1, 750)?),
             read_request_limit: within("--memory-read-request-limit", 4, 0, 4)? as usize,
-            write_candidates: within("--memory-write-candidates", 4, 0, 10)? as usize,
+            write_candidates: within(
+                "--memory-write-candidates",
+                crate::memory::runtime::DEFAULT_WRITE_CANDIDATES as u64,
+                0,
+                10,
+            )? as usize,
             retention_days: within("--memory-retention-days", 30, 1, 365)? as u32,
             max_nodes: within("--memory-max-nodes", 2000, 1, 2000)? as usize,
             selection: match self.memory.get("--memory-selection").map(String::as_str) {
@@ -495,13 +495,20 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
     let mut f = Flags::default();
     let mut args = args.peekable();
     while let Some(a) = args.next() {
+        if a == "--" {
+            // The flags end here: a task may name one (`prompt -- what does --budget do`).
+            f.words.extend(args.by_ref());
+            break;
+        }
         if !a.starts_with("--") {
             f.words.push(a);
             continue;
         }
         if !allowed.contains(&a.as_str()) {
             if a == "--online" {
-                return Err(usage("--online is only available to serve (D-064)"));
+                return Err(usage(
+                    "--online is only available to serve, install and memory drain (D-064)",
+                ));
             }
             return Err(usage(format_args!("unknown argument '{a}'")));
         }
@@ -523,7 +530,12 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             "--state-dir" => f.state_dir = Some(value.into()),
             "--session" => f.session = Some(value),
             "--codex-home" => f.codex_home = Some(value.into()),
-            "--budget" => f.budget = Some(number(&value)? as u32),
+            "--budget" => {
+                f.budget = Some(
+                    u32::try_from(number(&value)?)
+                        .map_err(|_| usage(format_args!("{a} is too large")))?,
+                )
+            }
             "--summarizer-cmd" => f.summarizer_cmd = Some(value),
             "--ripwire-max-rss-mb" | "--max-rss-mb" => f.max_rss_mb = Some(number(&value)?),
             "--edit-interval-ms" => f.edit_interval_ms = Some(number(&value)?),
@@ -538,12 +550,10 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             "--color" => f.color = Some(value),
             "--id" => f.id = Some(value),
             "--file" => f.file = Some(value.into()),
-            jev if JEV.contains(&jev) => {
-                let key = JEV.iter().find(|k| **k == jev).unwrap();
+            jev if let Some(key) = JEV.iter().find(|k| **k == jev) => {
                 f.jev.insert(key, value);
             }
-            memory if MEMORY.contains(&memory) => {
-                let key = MEMORY.iter().find(|k| **k == memory).unwrap();
+            memory if let Some(key) = MEMORY.iter().find(|k| **k == memory) => {
                 f.memory.insert(key, value);
             }
             _ => return Err(usage(format_args!("unknown argument '{a}'"))),
@@ -572,15 +582,37 @@ fn no_words(f: &Flags) -> Result<(), String> {
     }
 }
 
+/// Whether `own` asks for one of `wanted` as an argument of its own: never as the value of a flag
+/// (`--workspace -h`) nor among the words of a task, which start at `prompt`'s first word
+/// (`prompt explain the -h flag`).
+fn asks(own: &[String], wanted: &[&str]) -> bool {
+    let task_words = own.first().is_some_and(|s| s == "prompt");
+    let mut value_next = false;
+    for a in own.iter().skip(usize::from(task_words)) {
+        if std::mem::take(&mut value_next) {
+            continue;
+        }
+        if wanted.contains(&a.as_str()) {
+            return true;
+        }
+        if a.starts_with("--") {
+            value_next = !SWITCHES.contains(&a.as_str());
+        } else if task_words {
+            return false;
+        }
+    }
+    false
+}
+
 pub fn parse(args: Vec<String>) -> Result<Command, String> {
     let own = args
         .iter()
         .position(|a| a == "--")
         .map_or(&args[..], |i| &args[..i]);
-    if own.iter().any(|a| a == "-h" || a == "--help") {
+    if asks(own, &["-h", "--help"]) {
         return Ok(Command::Info(USAGE.into()));
     }
-    if own.iter().any(|a| a == "--version") {
+    if asks(own, &["--version"]) {
         return Ok(Command::Info(format!(
             "ripwire-broker {}",
             env!("CARGO_PKG_VERSION")
@@ -592,277 +624,302 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
         _ => None,
     };
     match sub.as_deref() {
-        None | Some("serve") => {
-            let f = flags(
-                it,
-                &with(
-                    &[
-                        "--redact-workspace",
-                        "--incremental",
-                        "--ripwire-max-rss-mb",
-                        SUMMARIZER[0],
-                        SUMMARIZER[1],
-                        SUMMARIZER[2],
-                        SUMMARIZER[3],
-                        "--online",
-                        "--memory",
-                        "--jev-no-cache",
-                    ]
-                    .into_iter()
-                    .chain(JEV.iter().copied())
-                    .chain(MEMORY.iter().copied())
-                    .collect::<Vec<_>>(),
-                ),
-            )?;
-            no_words(&f)?;
-            Ok(Command::Serve(ServeArgs {
-                workspace: f.workspace()?,
-                ripwire: f.upstream.ripwire.clone(),
-                timeout: f.upstream.timeout,
-                redact_workspace: f.on("--redact-workspace"),
-                incremental: f.on("--incremental"),
-                summarizer: f.summarizer()?,
-                ripwire_max_rss_mb: f.max_rss_mb,
-                online: f.online()?,
-                online_origin: f.online_origin(),
-                memory: f.memory()?,
-            }))
-        }
-        Some("__supervise") => {
-            let rest: Vec<String> = it.collect();
-            let split = rest
-                .iter()
-                .position(|a| a == "--")
-                .ok_or_else(|| usage("__supervise needs -- COMMAND"))?;
-            let f = flags(rest[..split].iter().cloned(), &["--max-rss-mb"])?;
-            no_words(&f)?;
-            Ok(Command::Supervise {
-                max_rss_mb: f
-                    .max_rss_mb
-                    .ok_or_else(|| usage("--max-rss-mb is required"))?,
-                argv: rest[split + 1..].to_vec(),
-            })
-        }
-        Some("__watch") => {
-            let mut values = HashMap::new();
-            let mut it = it;
-            while let (Some(k), Some(v)) = (it.next(), it.next()) {
-                values.insert(k, v);
-            }
-            let num = |k: &str| {
-                values
-                    .get(k)
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .ok_or_else(|| usage(format_args!("__watch needs {k}")))
-            };
-            Ok(Command::Watch {
-                parent: num("--parent")? as u32,
-                child: num("--child")? as u32,
-                max_rss_mb: num("--max-rss-mb")?,
-                program: values.get("--program").cloned().unwrap_or_default(),
-            })
-        }
-        Some("hook") => {
-            let (host, event) = (host(it.next())?, event(it.next())?);
-            let f = flags(
-                it,
-                &with(&[
-                    "--state-dir",
-                    "--every-prompt",
-                    "--gate",
-                    "--log-refs",
-                    "--edit-interval-ms",
-                    "--memory",
-                ]),
-            )?;
-            no_words(&f)?;
-            Ok(Command::Hook(HookArgs {
-                host,
-                event,
-                workspace: f.workspace.clone(),
-                upstream: f.upstream.clone(),
-                state_dir: f.state_dir.clone(),
-                every_prompt: f.on("--every-prompt"),
-                gate: f.on("--gate"),
-                log_refs: f.on("--log-refs"),
-                edit_interval_ms: f.edit_interval_ms,
-                memory: f.on("--memory"),
-            }))
-        }
-        Some("hook-log") => {
-            let f = flags(it, &["--session", "--state-dir"])?;
-            no_words(&f)?;
-            Ok(Command::HookLog {
-                session: f.session.ok_or_else(|| usage("--session is required"))?,
-                state_dir: f.state_dir,
-            })
-        }
-        Some("hook-stats") => {
-            let f = flags(it, &["--state-dir", "--json"])?;
-            no_words(&f)?;
-            Ok(Command::HookStats {
-                state_dir: f.state_dir.clone(),
-                json: f.on("--json"),
-            })
-        }
-        Some("prompt") => {
-            let f = flags(it, &with(&["--budget"]))?;
-            if f.words.is_empty() {
-                return Err(usage("prompt needs a TASK"));
-            }
-            Ok(Command::Prompt(PromptArgs {
-                workspace: f.workspace()?,
-                upstream: f.upstream.clone(),
-                budget_tokens: f.budget,
-                task: f.words.join(" "),
-            }))
-        }
-        Some("doctor") => {
-            let f = flags(
-                it,
-                &with(&[
-                    "--json",
-                    "--state-dir",
-                    SUMMARIZER[0],
-                    SUMMARIZER[1],
-                    "--jev-probe",
-                    "--jev-model",
-                ]),
-            )?;
-            no_words(&f)?;
-            let jev_model = f.jev.get("--jev-model").cloned();
-            if jev_model.is_some() && !f.on("--jev-probe") {
-                return Err(usage("--jev-model needs --jev-probe here"));
-            }
-            Ok(Command::Doctor(DoctorArgs {
-                workspace: f.workspace()?,
-                upstream: f.upstream.clone(),
-                state_dir: f.state_dir.clone(),
-                summarizer: f.summarizer()?,
-                json: f.on("--json"),
-                jev_probe: f.on("--jev-probe"),
-                jev_model,
-            }))
-        }
-        Some("install") => {
-            let host = host(it.next())?;
-            let f = flags(
-                it,
-                &[
-                    "--workspace",
-                    "--hooks",
-                    "--statusline",
-                    "--write",
-                    "--codex-home",
-                    "--online",
-                    "--memory",
-                ],
-            )?;
-            no_words(&f)?;
-            if f.on("--statusline") && host != Host::ClaudeCode {
-                return Err(usage("--statusline is only available to claude-code"));
-            }
-            Ok(Command::Install(InstallArgs {
-                host,
-                workspace: f.workspace()?,
-                hooks: f.on("--hooks"),
-                statusline: f.on("--statusline"),
-                write: f.on("--write"),
-                codex_home: f.codex_home.clone(),
-                online: f.on("--online"),
-                memory: f.on("--memory"),
-            }))
-        }
-        Some("statusline") => {
-            let f = flags(
-                it,
-                &[
-                    "--workspace",
-                    "--state-dir",
-                    "--detail",
-                    "--width",
-                    "--color",
-                ],
-            )?;
-            no_words(&f)?;
-            let color = match f.color.as_deref() {
-                None | Some("never") => Color::Never,
-                Some("always") => Color::Always,
-                Some(other) => {
-                    return Err(usage(format_args!(
-                        "--color takes never or always, not '{other}'"
-                    )));
-                }
-            };
-            Ok(Command::Statusline(StatuslineArgs {
-                workspace: f.workspace.clone(),
-                state_dir: f.state_dir.clone(),
-                detail: f.on("--detail"),
-                width: f.width.map(|w| w as usize),
-                color,
-            }))
-        }
-        Some("memory") => {
-            let verb = it.next();
-            let extra: &[&str] = match verb.as_deref() {
-                Some("status") => &["--json"],
-                Some("forget") => &["--all", "--id"],
-                Some("add") => &["--file"],
-                Some("drain") => &["--online", "--jev-model", "--memory-write-candidates"],
-                Some("retry") => &[],
-                Some("resume") => &[],
-                other => return Err(usage(format_args!("unknown memory command {other:?}"))),
-            };
-            let allowed: Vec<&str> = ["--workspace", "--state-dir"]
-                .iter()
-                .chain(extra)
-                .copied()
-                .collect();
-            let f = flags(it, &allowed)?;
-            no_words(&f)?;
-            let action = match (verb.as_deref(), f.on("--all"), f.id.clone()) {
-                (Some("status"), ..) => MemoryAction::Status {
-                    json: f.on("--json"),
-                },
-                (Some("forget"), true, None) => MemoryAction::ForgetAll,
-                (Some("forget"), false, Some(id)) => MemoryAction::Forget { id },
-                (Some("forget"), ..) => return Err(usage("memory forget takes --all or --id ID")),
-                (Some("drain"), ..) => match f.on("--online") {
-                    true => MemoryAction::Drain {
-                        model: f.jev.get("--jev-model").cloned(),
-                        candidates: match f.memory.get("--memory-write-candidates") {
-                            None => None,
-                            Some(v) => match v.parse::<usize>() {
-                                Ok(n) if n <= 10 => Some(n),
-                                _ => {
-                                    return Err(usage(
-                                        "--memory-write-candidates takes a number from 0 to 10",
-                                    ));
-                                }
-                            },
-                        },
-                    },
-                    false => {
-                        return Err(usage(
-                            "memory drain needs --online: it sends memories to the provider",
-                        ));
-                    }
-                },
-                (Some("add"), ..) => MemoryAction::Add {
-                    file: f
-                        .file
-                        .clone()
-                        .ok_or_else(|| usage("memory add needs --file PATH"))?,
-                },
-                (Some("retry"), ..) => MemoryAction::Retry,
-                _ => MemoryAction::Resume,
-            };
-            Ok(Command::Memory(MemoryCommand {
-                action,
-                workspace: f.workspace()?,
-                state_dir: f.state_dir.clone(),
-            }))
-        }
+        None | Some("serve") => parse_serve(it),
+        Some("__supervise") => parse_supervise(it),
+        Some("__watch") => parse_watch(it),
+        Some("hook") => parse_hook(it),
+        Some("hook-log") => parse_hook_log(it),
+        Some("hook-stats") => parse_hook_stats(it),
+        Some("prompt") => parse_prompt(it),
+        Some("doctor") => parse_doctor(it),
+        Some("install") => parse_install(it),
+        Some("statusline") => parse_statusline(it),
+        Some("memory") => parse_memory(it),
         Some(other) => Err(usage(format_args!("unknown command '{other}'"))),
     }
+}
+
+/// What follows the subcommand.
+type Args = std::iter::Peekable<std::vec::IntoIter<String>>;
+
+fn parse_serve(it: Args) -> Result<Command, String> {
+    let f = flags(
+        it,
+        &with(
+            &[
+                "--redact-workspace",
+                "--incremental",
+                "--ripwire-max-rss-mb",
+                SUMMARIZER[0],
+                SUMMARIZER[1],
+                SUMMARIZER[2],
+                SUMMARIZER[3],
+                "--online",
+                "--memory",
+                "--jev-no-cache",
+                "--state-dir",
+            ]
+            .into_iter()
+            .chain(JEV.iter().copied())
+            .chain(MEMORY.iter().copied())
+            .collect::<Vec<_>>(),
+        ),
+    )?;
+    no_words(&f)?;
+    Ok(Command::Serve(ServeArgs {
+        workspace: f.workspace()?,
+        ripwire: f.upstream.ripwire.clone(),
+        timeout: f.upstream.timeout,
+        redact_workspace: f.on("--redact-workspace"),
+        incremental: f.on("--incremental"),
+        summarizer: f.summarizer()?,
+        ripwire_max_rss_mb: f.max_rss_mb,
+        online: f.online()?,
+        memory: f.memory()?,
+        state_dir: f.state_dir,
+    }))
+}
+
+fn parse_supervise(it: Args) -> Result<Command, String> {
+    let rest: Vec<String> = it.collect();
+    let split = rest
+        .iter()
+        .position(|a| a == "--")
+        .ok_or_else(|| usage("__supervise needs -- COMMAND"))?;
+    let f = flags(rest[..split].iter().cloned(), &["--max-rss-mb"])?;
+    no_words(&f)?;
+    Ok(Command::Supervise {
+        max_rss_mb: f
+            .max_rss_mb
+            .ok_or_else(|| usage("--max-rss-mb is required"))?,
+        argv: rest[split + 1..].to_vec(),
+    })
+}
+
+fn parse_watch(mut it: Args) -> Result<Command, String> {
+    let mut values = HashMap::new();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        values.insert(k, v);
+    }
+    let num = |k: &str| {
+        values
+            .get(k)
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or_else(|| usage(format_args!("__watch needs {k}")))
+    };
+    let pid = |k: &str| {
+        u32::try_from(num(k)?).map_err(|_| usage(format_args!("__watch: {k} is too large")))
+    };
+    Ok(Command::Watch {
+        parent: pid("--parent")?,
+        child: pid("--child")?,
+        max_rss_mb: num("--max-rss-mb")?,
+        program: values.get("--program").cloned().unwrap_or_default(),
+        child_started: values.get("--child-started").cloned(),
+    })
+}
+
+fn parse_hook(mut it: Args) -> Result<Command, String> {
+    let (host, event) = (host(it.next())?, event(it.next())?);
+    let f = flags(
+        it,
+        &with(&[
+            "--state-dir",
+            "--every-prompt",
+            "--gate",
+            "--log-refs",
+            "--edit-interval-ms",
+            "--memory",
+        ]),
+    )?;
+    no_words(&f)?;
+    Ok(Command::Hook(HookArgs {
+        host,
+        event,
+        workspace: f.workspace.clone(),
+        upstream: f.upstream.clone(),
+        state_dir: f.state_dir.clone(),
+        every_prompt: f.on("--every-prompt"),
+        gate: f.on("--gate"),
+        log_refs: f.on("--log-refs"),
+        edit_interval_ms: f.edit_interval_ms,
+        memory: f.on("--memory"),
+    }))
+}
+
+fn parse_hook_log(it: Args) -> Result<Command, String> {
+    let f = flags(it, &["--session", "--state-dir"])?;
+    no_words(&f)?;
+    Ok(Command::HookLog {
+        session: f.session.ok_or_else(|| usage("--session is required"))?,
+        state_dir: f.state_dir,
+    })
+}
+
+fn parse_hook_stats(it: Args) -> Result<Command, String> {
+    let f = flags(it, &["--state-dir", "--json"])?;
+    no_words(&f)?;
+    Ok(Command::HookStats {
+        state_dir: f.state_dir.clone(),
+        json: f.on("--json"),
+    })
+}
+
+fn parse_prompt(it: Args) -> Result<Command, String> {
+    let f = flags(it, &with(&["--budget"]))?;
+    if f.words.is_empty() {
+        return Err(usage("prompt needs a TASK"));
+    }
+    Ok(Command::Prompt(PromptArgs {
+        workspace: f.workspace()?,
+        upstream: f.upstream.clone(),
+        budget_tokens: f.budget,
+        task: f.words.join(" "),
+    }))
+}
+
+fn parse_doctor(it: Args) -> Result<Command, String> {
+    let f = flags(
+        it,
+        &with(&[
+            "--json",
+            "--state-dir",
+            SUMMARIZER[0],
+            SUMMARIZER[1],
+            "--jev-probe",
+            "--jev-model",
+        ]),
+    )?;
+    no_words(&f)?;
+    let jev_model = f.jev.get("--jev-model").cloned();
+    if jev_model.is_some() && !f.on("--jev-probe") {
+        return Err(usage("--jev-model needs --jev-probe here"));
+    }
+    Ok(Command::Doctor(DoctorArgs {
+        workspace: f.workspace()?,
+        upstream: f.upstream.clone(),
+        state_dir: f.state_dir.clone(),
+        summarizer: f.summarizer()?,
+        json: f.on("--json"),
+        jev_probe: f.on("--jev-probe"),
+        jev_model,
+    }))
+}
+
+fn parse_install(mut it: Args) -> Result<Command, String> {
+    let host = host(it.next())?;
+    let f = flags(
+        it,
+        &[
+            "--workspace",
+            "--hooks",
+            "--statusline",
+            "--write",
+            "--codex-home",
+            "--online",
+            "--memory",
+        ],
+    )?;
+    no_words(&f)?;
+    if f.on("--statusline") && host != Host::ClaudeCode {
+        return Err(usage("--statusline is only available to claude-code"));
+    }
+    Ok(Command::Install(InstallArgs {
+        host,
+        workspace: f.workspace()?,
+        hooks: f.on("--hooks"),
+        statusline: f.on("--statusline"),
+        write: f.on("--write"),
+        codex_home: f.codex_home.clone(),
+        online: f.on("--online"),
+        memory: f.on("--memory"),
+    }))
+}
+
+fn parse_statusline(it: Args) -> Result<Command, String> {
+    let f = flags(
+        it,
+        &[
+            "--workspace",
+            "--state-dir",
+            "--detail",
+            "--width",
+            "--color",
+        ],
+    )?;
+    no_words(&f)?;
+    let color = match f.color.as_deref() {
+        None | Some("never") => Color::Never,
+        Some("always") => Color::Always,
+        Some(other) => {
+            return Err(usage(format_args!(
+                "--color takes never or always, not '{other}'"
+            )));
+        }
+    };
+    Ok(Command::Statusline(StatuslineArgs {
+        workspace: f.workspace.clone(),
+        state_dir: f.state_dir.clone(),
+        detail: f.on("--detail"),
+        width: f.width.map(|w| w as usize),
+        color,
+    }))
+}
+
+fn parse_memory(mut it: Args) -> Result<Command, String> {
+    let verb = it.next();
+    let extra: &[&str] = match verb.as_deref() {
+        Some("status") => &["--json"],
+        Some("forget") => &["--all", "--id"],
+        Some("add") => &["--file"],
+        Some("drain") => &["--online", "--jev-model", "--memory-write-candidates"],
+        Some("retry") => &[],
+        Some("resume") => &[],
+        other => return Err(usage(format_args!("unknown memory command {other:?}"))),
+    };
+    let allowed: Vec<&str> = ["--workspace", "--state-dir"]
+        .iter()
+        .chain(extra)
+        .copied()
+        .collect();
+    let f = flags(it, &allowed)?;
+    no_words(&f)?;
+    let action = match (verb.as_deref(), f.on("--all"), f.id.clone()) {
+        (Some("status"), ..) => MemoryAction::Status {
+            json: f.on("--json"),
+        },
+        (Some("forget"), true, None) => MemoryAction::ForgetAll,
+        (Some("forget"), false, Some(id)) => MemoryAction::Forget { id },
+        (Some("forget"), ..) => return Err(usage("memory forget takes --all or --id ID")),
+        (Some("drain"), ..) => match f.on("--online") {
+            true => MemoryAction::Drain {
+                model: f.jev.get("--jev-model").cloned(),
+                candidates: match f.memory.contains_key("--memory-write-candidates") {
+                    true => Some(f.within("--memory-write-candidates", 4, 0, 10)? as usize),
+                    false => None,
+                },
+            },
+            false => {
+                return Err(usage(
+                    "memory drain needs --online: it sends memories to the provider",
+                ));
+            }
+        },
+        (Some("add"), ..) => MemoryAction::Add {
+            file: f
+                .file
+                .clone()
+                .ok_or_else(|| usage("memory add needs --file PATH"))?,
+        },
+        (Some("retry"), ..) => MemoryAction::Retry,
+        (Some("resume"), ..) => MemoryAction::Resume,
+        (other, ..) => {
+            return Err(usage(format_args!("unknown memory command {other:?}")));
+        }
+    };
+    Ok(Command::Memory(MemoryCommand {
+        action,
+        workspace: f.workspace()?,
+        state_dir: f.state_dir,
+    }))
 }

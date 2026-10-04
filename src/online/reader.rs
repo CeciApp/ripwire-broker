@@ -312,7 +312,7 @@ fn admitted_prefixes(root: &Path, parts: &[String]) -> HashSet<PathBuf> {
         .parents(true)
         .require_git(false)
         .follow_links(false);
-    let (pruned_root, pruned_target) = (root.to_path_buf(), target.clone());
+    let (pruned_root, pruned_target) = (root.to_path_buf(), target);
     builder.filter_entry(move |e| match e.path().strip_prefix(&pruned_root) {
         Ok(rel) => rel.as_os_str().is_empty() || pruned_target.starts_with(rel),
         // Not below the root: leave the decision to the rest of the policy.

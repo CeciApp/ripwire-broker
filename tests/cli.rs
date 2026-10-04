@@ -351,9 +351,104 @@ fn hook_and_prompt_reject_online() {
     ] {
         let err = parse(bad).expect_err(&format!("{bad:?}"));
         assert!(
-            err.contains("--online is only available to serve"),
+            err.contains("--online is only available to serve, install and memory drain"),
             "{bad:?}: {err}"
         );
+    }
+}
+
+/// The message names every command that takes `--online` (D-147): it said "only serve", and
+/// `install` and `memory drain` take it too.
+#[test]
+fn the_commands_the_online_message_names_take_online() {
+    assert!(parse(&["--workspace", "/w", "--online"]).is_ok());
+    assert!(parse(&["install", "claude-code", "--workspace", "/w", "--online"]).is_ok());
+    assert!(parse(&["memory", "drain", "--workspace", "/w", "--online"]).is_ok());
+}
+
+/// A number that does not fit is refused, never wrapped (D-147): `--budget 4294967296` was 0.
+#[test]
+fn numbers_past_their_width_are_refused() {
+    let err = parse(&["prompt", "--workspace", "/w", "--budget", "4294967296", "t"])
+        .expect_err("past u32");
+    assert!(err.contains("--budget"), "{err}");
+    for (k, v) in [("--parent", "4294967297"), ("--child", "4294967297")] {
+        let mut args = vec![
+            "__watch",
+            "--parent",
+            "1",
+            "--child",
+            "2",
+            "--max-rss-mb",
+            "9",
+        ];
+        let at = args.iter().position(|a| *a == k).unwrap();
+        args[at + 1] = v;
+        assert!(parse(&args).is_err(), "{k} {v}");
+    }
+}
+
+/// `-h`, `--help` and `--version` count as arguments of their own, never inside the words of a
+/// task nor as the value of a flag (D-147); `--` ends the flags, so a task can name one.
+#[test]
+fn help_inside_a_task_or_a_value_is_task_text() {
+    let task = |args: &[&str]| match parse(args) {
+        Ok(Command::Prompt(p)) => p.task,
+        other => panic!("{args:?}: {other:?}"),
+    };
+    assert_eq!(
+        task(&[
+            "prompt",
+            "--workspace",
+            "/w",
+            "explain",
+            "the",
+            "-h",
+            "flag"
+        ]),
+        "explain the -h flag"
+    );
+    // A word that looks like a flag is one, unless it comes after `--`.
+    assert!(matches!(
+        parse(&["prompt", "--workspace", "/w", "what", "does", "--version", "print"]),
+        Err(e) if e.contains("unknown argument '--version'")
+    ));
+    assert_eq!(
+        task(&[
+            "prompt",
+            "--workspace",
+            "/w",
+            "--",
+            "what",
+            "does",
+            "--version"
+        ]),
+        "what does --version"
+    );
+    assert_eq!(
+        task(&[
+            "prompt",
+            "--workspace",
+            "/w",
+            "--",
+            "what",
+            "does",
+            "--budget",
+            "do"
+        ]),
+        "what does --budget do"
+    );
+    assert!(matches!(
+        parse(&["prompt", "--workspace", "-h", "t"]),
+        Ok(Command::Prompt(_))
+    ));
+    for help in [
+        &["--help"][..],
+        &["prompt", "--help"],
+        &["prompt", "--workspace", "/w", "-h", "t"],
+        &["hook", "claude-code", "stop", "--help"],
+    ] {
+        assert!(matches!(parse(help), Ok(Command::Info(_))), "{help:?}");
     }
 }
 
@@ -363,8 +458,8 @@ fn memory_implies_online_and_both_flags_are_equivalent() {
         panic!()
     };
     assert_eq!(
-        (off.online, off.memory, off.online_origin),
-        (None, None, None),
+        (off.online, off.memory),
+        (None, None),
         "offline, no memory, by default"
     );
 
@@ -375,7 +470,6 @@ fn memory_implies_online_and_both_flags_are_equivalent() {
         only.online.is_some() && only.memory.is_none(),
         "--online alone keeps no history"
     );
-    assert_eq!(only.online_origin, Some(cli::OnlineOrigin::Explicit));
 
     let Ok(Command::Serve(m)) = parse(&["--workspace", "/w", "--memory"]) else {
         panic!()
@@ -393,8 +487,6 @@ fn memory_implies_online_and_both_flags_are_equivalent() {
         m.memory.as_ref().map(|a| a.read_deadline),
         Some(Duration::from_millis(750))
     );
-    assert_eq!(m.online_origin, Some(cli::OnlineOrigin::Implied));
-    assert_eq!(both.online_origin, Some(cli::OnlineOrigin::Explicit));
 }
 
 #[test]
@@ -1227,6 +1319,37 @@ fn install_codex_merges_hooks_json_and_prints_the_toml_snippet() {
         before,
         "idempotent"
     );
+}
+
+/// A summarizer version command that never ends costs at most its timeout (D-147): it runs before
+/// `serve` answers its host and in `doctor`.
+#[test]
+fn a_summarizer_version_command_that_hangs_fails_within_the_timeout() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let llm = bin.path().join("llm");
+    common::write_executable(&llm, "#!/bin/sh\necho note\n");
+    let version = bin.path().join("llm-version");
+    common::write_executable(&version, "#!/bin/sh\nsleep 30; echo v1\n");
+    let started = std::time::Instant::now();
+
+    let (_, report, _) = doctor(
+        ws.path(),
+        &[
+            "--summarizer-cmd",
+            llm.to_str().unwrap(),
+            "--summarizer-version-cmd",
+            version.to_str().unwrap(),
+        ],
+    );
+
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(20), "{took:?}");
+    let detail = check(&report, "summarizer")["detail"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(detail.contains("version command failed"), "{detail}");
 }
 
 /// A ripwire that never answers `--version` costs at most the version timeout (D-146): one that
@@ -3533,17 +3656,14 @@ mod shell_edits {
 
     /// A `git` that appends a line to `calls` and then runs `then`, first on the returned PATH.
     fn fake_git(dir: &Path, then: &str) -> (std::ffi::OsString, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let calls = dir.join("calls");
         let script = bin.join("git");
-        std::fs::write(
+        crate::common::write_executable(
             &script,
             format!("#!/bin/sh\necho call >> '{}'\n{then}\n", calls.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut path = vec![bin];
         path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         (std::env::join_paths(path).unwrap(), calls)
@@ -3716,10 +3836,21 @@ mod shell_edits {
         assert_eq!(calls(&counter), after_prompt, "no more git in this session");
     }
 
-    /// A `git` that answers right but takes ~60 ms per call: over the gate, far under the timeout.
+    /// A `git` that answers right but takes at least 30 ms per call. A fingerprint makes two, so it
+    /// is over the 50 ms gate; the margin to the 500 ms timeout is what a loaded machine eats into
+    /// (60 ms per call failed there now and then, D-147).
+    const _: () = assert!(ripwire_broker::hook::SLOW_FINGERPRINT.as_millis() < 2 * 30);
     fn slow_real_git(tools: &Path) -> (std::ffi::OsString, std::path::PathBuf) {
-        let then = format!("sleep 0.06\nexec '{}' \"$@\"", real_git().display());
-        fake_git(tools, &then)
+        let then = format!("sleep 0.03\nexec '{}' \"$@\"", real_git().display());
+        let (path, calls) = fake_git(tools, &then);
+        // The first run of a new executable can be slow on its own (macOS checks it): pay it
+        // here, not inside the hook's 500 ms.
+        let warm = std::process::Command::new(tools.join("bin/git"))
+            .arg("--version")
+            .output();
+        assert!(warm.is_ok_and(|o| o.status.success()));
+        let _ = std::fs::remove_file(&calls);
+        (path, calls)
     }
 
     #[test]
@@ -4828,4 +4959,238 @@ fn the_codex_snippet_is_valid_toml_for_any_workspace_path() {
             .any(|a| std::path::Path::new(a) == canonical || std::path::Path::new(a) == ws),
         "the path comes back as it is: {args:?}"
     );
+}
+
+/// A hook whose host stopped reading still exits 0 (PRD §21.4): its answer goes to a closed
+/// stdout, which `println!` turned into a panic and exit 101.
+#[test]
+fn a_hook_exits_zero_when_its_stdout_is_closed() {
+    use std::io::Write;
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let input = serde_json::json!({"session_id": "s", "cwd": ws.path(),
+        "hook_event_name": "UserPromptSubmit", "prompt": "#ripwire-off"});
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args(["hook", "claude-code", "user-prompt-submit", "--workspace"])
+        .arg(ws.path())
+        .arg("--state-dir")
+        .arg(state.path())
+        .args(["--ripwire", "/nonexistent/ripwire"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input.to_string().as_bytes()).unwrap();
+    drop(stdin);
+
+    let status = child.wait().unwrap();
+
+    assert_eq!(status.code(), Some(0));
+}
+
+/// The first event of a new session prunes the sessions nobody touched for 30 days (D-147): their
+/// state, lock and status line projection were kept forever, and `hook-stats` parses them all.
+#[test]
+fn a_new_session_prunes_sessions_untouched_for_thirty_days() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let dir = state.path();
+    std::fs::create_dir_all(dir.join("statusline")).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+    let recent = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let put = |name: &str, at: std::time::SystemTime| {
+        let p = dir.join(name);
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    put("old.json", old);
+    put("old.lock", old);
+    put("statusline/old.json", old);
+    put("recent.json", recent);
+    let prompt = |session: &str| {
+        let input = serde_json::json!({"session_id": session, "cwd": ws.path(),
+            "hook_event_name": "UserPromptSubmit", "prompt": "#ripwire-off"});
+        let (code, _, err) = run(
+            &[
+                "hook",
+                "claude-code",
+                "user-prompt-submit",
+                "--workspace",
+                ws.path().to_str().unwrap(),
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--ripwire",
+                "/nonexistent/ripwire",
+            ],
+            &input.to_string(),
+        );
+        assert_eq!(code, 0, "{err}");
+    };
+
+    prompt("new");
+
+    for gone in ["old.json", "old.lock", "statusline/old.json"] {
+        assert!(!dir.join(gone).exists(), "{gone} kept");
+    }
+    assert!(dir.join("recent.json").exists(), "a recent session is kept");
+    let store = ripwire_broker::state::StateStore::new(dir.to_path_buf());
+    assert!(
+        store.load("new").opted_out,
+        "the new session itself is saved"
+    );
+}
+
+/// The installer knows its own hooks by their program and the word `hook`, as it knows its status
+/// line (D-147): a substring check missed a renamed binary, which left duplicates, and took any
+/// command that merely mentioned "ripwire-broker" and " hook ". A foreign group that was already
+/// empty is the user's, and stays.
+#[test]
+fn install_recognises_its_hooks_by_program_not_by_substring() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let before = serde_json::json!({"hooks": {"Stop": [
+        {"hooks": [{"type": "command", "command": "'/opt/rb' hook claude-code stop"}]},
+        {"hooks": [{"type": "command", "command": "echo ripwire-broker hook notes"}]},
+        {"hooks": [{"type": "command", "command": "ripwire-broker hook-stats --json"}]},
+        {"matcher": "kept", "hooks": []},
+    ]}});
+    std::fs::write(&settings, before.to_string()).unwrap();
+    let Ok(Command::Install(args)) = parse(&[
+        "install",
+        "claude-code",
+        "--workspace",
+        root.to_str().unwrap(),
+        "--hooks",
+    ]) else {
+        panic!()
+    };
+
+    let plan = ripwire_broker::install::plan(&args, std::path::Path::new("/opt/rb")).unwrap();
+
+    let change = plan.changes.iter().find(|c| c.path == settings).unwrap();
+    let after: Value = serde_json::from_str(&change.after).unwrap();
+    let stop = commands(&after, "Stop");
+    assert_eq!(
+        stop.iter()
+            .filter(|c| c.contains(" hook claude-code stop"))
+            .count(),
+        1,
+        "the renamed binary's hook is replaced, not doubled: {stop:?}"
+    );
+    for foreign in [
+        "echo ripwire-broker hook notes",
+        "ripwire-broker hook-stats --json",
+    ] {
+        assert!(stop.contains(&foreign.to_string()), "{foreign}: {stop:?}");
+    }
+    let groups = after["hooks"]["Stop"].as_array().unwrap();
+    assert!(groups.iter().any(|g| g["matcher"] == "kept"), "{after}");
+}
+
+/// A session's saved state is read like the other private files (D-147): opened once without
+/// following a link or blocking on a FIFO, and only a regular file. A FIFO in its place held the
+/// hook forever; a link was followed.
+#[test]
+fn a_session_state_that_is_a_fifo_or_a_link_reads_as_fresh() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let name = |id: &str| {
+        dir.path()
+            .join(format!("{:x}.json", Sha256::digest(id.as_bytes())))
+    };
+    assert!(
+        Proc::new("mkfifo")
+            .arg(name("fifo"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    // A real, valid state elsewhere: what a followed link would load.
+    let outside = tempfile::tempdir().unwrap();
+    let elsewhere = ripwire_broker::state::StateStore::new(outside.path().to_path_buf());
+    let paused = ripwire_broker::hook::SessionState {
+        opted_out: true,
+        ..Default::default()
+    };
+    elsewhere.save("x", &paused).unwrap();
+    let real = outside
+        .path()
+        .join(format!("{:x}.json", Sha256::digest(b"x")));
+    assert!(elsewhere.load("x").opted_out);
+    std::os::unix::fs::symlink(&real, name("link")).unwrap();
+    let store = ripwire_broker::state::StateStore::new(dir.path().to_path_buf());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((store.load("fifo").opted_out, store.load("link").opted_out));
+    });
+
+    let (fifo, link) = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("loading a FIFO blocked");
+
+    assert!(!fifo && !link, "neither is read");
+}
+
+/// The watcher kills only the process it was started for (D-147). Its pid can be reused once the
+/// supervisor is gone and ripwire reaped, and `kill -9 <pid>` then hit an unrelated process; the
+/// start time the supervisor passes tells them apart.
+#[test]
+fn the_watcher_never_kills_a_process_that_only_reuses_the_pid() {
+    let mut bystander = Proc::new("sleep")
+        .arg("30")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = bystander.id().to_string();
+
+    // Its parent check fails at once (pid 1 is not its parent), so it acts on the first loop.
+    let status = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args([
+            "__watch",
+            "--parent",
+            "1",
+            "--child",
+            &pid,
+            "--max-rss-mb",
+            "99999",
+        ])
+        .args([
+            "--child-started",
+            "Thu Jan  1 00:00:00 1970",
+            "--program",
+            "x",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+
+    let alive = bystander.try_wait().unwrap().is_none();
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    assert!(status.success());
+    assert!(alive, "a process with another start time was killed");
+}
+
+/// `doctor` asks ripwire its version once (D-147): the launch it then makes reused nothing and
+/// asked again.
+#[test]
+fn doctor_asks_the_version_once() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let counter = bin.path().join("versions");
+    let ripwire = common::counting_ripwire(bin.path(), &counter);
+
+    doctor(ws.path(), &["--ripwire", ripwire.to_str().unwrap()]);
+
+    let asked = std::fs::read_to_string(&counter).unwrap_or_default();
+    assert_eq!(asked.lines().count(), 1, "{asked:?}");
 }

@@ -63,11 +63,10 @@ impl StateStore {
         Ok(file)
     }
 
-    /// A missing or unreadable file is a fresh session.
+    /// A missing or unreadable file is a fresh session; so is one that is not a regular file.
     pub fn load(&self, session_id: &str) -> SessionState {
-        fs::read_to_string(self.path(session_id))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
+        read_regular(&self.path(session_id), MAX_STATE_BYTES)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default()
     }
 
@@ -81,9 +80,33 @@ impl StateStore {
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
-            .filter_map(|p| fs::read_to_string(p).ok())
-            .filter_map(|t| serde_json::from_str(&t).ok())
+            .filter_map(|p| read_regular(&p, MAX_STATE_BYTES))
+            .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
             .collect()
+    }
+
+    /// Whether `session_id` has a saved state.
+    pub fn has(&self, session_id: &str) -> bool {
+        self.path(session_id).exists()
+    }
+
+    /// Removes what the sessions last touched before `cutoff` left behind: their state, their lock
+    /// and their status line projection (D-147). Temporaries and anything else are left alone.
+    pub fn prune(&self, cutoff: std::time::SystemTime) {
+        for dir in [self.dir.clone(), self.dir.join("statusline")] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+                let stale = fs::symlink_metadata(&path)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at < cutoff);
+                let ours = path.extension().is_some_and(|x| x == "json" || x == "lock");
+                if stale && ours {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
     }
 
     /// Forgets a session; missing files are fine.
@@ -101,6 +124,28 @@ impl StateStore {
             serde_json::to_string(state)?.as_bytes(),
         )
     }
+}
+
+/// A session's state stays far below this: about 5,000 fingerprints and a short log.
+const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The bytes of a private file, opened once without following a link or blocking on a FIFO, and
+/// every check made on what was opened (D-147). `None` when it is missing, unreadable, larger than
+/// `max`, or not a regular file.
+fn read_regular(path: &Path, max: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > max {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= max).then_some(bytes)
 }
 
 /// Process-wide: threads writing the same file never share a temporary.

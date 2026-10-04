@@ -34,7 +34,7 @@ commands; `ripwire-broker --help` lists them all:
 | `hook <claude-code\|codex> <event>` | Automatic context from a host hook ([below](#automatic-mode-hooks)) |
 | `hook-log --session ID` | What the hooks injected in a session (counts only) |
 | `hook-stats [--json]` | Every saved hook session (one with no events and nothing remembered is skipped) reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
-| `prompt --workspace DIR [--budget N] TASK...` | Prints the task followed by its context, for clients without hooks (`--budget` defaults to `context_for_task`'s 2500) |
+| `prompt --workspace DIR [--budget N] [--] TASK...` | Prints the task followed by its context, for clients without hooks (`--budget` defaults to `context_for_task`'s 2500). A task word that starts with `--` needs the `--` before the task; `-h` or `--version` inside a task is task text |
 | `doctor --workspace DIR [--json] [--jev-probe [--jev-model M]]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
 | `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online] [--memory]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
@@ -45,8 +45,9 @@ commands; `ripwire-broker --help` lists them all:
 | `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker or the provider refuses the key |
 | `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back; local |
 
-Every command that keeps state (`hook`, `hook-log`, `hook-stats`, `doctor`, `statusline`, `memory …`)
-also takes `--state-dir DIR`; without it, `$XDG_STATE_HOME/ripwire-broker` or
+Every command that keeps state (`serve`, `hook`, `hook-log`, `hook-stats`, `doctor`, `statusline`,
+`memory …`) also takes `--state-dir DIR` (for `serve`, where `--memory` keeps its store: give it the
+same directory as the hooks that collect for it); without it, `$XDG_STATE_HOME/ripwire-broker` or
 `~/.local/state/ripwire-broker` (an empty or relative `XDG_STATE_HOME` counts as unset).
 
 If ripwire is unavailable at startup, the server still comes up in degraded mode. Tools then
@@ -68,7 +69,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--incremental` | off | Sends unchanged items only once per server process ([below](#incremental-context)) |
 | `--ripwire-max-rss-mb N` | no limit | Kills ripwire above N MiB of resident memory; the broker restarts it |
 | `--summarizer-cmd CMD` | off | Local model CLI for architectural notes ([below](#architectural-notes-local-model)) |
-| `--summarizer-version-cmd CMD` | none | Prints the model's version; its hash invalidates cached notes |
+| `--summarizer-version-cmd CMD` | none | Prints the model's version; its hash invalidates cached notes. It gets 10 s |
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
@@ -197,7 +198,8 @@ ripwire-broker --workspace /repo \
 - **From the evidence only:** a note is written only from items included in the same answer.
   `derived_from` lists them, `generated: true` and `source.basis: local_model` mark it, and the text sits
   under `untrusted_repository_data`. Terminal escape codes and control characters are removed, and the note
-  is capped at 600 characters.
+  is capped at 600 characters. The model's answer is read up to 1 MiB, never whole, while the prompt is
+  still being written to it.
 - **Never blocking:** an answer waits at most `--summarizer-wait-ms`. If the note isn't ready, the answer
   carries a `note_pending` limitation and the note finishes in the background. At most one generation runs at
   a time. A failure becomes `summarizer_unavailable`, and everything else in the answer is unchanged.
@@ -450,7 +452,8 @@ hook contract, so the same command serves both:
   by default `$XDG_STATE_HOME/ripwire-broker` or `~/.local/state/ripwire-broker` (an empty or relative
   `XDG_STATE_HOME` counts as unset, so state never lands in the workspace). It holds fingerprints and
   counts, never prompts or code. In a git workspace it can also hold the working-tree fingerprint: up to 5,000
-  entries, each an absolute path anywhere in the repository with its mtime and size.
+  entries, each an absolute path anywhere in the repository with its mtime and size. The first event of a
+  new session removes the files of sessions nobody touched for 30 days.
 - **Cost:** a hook starts ripwire only for an event that asks it something (about 0.1–0.5 s on a small
   repository): not for a prompt after the first one (without `--every-prompt`), an event of a paused session,
   an edit held back by the coalescing window, or an edit outside the workspace. `doctor` shows the timing of a

@@ -58,8 +58,9 @@ fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
     let runtime = match &a.memory {
         None => None,
         Some(_) => {
-            let dir = StateStore::default_dir()
-                .ok_or("--memory: no state directory (set XDG_STATE_HOME or HOME)")?;
+            let dir = a.state_dir.clone().or_else(StateStore::default_dir).ok_or(
+                "--memory: no state directory (pass --state-dir, or set XDG_STATE_HOME or HOME)",
+            )?;
             memory::runtime::from_serve(&a, &dir, memory_client)?
         }
     };
@@ -131,10 +132,15 @@ fn online_config(
 
 /// `memory drain --online` (PD-2): the spool incorporated and ready jobs sent, for at most 60 s or
 /// 20 jobs. Needs the `online` feature and the credential; nothing is downgraded.
-async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
+async fn memory_drain(
+    workspace: &std::path::Path,
+    state_dir: Option<std::path::PathBuf>,
+    model: Option<String>,
+    candidates: Option<usize>,
+) -> ExitCode {
     #[cfg(not(feature = "online"))]
     {
-        let _ = a;
+        let _ = (workspace, state_dir, model, candidates);
         eprintln!(
             "memory drain --online: this binary was built without the online feature; \
              rebuild it with `cargo build --release --features online`"
@@ -144,7 +150,8 @@ async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
     #[cfg(feature = "online")]
     {
         use memory::controller::{Config, Worker};
-        use memory::runtime::{DEFAULT_MODEL, DRAIN_DEADLINE, DRAIN_JOBS, drain};
+        use memory::runtime::{DEFAULT_WRITE_CANDIDATES, DRAIN_DEADLINE, DRAIN_JOBS, drain};
+        use ripwire_broker::online::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_MODEL, DEFAULT_TIMEOUT_MS};
         use ripwire_broker::online::{classifier::Shared, credential::Credential, jev::JevClient};
         let fail = |e: String| {
             eprintln!("memory drain --online: {e}");
@@ -154,26 +161,25 @@ async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
             Ok(k) => k,
             Err(e) => return fail(e.to_string()),
         };
-        let cli::MemoryAction::Drain { model, candidates } = &a.action else {
-            return ExitCode::from(2);
-        };
-        let model = model.clone().unwrap_or_else(|| DEFAULT_MODEL.into());
-        let client = match JevClient::new(key, &model, std::time::Duration::from_secs(15)) {
+        let model = model.unwrap_or_else(|| DEFAULT_MODEL.into());
+        let timeout = std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
+        let client = match JevClient::new(key, &model, timeout) {
             Ok(c) => c,
             Err(e) => return fail(e),
         };
-        let Some(dir) = a.state_dir.clone().or_else(StateStore::default_dir) else {
+        let Some(dir) = state_dir.or_else(StateStore::default_dir) else {
             return fail("no state directory: pass --state-dir".into());
         };
-        let id = match memory::identity::workspace_id(&a.workspace) {
+        let id = match memory::identity::workspace_id(workspace) {
             Ok(id) => id,
             Err(e) => return fail(e),
         };
         let store = Arc::new(memory::store::Store::new(&dir, &id));
-        let classifier: MemoryClient = Arc::new(Shared::new(Arc::new(client), 4));
+        let classifier: MemoryClient =
+            Arc::new(Shared::new(Arc::new(client), DEFAULT_MAX_IN_FLIGHT));
         let config = Config {
             model,
-            candidates: candidates.unwrap_or(4),
+            candidates: candidates.unwrap_or(DEFAULT_WRITE_CANDIDATES),
         };
         let worker = Worker::new(store.clone(), classifier, config);
         let clock = memory::time::SystemClock;
@@ -195,190 +201,210 @@ async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
     }
 }
 
+/// `serde_json` pretty-printed on stdout, as `--json` asks.
+fn print_json(value: &impl serde::Serialize) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_default()
+    );
+}
+
+/// `hook`: always exit 0, a hook must never break the host (PRD 21.4).
+async fn hook_command(a: &cli::HookArgs) -> ExitCode {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    if let Some(out) = hook::run(a, &input).await {
+        // A host that stopped reading (EPIPE) must not turn into exit 101: `println!` would panic.
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "{out}");
+    }
+    ExitCode::SUCCESS
+}
+
+fn hook_log(session: &str, state_dir: Option<std::path::PathBuf>) -> ExitCode {
+    let Some(dir) = state_dir.or_else(StateStore::default_dir) else {
+        eprintln!("no state directory: pass --state-dir");
+        return ExitCode::from(2);
+    };
+    let log = StateStore::new(dir).load(session).log;
+    if log.is_empty() {
+        println!("no injections recorded for this session");
+    }
+    let now = hook::now();
+    for entry in log {
+        println!("{}", entry.line(now));
+    }
+    ExitCode::SUCCESS
+}
+
+fn hook_stats(state_dir: Option<std::path::PathBuf>, json: bool) -> ExitCode {
+    let Some(dir) = state_dir.or_else(StateStore::default_dir) else {
+        eprintln!("no state directory: pass --state-dir");
+        return ExitCode::from(2);
+    };
+    let report = ripwire_broker::usage::report(&StateStore::new(dir).sessions());
+    match json {
+        true => print_json(&report),
+        false => print!("{}", ripwire_broker::usage::render(&report)),
+    }
+    ExitCode::SUCCESS
+}
+
+async fn prompt(a: &cli::PromptArgs) -> ExitCode {
+    let (text, err) = ripwire_broker::local::prompt(a).await;
+    print!("{text}");
+    if let Some(e) = err {
+        eprintln!("ripwire-broker: no context ({}): {}", e.error, e.message);
+    }
+    ExitCode::SUCCESS
+}
+
+async fn doctor(a: &cli::DoctorArgs) -> ExitCode {
+    let report = ripwire_broker::doctor::run(a).await;
+    match a.json {
+        true => print_json(&report),
+        false => print!("{}", report.text()),
+    }
+    match report.ok {
+        true => ExitCode::SUCCESS,
+        false => ExitCode::FAILURE,
+    }
+}
+
+fn install(a: &cli::InstallArgs) -> ExitCode {
+    let binary = std::env::current_exe().unwrap_or_else(|_| "ripwire-broker".into());
+    let plan = match ripwire_broker::install::plan(a, &binary) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if a.write {
+        match ripwire_broker::install::apply(&plan) {
+            Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+            Err(e) => {
+                eprintln!("install: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        println!("dry run: nothing written; pass --write to apply");
+        for c in &plan.changes {
+            let verb = match c.before.is_some() {
+                true => "update",
+                false => "create",
+            };
+            println!("\n{verb} {}:\n{}", c.path.display(), c.after);
+        }
+    }
+    for note in &plan.notes {
+        println!("\n{note}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// Status line mode (PRD §24): local reads only, always exit 0, one line.
+fn statusline(a: &cli::StatuslineArgs) -> ExitCode {
+    use ripwire_broker::statusline::{self, MAX_STDIN_BYTES, Options};
+    use ripwire_broker::statusline_state::{self as projection, HOST, Read};
+    use std::io::Write;
+    let mut raw = Vec::new();
+    let _ = std::io::stdin()
+        .take(MAX_STDIN_BYTES + 1)
+        .read_to_end(&mut raw);
+    let text = match raw.len() as u64 > MAX_STDIN_BYTES {
+        true => String::new(),
+        false => String::from_utf8(raw).unwrap_or_default(),
+    };
+    let input = statusline::parse_input(&text);
+    let snapshot = input.session_id.as_ref().and_then(|session| {
+        let root = statusline::resolve_root(a.workspace.as_deref(), &input)?;
+        let dir = a.state_dir.clone().or_else(StateStore::default_dir)?;
+        match projection::read(&dir, HOST, session, &root) {
+            Read::Valid(s) => Some(s),
+            _ => None,
+        }
+    });
+    let width = a
+        .width
+        .or_else(|| std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()))
+        .unwrap_or(100);
+    let options = Options {
+        detail: a.detail,
+        width,
+        color: a.color == cli::Color::Always,
+    };
+    // A closed stdout (EPIPE) must not turn the bar into a failure: `println!` would panic.
+    let _ = writeln!(
+        std::io::stdout(),
+        "{}",
+        statusline::render(&input, snapshot.as_ref(), &options, hook::now())
+    );
+    ExitCode::SUCCESS
+}
+
+/// The local `memory` commands; `drain` is [`memory_drain`].
+fn memory_local(a: &cli::MemoryCommand) -> ExitCode {
+    match ripwire_broker::memory::command::run(a) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    let serve = match cli::parse(std::env::args().skip(1).collect()) {
-        Ok(Command::Serve(a)) => a,
+    match cli::parse(std::env::args().skip(1).collect()) {
+        Ok(Command::Serve(a)) => serve(a).await,
         Ok(Command::Supervise { max_rss_mb, argv }) => {
-            return ripwire_broker::supervise::run(max_rss_mb, &argv);
+            ripwire_broker::supervise::run(max_rss_mb, &argv)
         }
         Ok(Command::Watch {
             parent,
             child,
             max_rss_mb,
             program,
-        }) => {
-            return ripwire_broker::supervise::watch(parent, child, max_rss_mb, &program);
-        }
+            child_started,
+        }) => ripwire_broker::supervise::watch(
+            parent,
+            child,
+            max_rss_mb,
+            &program,
+            child_started.as_deref(),
+        ),
         Ok(Command::Info(text)) => {
             println!("{text}");
-            return ExitCode::SUCCESS;
+            ExitCode::SUCCESS
         }
-        Ok(Command::Hook(a)) => {
-            // Always exit 0: a hook must never break the host (PRD 21.4).
-            let mut input = String::new();
-            let _ = std::io::stdin().read_to_string(&mut input);
-            if let Some(out) = hook::run(&a, &input).await {
-                println!("{out}");
-            }
-            return ExitCode::SUCCESS;
-        }
-        Ok(Command::HookLog { session, state_dir }) => {
-            let Some(dir) = state_dir.or_else(StateStore::default_dir) else {
-                eprintln!("no state directory: pass --state-dir");
-                return ExitCode::from(2);
-            };
-            let log = StateStore::new(dir).load(&session).log;
-            if log.is_empty() {
-                println!("no injections recorded for this session");
-            }
-            let now = hook::now();
-            for entry in log {
-                println!("{}", entry.line(now));
-            }
-            return ExitCode::SUCCESS;
-        }
-        Ok(Command::HookStats { state_dir, json }) => {
-            let Some(dir) = state_dir.or_else(StateStore::default_dir) else {
-                eprintln!("no state directory: pass --state-dir");
-                return ExitCode::from(2);
-            };
-            let report = ripwire_broker::usage::report(&StateStore::new(dir).sessions());
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).unwrap_or_default()
-                );
-            } else {
-                print!("{}", ripwire_broker::usage::render(&report));
-            }
-            return ExitCode::SUCCESS;
-        }
-        Ok(Command::Prompt(a)) => {
-            let (text, err) = ripwire_broker::local::prompt(&a).await;
-            print!("{text}");
-            if let Some(e) = err {
-                eprintln!("ripwire-broker: no context ({}): {}", e.error, e.message);
-            }
-            return ExitCode::SUCCESS;
-        }
-        Ok(Command::Doctor(a)) => {
-            let report = ripwire_broker::doctor::run(&a).await;
-            if a.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).unwrap_or_default()
-                );
-            } else {
-                print!("{}", report.text());
-            }
-            return if report.ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            };
-        }
-        Ok(Command::Install(a)) => {
-            let binary = std::env::current_exe().unwrap_or_else(|_| "ripwire-broker".into());
-            let plan = match ripwire_broker::install::plan(&a, &binary) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            if a.write {
-                match ripwire_broker::install::apply(&plan) {
-                    Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
-                    Err(e) => {
-                        eprintln!("install: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            } else {
-                println!("dry run: nothing written; pass --write to apply");
-                for c in &plan.changes {
-                    let verb = if c.before.is_some() {
-                        "update"
-                    } else {
-                        "create"
-                    };
-                    println!("\n{verb} {}:\n{}", c.path.display(), c.after);
-                }
-            }
-            for note in &plan.notes {
-                println!("\n{note}");
-            }
-            return ExitCode::SUCCESS;
-        }
-        Ok(Command::Statusline(a)) => {
-            // Status line mode (PRD §24): local reads only, always exit 0, one line.
-            use ripwire_broker::statusline::{self, MAX_STDIN_BYTES, Options};
-            use ripwire_broker::statusline_state::{self as projection, HOST, Read};
-            use std::io::Write;
-            let mut raw = Vec::new();
-            let _ = std::io::stdin()
-                .take(MAX_STDIN_BYTES + 1)
-                .read_to_end(&mut raw);
-            let text = match raw.len() as u64 > MAX_STDIN_BYTES {
-                true => String::new(),
-                false => String::from_utf8(raw).unwrap_or_default(),
-            };
-            let input = statusline::parse_input(&text);
-            let snapshot = match &input.session_id {
-                Some(session) => {
-                    let root = statusline::resolve_root(a.workspace.as_deref(), &input);
-                    let dir = a.state_dir.clone().or_else(StateStore::default_dir);
-                    match (root, dir) {
-                        (Some(root), Some(dir)) => {
-                            match projection::read(&dir, HOST, session, &root) {
-                                Read::Valid(s) => Some(s),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    }
-                }
-                None => None,
-            };
-            let width = a
-                .width
-                .or_else(|| std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()))
-                .unwrap_or(100);
-            let options = Options {
-                detail: a.detail,
-                width,
-                color: a.color == cli::Color::Always,
-            };
-            // A closed stdout (EPIPE) must not turn the bar into a failure: `println!` would panic.
-            let _ = writeln!(
-                std::io::stdout(),
-                "{}",
-                statusline::render(&input, snapshot.as_ref(), &options, hook::now())
-            );
-            return ExitCode::SUCCESS;
-        }
-        Ok(Command::Memory(a)) if matches!(a.action, cli::MemoryAction::Drain { .. }) => {
-            return memory_drain(&a).await;
-        }
-        Ok(Command::Memory(a)) => {
-            // Dispatched before `settings`: local, never online (PRD jev-mem §4).
-            return match ripwire_broker::memory::command::run(&a) {
-                Ok(text) => {
-                    println!("{text}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("{e}");
-                    ExitCode::FAILURE
-                }
-            };
-        }
+        Ok(Command::Hook(a)) => hook_command(&a).await,
+        Ok(Command::HookLog { session, state_dir }) => hook_log(&session, state_dir),
+        Ok(Command::HookStats { state_dir, json }) => hook_stats(state_dir, json),
+        Ok(Command::Prompt(a)) => prompt(&a).await,
+        Ok(Command::Doctor(a)) => doctor(&a).await,
+        Ok(Command::Install(a)) => install(&a),
+        Ok(Command::Statusline(a)) => statusline(&a),
+        Ok(Command::Memory(cli::MemoryCommand {
+            action: cli::MemoryAction::Drain { model, candidates },
+            workspace,
+            state_dir,
+        })) => memory_drain(&workspace, state_dir, model, candidates).await,
+        // Dispatched before `settings`: local, never online (PRD jev-mem §4).
+        Ok(Command::Memory(a)) => memory_local(&a),
         Err(msg) => {
             eprintln!("{msg}");
-            return ExitCode::from(2);
+            ExitCode::from(2)
         }
-    };
+    }
+}
+
+/// `serve`: the MCP server over stdio, with the memory worker when `--memory` is on.
+async fn serve(serve: ServeArgs) -> ExitCode {
     // Held until `main` returns: dropping it stops the worker with the server.
     let (settings, mut memory) = match settings(serve) {
         Ok(s) => s,

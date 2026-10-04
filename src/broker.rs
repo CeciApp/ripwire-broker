@@ -570,7 +570,8 @@ impl Broker {
         self.workspace.relative(path).ok()
     }
 
-    /// Waits for a note still being written in the background, if any.
+    /// Waits for a note still being written in the background, if any: for tests, which observe
+    /// a note settle. The server never waits for one.
     pub async fn wait_background(&self) {
         if let Some(engine) = &self.notes {
             engine.wait_background().await;

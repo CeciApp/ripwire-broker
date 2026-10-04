@@ -23,8 +23,9 @@ pub const DRAIN_JOBS: usize = 20;
 /// Retention runs when the worker starts and then once an hour while it is active.
 const SWEEP_EVERY_MS: u64 = 60 * 60 * 1000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
-/// The pinned model when no `--jev-model` was given.
-pub const DEFAULT_MODEL: &str = "jev-1.13.0";
+pub use crate::online::DEFAULT_MODEL;
+/// Earlier memories a new one is compared with when no `--memory-write-candidates` is given.
+pub const DEFAULT_WRITE_CANDIDATES: usize = 4;
 
 pub struct Runtime {
     store: Arc<Store>,

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[async_trait]
 pub trait Summarizer: Send + Sync + std::fmt::Debug {
@@ -32,6 +32,12 @@ pub struct CommandSummarizer {
     trusted_version: bool,
 }
 
+/// A note is at most 600 characters; a model's answer is read up to this, never whole.
+const MAX_ANSWER_BYTES: u64 = 1024 * 1024;
+
+/// How long `--summarizer-version-cmd` may take (`ollama show` against a stuck server hangs).
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn split_command(command: &str) -> Result<Vec<String>, String> {
     let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
     if argv.is_empty() {
@@ -53,16 +59,27 @@ impl CommandSummarizer {
         let mut model_id = argv.join(" ");
         if let Some(v) = version_cmd {
             let vargv = split_command(v)?;
-            let out = std::process::Command::new(&vargv[0])
-                .args(&vargv[1..])
-                .env_remove(crate::online::KEY_VAR)
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|e| format!("{}: {e}", vargv[0]))?;
-            if !out.status.success() {
-                return Err(format!("{} exited with {}", vargv[0], out.status));
+            let mut command = std::process::Command::new(&vargv[0]);
+            command.args(&vargv[1..]).env_remove(crate::online::KEY_VAR);
+            // It runs before `serve` answers its host: a command that hangs must not hang it.
+            let deadline = std::time::Instant::now() + VERSION_TIMEOUT;
+            let (status, stdout) = match crate::bounded::output(command, deadline) {
+                Ok(done) => done,
+                Err(crate::bounded::Stop::Late) => {
+                    return Err(format!(
+                        "{} did not finish within {} s",
+                        vargv[0],
+                        VERSION_TIMEOUT.as_secs()
+                    ));
+                }
+                Err(crate::bounded::Stop::Failed) => {
+                    return Err(format!("{}: could not run it", vargv[0]));
+                }
+            };
+            if !status.success() {
+                return Err(format!("{} exited with {}", vargv[0], status));
             }
-            let digest = format!("{:x}", Sha256::digest(&out.stdout));
+            let digest = format!("{:x}", Sha256::digest(&stdout));
             model_id = format!("{model_id} @{}", &digest[..16]);
         }
         Ok(Self {
@@ -89,20 +106,41 @@ impl Summarizer for CommandSummarizer {
             .spawn()
             .map_err(|e| format!("{program}: {e}"))?;
         let mut stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+        // The prompt is written while the answer is read: a model that prints before it reads
+        // would otherwise fill its pipe while this side still writes, and both would wait.
         let run = async {
-            // A model that exits without reading its input is not an error by itself.
-            let _ = stdin.write_all(prompt.as_bytes()).await;
-            drop(stdin);
-            child.wait_with_output().await
+            let write = async {
+                // A model that exits without reading its input is not an error by itself.
+                let _ = stdin.write_all(prompt.as_bytes()).await;
+                drop(stdin);
+            };
+            let read = async {
+                let mut answer = Vec::new();
+                stdout
+                    .take(MAX_ANSWER_BYTES + 1)
+                    .read_to_end(&mut answer)
+                    .await
+                    .map(|_| answer)
+            };
+            let ((), answer) = tokio::join!(write, read);
+            let answer = answer?;
+            if answer.len() as u64 > MAX_ANSWER_BYTES {
+                // Dropping the child kills it (`kill_on_drop`).
+                return Ok(Err(format!(
+                    "answer too large (over {MAX_ANSWER_BYTES} bytes)"
+                )));
+            }
+            child.wait().await.map(|status| Ok((status, answer)))
         };
-        let out = tokio::time::timeout(self.hard_timeout, run)
+        let (status, answer) = tokio::time::timeout(self.hard_timeout, run)
             .await
             .map_err(|_| format!("timeout after {} ms", self.hard_timeout.as_millis()))?
-            .map_err(|e| format!("{program}: {e}"))?;
-        if !out.status.success() {
-            return Err(format!("{program} exited with {}", out.status));
+            .map_err(|e| format!("{program}: {e}"))??;
+        if !status.success() {
+            return Err(format!("{program} exited with {status}"));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(String::from_utf8_lossy(&answer).into_owned())
     }
 
     fn model_id(&self) -> String {

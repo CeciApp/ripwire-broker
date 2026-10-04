@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-04 18:30 | Achados baixos da CLI, dos hooks, do instalador e do estado, em TDD: EPIPE no hook, relógio para trás, `--help` dentro da tarefa, números truncados, `serve --state-dir`, prazo do comando de versão, poda de sessões de 30 dias, hooks do instalador por programa, estado lido sem seguir link nem travar em FIFO, summarizer que escreve e lê junto com teto de 1 MiB, watcher que confere o início do processo, uma versão por `doctor`; código morto e simplificações da área | [D-147](#d-147--achados-baixos-da-cli-dos-hooks-e-do-estado) |
 | 2026-10-04 14:00 | Revisão de 2026-10-04: os cinco achados de maior impacto em produção corrigidos em TDD — leitura e hash do online no pool bloqueante, snapshot lido pelo arquivo verificado (TOCTOU), chave do provedor fora dos processos filhos, prazo de 5 s no `ripwire --version` e erros do worker de memória ditos uma vez no stderr | [D-146](#d-146--revisão-de-2026-10-04-os-cinco-de-maior-impacto) |
 | 2026-10-04 11:04 | Documentação sincronizada com o código depois da auditoria: status do `--memory` no PRD jev-mem, no README e no PRD principal; os seis braços do eval; o resumo com "found"; os tetos de `Retry-After`; o mapa de arquivos e a evidência do plano; a ordem do índice do changelog; o handoff | [D-145](#d-145--documentação-sincronizada-com-o-código-depois-da-auditoria) |
 | 2026-10-04 04:40 | Achados médios da auditoria corrigidos em TDD (16, mais um achado no caminho): roteador por início de palavra, hook que só lança o ripwire quando vai perguntar, variáveis de diretório vazias ou relativas ignoradas, três do online, três da memória, quatro do eval, o TOML do Codex, o dedup de corpos e de riscos e o resumo; a leitura bloqueante do online fica registrada, sem teste determinístico | [D-144](#d-144--auditoria-de-2026-10-04-os-achados-médios) |
@@ -6385,4 +6386,103 @@ orçamento desliga a detecção em vez de contar uma impressão lenta. O `bounde
 anterior (o mesmo poll de 2 ms), então a falha fica registrada como sensível a carga, sem correção.
 
 **Testes:** 694 → 702 no build padrão, 710 → 719 com `online` (mais dois ignorados, os filhos dos testes de reexecução).
+
+## D-147 — Achados baixos da CLI, dos hooks e do estado
+
+**Data:** 2026-10-04 18:30.
+
+**Contexto:** o mantenedor pediu os grupos 3 (o que a revisão do D-146 deixou) e 4 (os achados
+baixos, o código morto e as simplificações das auditorias do D-143 e do D-144). Os relatórios da
+auditoria só existiam na conversa; foram recuperados do histórico da sessão. Este registro cobre a
+primeira área: CLI, hooks, instalador, `doctor`, estado, summarizer e supervisor. Um commit por achado,
+teste vermelho visto falhar, mutações derrubadas.
+
+**Corrigidos:**
+
+- **Hook com stdout fechado:** `println!` entra em pânico com EPIPE, e o hook saía com 101 apesar de
+  prometer sempre 0. Agora `writeln!` com o erro ignorado, como o status line.
+- **Relógio para trás:** `now.saturating_sub(last_edit_ms)` dava 0 e lia como "dentro da janela";
+  toda edição ficava segurada até o relógio alcançar. Agora um relógio que voltou fecha a janela.
+- **CLI:**
+  - `-h`, `--help` e `--version` eram aceitos em qualquer lugar antes do `--`, e
+    `prompt … explain the -h flag` imprimia o uso. Agora só valem como argumento próprio, nunca
+    como valor de flag nem entre as palavras da tarefa. O `--` encerra as flags, então uma tarefa
+    pode citar uma (`prompt -- what does --budget do`).
+  - `--budget` e os pids do `__watch` usavam `as u32`: `--budget 4294967296` virava 0. Agora um
+    número além da largura é recusado.
+  - A mensagem "--online is only available to serve" esquecia o `install` e o `memory drain`.
+- **`serve --state-dir`:** `hook --state-dir X --memory` grava o spool em X, mas o `serve` só
+  conhecia o diretório padrão e nunca lia esse spool. O `serve` ganhou `--state-dir`, com o mesmo
+  sentido dos hooks e dos comandos `memory`.
+- **Comando de versão do summarizer:** rodava sem limite antes de o `serve` responder ao host e no
+  `doctor`. Agora usa `bounded::output` com 10 s.
+- **Sessões nunca apagadas:** cada sessão deixava estado, lock e projeção do status line para
+  sempre, e o `hook-stats` lia todos. O primeiro evento de uma sessão nova apaga os arquivos de
+  sessões que ninguém tocou por 30 dias.
+- **Hooks do instalador:** eram reconhecidos por substring. Um binário renomeado duplicava os hooks
+  a cada reinstalação, um comando alheio que só citasse as duas palavras era apagado, e um grupo
+  alheio já vazio sumia. Agora um hook é nosso quando o programa é um nome do broker ou o binário que
+  instala e o primeiro argumento é `hook`, como o status line já era reconhecido. Só sai o grupo que
+  a remoção esvaziou.
+- **Estado da sessão lido como os outros arquivos privados** (grupo 3): `StateStore::load` e
+  `sessions` liam por nome. Uma FIFO travava o hook para sempre, um link era seguido, e não havia
+  limite de tamanho. Agora o arquivo é aberto uma vez com `O_NOFOLLOW | O_NONBLOCK`, e só se lê um
+  arquivo regular de até 16 MiB.
+- **Summarizer** (grupo 3): escrevia o prompt inteiro antes de ler a resposta, e um modelo que
+  imprime antes de ler travava os dois até o limite duro. Agora escreve e lê ao mesmo tempo. A
+  resposta é lida até 1 MiB; acima disso é recusada e o modelo, morto.
+- **Watcher e pid reaproveitado** (grupo 3): o `__watch` podia mandar `kill -9` a um processo alheio
+  que herdasse o pid do ripwire. O watcher lê o início do filho ao começar (`ps -o lstart=`, ou a
+  flag `--child-started`) e não mata um processo que começou em outra hora. A primeira versão fazia
+  o supervisor ler esse início antes de lançar o watcher; isso alargava a janela em que um
+  supervisor morto deixa o ripwire sem vigia, e o `killing_the_supervisor_does_not_orphan_ripwire`
+  passou a falhar nos gates. O watcher voltou a ser lançado logo depois do filho.
+- **`doctor` perguntava a versão duas vezes:** o lançamento agora reaproveita a que já leu.
+
+**Código morto e simplificações:**
+
+- **Removidos:**
+  - `ServeArgs::online_origin` com `OnlineOrigin`: lido só pelos testes;
+  - o parâmetro `_host` de `hook::handle`;
+  - o ramo inalcançável do `Drain` em `main`.
+- **Unificados:**
+  - a segunda validação de `--memory-write-candidates` (agora `Flags::within`);
+  - os defaults do provedor (`online::DEFAULT_MODEL`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_IN_FLIGHT`,
+    e `memory::runtime::DEFAULT_WRITE_CANDIDATES`; o modelo estava escrito em quatro lugares);
+  - os três SHA-256 com prefixo de tamanho, em `identity::hash` (um teste fixa uma chave de nota,
+    para as já guardadas continuarem valendo).
+- **Divididos:** `main` em uma função por comando; `cli::parse` em uma por subcomando; três passos de
+  `hook::run` (impressão da árvore, `Policy`, versão em cache).
+- **Pequenos:**
+  - o `is_shell` calculado duas vezes;
+  - o `is_sorted` antes do `sort`;
+  - a dupla busca nas tabelas de flags (agora um guard `if let`);
+  - três clones redundantes;
+  - o `resume` agora tem nome no `match`;
+  - a documentação do `wait_background`, que prometia um desligamento gracioso inexistente.
+
+**Não feitos, com o motivo:**
+
+- **Teto duro na saída do hook (A2):** com 120 a 1.000 itens cortados, a saída fica abaixo de 9.000
+  caracteres. Sem caso que falhe, nenhuma guarda foi acrescentada; o caso ficou como teste de
+  regressão.
+- **Helper do diretório de estado:** as nove ocorrências são o mesmo `or_else(StateStore::default_dir)`
+  de uma linha; a regra já mora num lugar só (`default_dir` e `env_dir`, D-144).
+- **`VisibleStats.events`:** está no formato da projeção documentado no PRD §24.
+- **Variantes de `statusline_state::Read`:** distinguem o motivo para quem observa, ainda que o
+  `main` trate todas igual.
+- **Locks:** o lock da sessão espera e o slot remoto da memória não; são regras diferentes.
+- **Relógios:** `hook::now` é em segundos, não um clone do relógio em milissegundos da memória.
+- **`host`/`event`:** já são uma tabela em forma de `match`.
+
+**Teste intermitente:** o fixture do `git` lento (60 ms por chamada, duas chamadas, dentro dos
+500 ms do hook) passou a dormir 30 ms por chamada, ainda acima dos 50 ms do limiar (fixado por
+uma asserção de compilação). Ele roda o `git` falso uma vez antes do hook, porque no macOS a
+primeira execução de um executável novo é lenta, e o grava com `common::write_executable` (ETXTBSY
+no Linux). O `shell_edits` passou de 1 falha em 8 execuções para 0 em 15. Com três suítes ao
+mesmo tempo, os limiares de tempo real ainda cedem. Na mesma tarde, o
+`killing_the_supervisor_does_not_orphan_ripwire` falhou quatro vezes seguidas com a máquina em
+carga média 9; não falhou nas sete execuções seguintes.
+
+**Testes:** 702 → 717 no build padrão, 719 → 735 com `online` (gates locais verdes).
 
