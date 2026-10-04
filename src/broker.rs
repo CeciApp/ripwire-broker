@@ -58,22 +58,29 @@ struct Unfinished<'a> {
     finished: bool,
 }
 
+impl Unfinished<'_> {
+    /// The call's record after `took`, its spans and stages taken.
+    fn record(&self, outcome: &'static str, took: std::time::Duration) -> RequestRecord {
+        RequestRecord {
+            request_id: self.id,
+            tool: self.tool,
+            outcome,
+            total_us: took.as_micros() as u64,
+            upstream: std::mem::take(&mut *self.spans.lock().unwrap()),
+            stages: std::mem::take(&mut *self.stages.lock().unwrap()),
+        }
+    }
+}
+
 impl Drop for Unfinished<'_> {
     fn drop(&mut self) {
         if self.finished {
             return;
         }
-        let took = self.started.elapsed();
+        let record = self.record("cancelled", self.started.elapsed());
         let mut metrics = self.broker.metrics.lock().unwrap();
         metrics.cancelled(self.tool);
-        metrics.request(RequestRecord {
-            request_id: self.id,
-            tool: self.tool,
-            outcome: "cancelled",
-            total_us: took.as_micros() as u64,
-            upstream: std::mem::take(&mut *self.spans.lock().unwrap()),
-            stages: std::mem::take(&mut *self.stages.lock().unwrap()),
-        });
+        metrics.request(record);
     }
 }
 
@@ -610,28 +617,18 @@ impl Broker {
             stages: stages.clone(),
             finished: false,
         };
-        let ctx = RequestCtx {
-            id,
-            spans: spans.clone(),
-            stages: stages.clone(),
-        };
+        let ctx = RequestCtx { id, spans, stages };
         let result = REQUEST.scope(ctx, inner).await;
         guard.finished = true;
-        let spans = std::mem::take(&mut *spans.lock().unwrap());
         let took = started.elapsed();
+        let outcome = match &result {
+            Ok(env) => env.status.as_str(),
+            Err(e) => e.error,
+        };
+        let record = guard.record(outcome, took);
         let mut metrics = self.metrics.lock().unwrap();
         metrics.tool(tool, took, &result);
-        metrics.request(RequestRecord {
-            request_id: id,
-            tool,
-            outcome: match &result {
-                Ok(env) => env.status.as_str(),
-                Err(e) => e.error,
-            },
-            total_us: took.as_micros() as u64,
-            upstream: spans,
-            stages: std::mem::take(&mut *stages.lock().unwrap()),
-        });
+        metrics.request(record);
         result
     }
 
