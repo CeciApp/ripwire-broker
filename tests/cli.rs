@@ -4662,8 +4662,8 @@ fn an_empty_or_relative_directory_variable_never_puts_state_in_the_workspace() {
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
-        let project = std::fs::read_to_string(ws.path().join(".claude/settings.json"))
-            .unwrap_or_default();
+        let project =
+            std::fs::read_to_string(ws.path().join(".claude/settings.json")).unwrap_or_default();
         assert!(
             !project.contains("statusLine"),
             "CLAUDE_CONFIG_DIR={value:?}: the user's own bar was seen: {project}"
