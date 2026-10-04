@@ -5011,6 +5011,7 @@ fn a_new_session_prunes_sessions_untouched_for_thirty_days() {
     };
     put("old.json", old);
     put("old.lock", old);
+    put("orphan.lock", old);
     put("statusline/old.json", old);
     put("recent.json", recent);
     let prompt = |session: &str| {
@@ -5035,7 +5036,7 @@ fn a_new_session_prunes_sessions_untouched_for_thirty_days() {
 
     prompt("new");
 
-    for gone in ["old.json", "old.lock", "statusline/old.json"] {
+    for gone in ["old.json", "old.lock", "orphan.lock", "statusline/old.json"] {
         assert!(!dir.join(gone).exists(), "{gone} kept");
     }
     assert!(dir.join("recent.json").exists(), "a recent session is kept");
@@ -5193,4 +5194,55 @@ fn doctor_asks_the_version_once() {
 
     let asked = std::fs::read_to_string(&counter).unwrap_or_default();
     assert_eq!(asked.lines().count(), 1, "{asked:?}");
+}
+
+/// Pruning never removes the state of a session whose lock is held (D-148): a session resumed
+/// after 30 idle days holds its lock while it loads, and a new session pruning at that moment made
+/// it load a fresh state and lose its own (CodeRabbit, PR #58).
+#[test]
+fn pruning_skips_a_session_whose_lock_is_held() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = ripwire_broker::state::StateStore::new(state.path().to_path_buf());
+    let paused = ripwire_broker::hook::SessionState {
+        opted_out: true,
+        ..Default::default()
+    };
+    store.save("resumed", &paused).unwrap();
+    let held = store.lock("resumed").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+    for entry in std::fs::read_dir(state.path()).unwrap() {
+        let p = entry.unwrap().path();
+        if p.is_file() {
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+    }
+    let input = serde_json::json!({"session_id": "new", "cwd": ws.path(),
+        "hook_event_name": "UserPromptSubmit", "prompt": "#ripwire-off"});
+
+    let (code, _, err) = run(
+        &[
+            "hook",
+            "claude-code",
+            "user-prompt-submit",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--ripwire",
+            "/nonexistent/ripwire",
+        ],
+        &input.to_string(),
+    );
+
+    assert_eq!(code, 0, "{err}");
+    drop(held);
+    assert!(
+        store.load("resumed").opted_out,
+        "the held session kept its state"
+    );
 }

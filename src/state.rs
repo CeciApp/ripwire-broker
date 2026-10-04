@@ -91,18 +91,47 @@ impl StateStore {
     }
 
     /// Removes what the sessions last touched before `cutoff` left behind: their state, their lock
-    /// and their status line projection (D-147). Temporaries and anything else are left alone.
+    /// and their status line projection (D-147). A session whose lock is held is skipped: it may
+    /// have just been resumed, and its state is about to be read (D-148). Temporaries and anything
+    /// else are left alone.
     pub fn prune(&self, cutoff: std::time::SystemTime) {
-        for dir in [self.dir.clone(), self.dir.join("statusline")] {
-            let Ok(entries) = fs::read_dir(&dir) else {
-                continue;
-            };
+        let stale = |path: &Path| {
+            fs::symlink_metadata(path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| at < cutoff)
+        };
+        if let Ok(entries) = fs::read_dir(&self.dir) {
             for path in entries.filter_map(Result::ok).map(|e| e.path()) {
-                let stale = fs::symlink_metadata(&path)
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|at| at < cutoff);
+                // A session is its state and its lock; either one, alone and stale, is enough.
+                let state = path.with_extension("json");
+                let lock = path.with_extension("lock");
                 let ours = path.extension().is_some_and(|x| x == "json" || x == "lock");
-                if stale && ours {
+                let alone = !state.exists() || !lock.exists();
+                if !ours || !stale(&state) && !(alone && stale(&path)) {
+                    continue;
+                }
+                let held = fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&lock)
+                    .map(|f| f.try_lock().map(|()| f));
+                match held {
+                    // Locked by a hook of that session: it is not stale after all.
+                    Ok(Err(_)) => continue,
+                    // Removed while holding the lock, so no hook of the session loads in between.
+                    Ok(Ok(_guard)) => {
+                        let _ = fs::remove_file(&state);
+                        let _ = fs::remove_file(&lock);
+                    }
+                    Err(_) => {
+                        let _ = fs::remove_file(&state);
+                    }
+                }
+            }
+        }
+        if let Ok(entries) = fs::read_dir(self.dir.join("statusline")) {
+            for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+                if path.extension().is_some_and(|x| x == "json") && stale(&path) {
                     let _ = fs::remove_file(&path);
                 }
             }
