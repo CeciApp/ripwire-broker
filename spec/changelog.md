@@ -102,6 +102,7 @@
 | 2026-10-03 22:52 | Fase 4 do plano do `--memory` (consolidação) feita em TDD (T4.1 a T4.3): cadência durável de 20 enriquecimentos ou 24 h, sem timer entre processos; rodadas de até 4 pares, 20 perguntas, 5 s e 4 tentativas, com cursor; decisões por par e `RepresentationDecision`, ligação `linked` a partir de 0,60, originais nunca apagados; nota derivada só pelo gate (`merge`/`promote` ≥ 0,85, contradição < 0,85), `memory-consolidation/v1`, validador de caminhos e IDs, cache só com versão confiável do sumarizador; revisão com um achado alto (rodada com commit falho comprada de novo a cada tick) e três médios corrigidos, entre eles os pares gravados pelo enriquecimento | [D-140](#d-140--fase-4-do---memory-consolidação) |
 | 2026-10-04 00:10 | Recorte da Fase 5 do `--memory` decidido pelo mantenedor: o braço C usa uma flag nova e experimental do `serve`, `--memory-selection deterministic` (mesma coleta e store, sem worker de enriquecimento, leitura pelas âncoras locais com revalidação, identidade separada); o corpus do eval ganha `sequence`, sessões em ordem no mesmo caminho e store por (sequência, braço, repetição) | [D-141](#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências) |
 | 2026-10-04 01:30 | Fase 5 do plano do `--memory` (avaliação) feita em TDD (T5.0 a T5.2; T5.3, a rodada, manual): `serve --memory-selection deterministic`; braços `broker-memory` e `broker-memory-deterministic` no `ripwire-eval`; `sequence` no corpus, com store por rodada; relatório com recuperação, ingestão e latência do agente separadas, jobs deixados por sessão e versões; revisão com quatro achados médios corrigidos e as divergências do PRD §14 registradas para a T5.3 | [D-142](#d-142--fase-5-do---memory-avaliação) |
+| 2026-10-04 09:30 | Auditoria do sistema (ferramentas do ripwire, clippy pedante e cinco revisores só de leitura, ~100 achados): os cinco defeitos mais graves corrigidos em TDD — o corpus por caminho relativo e as edições commitadas no eval, a sessão restaurada que deixava de lembrar, o `Retry-After` que derrubava o worker e o símbolo desconhecido que derrubava o `context_after_edit`; o resto registrado | [D-143](#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves) |
 | 2026-10-03 15:12 | Fase 1 do plano do `--memory` feita em TDD (T1.1 a T1.16, um commit por tarefa, mutação em cada uma): `--memory` e `--memory-*` no parse; registro `memory/v1`, identidade, admissão, relógio e sequência; store privado com spool, snapshot, tetos, lock, retenção, `forget` com tombstones e revogação; `memory status\|forget\|add\|resume`; coleta pelas tools e pelo `hook --memory`; `install`/`doctor`. O `serve --memory` ainda não liga a coleta (T2.11) | [D-137](#d-137--fase-1-do---memory-store-e-coleta) |
 | 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
@@ -6111,3 +6112,72 @@ falhou uma vez nos portões (a leitura do resource) e passou isolado três vezes
 
 **Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos e `props_fs`
 verdes; CA-10 sem crate de rede; guarda de fixtures verde.
+
+## D-143 — Auditoria de 2026-10-04: os cinco defeitos mais graves
+
+**Data:** 2026-10-04 09:30.
+
+**Contexto:** a pedido do mantenedor, uma auditoria do sistema inteiro atrás de bugs, código que nunca
+executa e simplificações. Ferramentas: `ripwire --dead-code`, `--clones` e `--quality-panel`, o clippy
+com `pedantic` e `nursery`, e cinco revisores só de leitura, um por área (caminho MCP, comandos do
+host, modo online, memória, avaliação), que reproduziram parte dos achados com programas
+descartáveis fora do repositório. Cerca de 100 achados; o ripwire acusou um único código morto, falso
+positivo (`effort_label` é passado por nome).
+
+**Decisão:** corrigir primeiro, em TDD, os cinco que o mantenedor escolheu entre os mais graves; o
+resto fica registrado abaixo para tarefas próprias.
+
+**Corrigidos (teste vermelho, correção, mutações):**
+
+- **Eval — corpus por caminho relativo:** `Corpus::load` juntava o `repo` relativo ao diretório do
+  corpus, vazio ou `.` quando `--corpus` é relativo (como no exemplo do README); o `git -C <cópia>
+  fetch <repo>` procurava o repositório dentro da cópia, e toda tarefa quebrava. Agora os
+  repositórios saem em caminho absoluto.
+- **Eval — edições commitadas:** os arquivos mudados vinham do `git status` contra o `HEAD`; um agente
+  que desse commit (ele pode rodar git) tinha recall 0, e sem `-z` o git escapava nomes não ASCII,
+  que nunca casavam com a referência. Agora: o diff contra o `base` da tarefa mais os não rastreados,
+  separados por NUL.
+- **Sessão restaurada que deixava de lembrar:** a fila de despejo não é persistida; depois de
+  restaurada ela vinha vazia, e no teto (5.000 impressões) cada impressão nova era despejada assim que
+  chegava. A sessão de um hook, restaurada a cada evento, passava a reenviar tudo inteiro. Agora o que
+  veio do disco conta como mais antigo que tudo o que o processo acrescenta. O retorno antecipado
+  abaixo do teto é mutante equivalente (só poupa trabalho).
+- **Worker da memória e `Retry-After` enorme:** a espera de um 429 chegava sem teto a `Instant +
+  espera`; o maior valor que o cabeçalho carrega estourava e derrubava o worker do `serve` em silêncio
+  (e o `memory drain`), e um valor grande e finito prendia o job por anos, fora do alcance do `memory
+  retry`. Agora o worker guarda no máximo uma hora (`MAX_COOLDOWN`), como o scheduler da descoberta já
+  limita o seu, e as somas de prazo saturam.
+- **`context_after_edit` com símbolo desconhecido:** o Ripwire real responde `edit_check`/`impact`
+  de um símbolo que não conhece com erro JSON-RPC, que virava `upstream_refused` da ferramenta inteira
+  e jogava fora a situação já buscada: o caso comum de um símbolo recém-renomeado ou apagado. Agora é
+  a limitação `evidence_missing` do verbo, com texto sem "gate" (não há gate depois de uma edição); só
+  um upstream indisponível faz a chamada falhar. PRD principal §9.2.
+
+**Registrados para depois, por área (os `arquivo:linha` estão no relatório da auditoria):**
+
+- **Médios:** o roteador casa substrings (`"adr"` em "padrão", `"fix"` em "prefix"), e tarefas em
+  português vão para docs; o hook sobe o ripwire mesmo quando não vai perguntar nada; `XDG_STATE_HOME`
+  vazio ou relativo grava estado dentro do workspace; no online, id de resposta repetido aceito, task do
+  classificador em pânico que trava o scheduler até o prazo, teto de `--jev-max-source-bytes` gasto na
+  ordem errada e leitura/hash bloqueando o laço assíncrono; na memória, o arquivo `generation` gravado
+  depois do snapshot (uma queda entre os dois mantém a cópia quente com memórias esquecidas), `Defer`
+  depois de requests enviados devolvendo a execução, e o tick ocioso que relê o snapshot ~3 vezes a
+  cada 5 s segurando o lock de escrita; no eval, o timeout que só mata o filho direto, `{repo}`/`{fix}`
+  no `env` chegando ao agente, barras comparando médias de conjuntos diferentes e `test_recall` 1,0
+  sem testes de referência; o TOML do Codex inválido com caminhos Unicode decompostos; o dedup pelo
+  corpo que descarta símbolos distintos; resumo e status calculados antes do orçamento.
+- **Código que nunca executa:** `admission::RENDERER_VERSION`, `transcript::read`,
+  `SemanticCache::is_empty`, `FileEvidence.location_only`, `MemoryRead.reads`, `Role::{Config, Test,
+  Risk}`, o `_host` de `hook::handle`, o ramo de `main.rs:157`, `"implement"` repetido no roteador,
+  `max_edit_checks`/`max_item_tokens` nunca configurados; inalcançáveis em produção a etapa de tempo
+  implícito da memória (`temporal_references` sempre vazio), o caminho `Inline` da leitura, a regra de
+  vários fragmentos de `file_decision` e a compatibilidade com o `ledger` antigo; cerca de 25 itens de
+  API pública usados só por testes.
+- **Simplificações:** dividir `main`, `cli::parse`, `hook::run`/`respond`, `retrieve::read_with`,
+  `store::commit_round`, `envelope_full` e `discover`; juntar a resolução do diretório de estado
+  (9 cópias), os três hashes idênticos, os dois mapas FIFO limitados, as aberturas de lock, os quatro
+  jeitos de chamar git no eval, a montagem de batches de controller e consolidate, `tokens`, o
+  limitador `unparsed` (6 cópias), `admit`/`admit_note` e `retry_failed`/`retry_all_failed`; structs no
+  lugar das listas longas de parâmetros; um só lugar para os defaults repetidos (`"jev-1.13.0"` em três).
+
+**Testes:** 675 → 680 no build padrão, 691 → 696 com `online`.
