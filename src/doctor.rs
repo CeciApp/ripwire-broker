@@ -221,8 +221,12 @@ async fn probe_from_env(args: &DoctorArgs) -> Check {
         Ok(k) => k,
         Err(e) => return fail(e.to_string()),
     };
-    let model = args.jev_model.as_deref().unwrap_or("jev-1.13.0");
-    match JevClient::new(key, model, std::time::Duration::from_secs(15)) {
+    let model = args
+        .jev_model
+        .as_deref()
+        .unwrap_or(crate::online::DEFAULT_MODEL);
+    let timeout = std::time::Duration::from_millis(crate::online::DEFAULT_TIMEOUT_MS);
+    match JevClient::new(key, model, timeout) {
         Ok(client) => jev_probe(&client).await,
         Err(e) => fail(e),
     }

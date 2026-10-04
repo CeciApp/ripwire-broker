@@ -150,7 +150,8 @@ async fn memory_drain(
     #[cfg(feature = "online")]
     {
         use memory::controller::{Config, Worker};
-        use memory::runtime::{DEFAULT_MODEL, DRAIN_DEADLINE, DRAIN_JOBS, drain};
+        use memory::runtime::{DEFAULT_WRITE_CANDIDATES, DRAIN_DEADLINE, DRAIN_JOBS, drain};
+        use ripwire_broker::online::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_MODEL, DEFAULT_TIMEOUT_MS};
         use ripwire_broker::online::{classifier::Shared, credential::Credential, jev::JevClient};
         let fail = |e: String| {
             eprintln!("memory drain --online: {e}");
@@ -161,7 +162,8 @@ async fn memory_drain(
             Err(e) => return fail(e.to_string()),
         };
         let model = model.unwrap_or_else(|| DEFAULT_MODEL.into());
-        let client = match JevClient::new(key, &model, std::time::Duration::from_secs(15)) {
+        let timeout = std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
+        let client = match JevClient::new(key, &model, timeout) {
             Ok(c) => c,
             Err(e) => return fail(e),
         };
@@ -173,10 +175,11 @@ async fn memory_drain(
             Err(e) => return fail(e),
         };
         let store = Arc::new(memory::store::Store::new(&dir, &id));
-        let classifier: MemoryClient = Arc::new(Shared::new(Arc::new(client), 4));
+        let classifier: MemoryClient =
+            Arc::new(Shared::new(Arc::new(client), DEFAULT_MAX_IN_FLIGHT));
         let config = Config {
             model,
-            candidates: candidates.unwrap_or(4),
+            candidates: candidates.unwrap_or(DEFAULT_WRITE_CANDIDATES),
         };
         let worker = Worker::new(store.clone(), classifier, config);
         let clock = memory::time::SystemClock;

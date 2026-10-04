@@ -22,6 +22,13 @@ pub mod scheduler;
 
 pub use coordinator::{OnlineConfig, OnlineEngine, OnlineTotals};
 
+/// The pinned model when no `--jev-model` is given.
+pub const DEFAULT_MODEL: &str = "jev-1.13.0";
+/// How long one request to the provider may take when no `--jev-timeout-ms` is given.
+pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+/// Requests in flight at once when no `--jev-max-in-flight` is given (RF-ONLINE-08).
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 4;
+
 /// The variable that carries the provider key. Defined outside the `online` feature: every build
 /// keeps it out of the processes it starts, since the variable can be set either way (D-146).
 pub const KEY_VAR: &str = "RIPWIRE_BROKER_JEV_API_KEY";

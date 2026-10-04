@@ -378,10 +378,16 @@ impl Flags {
         }
         Ok(Some(OnlineArgs {
             provider,
-            model: text("--jev-model", "jev-1.13.0"),
-            max_in_flight: positive("--jev-max-in-flight", 4)? as usize,
+            model: text("--jev-model", crate::online::DEFAULT_MODEL),
+            max_in_flight: positive(
+                "--jev-max-in-flight",
+                crate::online::DEFAULT_MAX_IN_FLIGHT as u64,
+            )? as usize,
             request_limit: positive("--jev-request-limit", 24)? as usize,
-            timeout: Duration::from_millis(positive("--jev-timeout-ms", 15_000)?),
+            timeout: Duration::from_millis(positive(
+                "--jev-timeout-ms",
+                crate::online::DEFAULT_TIMEOUT_MS,
+            )?),
             no_cache: self.on("--jev-no-cache"),
             max_source_bytes: match self.jev.contains_key("--jev-max-source-bytes") {
                 true => Some(positive("--jev-max-source-bytes", 0)?),
@@ -418,7 +424,12 @@ impl Flags {
         Ok(Some(MemoryArgs {
             read_deadline: Duration::from_millis(within("--memory-read-deadline-ms", 750, 1, 750)?),
             read_request_limit: within("--memory-read-request-limit", 4, 0, 4)? as usize,
-            write_candidates: within("--memory-write-candidates", 4, 0, 10)? as usize,
+            write_candidates: within(
+                "--memory-write-candidates",
+                crate::memory::runtime::DEFAULT_WRITE_CANDIDATES as u64,
+                0,
+                10,
+            )? as usize,
             retention_days: within("--memory-retention-days", 30, 1, 365)? as u32,
             max_nodes: within("--memory-max-nodes", 2000, 1, 2000)? as usize,
             selection: match self.memory.get("--memory-selection").map(String::as_str) {
