@@ -5133,3 +5133,44 @@ fn a_session_state_that_is_a_fifo_or_a_link_reads_as_fresh() {
 
     assert!(!fifo && !link, "neither is read");
 }
+
+/// The watcher kills only the process it was started for (D-147). Its pid can be reused once the
+/// supervisor is gone and ripwire reaped, and `kill -9 <pid>` then hit an unrelated process; the
+/// start time the supervisor passes tells them apart.
+#[test]
+fn the_watcher_never_kills_a_process_that_only_reuses_the_pid() {
+    let mut bystander = Proc::new("sleep")
+        .arg("30")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = bystander.id().to_string();
+
+    // Its parent check fails at once (pid 1 is not its parent), so it acts on the first loop.
+    let status = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args([
+            "__watch",
+            "--parent",
+            "1",
+            "--child",
+            &pid,
+            "--max-rss-mb",
+            "99999",
+        ])
+        .args([
+            "--child-started",
+            "Thu Jan  1 00:00:00 1970",
+            "--program",
+            "x",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+
+    let alive = bystander.try_wait().unwrap().is_none();
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    assert!(status.success());
+    assert!(alive, "a process with another start time was killed");
+}

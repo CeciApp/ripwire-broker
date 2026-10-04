@@ -287,6 +287,8 @@ pub enum Command {
         child: u32,
         max_rss_mb: u64,
         program: String,
+        /// When the child started, as `ps -o lstart=` prints it: only that process is killed.
+        child_started: Option<String>,
     },
 }
 
@@ -701,6 +703,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 child: pid("--child")?,
                 max_rss_mb: num("--max-rss-mb")?,
                 program: values.get("--program").cloned().unwrap_or_default(),
+                child_started: values.get("--child-started").cloned(),
             })
         }
         Some("hook") => {

@@ -208,8 +208,15 @@ async fn main() -> ExitCode {
             child,
             max_rss_mb,
             program,
+            child_started,
         }) => {
-            return ripwire_broker::supervise::watch(parent, child, max_rss_mb, &program);
+            return ripwire_broker::supervise::watch(
+                parent,
+                child,
+                max_rss_mb,
+                &program,
+                child_started.as_deref(),
+            );
         }
         Ok(Command::Info(text)) => {
             println!("{text}");
