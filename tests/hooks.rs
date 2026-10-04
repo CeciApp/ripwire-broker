@@ -953,6 +953,26 @@ async fn edits_inside_the_window_share_one_upstream_ask() {
     );
 }
 
+/// A clock set back past the last answered edit closes the window instead of holding every edit
+/// until the wall clock catches up (D-147): `now - last` saturated to 0, which read as "inside".
+#[tokio::test]
+async fn a_clock_set_back_does_not_hold_edits_until_it_catches_up() {
+    let (b, fake, ws) = hook_broker(edit_fake()).await;
+    std::fs::write(ws.path().join("a.txt"), "hello.").unwrap();
+    let input = event("claude_code_post_tool_use", ws.path());
+    let mut state = SessionState::default();
+    post_tool_use_at(&input, &b, &mut state, &at(1_000_000)).await;
+    let asked = fake.called().len();
+
+    // The clock goes back fifteen minutes.
+    post_tool_use_at(&input, &b, &mut state, &at(100_000)).await;
+
+    assert!(
+        fake.called().len() > asked,
+        "the edit is asked about, not held"
+    );
+}
+
 #[tokio::test]
 async fn an_edit_past_the_window_is_answered_again_and_carries_what_was_held() {
     let (b, fake, ws) = hook_broker(edit_fake()).await;
@@ -1793,5 +1813,38 @@ async fn ripwire_off_stops_injection_for_that_session() {
     assert_eq!(
         injected_envelope(&out)["memories"].as_array().map(Vec::len),
         Some(1)
+    );
+}
+
+/// The host's limit holds with many oversized bodies, each cut and declared (D-147): the audit
+/// suspected the limitations the budget never drops could push the rendering past it.
+#[tokio::test]
+async fn hook_output_stays_under_the_host_limit_with_many_cut_bodies() {
+    let (b, _fake, ws) =
+        hook_broker(FakeUpstream::new().answer_text("explore", &sized_explore(300, 2_000))).await;
+    let mut input = event("codex_user_prompt_submit", ws.path());
+    input["prompt"] = "how are requests handled?".into();
+
+    let out = hook::handle(
+        Host::Codex,
+        Event::UserPromptSubmit,
+        &input,
+        &b,
+        &mut SessionState::default(),
+        &Policy {
+            prompt_budget: 50_000,
+            ..Policy::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let text = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        text.chars().count() <= hook::MAX_CONTEXT_CHARS,
+        "{} chars",
+        text.chars().count()
     );
 }
