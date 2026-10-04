@@ -990,6 +990,16 @@ async fn the_gate_summary_states_what_blocks_ready() {
 
     assert!(summary.starts_with("attention_required"), "{summary}");
     assert!(summary.contains("4 quality regressions"), "{summary}");
+    let regressions = out["risks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "quality_regression")
+        .count();
+    assert_eq!(
+        regressions, 4,
+        "every regression the summary counts is delivered"
+    );
     assert!(summary.contains("1 missing co-change partner"), "{summary}");
 }
 

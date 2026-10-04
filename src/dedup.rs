@@ -45,8 +45,12 @@ fn keys(e: &Entry) -> (Vec<String>, Option<String>) {
             (k, body)
         }
         Entry::Test(_, t) => (vec![format!("test:{}", t.path)], None),
+        // The message is part of a risk: two regressions of one symbol are two risks.
         Entry::Risk(_, r) => (
-            vec![format!("risk:{}:{:?}:{:?}", r.kind, r.path, r.symbol)],
+            vec![format!(
+                "risk:{}:{:?}:{:?}:{}",
+                r.kind, r.path, r.symbol, r.message
+            )],
             None,
         ),
         Entry::Limitation(l) => (vec![format!("lim:{}:{}", l.kind, l.detail)], None),
