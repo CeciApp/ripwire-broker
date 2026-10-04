@@ -1,4 +1,5 @@
-//! The arms of the A/B (PRD §16.2 and §23.15): what MCP server, if any, the agent gets.
+//! The arms of the A/B (PRD §16.2 and §23.15) and of the memory evaluation (PRD jev-mem §14,
+//! D-141): what MCP server, if any, the agent gets.
 
 use super::transcript::Summary;
 use serde_json::{Value, json};
@@ -12,8 +13,13 @@ pub enum Arm {
     Ripwire,
     /// The agent with `ripwire-broker serve`.
     Broker,
-    /// The agent with `ripwire-broker serve --online`.
+    /// The agent with `ripwire-broker serve --online`: arm A of the memory evaluation.
     BrokerOnline,
+    /// Arm B: `serve --memory`, memory controlled by the classifier.
+    BrokerMemory,
+    /// Arm C: `serve --memory --memory-selection deterministic`, the same collection and store
+    /// with the local ranking and no classifier for memory.
+    BrokerMemoryDeterministic,
 }
 
 /// The binaries an arm starts.
@@ -23,7 +29,14 @@ pub struct Tools {
     pub ripwire: PathBuf,
 }
 
-pub const ALL: [Arm; 4] = [Arm::None, Arm::Ripwire, Arm::Broker, Arm::BrokerOnline];
+pub const ALL: [Arm; 6] = [
+    Arm::None,
+    Arm::Ripwire,
+    Arm::Broker,
+    Arm::BrokerOnline,
+    Arm::BrokerMemory,
+    Arm::BrokerMemoryDeterministic,
+];
 
 impl Arm {
     pub fn name(self) -> &'static str {
@@ -32,7 +45,18 @@ impl Arm {
             Arm::Ripwire => "ripwire",
             Arm::Broker => "broker",
             Arm::BrokerOnline => "broker-online",
+            Arm::BrokerMemory => "broker-memory",
+            Arm::BrokerMemoryDeterministic => "broker-memory-deterministic",
         }
+    }
+
+    /// Whether its server sends to the provider (`--memory` implies `--online`), and so needs
+    /// the credential and the consent of PRD §23.6.
+    pub fn needs_credential(self) -> bool {
+        matches!(
+            self,
+            Arm::BrokerOnline | Arm::BrokerMemory | Arm::BrokerMemoryDeterministic
+        )
     }
 
     pub fn parse(s: &str) -> Option<Arm> {
@@ -44,16 +68,20 @@ impl Arm {
         match self {
             Arm::None => None,
             Arm::Ripwire => Some("ripwire"),
-            Arm::Broker | Arm::BrokerOnline => Some("ripwire-broker"),
+            Arm::Broker
+            | Arm::BrokerOnline
+            | Arm::BrokerMemory
+            | Arm::BrokerMemoryDeterministic => Some("ripwire-broker"),
         }
     }
 
     /// The agent's MCP configuration, in the `mcpServers` shape Claude Code reads. Arguments
-    /// are an array, never a shell line.
-    pub fn mcp_config(self, tools: &Tools, workdir: &Path) -> Value {
+    /// are an array, never a shell line. A memory arm's server keeps its store under `state`
+    /// (`XDG_STATE_HOME`), so that every round starts from its own.
+    pub fn mcp_config(self, tools: &Tools, workdir: &Path, state: &Path) -> Value {
         let ws = workdir.to_string_lossy();
         let rw = tools.ripwire.to_string_lossy();
-        let broker = |online: bool| {
+        let broker = |extra: &[&str]| {
             let mut args = vec![
                 json!("serve"),
                 json!("--workspace"),
@@ -61,16 +89,24 @@ impl Arm {
                 json!("--ripwire"),
                 json!(rw),
             ];
-            if online {
-                args.push(json!("--online"));
+            args.extend(extra.iter().map(|a| json!(a)));
+            let mut server = json!({"command": tools.broker.to_string_lossy(), "args": args});
+            if extra.contains(&"--memory") {
+                server["env"] = json!({"XDG_STATE_HOME": state.to_string_lossy()});
             }
-            json!({"command": tools.broker.to_string_lossy(), "args": args})
+            server
         };
         let servers = match self {
             Arm::None => json!({}),
             Arm::Ripwire => json!({"ripwire": {"command": rw, "args": [ws, "--mcp"]}}),
-            Arm::Broker => json!({"ripwire-broker": broker(false)}),
-            Arm::BrokerOnline => json!({"ripwire-broker": broker(true)}),
+            Arm::Broker => json!({"ripwire-broker": broker(&[])}),
+            Arm::BrokerOnline => json!({"ripwire-broker": broker(&["--online"])}),
+            Arm::BrokerMemory => json!({"ripwire-broker": broker(&["--memory"])}),
+            Arm::BrokerMemoryDeterministic => json!({"ripwire-broker": broker(&[
+                "--memory",
+                "--memory-selection",
+                "deterministic"
+            ])}),
         };
         json!({"mcpServers": servers})
     }

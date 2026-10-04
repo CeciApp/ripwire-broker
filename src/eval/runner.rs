@@ -1,7 +1,8 @@
 //! Runs every (task, arm, repeat) once: a fresh repository holding the task's base and its
 //! ancestors only, the agent in it with the arm's MCP configuration, the transcript saved, the
-//! copy scored and deleted. The source repository is only ever read, by `git fetch`; nothing is
-//! written to it.
+//! copy scored and deleted. The tasks of a sequence are one round: they run in order, each from
+//! its own base but in the same place and with the same memory store, which goes with the round.
+//! The source repository is only ever read, by `git fetch`; nothing is written to it.
 
 use super::arm::{Arm, Tools};
 use super::corpus::{Corpus, Task};
@@ -246,7 +247,9 @@ fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) ->
     }
 }
 
-fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
+/// One session in the round's place `dir`: the copy (`work`, made afresh at the task's base, in
+/// the same path for every session of a sequence) and the server's state (`state`).
+fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRecord {
     let failed = |why: String| RunRecord {
         task: task.id.clone(),
         repo: task.repo_name(),
@@ -256,11 +259,8 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
         invalid: Some(why),
         ..RunRecord::default()
     };
-    let dir = match scratch() {
-        Ok(d) => d,
-        Err(e) => return failed(e),
-    };
     let work = dir.join("work");
+    let _ = std::fs::remove_dir_all(&work);
     let id = run_id(task, arm, repeat);
     let env = environment(task, &id);
     let result = (|| {
@@ -288,8 +288,12 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
                 })
                 .collect();
         let config = dir.join("mcp.json");
-        std::fs::write(&config, arm.mcp_config(&cfg.tools, &work).to_string())
-            .map_err(|e| e.to_string())?;
+        let state = dir.join("state");
+        std::fs::write(
+            &config,
+            arm.mcp_config(&cfg.tools, &work, &state).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
         let argv: Vec<String> = cfg
             .agent
             .iter()
@@ -343,17 +347,40 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
             None,
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
     result.unwrap_or_else(failed)
+}
+
+/// The corpus as rounds: each task alone, or the tasks of one sequence together, in corpus
+/// order (a sequence where its first task is).
+fn rounds(tasks: &[Task]) -> Vec<Vec<&Task>> {
+    let mut out: Vec<Vec<&Task>> = vec![];
+    for t in tasks {
+        let joins = t
+            .sequence
+            .as_ref()
+            .and_then(|s| out.iter_mut().find(|r| r[0].sequence.as_ref() == Some(s)));
+        match joins {
+            Some(round) => round.push(t),
+            None => out.push(vec![t]),
+        }
+    }
+    out
 }
 
 /// Runs what `results.jsonl` does not have yet; returns how many runs it made.
 pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> {
     cfg.corpus.validate().map_err(|e| e.join("\n"))?;
-    if cfg.arms.contains(&Arm::BrokerOnline) && std::env::var_os(ONLINE_KEY).is_none() {
+    let online: Vec<&str> = cfg
+        .arms
+        .iter()
+        .filter(|a| a.needs_credential())
+        .map(|a| a.name())
+        .collect();
+    if !online.is_empty() && std::env::var_os(ONLINE_KEY).is_none() {
         return Err(format!(
-            "arm broker-online needs {ONLINE_KEY} in the environment, and consent to send \
-             eligible source of every corpus repository to the provider (PRD §23.6)"
+            "arm(s) {} need {ONLINE_KEY} in the environment, and consent to send eligible \
+             source of every corpus repository to the provider (PRD §23.6)",
+            online.join(", ")
         ));
     }
     std::fs::create_dir_all(cfg.out.join("transcripts")).map_err(|e| e.to_string())?;
@@ -365,20 +392,29 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
         .open(cfg.out.join("results.jsonl"))
         .map_err(|e| e.to_string())?;
     let mut made = 0;
-    for task in &cfg.corpus.tasks {
+    for round in rounds(&cfg.corpus.tasks) {
         for repeat in 1..=cfg.repeats {
             for &arm in &cfg.arms {
-                if done.contains(&(task.id.clone(), arm.name().to_string(), repeat)) {
+                // A round is recorded whole, at its end: done when its first task is.
+                if done.contains(&(round[0].id.clone(), arm.name().to_string(), repeat)) {
                     continue;
                 }
-                log(&format!("{} · {} · {repeat}", task.id, arm.name()));
-                let r = one(cfg, task, arm, repeat);
-                if let Some(why) = &r.invalid {
-                    log(&format!("  invalid: {why}"));
+                let dir = scratch()?;
+                let mut records = vec![];
+                for task in &round {
+                    log(&format!("{} · {} · {repeat}", task.id, arm.name()));
+                    let r = one(cfg, task, arm, repeat, &dir);
+                    if let Some(why) = &r.invalid {
+                        log(&format!("  invalid: {why}"));
+                    }
+                    records.push(r);
                 }
-                let line = serde_json::to_string(&r).map_err(|e| e.to_string())?;
-                writeln!(results, "{line}").map_err(|e| e.to_string())?;
-                made += 1;
+                let _ = std::fs::remove_dir_all(&dir);
+                for r in records {
+                    let line = serde_json::to_string(&r).map_err(|e| e.to_string())?;
+                    writeln!(results, "{line}").map_err(|e| e.to_string())?;
+                    made += 1;
+                }
             }
         }
     }

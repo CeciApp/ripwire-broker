@@ -42,6 +42,10 @@ pub struct Task {
     /// `{repo}` (the source repository) and `{fix}`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Tasks with the same sequence are sessions of one history (PRD jev-mem §14): they run in
+    /// corpus order, in one place and with one memory store per arm and repeat.
+    #[serde(default)]
+    pub sequence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

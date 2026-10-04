@@ -573,13 +573,16 @@ cargo build --release
 ```
 
 - **Corpus:** JSON, `{"tasks": [{"id", "repo", "base", "fix", "prompt", "vocabulary_diverges", "reference":
-  {"files", "tests"}, "check", "setup", "teardown", "env"}]}`. `repo` is a local git repository (relative to
+  {"files", "tests"}, "check", "setup", "teardown", "env", "sequence"}]}`. `repo` is a local git repository (relative to
   the corpus file), `base` the commit the agent starts from, `fix` the reference commit, `reference.files` what
   it modifies, and `check` a shell command whose exit 0 means the task was solved. `setup` prepares the copy
   (dependencies, build caches) and is not counted as the agent's edit; `teardown` cleans up after it; `env`
   applies to all of them and to the agent. Commands and `env` values take `{repo}`, `{fix}` and `{run}`, a
   per-run id safe for a database name. Tasks taken from real commits get their reference for free, and their
   tests become hidden tests: `git -C {repo} show {fix}:test/x_test.exs > test/x_test.exs && mix test test/x_test.exs`.
+  Tasks with the same `sequence` are sessions of one history, for the memory arms: they run in corpus order,
+  each from its own `base`, in the same place and with the same memory store for a given arm and repeat; a
+  sequence is recorded, and resumed, as a whole.
 - **Validation:** `validate` runs each task's check on a copy at the base, where it must fail, and on one at
   the fix, where it must pass. A check that passes at the base measures nothing. The output of every setup
   and check goes to `validate-logs/` next to the corpus; a run's check output goes next to its transcript.
@@ -590,8 +593,12 @@ cargo build --release
   today's date, or bind a fixed port that a second suite on the same machine already holds. Put a frozen clock
   (the day the change was written, not the merge date) and a port of its own in the task's `env`, when the
   suite offers them (D-121).
-- **Arms:** `none`, `ripwire` (ripwire's MCP directly), `broker`, `broker-online`. The online arm needs
-  `RIPWIRE_BROKER_JEV_API_KEY` and sends eligible source of the corpus repositories to the provider.
+- **Arms:** `none`, `ripwire` (ripwire's MCP directly), `broker`, `broker-online`, and for the memory
+  evaluation ([PRD](docs/jev-mem-prd.md#14-observabilidade-avaliação-e-critérios-de-aceitação)) `broker-memory`
+  (`serve --memory`, arm B) and `broker-memory-deterministic` (`--memory-selection deterministic`, arm C);
+  `broker-online` is arm A. Those three need `RIPWIRE_BROKER_JEV_API_KEY` and send eligible source of the
+  corpus repositories to the provider. A memory arm's server keeps its store in a directory of the round's
+  own (`XDG_STATE_HOME`), removed with the round, so no round sees another's memories or yours.
 - **Isolation:** each run gets a fresh repository holding the base and its ancestors only. The fix, a later
   commit, cannot leak through `git log`, and the source repository is never written to. The default agent is
   Claude Code headless with `--strict-mcp-config --setting-sources local`: neither your own settings, hooks

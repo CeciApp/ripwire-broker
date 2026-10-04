@@ -12,7 +12,7 @@ use std::time::Duration;
 const USAGE: &str = "\
 usage: ripwire-eval check --corpus FILE
        ripwire-eval validate --corpus FILE [--check-timeout-s N]
-       ripwire-eval run --corpus FILE --out DIR [--arms none,ripwire,broker[,broker-online]]
+       ripwire-eval run --corpus FILE --out DIR [--arms none,ripwire,broker[,broker-online,broker-memory,broker-memory-deterministic]]
                     [--repeats N] [--agent-cmd CMD] [--broker BIN] [--ripwire BIN]
                     [--timeout-s N] [--check-timeout-s N]
        ripwire-eval report --out DIR [--json]
