@@ -67,21 +67,32 @@ pub fn state(workdir: &Path, file: &str) -> Option<Vec<u8>> {
         .map(|bytes| Sha256::digest(bytes).to_vec())
 }
 
-/// Files changed in the working tree against `HEAD`, new ones included, relative to the root.
-pub fn modified_files(workdir: &Path) -> Vec<String> {
-    let Ok(out) = Command::new("git")
-        .arg("-C")
-        .arg(workdir)
-        .args(["status", "--porcelain", "-uall", "--no-renames"])
-        .output()
-    else {
-        return vec![];
+/// Files that differ from `base` in the working tree, whatever the agent committed meanwhile,
+/// plus new untracked ones, relative to the root. NUL-separated, so no name comes back quoted.
+pub fn modified_files(workdir: &Path, base: &str) -> Vec<String> {
+    let names = |args: &[&str]| -> Vec<String> {
+        Command::new("git")
+            .arg("-C")
+            .arg(workdir)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                o.stdout
+                    .split(|b| *b == 0)
+                    .filter(|n| !n.is_empty())
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
     };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.get(3..))
-        .map(|p| p.trim_matches('"').to_string())
-        .collect()
+    let mut files = names(&["diff", "--name-only", "-z", "--no-renames", base]);
+    files.extend(names(&["ls-files", "-o", "--exclude-standard", "-z"]));
+    files.sort();
+    files.dedup();
+    files
 }
 
 /// Runs `command` (a task's `setup`, `check` or `teardown`, already pointed at the copy): exit 0

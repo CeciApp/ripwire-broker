@@ -231,7 +231,7 @@ fn modified_files_come_from_git_including_new_ones() {
     std::fs::create_dir_all(repo.path().join("src/new")).unwrap();
     std::fs::write(repo.path().join("src/new/token.py"), "x\n").unwrap();
 
-    let mut files = score::modified_files(repo.path());
+    let mut files = score::modified_files(repo.path(), "HEAD");
     files.sort();
     assert_eq!(files, vec!["src/auth.py", "src/new/token.py"]);
 }
@@ -1625,4 +1625,65 @@ fn a_corpus_given_by_a_relative_path_still_finds_its_repositories() {
     )
     .unwrap();
     assert_eq!(record["valid"], true, "the copy was made: {record}");
+}
+
+/// A stand-in agent that edits the task's file, adds one with a non-ASCII name, and commits
+/// both, as an agent allowed to run git may.
+fn committing_agent(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("committing-agent");
+    common::write_executable(
+        &path,
+        r##"#!/bin/sh
+cat > /dev/null
+echo '{"type":"system","subtype":"init","tools":["Read","Edit"],"mcp_servers":[{"name":"ripwire-broker","status":"connected"}]}'
+echo "# expired tokens are rejected" >> src/auth.py
+mkdir -p docs && echo "notes" > "docs/ação.md"
+git add -A && git -c user.email=a@example.invalid -c user.name=agent commit -qm done
+echo '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}'
+"##,
+    );
+    path
+}
+
+#[test]
+fn edits_the_agent_committed_still_count_and_any_file_name_matches() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let mut task = auth_task("t", repo.path(), &head, None);
+    task["reference"]["files"] = json!(["src/auth.py", "docs/ação.md"]);
+    std::fs::write(
+        work.path().join("corpus.json"),
+        json!({ "tasks": [task] }).to_string(),
+    )
+    .unwrap();
+    let agent = committing_agent(work.path());
+    let out = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .args([
+            "run",
+            "--corpus",
+            work.path().join("corpus.json").to_str().unwrap(),
+            "--out",
+            work.path().join("out").to_str().unwrap(),
+            "--arms",
+            "broker",
+            "--agent-cmd",
+            &format!("{} --mcp-config {{mcp_config}}", agent.display()),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let record: Value = serde_json::from_str(
+        std::fs::read_to_string(work.path().join("out/results.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (&record["file_recall"], &record["file_precision"]),
+        (&json!(1.0), &json!(1.0)),
+        "measured against the task's base, names exact: {record}"
+    );
 }

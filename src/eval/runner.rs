@@ -310,7 +310,7 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRe
         // What setup left in the tree (builds, caches) is not the agent's edit, unless the agent
         // then changed it again: each such file is remembered by its content.
         let before_agent: std::collections::HashMap<String, Option<Vec<u8>>> =
-            score::modified_files(&work)
+            score::modified_files(&work, &task.base)
                 .into_iter()
                 .map(|f| {
                     let state = score::state(&work, &f);
@@ -349,7 +349,7 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRe
         } else if s.valid() {
             s.invalid = arm.contamination(&s);
         }
-        let modified: Vec<String> = score::modified_files(&work)
+        let modified: Vec<String> = score::modified_files(&work, &task.base)
             .into_iter()
             .filter(|f| {
                 before_agent
