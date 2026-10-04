@@ -1633,3 +1633,45 @@ async fn a_refused_credential_is_said_once() {
     assert_eq!(said.len(), 1, "{said:#?}");
     assert!(said[0].contains("refused the credential"), "{said:#?}");
 }
+
+/// `serve --state-dir DIR` keeps memory where a hook run with the same `--state-dir` put its spool
+/// (D-147): without it the server only knew the default directory, and that spool was never read.
+#[cfg(feature = "online")]
+#[test]
+fn serve_reads_the_spool_of_the_state_dir_it_is_given() {
+    let (ws, dir, xdg) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let ws_path = ws.path().canonicalize().unwrap();
+    let id = ripwire_broker::memory::identity::workspace_id(&ws_path).unwrap();
+    let store = Store::new(dir.path(), &id);
+    store.enqueue(&rec(1, "cache layer", &["e"])).unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args(["--workspace", ws_path.to_str().unwrap()])
+        .args(["--ripwire", "/nonexistent/ripwire", "--memory"])
+        .args(["--memory-selection", "deterministic", "--state-dir"])
+        .arg(dir.path())
+        .env("XDG_STATE_HOME", xdg.path())
+        .env("RIPWIRE_BROKER_JEV_API_KEY", "tok-unused")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut ingested = false;
+    while !ingested && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        ingested = store.load().is_ok_and(|s| !s.nodes.is_empty());
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        ingested,
+        "the server never incorporated the spool under --state-dir"
+    );
+}

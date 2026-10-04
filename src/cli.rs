@@ -14,7 +14,7 @@ pub enum Color {
 
 pub const USAGE: &str = "\
 usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [--redact-workspace] [--incremental]
-                      [--ripwire-max-rss-mb N]
+                      [--ripwire-max-rss-mb N] [--state-dir DIR]
                       [--online [--jev-provider typesafe] [--jev-model MODEL] [--jev-max-in-flight N]
                                 [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
                                 [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
@@ -93,6 +93,8 @@ pub struct ServeArgs {
     pub online_origin: Option<OnlineOrigin>,
     /// Persistent memory (PRD jev-mem §4); implies `online`. `None` keeps no history.
     pub memory: Option<MemoryArgs>,
+    /// Where memory lives, as for the hooks and the `memory` commands; `None`: the default.
+    pub state_dir: Option<PathBuf>,
 }
 
 /// How the effective online mode came about, kept for diagnostics (PRD jev-mem §4).
@@ -641,6 +643,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                         "--online",
                         "--memory",
                         "--jev-no-cache",
+                        "--state-dir",
                     ]
                     .into_iter()
                     .chain(JEV.iter().copied())
@@ -660,6 +663,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 online: f.online()?,
                 online_origin: f.online_origin(),
                 memory: f.memory()?,
+                state_dir: f.state_dir.clone(),
             }))
         }
         Some("__supervise") => {

@@ -58,8 +58,9 @@ fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
     let runtime = match &a.memory {
         None => None,
         Some(_) => {
-            let dir = StateStore::default_dir()
-                .ok_or("--memory: no state directory (set XDG_STATE_HOME or HOME)")?;
+            let dir = a.state_dir.clone().or_else(StateStore::default_dir).ok_or(
+                "--memory: no state directory (pass --state-dir, or set XDG_STATE_HOME or HOME)",
+            )?;
             memory::runtime::from_serve(&a, &dir, memory_client)?
         }
     };
