@@ -48,24 +48,24 @@ pub fn run(max_rss_mb: u64, argv: &[String]) -> ExitCode {
             return ExitCode::from(127);
         }
     };
-    let started = probe(child.id()).map(|(_, started)| started);
+    // Started at once, before anything else: a supervisor killed before its watcher exists leaves
+    // ripwire unwatched. The watcher reads the child's start time itself.
     let watcher = std::env::current_exe().and_then(|me| {
-        let mut watch = Command::new(me);
-        watch.args([
-            "__watch",
-            "--parent",
-            &std::process::id().to_string(),
-            "--child",
-            &child.id().to_string(),
-            "--max-rss-mb",
-            &max_rss_mb.to_string(),
-            "--program",
-            program,
-        ]);
-        if let Some(started) = &started {
-            watch.args(["--child-started", started]);
-        }
-        watch.stdin(Stdio::null()).stdout(Stdio::null()).spawn()
+        Command::new(me)
+            .args([
+                "__watch",
+                "--parent",
+                &std::process::id().to_string(),
+                "--child",
+                &child.id().to_string(),
+                "--max-rss-mb",
+                &max_rss_mb.to_string(),
+                "--program",
+                program,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
     });
     if let Err(e) = watcher {
         // Without a watcher there is neither a limit nor orphan protection: refuse to run.
@@ -88,8 +88,9 @@ pub fn run(max_rss_mb: u64, argv: &[String]) -> ExitCode {
 }
 
 /// `__watch`: kills `child` above the limit or once `parent` (the supervisor) is gone. Only the
-/// process that started at `started` (as the supervisor read it; now, without it) is ever killed: a
-/// process that reuses the pid after ripwire ended is not ripwire (D-147).
+/// process that started at `started` (when given; otherwise as read when the watch begins, while
+/// the supervisor still waits on ripwire) is ever killed: a process that reuses the pid after
+/// ripwire ended is not ripwire (D-147).
 pub fn watch(
     parent: u32,
     child: u32,
