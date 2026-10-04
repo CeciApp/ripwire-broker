@@ -506,10 +506,23 @@ sumarizador (decisões e ligações, sem nota); o teste extra
 
 ### Fase 5 — Avaliação
 
-- [ ] **T5.1 · Braços B e C.** CA-16.
+**Recorte ajustado antes de começar ([D-141](../changelog.md#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências)):**
+o braço C pede um modo do servidor que não existia (T5.0), e a memória só passa de uma sessão a
+outra se as sessões de uma sequência rodarem no mesmo caminho (o `workspace_id` inclui a raiz
+canônica); o runner ganha o campo `sequence` na T5.1.
+
+- [ ] **T5.0 · `serve --memory --memory-selection deterministic`.** CA-16. D-141.
+  **Vermelho:** `tests/cli.rs::memory_selection_is_jev_unless_deterministic_is_asked`;
+  `tests/broker.rs::a_deterministic_read_asks_the_classifier_nothing_and_says_how_it_chose`
+  (mesma revalidação das fontes, `stop_reason: deterministic`, `basis` próprio, sem `scores`);
+  `tests/memory_controller.rs::deterministic_memory_collects_and_ingests_but_never_enriches`.
+  **Verde:** `src/cli.rs`, `src/memory/retrieve.rs`, `src/memory/runtime.rs`, `src/model.rs`
+  (`scores` opcional: ausência não vira zero). **Docs:** `USAGE`, README, PRD principal §9.1.
+- [ ] **T5.1 · Braços B e C, sequências e store isolado.** CA-16.
   **Vermelho:** `tests/eval.rs`: `the_memory_arms_parse_and_start_the_right_server`
   (`broker-memory`, `broker-memory-deterministic`); `contamination_is_detected_for_the_new_arms`;
-  `each_round_gets_an_isolated_store`. **Verde:** `src/eval/arm.rs`.
+  `each_round_gets_an_isolated_store`; `a_sequence_runs_in_order_in_one_place_and_shares_its_store`.
+  **Verde:** `src/eval/arm.rs`, `src/eval/corpus.rs` (`sequence`), `src/eval/runner.rs`.
 - [ ] **T5.2 · Relatório com custo separado.** CA-16.
   **Vermelho:** `tests/eval.rs::the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versions`.
 - [ ] **T5.3 · manual · Rodada e gates do PRD §14.** Corpus ≥ 30 tarefas em sequências, fora deste
