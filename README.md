@@ -582,7 +582,10 @@ cargo build --release
   tests become hidden tests: `git -C {repo} show {fix}:test/x_test.exs > test/x_test.exs && mix test test/x_test.exs`.
   Tasks with the same `sequence` are sessions of one history, for the memory arms: they run in corpus order,
   each from its own `base`, in the same place and with the same memory store for a given arm and repeat; a
-  sequence is recorded, and resumed, as a whole.
+  sequence is recorded, and resumed, as a whole (one recorded in part stops the run, with the lines to
+  remove), stays in one repository, and marks a session after an invalid one `history_incomplete`. Each
+  arm's history is its own earlier sessions: arms B and C differ in history as well as in selection, and a
+  memory whose source the agent edited is stale in the next session unless its base has the same bytes.
 - **Validation:** `validate` runs each task's check on a copy at the base, where it must fail, and on one at
   the fix, where it must pass. A check that passes at the base measures nothing. The output of every setup
   and check goes to `validate-logs/` next to the corpus; a run's check output goes next to its transcript.
@@ -607,13 +610,15 @@ cargo build --release
   is recorded as invalid and left out of the averages.
 - **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped),
   `versions.json` (the broker's and ripwire's versions, the pinned classifier model, the summarizer; the
-  agent's version and model come from each session's transcript), and `transcripts/`, which holds the
+  agent's version and model come from each session's transcript; a resume with other binaries is
+  refused), and `transcripts/`, which holds the
   agent's full session, repository code included. Keep it local.
 - **Memory cost:** a memory arm's run records, apart, what its reads sent and delivered (from
   `provenance.memory` in the answers), how long the agent waited for `context_for_task`, what the round's
   store spent of its 24-hour quota during the session besides the reads (the worker's enrichment and
-  consolidation, read with `memory status`), and the agent's own duration. Other arms have none of these
-  fields, never zeros. The report's "Custo da memória" table averages them; questions are not turned into
+  consolidation, read with `memory status`), the observations and jobs it left for the next session (the
+  worker dies with the session, so the next one pays for them), and the agent's own duration. Other arms
+  have none of these fields, never zeros; arm A sits beside B and C for its `context_for_task` wait. The report's "Custo da memória" table averages them; questions are not turned into
   dollars without verified pricing.
 - **Bars:** each one reads `passa`, `falha` or `insuficiente`. They stay `insuficiente` below 30 tasks in 3
   repositories.

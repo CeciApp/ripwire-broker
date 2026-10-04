@@ -101,6 +101,7 @@
 | 2026-10-03 21:33 | Fase 3 do plano do `--memory` (leitura e entrega) feita em TDD (T3.1 a T3.10; T3.11, validação nos hosts, pendente e manual): índice lexical e de entidades com RRF, routing, scoring, beam e limites, parada, prazo de 750 ms, fontes mudadas omitidas e revalidadas, `memories[]` e `provenance.memory`, orçamento da memória com reserva, seção legível no texto MCP, leitura paralela em `context_for_task` com snapshot quente, hooks prontos para memórias; revisão com 12 achados corrigidos, entre eles a quota em `quota.json` e a chave do cache pela geração | [D-139](#d-139--fase-3-do---memory-leitura-e-entrega) |
 | 2026-10-03 22:52 | Fase 4 do plano do `--memory` (consolidação) feita em TDD (T4.1 a T4.3): cadência durável de 20 enriquecimentos ou 24 h, sem timer entre processos; rodadas de até 4 pares, 20 perguntas, 5 s e 4 tentativas, com cursor; decisões por par e `RepresentationDecision`, ligação `linked` a partir de 0,60, originais nunca apagados; nota derivada só pelo gate (`merge`/`promote` ≥ 0,85, contradição < 0,85), `memory-consolidation/v1`, validador de caminhos e IDs, cache só com versão confiável do sumarizador; revisão com um achado alto (rodada com commit falho comprada de novo a cada tick) e três médios corrigidos, entre eles os pares gravados pelo enriquecimento | [D-140](#d-140--fase-4-do---memory-consolidação) |
 | 2026-10-04 00:10 | Recorte da Fase 5 do `--memory` decidido pelo mantenedor: o braço C usa uma flag nova e experimental do `serve`, `--memory-selection deterministic` (mesma coleta e store, sem worker de enriquecimento, leitura pelas âncoras locais com revalidação, identidade separada); o corpus do eval ganha `sequence`, sessões em ordem no mesmo caminho e store por (sequência, braço, repetição) | [D-141](#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências) |
+| 2026-10-04 01:30 | Fase 5 do plano do `--memory` (avaliação) feita em TDD (T5.0 a T5.2; T5.3, a rodada, manual): `serve --memory-selection deterministic`; braços `broker-memory` e `broker-memory-deterministic` no `ripwire-eval`; `sequence` no corpus, com store por rodada; relatório com recuperação, ingestão e latência do agente separadas, jobs deixados por sessão e versões; revisão com quatro achados médios corrigidos e as divergências do PRD §14 registradas para a T5.3 | [D-142](#d-142--fase-5-do---memory-avaliação) |
 | 2026-10-03 15:12 | Fase 1 do plano do `--memory` feita em TDD (T1.1 a T1.16, um commit por tarefa, mutação em cada uma): `--memory` e `--memory-*` no parse; registro `memory/v1`, identidade, admissão, relógio e sequência; store privado com spool, snapshot, tetos, lock, retenção, `forget` com tombstones e revogação; `memory status\|forget\|add\|resume`; coleta pelas tools e pelo `hook --memory`; `install`/`doctor`. O `serve --memory` ainda não liga a coleta (T2.11) | [D-137](#d-137--fase-1-do---memory-store-e-coleta) |
 | 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
@@ -6037,3 +6038,76 @@ o `memory status` não mostra a cadência; o diagrama de `spec/diagrams/`.
 
 **Consequência:** a Fase 5 ganha a T5.0 (o modo do servidor), e a T5.1 passa a tocar
 `src/eval/corpus.rs` e `src/eval/runner.rs`. Registrado no plano antes de qualquer código.
+
+## D-142 — Fase 5 do `--memory`: avaliação
+
+**Data:** 2026-10-04 01:30.
+
+**Decisão:** a Fase 5 do [plano](plan/jev-mem-plan.md) está feita em TDD no recorte do
+[D-141](#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências) (T5.0 a T5.2), uma
+tarefa por commit, com o teste vermelho visto falhar, mutações, documentação e os cinco portões. A
+T5.3 (a rodada com ≥ 30 tarefas em sequências, fora do repositório) fica pendente e manual: sem ela,
+o `--memory` continua experimental.
+
+**O que entrou:**
+
+- **T5.0:** `serve --memory --memory-selection jev|deterministic`. Em `deterministic`, a mesma coleta
+  e o mesmo store, sem worker de enriquecimento nem consolidação (o spool continua sendo incorporado
+  e a retenção continua valendo); a leitura entrega as âncoras locais com as fontes inalteradas, sem
+  perguntar nada ao classificador, com `basis: deterministic_rank`, `stop_reason: deterministic` e
+  sem `scores` (o campo passou a ser opcional: ausência não vira zero).
+- **T5.1:** braços `broker-memory` (B) e `broker-memory-deterministic` (C) no `ripwire-eval`, com
+  credencial exigida como no `broker-online` (A); o campo `sequence` no corpus: sessões em ordem, no
+  mesmo caminho (o mesmo `workspace_id`), cada uma no seu `base`; o store de cada rodada num
+  diretório próprio passado ao servidor por `XDG_STATE_HOME`, removido com a rodada.
+- **T5.2:** cada execução de um braço de memória registra, à parte, o que as leituras enviaram e
+  entregaram (de `provenance.memory`), a espera por `context_for_task`, o quanto a quota do store
+  cresceu na sessão além das leituras (`memory status`), e a duração do agente; `versions.json` com
+  as versões dos executáveis, o modelo pinado e o sumarizador; a versão do agente sai do evento
+  `init` de cada sessão. O relatório ganha a tabela "Custo da memória" e as versões.
+
+**Achado no caminho:** o transcript lia o envelope com `from_str` sobre o texto inteiro do resultado
+MCP; com memórias, o texto traz a seção legível depois do JSON, e o envelope não era lido: o recall
+dos arquivos apresentados sairia nulo justamente nos braços B e C. Agora lê o primeiro valor JSON.
+
+**Revisão independente do diff (plano §7, item 6), por um agente revisor só de leitura:** quatro
+achados médios e vários baixos. Corrigidos em TDD:
+
+- **Médio — um arquivo perdido no commit da T5.2:** `src/auth.py`, com 8 linhas do agente falso. Na
+  primeira versão da T5.2, o runner pedia `--version` ao comando do agente para registrar a versão; o
+  agente falso dos testes rodou com a raiz do repositório como diretório e o `git add -A src` o
+  levou. O arquivo saiu, e o runner não roda mais o agente fora de uma sessão.
+- **Médio — a retomada olhava só a primeira tarefa da rodada:** uma sessão acrescentada a uma
+  sequência nunca rodaria, uma reordenação duplicaria linhas. Agora uma rodada gravada em parte para
+  a execução antes de rodar qualquer coisa, dizendo quais linhas remover.
+- **Médio — a ingestão de uma sessão é paga pela seguinte:** o worker morre com o agente, então os
+  jobs enfileirados numa sessão só rodam (e são cobrados) no servidor da próxima, e os da última
+  nunca. Não há como medir sem rede nos testes, nem como mudar sem alterar o que a sessão faria: cada
+  execução registra agora as observações e os jobs que deixou (`memory status` ganhou
+  `jobs_pending`), e o relatório explica a defasagem.
+- **Médio — divergências do PRD §14 que o D-141 não dizia:** o histórico de cada braço são as suas
+  próprias sessões avaliadas (não um histórico de treino comum e separado), os braços rodam em ordem
+  fixa, sem cache frio e quente separados, e uma memória cuja fonte o agente editou fica velha na
+  sessão seguinte se o `base` não tiver os mesmos bytes. Registradas na T5.3 do plano e no README,
+  para a rodada tratar.
+- **Baixos corrigidos:** uma sequência que atravessa repositórios ou tem nome vazio é recusada no
+  `check`; uma sessão depois de outra inválida sai marcada `history_incomplete`; uma retomada com
+  binários diferentes dos de `versions.json` é recusada; o braço A entra na tabela de custo da
+  memória (a espera por `context_for_task`) e o `report --json` traz o custo e as versões; o `basis`
+  vem da seleção da leitura, não da presença de `scores`; o PRD jev-mem §10 lista `deterministic`;
+  dois testes ficaram exatos (células da tabela, caminho do store, versão do pacote).
+- **Registrados, sem correção:** o braço C também cede até 4 pedidos de `--jev-request-limit` à
+  leitura (justo entre B e C, menos descoberta que o A); a memória automática do próprio Claude Code
+  por diretório, se ativa em `-p` com `--setting-sources local`, valeria para todos os braços dentro
+  de uma sequência (não confirmado; conferir antes da rodada paga); um servidor que sobrevivesse a
+  uma sessão morta por timeout (só o `claude` é morto) poderia cobrar na sessão seguinte (depende de
+  o `serve` sair no EOF do stdin; não verificado); o `memory/v1` ganhou valores (`deterministic`,
+  `deterministic_rank`) e `scores` opcional sem mudar a versão do schema, aditivo no modo `jev`.
+
+**Testes instáveis sob carga:** `mcp_surface::an_online_server_says_so_in_its_status_without_the_credential`
+falhou uma vez nos portões (a leitura do resource) e passou isolado três vezes; não é desta fase.
+
+**Testes:** 663 → 675 no build padrão, 679 → 691 com `online`.
+
+**Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos e `props_fs`
+verdes; CA-10 sem crate de rede; guarda de fixtures verde.

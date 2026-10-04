@@ -315,7 +315,7 @@ Executar em paralelo com a preparação estrutural quando houver orçamento e st
 8. Com a evidência candidata, stopping em batch separado: suficiente se sufficiency `>=0,95`, missing `<0,15` e contradiction `<0,15`; também parar se continue_useful `<0,15`. Reservar o quarto request para essa etapa quando os anteriores couberem no prazo. Sem tempo ou resposta válida, declarar limite/incompleto, jamais suficiente.
 9. Revalidar hashes e geração imediatamente antes da entrega. Aplicar budget global, dedup por sessão, refs e qualificadores. Se truncamento remover evidência após stopping, marcar `assessment_before_truncation`; não afirmar suficiência sobre conjunto diferente.
 
-`stop_reason`: `sufficient`, `low_expected_gain`, `empty`, `deadline`, `request_limit`, `question_limit`, `graph_limit`, `cancelled`, `provider_error`, `budget_omitted`. Somente os dois primeiros expressam decisão semântica. Falha remota preserva contexto estrutural. Âncoras não classificadas podem ser contadas, mas v1 não as injeta como memória Jev validada; cache válido pode suprir a classificação. O braço determinístico de avaliação deve ter identidade separada.
+`stop_reason`: `sufficient`, `low_expected_gain`, `empty`, `deadline`, `request_limit`, `question_limit`, `graph_limit`, `cancelled`, `provider_error`, `budget_omitted`; e, só no braço determinístico da avaliação (`--memory-selection deterministic`, D-141), `deterministic`. Somente os dois primeiros expressam decisão semântica. Falha remota preserva contexto estrutural. Âncoras não classificadas podem ser contadas, mas v1 não as injeta como memória Jev validada; cache válido pode suprir a classificação. O braço determinístico de avaliação deve ter identidade separada.
 
 ## 11. Envelope, host e System Two
 

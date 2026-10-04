@@ -1,12 +1,13 @@
 # Memória persistente com Jev (`--memory`) — Plano de implementação
 
-**Data:** 2026-10-03 · **Status:** plano validado contra o código; Fases 0 a 4 feitas
+**Data:** 2026-10-04 · **Status:** plano validado contra o código; Fases 0 a 5 feitas
 ([D-136](../changelog.md#d-136--fase-0-do---memory-prd-jev-mem-v03),
 [D-137](../changelog.md#d-137--fase-1-do---memory-store-e-coleta),
 [D-138](../changelog.md#d-138--fase-2-do---memory-controle-jev),
 [D-139](../changelog.md#d-139--fase-3-do---memory-leitura-e-entrega),
-[D-140](../changelog.md#d-140--fase-4-do---memory-consolidação)), com a T3.11 pendente de
-rodada manual nos hosts; Fase 5 em diante não começada.
+[D-140](../changelog.md#d-140--fase-4-do---memory-consolidação),
+[D-142](../changelog.md#d-142--fase-5-do---memory-avaliação)), com a T3.11 (hosts) e a T5.3 (rodada
+da avaliação) pendentes e manuais; Fase 6 não começada.
 **Spec:** [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) v0.3. Onde este plano diz "PRD §N", é esse documento;
 "PRD principal" é [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md). "CA-N" é o critério
 verificável N do PRD §14.
@@ -511,23 +512,39 @@ o braço C pede um modo do servidor que não existia (T5.0), e a memória só pa
 outra se as sessões de uma sequência rodarem no mesmo caminho (o `workspace_id` inclui a raiz
 canônica); o runner ganha o campo `sequence` na T5.1.
 
-- [ ] **T5.0 · `serve --memory --memory-selection deterministic`.** CA-16. D-141.
+- [x] **T5.0 · `serve --memory --memory-selection deterministic`.** CA-16. D-141.
   **Vermelho:** `tests/cli.rs::memory_selection_is_jev_unless_deterministic_is_asked`;
   `tests/broker.rs::a_deterministic_read_asks_the_classifier_nothing_and_says_how_it_chose`
   (mesma revalidação das fontes, `stop_reason: deterministic`, `basis` próprio, sem `scores`);
   `tests/memory_controller.rs::deterministic_memory_collects_and_ingests_but_never_enriches`.
   **Verde:** `src/cli.rs`, `src/memory/retrieve.rs`, `src/memory/runtime.rs`, `src/model.rs`
   (`scores` opcional: ausência não vira zero). **Docs:** `USAGE`, README, PRD principal §9.1.
-- [ ] **T5.1 · Braços B e C, sequências e store isolado.** CA-16.
+- [x] **T5.1 · Braços B e C, sequências e store isolado.** CA-16.
   **Vermelho:** `tests/eval.rs`: `the_memory_arms_parse_and_start_the_right_server`
   (`broker-memory`, `broker-memory-deterministic`); `contamination_is_detected_for_the_new_arms`;
   `each_round_gets_an_isolated_store`; `a_sequence_runs_in_order_in_one_place_and_shares_its_store`.
   **Verde:** `src/eval/arm.rs`, `src/eval/corpus.rs` (`sequence`), `src/eval/runner.rs`.
-- [ ] **T5.2 · Relatório com custo separado.** CA-16.
+- [x] **T5.2 · Relatório com custo separado.** CA-16.
   **Vermelho:** `tests/eval.rs::the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versions`.
 - [ ] **T5.3 · manual · Rodada e gates do PRD §14.** Corpus ≥ 30 tarefas em sequências, fora deste
   repositório. Sem evidência suficiente, o recurso continua experimental. Nenhum número do LoCoMo
-  é transferido; nenhuma comparação com Mem0.
+  é transferido; nenhuma comparação com Mem0. **O que o instrumento ainda não faz, e a rodada tem de
+  tratar ([D-142](../changelog.md#d-142--fase-5-do---memory-avaliação)):** o histórico de cada braço
+  são as suas próprias sessões avaliadas, não um histórico de treino comum e separado (B e C diferem
+  em histórico além de seleção; o B ainda enriquecido); os braços rodam na ordem de `--arms`, sem
+  aleatorização, e sem separar cache frio e quente; a ingestão de uma sessão é paga pela seguinte
+  (o worker morre com a sessão; a coluna "jobs pendentes ao fim" mostra o que ficou); uma memória
+  cuja fonte o agente editou fica velha na sessão seguinte se o `base` dela não tiver os mesmos bytes;
+  o braço C também cede até 4 pedidos de `--jev-request-limit` à leitura (não usa nenhum); e a
+  memória automática do próprio Claude Code por diretório, se ativa em `-p`, valeria para todos os
+  braços dentro de uma sequência (conferir antes da rodada paga).
+
+**Saída da Fase 5:** CA-16 coberto no instrumento (T5.0–T5.2); a rodada (T5.3) é manual; PR único.
+
+**Como a Fase 5 saiu ([D-142](../changelog.md#d-142--fase-5-do---memory-avaliação)):** o recorte
+mudou antes do código (D-141: o braço C por flag do `serve`, as sequências no corpus); o transcript
+deixava de ler o envelope quando a seção legível de memória vinha depois do JSON, o que zeraria o
+recall de apresentados nos braços B e C; a versão do agente sai do evento `init` de cada sessão.
 
 ### Fase 6 — Fechamento
 
@@ -661,3 +678,7 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T4.2 | `tests/memory_consolidation.rs`: `a_round_asks_at_most_four_pairs_twenty_questions_in_five_seconds`, `links_and_decisions_work_without_a_summarizer`: `cannot find value DEADLINE/MAX_QUESTIONS/MAX_ATTEMPTS/LINK in consolidate`; depois `one pair was worth linking` (nenhuma aresta); `originals_are_never_deleted` nasceu verde (guarda: não há remoção a desfazer), provada por mutação | `914ae2b` | 5 pares; prazo ×2; 1 tentativa; limiar da ligação 0,2; ligação não gravada; grafo da ligação trocado; o mais antigo removido quando obsoleto: todas mortas. Resposta ausente virando 0 **sobreviveu**: teste novo `a_pair_missing_any_one_answer_is_not_decided` (no commit da T4.3) a mata para as quatro Nouls. Equivalente: a guarda `Decision::Choice` e a probabilidade da opção cobrem o mesmo caso | — | suíte alvo verde; portões completos na T4.3 |
 | T4.3 | `tests/memory_consolidation.rs` (com `tests/common/summarizer.rs`): `only_merge_or_promote_at_085_with_contradiction_below_085_calls_the_summarizer`, `parents_that_do_not_fit_are_not_summarized`, `a_note_naming_unknown_paths_or_ids_is_discarded`, `a_timeout_or_invalid_output_keeps_the_pair_separate_and_changes_no_gate`, `without_a_trusted_version_cmd_generated_notes_are_not_cached_on_disk`: `cannot find NOTE_PROMPT_VERSION`, `no method versioned/with_summarizer`, `no field note/notes`; `the_worker_gives_its_rounds_the_servers_summarizer`: `no method named set_summarizer` | `d9a7ddb` | `>=` → `>` no 0,85; `<` → `<=` na contradição; `keep_separate` autorizando nota; teto dos pais ×2; validador que aceita tudo; IDs não verificados; caminho com `/` não verificado (sobreviveu: o caso tinha extensão; caso `docs/internal/README` acrescentado); 601 caracteres aceitos; cache sem versão confiável; cache não lido; `forget` sem limpar o cache; erro do sumarizador virando nota; pais faltando em `derived_from`; modelo não gravado; pai fora do prompt; sumarizador não passado à rodada; notas fora das métricas: todas mortas. Contador de notas nas métricas acrescentado junto com o código, provado só por mutação. Sem teste próprio: a expiração pelo mínimo dos pais (a retenção já leva os descendentes) | README (Consolidation, métricas); PRD principal §7.2, §10.3, §23.3 | 653 / 669 |
 | Revisão F4 | Achados do revisor independente (D-140): `a_round_that_cannot_be_committed_does_not_run_again_at_once` (`Err(Full(Snapshot))`), `a_round_that_sent_nothing_keeps_its_trigger`, `the_pairs_of_a_store_at_its_cap_are_found_without_scanning_it` e `the_pairs_are_the_neighbours_an_enrichment_compared` (`no field pairs`, `no function Pair::of`), `a_drain_without_time_for_a_whole_round_does_not_start_one` (1 request ≠ 0), `what_is_forgotten_during_a_round_is_neither_summarized_nor_recorded` (o sumarizador recebeu o prompt), `a_note_that_cannot_be_added_is_neither_pointed_at_nor_cached`, `a_note_naming_unknown_paths_or_ids_is_discarded` ampliado (`.env` aceito), `the_parents_reach_the_summarizer_fenced`, todos vistos vermelhos; `a_round_split_over_requests_moves_the_cursor_only_past_what_went_out` e `a_forget_all_during_a_split_round_stops_the_requests_left` nasceram verdes depois da correção que os pede e foram provados por mutação | `3587297`, `5e17173`, `9de7445`, `e28792d`, `d5510ee`, `e396259`, `4d4738d`, `eaca339` | sem o recuo do snapshot cheio; sem a espera do worker; espera ×2; commit com nada enviado; cursor no último dos quatro; índice local trocado (sobreviveu até o teste ganhar a segunda volta com os dois requests); pares não gravados; o worker passando `&[]`; `forget` mantendo os pares; `pending` ignorando decisões; prazo do drain pela metade; revogação ignorada entre requests; pais não relidos antes das notas; cache e ponteiro de nota que não entrou; tombstone e teto de nós ignorados; arquivo oculto, nome de uma letra, extensão longa, hash curto e prefixo conhecido desligados um a um; ponto inicial cortado; pai cru no prompt: todas mortas. Uma rodada de mutações correu com o teste do validador vermelho (caso errado) e foi refeita. Sem teste: a chave com política e schema (constantes) | D-140 (seção da revisão); README (Consolidation); PRD principal §10.3 | 663 / 679 |
+| T5.0 | `tests/cli.rs::memory_selection_is_jev_unless_deterministic_is_asked`: `unresolved import Selection`, `no field selection on MemoryArgs`; `tests/broker.rs::a_deterministic_read_asks_the_classifier_nothing_and_says_how_it_chose`: `no field selection on ReadConfig`; `tests/memory_controller.rs::deterministic_memory_collects_and_ingests_but_never_enriches`: seleção `Jev` ≠ `Deterministic` | `81858b9` | `deterministic` lido como `jev`; ramo determinístico desligado; `stale_omitted` não contado; `basis` trocado; `scores` zerados; `stop_reason` trocado; o runtime enriquecendo; a seleção fora da leitura: todas mortas | `USAGE`; README (linha da flag); PRD principal §9.1 | (portões no fim da fase) |
+| T5.1 | `tests/eval.rs`: `the_memory_arms_parse_and_start_the_right_server`, `contamination_is_detected_for_the_new_arms`, `each_round_gets_an_isolated_store`, `a_sequence_runs_in_order_in_one_place_and_shares_its_store`: `no variant BrokerMemory/BrokerMemoryDeterministic`, `no method needs_credential`, `mcp_config takes 2 arguments` | `6c0b839` | credencial sem o braço B; sem o `XDG_STATE_HOME`; o C sem `--memory-selection`; sequência não agrupada; cópia não refeita entre sessões; lugar novo a cada sessão; store não removido (sobreviveu: o agente falso não criava o store; passou a criar): todas mortas | README (corpus `sequence`, braços, isolamento) | (idem) |
+| T5.2 | `tests/eval.rs::the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versions`: o resultado nem era lido (o `echo` do `sh` do macOS quebrava a linha), depois `presented_recall` nulo (o JSON seguido da seção de memória), depois a seção ausente | `3dbd8a4` | `from_str` de volta; espera não somada; requests e memórias entregues não somados; ingestão sem descontar as leituras; campos de memória nos braços sem memória; sem a medida de antes; seção fora; modelo trocado; agente sem o modelo; versões fora do relatório: todas mortas. Rodar o agente com `--version` contava como execução (e deixou `src/auth.py` na raiz, removido na revisão) | README (saída, custo da memória) | (idem) |
+| Revisão F5 | Achados do revisor independente (D-142): `a_sequence_partly_recorded_is_refused_not_resumed_in_part`, `a_sequence_stays_in_one_repository`, `a_session_after_an_invalid_one_says_its_history_is_incomplete`, `versions_that_change_between_runs_are_refused`, e o teste do relatório ampliado (jobs deixados, braço A, `--json`, células exatas), todos vistos vermelhos | `9722f9f`, `b442be8`, `41bf6fd`, `7600d15` | rodada parcial aceita; repositório e nome vazio da sequência; histórico incompleto não marcado; versões trocadas aceitas; `jobs_pending` zerado; braço A fora; custo fora do `--json`; `basis` sem a seleção: todas mortas | D-142; README; PRD jev-mem §10 (`deterministic`); este plano (T5.3) | 675 / 691 |
