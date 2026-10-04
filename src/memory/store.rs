@@ -824,6 +824,7 @@ impl Store {
         let mut count = 0;
         let mut added = Vec::new();
         let mut added_notes: Vec<String> = Vec::new();
+        let before = state.consolidation.decisions.clone();
         for d in decided {
             let p = &d.decision;
             if !intact(&state, &p.pair.first, &p.hashes.0)
@@ -893,6 +894,13 @@ impl Store {
                 state.nodes.remove(id);
             }
             state.consolidation.drop_nodes(&gone);
+            bytes = on_disk(&state)?;
+        }
+        if bytes.len() as u64 > self.limits.snapshot_bytes {
+            // Not even the decisions fit: the cadence alone is written, so the round is not
+            // bought again at the next tick.
+            state.consolidation.decisions = before;
+            count = 0;
             bytes = on_disk(&state)?;
             if bytes.len() as u64 > self.limits.snapshot_bytes {
                 return Err(Refusal::Full(Full::Snapshot));

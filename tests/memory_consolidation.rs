@@ -763,3 +763,157 @@ async fn the_worker_gives_its_rounds_the_servers_summarizer() {
     let m = worker.metrics();
     assert_eq!((m.rounds, m.notes, m.notes_rejected), (1, 1, 0));
 }
+
+// ---------------------------------------------------------------- review of phase 4 (D-140)
+
+fn worker_over(store: &Arc<Store>, fake: Arc<Fake>) -> Worker {
+    Worker::new(
+        store.clone(),
+        fake,
+        controller::Config {
+            model: MODEL.into(),
+            candidates: 4,
+        },
+    )
+}
+
+#[tokio::test]
+async fn a_round_that_cannot_be_committed_does_not_run_again_at_once() {
+    use ripwire_broker::memory::store::Limits;
+    // A snapshot with no room left for the decisions: the cadence is written all the same.
+    let dir = tempfile::tempdir().unwrap();
+    let full = stored(dir.path(), &same_file(3));
+    enrich(&full, 3, T0);
+    let size = std::fs::metadata(full.dir().join("snapshot.json"))
+        .unwrap()
+        .len();
+    let limits = Limits {
+        // Room for the cadence and the cursor, not for three decisions of ~700 bytes.
+        snapshot_bytes: size + 400,
+        ..Limits::default()
+    };
+    let store = Store::with_limits(dir.path(), &ws(), limits);
+    let fake = Fake::new(separate);
+    let round = consolidate::round(&store, &fake, &Config::new(MODEL), T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(round.decided, 0, "no room for the decisions");
+    let s = store.load().unwrap();
+    assert_eq!(s.consolidation.counted, 3);
+    assert!(!consolidate::due(&s, T0 + DAY_MS), "not due again at once");
+    assert_eq!(fake.requests(), 1);
+
+    // A writer held past the wait: the worker does not try again for a while.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &same_file(3)));
+    enrich(&store, 3, T0);
+    let fake = Arc::new(Fake::new(separate));
+    let worker = worker_over(&store, fake.clone());
+    let held = Store::new(dir.path(), &ws()).writer().unwrap();
+    assert!(worker.consolidate(T0 + DAY_MS).await.is_err());
+    drop(held);
+    assert_eq!(fake.requests(), 1);
+    assert!(worker.consolidate(T0 + DAY_MS + 1).await.unwrap().is_none());
+    assert_eq!(fake.requests(), 1, "no second purchase of the same round");
+    let later = T0 + DAY_MS + consolidate::RETRY_AFTER_MS;
+    assert!(worker.consolidate(later).await.unwrap().is_some());
+    assert_eq!(fake.requests(), 2);
+}
+
+/// Fails every request with `error`, counting them.
+struct Refusing(fn() -> ClassifyError, std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl MemoryClassifier for Refusing {
+    async fn decide(&self, _: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err((self.0)())
+    }
+}
+
+#[tokio::test]
+async fn a_round_that_sent_nothing_keeps_its_trigger() {
+    use ripwire_broker::memory::store::Limits;
+    // The 24-hour budget is spent: nothing goes out, and the round is still due.
+    let dir = tempfile::tempdir().unwrap();
+    let limits = Limits {
+        questions_per_day: 0,
+        ..Limits::default()
+    };
+    let records = same_file(3);
+    let store = Store::with_limits(dir.path(), &ws(), limits);
+    for r in &records {
+        store.enqueue(r).unwrap();
+    }
+    store.ingest().unwrap();
+    enrich(&store, 3, T0);
+    let fake = Fake::new(separate);
+    let round = consolidate::round(&store, &fake, &Config::new(MODEL), T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((round.requests, round.decided), (0, 0));
+    let s = store.load().unwrap();
+    assert_eq!(s.consolidation.counted, 0);
+    assert_eq!(s.consolidation.cursor, None);
+    assert!(consolidate::due(&s, T0 + DAY_MS), "still due");
+}
+
+#[tokio::test]
+async fn a_round_split_over_requests_moves_the_cursor_only_past_what_went_out() {
+    use ripwire_broker::memory::store::Limits;
+    // Texts that double in JSON: four pairs do not fit one request.
+    let records: Vec<Record> = (1..=5)
+        .map(|i| rec(i, &format!("{i}{}", "\"".repeat(1_990)), &["src/cache.rs"]))
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    // Enough budget for the first request only.
+    let limits = Limits {
+        questions_per_day: 15,
+        ..Limits::default()
+    };
+    let store = Store::with_limits(dir.path(), &ws(), limits);
+    for r in &records {
+        store.enqueue(r).unwrap();
+    }
+    store.ingest().unwrap();
+    enrich(&store, 5, T0);
+    let fake = Fake::new(|pair, name| match (pair, name) {
+        (_, "representation") => choice("keep_separate", 0.9),
+        _ => noul(0.1),
+    });
+    let round = consolidate::round(&store, &fake, &Config::new(MODEL), T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    let seen = fake.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "the second request did not fit the budget");
+    let first = seen[0].state["pairs"].as_array().unwrap().len();
+    assert!((1..4).contains(&first), "{first} pairs in the first request");
+    assert_eq!(round.decided, first, "every pair sent was decided");
+    assert_eq!(
+        store.load().unwrap().consolidation.cursor,
+        Some(round.asked[first - 1].key()),
+        "past what went out, not past the four"
+    );
+    // With the budget to spare, both requests go out, each asking only about its own pairs.
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &records);
+    enrich(&store, 5, T0);
+    let fake = Fake::new(separate);
+    let round = consolidate::round(&store, &fake, &Config::new(MODEL), T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(round.decided, 4);
+    let seen = fake.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    for req in &seen {
+        let pairs = req.state["pairs"].as_array().unwrap().len();
+        for (_, q) in &req.questions.0 {
+            let (i, _) = fake.names[&q.instructions];
+            assert!(i < pairs, "pairs[{i}] asked in a request of {pairs}");
+        }
+    }
+}

@@ -517,6 +517,8 @@ pub struct Worker {
     cfg: Config,
     suspended: std::sync::atomic::AtomicBool,
     metrics: Arc<std::sync::Mutex<Metrics>>,
+    /// No consolidation round before this, after one that could not be committed.
+    next_round_ms: std::sync::atomic::AtomicU64,
     /// `--summarizer-cmd`, for the derived notes of consolidation rounds.
     summarizer: std::sync::OnceLock<Arc<dyn crate::summarizer::Summarizer>>,
 }
@@ -534,6 +536,7 @@ impl Worker {
             suspended: Default::default(),
             metrics: Default::default(),
             summarizer: Default::default(),
+            next_round_ms: Default::default(),
         }
     }
 
@@ -573,9 +576,17 @@ impl Worker {
         if let Some(s) = self.summarizer.get() {
             cfg = cfg.with_summarizer(s.clone());
         }
-        let Some(round) =
-            super::consolidate::round(&self.store, &*self.classifier, &cfg, now_ms).await?
-        else {
+        use std::sync::atomic::Ordering::SeqCst;
+        if now_ms < self.next_round_ms.load(SeqCst) {
+            return Ok(None);
+        }
+        let ran = super::consolidate::round(&self.store, &*self.classifier, &cfg, now_ms).await;
+        if ran.is_err() {
+            // What it paid for is not bought again at the next tick.
+            let next = now_ms.saturating_add(super::consolidate::RETRY_AFTER_MS);
+            self.next_round_ms.store(next, SeqCst);
+        }
+        let Some(round) = ran? else {
             return Ok(None);
         };
         let mut metrics = self.metrics.lock().unwrap();

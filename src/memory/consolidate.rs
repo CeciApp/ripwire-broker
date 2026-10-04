@@ -43,6 +43,8 @@ pub const MAX_QUESTIONS: usize = MAX_PAIRS * PER_PAIR;
 pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// ...and its classifier attempts, retries included.
 pub const MAX_ATTEMPTS: u32 = 4;
+/// After a round that could not be committed, the worker waits this long before another.
+pub const RETRY_AFTER_MS: u64 = 10 * 60 * 1000;
 /// The relation of the link a round adds between a pair worth linking.
 pub const LINK: &str = "linked";
 /// The prompt and cache of derived notes, apart from `notes/v1`.
@@ -601,6 +603,8 @@ pub async fn round(
         sent: 0,
     };
     let mut answers: Vec<Vec<Decision>> = vec![vec![]; asked.len()];
+    // The last pair a request went out for: the cursor's next place.
+    let mut last_sent = None;
     let batches = wire::batches(&cfg.model, &json!({}), "pairs", groups).unwrap_or_default();
     for batch in batches {
         // Within a request, a pair is `pairs[local]`: ask again with that index.
@@ -615,7 +619,8 @@ pub async fn round(
             .map(|(_, q)| q)
             .collect();
         let req = StateRequest::new(&cfg.model, batch.request.state.clone(), questions);
-        match controller::send(
+        let sent_before = budget.sent;
+        let outcome = controller::send(
             store,
             classifier,
             &req,
@@ -623,8 +628,11 @@ pub async fn round(
             &mut budget,
             &mut round.metrics,
         )
-        .await
-        {
+        .await;
+        if budget.sent > sent_before {
+            last_sent = order.last().copied();
+        }
+        match outcome {
             Ok(decisions) => {
                 for ((g, _), d) in batch.keys.iter().zip(decisions) {
                     answers[*g].push(d);
@@ -637,6 +645,10 @@ pub async fn round(
         }
     }
     round.requests = budget.sent;
+    if !asked.is_empty() && budget.sent == 0 {
+        // Nothing went out (the budget is spent, the store was busy): the round stays due.
+        return Ok(Some(round));
+    }
     let mut decided: Vec<Decided> = asked
         .iter()
         .zip(&answers)
@@ -647,10 +659,8 @@ pub async fn round(
             derive(&state, &**summarizer, d, now_ms, &mut round).await;
         }
     }
-    // The cursor moves on once the pairs were asked, whatever the answers were.
-    let cursor = (budget.sent > 0)
-        .then(|| asked.last().map(Pair::key))
-        .flatten();
+    // The cursor moves past the pairs that were asked, whatever the answers were.
+    let cursor = last_sent.map(|g| asked[g].key());
     round.decided = store.commit_round(state.enriched, cursor, decided, &cfg.model, now_ms)?;
     Ok(Some(round))
 }
