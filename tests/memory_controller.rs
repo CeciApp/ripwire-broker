@@ -1459,3 +1459,36 @@ async fn serve_with_memory_reads_with_its_flags() {
         Store::new(state.path(), rt.workspace_id()).dir()
     );
 }
+
+#[tokio::test]
+async fn deterministic_memory_collects_and_ingests_but_never_enriches() {
+    use ripwire_broker::memory::retrieve::Selection;
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let fake = Scripted::new(vec![]);
+    let args = serve(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--memory",
+        "--memory-selection",
+        "deterministic",
+    ]);
+    let mut rt = runtime::from_serve(&args, state.path(), Some(fake.clone()))
+        .unwrap()
+        .unwrap();
+    let read = rt.publish().read.as_ref().expect("it reads memory");
+    assert_eq!(read.cfg.selection, Selection::Deterministic);
+    let store = Store::new(state.path(), rt.workspace_id());
+    rt.start(std::time::Duration::from_millis(20));
+
+    // The same collection and store: the observation is incorporated...
+    store.enqueue(&rec(1, "cache layer", &["e"])).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while store.load().unwrap().nodes.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "incorporated");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // ...and never sent to the classifier.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(fake.sent(), 0);
+    assert_eq!(store.load().unwrap().enriched, 0);
+}

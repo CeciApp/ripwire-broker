@@ -6,7 +6,7 @@
 use super::controller::{Config, Worker};
 use super::identity;
 use super::publish::MemoryConfig;
-use super::retrieve::{ReadConfig, ReadSetup};
+use super::retrieve::{ReadConfig, ReadSetup, Selection};
 use super::store::{Limits, Refusal, Store};
 use super::time::{Clock, SystemClock};
 use crate::cli::ServeArgs;
@@ -33,6 +33,8 @@ pub struct Runtime {
     publish: MemoryConfig,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// `--memory-selection`: in `Deterministic` nothing is enriched or consolidated.
+    selection: Selection,
 }
 
 /// The runtime `serve` gets: `None` without `--memory`, whatever else is on. `--online` alone
@@ -71,6 +73,7 @@ pub fn from_serve(
             model: config.model.clone(),
             deadline: memory.read_deadline,
             request_limit: memory.read_request_limit,
+            selection: memory.selection,
             ..ReadConfig::default()
         },
     };
@@ -88,6 +91,7 @@ pub fn from_serve(
         publish,
         cancel: CancellationToken::new(),
         task: None,
+        selection: memory.selection,
     }))
 }
 
@@ -111,10 +115,12 @@ impl Runtime {
     }
 
     /// Runs the worker in the background until the runtime is dropped: incorporate the spool,
-    /// run every ready job, then wait `tick`.
+    /// run every ready job and a consolidation round that came due, then wait `tick`. With
+    /// `--memory-selection deterministic` only the spool and retention run: nothing is sent.
     pub fn start(&mut self, tick: Duration) {
         let (store, worker, cancel) =
             (self.store.clone(), self.worker.clone(), self.cancel.clone());
+        let enrich = self.selection == Selection::Jev;
         self.task = Some(tokio::spawn(async move {
             let mut swept_at: Option<u64> = None;
             loop {
@@ -124,12 +130,14 @@ impl Runtime {
                     swept_at = Some(now);
                 }
                 let _ = store.ingest();
-                while let Ok(Some(_)) = worker.run_once(SystemClock.now_ms()).await {
+                while enrich && let Ok(Some(_)) = worker.run_once(SystemClock.now_ms()).await {
                     if cancel.is_cancelled() {
                         return;
                     }
                 }
-                let _ = worker.consolidate(SystemClock.now_ms()).await;
+                if enrich {
+                    let _ = worker.consolidate(SystemClock.now_ms()).await;
+                }
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = tokio::time::sleep(tick) => {}

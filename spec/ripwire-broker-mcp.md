@@ -666,7 +666,12 @@ parcial, degradado). Cada memória leva id, texto como `untrusted_repository_dat
 com o hash dos bytes de então, `observed_at_ms` com o seu significado (`time_basis`), `basis`,
 os pais quando derivada, `stale: false` (uma memória com fonte mudada é omitida, não entregue),
 `why_included` e as notas do scoring. Sem `--memory`, os dois campos não aparecem e o envelope é
-byte a byte o de antes. Memória é relato do passado: não muda `status` e não substitui itens,
+byte a byte o de antes. Com `--memory-selection deterministic` (experimental, controle da
+avaliação, [D-141](changelog.md#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências)),
+a leitura não pergunta nada ao classificador: entrega as âncoras locais (palavras e arquivos da
+tarefa) cujas fontes não mudaram, com `basis: deterministic_rank`, sem `scores` (ausência não vira
+zero) e com `stop_reason: deterministic`; o servidor continua coletando e incorporando, mas não
+enriquece nem consolida. Memória é relato do passado: não muda `status` e não substitui itens,
 riscos ou testes.
 
 A leitura corre ao lado da parte estrutural de `context_for_task`, dentro de

@@ -74,6 +74,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
 | `--memory-retention-days N` | `30` | 1–365 |
 | `--memory-max-nodes N` | `2000` | 1–2000 memories per workspace |
+| `--memory-selection jev\|deterministic` | `jev` | **Experimental, for evaluation** ([D-141](spec/changelog.md#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências)): `deterministic` keeps the same collection and store but enriches nothing and asks the classifier nothing about memory; a read delivers the local matches (task words and files) whose sources are unchanged, with `basis: deterministic_rank`, no `scores` and `stop_reason: deterministic`. Discovery is unchanged |
 
 ### How an MCP host passes configuration
 

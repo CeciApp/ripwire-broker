@@ -261,14 +261,17 @@ pub struct MemoryItem {
     pub observed_at_ms: u64,
     /// What `observed_at_ms` means: when it was observed, not when anything happened.
     pub time_basis: String,
-    /// How it was chosen: scored by the classifier against the task.
+    /// How it was chosen: `jev_scored` by the classifier against the task, or
+    /// `deterministic_rank` by the local ranking alone.
     pub basis: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub derived_from: Vec<String>,
     /// Always false: a memory whose source changed is left out, not delivered as stale.
     pub stale: bool,
     pub why_included: String,
-    pub scores: MemoryScores,
+    /// Absent when no classifier scored it (`--memory-selection deterministic`): never zeros.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scores: Option<MemoryScores>,
 }
 
 /// How the memory part of an answer was made (`ripwire-broker.memory/v1`).

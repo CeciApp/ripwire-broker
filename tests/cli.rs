@@ -398,6 +398,37 @@ fn memory_implies_online_and_both_flags_are_equivalent() {
 }
 
 #[test]
+fn memory_selection_is_jev_unless_deterministic_is_asked() {
+    use ripwire_broker::memory::retrieve::Selection;
+    let serve = |extra: &[&str]| {
+        let mut args = vec!["--workspace", "/w"];
+        args.extend(extra);
+        parse(&args)
+    };
+    let selection = |extra: &[&str]| match serve(extra) {
+        Ok(Command::Serve(d)) => d.memory.unwrap().selection,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(selection(&["--memory"]), Selection::Jev);
+    assert_eq!(
+        selection(&["--memory", "--memory-selection", "jev"]),
+        Selection::Jev
+    );
+    assert_eq!(
+        selection(&["--memory", "--memory-selection", "deterministic"]),
+        Selection::Deterministic
+    );
+    let err = serve(&["--memory", "--memory-selection", "random"]).unwrap_err();
+    assert!(
+        err.contains("--memory-selection") && err.contains("deterministic"),
+        "{err}"
+    );
+    let err = serve(&["--memory-selection", "deterministic"]).unwrap_err();
+    assert!(err.contains("need --memory"), "{err}");
+    assert!(cli::USAGE.contains("--memory-selection jev|deterministic"));
+}
+
+#[test]
 fn memory_options_have_defaults_and_refuse_values_out_of_range() {
     let serve = |extra: &[&str]| {
         let mut args = vec!["--workspace", "/w", "--memory"];
