@@ -361,6 +361,7 @@ cliente HTTP é criado e o diagrama se reduz ao caminho local.
 | Provenance tracker | Registrar origem e justificativa de cada item |
 | Renderer | Produzir conteúdo estruturado e resumo textual opcional |
 | Metrics sink | Registrar métricas locais sem conteúdo sensível |
+| Memória (`--memory`) | Store de observações por workspace, separado do grafo de código do Ripwire; worker que as enriquece e consolida com o Jev; leitura em `context_for_task` ([PRD jev-mem](../docs/jev-mem-prd.md)). O Jev controla a memória e o agente do host é o System Two |
 
 ### 7.3 Transporte
 
@@ -852,6 +853,27 @@ padrão. Requisitos:
   [D-036](changelog.md#d-036--espera-limitada-e-fallback-proposta),
   [D-046](changelog.md#d-046--fase-3-com-cache-em-memória) e
   [D-048](changelog.md#d-048--ponto-de-parada-4-fase-3).
+
+**Notas derivadas da memória** ([D-140](changelog.md#d-140--fase-4-do---memory-consolidação)):
+com `--memory`, o mesmo `--summarizer-cmd` escreve notas derivadas na consolidação, sob contrato
+próprio, distinto das notas arquiteturais:
+
+- **Gatilho:** só um par que o classificador quer `merge` ou `promote` com probabilidade da opção
+  ≥ 0,85 e contradição < 0,85, com os dois pais ainda íntegros. Sem sumarizador, decisões e
+  ligações funcionam por inteiro, sem nota.
+- **Evidência:** os dois pais inteiros, até 2.000 caracteres juntos; se não couberem, nenhuma nota.
+- **Prompt e validação:** `memory-consolidation/v1`; a nota tem no máximo 600 caracteres, mantém
+  os qualificadores e é descartada se nomear caminho ou ID que os pais não nomeiam. Validar o
+  formato não prova fidelidade: perda de detalhe e contradição entram na avaliação (Fase 5 do
+  plano).
+- **Proveniência:** `derived_from` com IDs e hashes dos pais, o modelo do sumarizador, a versão do
+  prompt e a decisão que a autorizou. A nota é hipótese derivada, nunca fato confirmado pelo
+  classificador; não substitui nem apaga os pais, fica velha com as fontes deles e expira com o
+  primeiro.
+- **Cache:** em disco, só IDs, e só com `--summarizer-version-cmd`; sem ele, nenhuma nota é
+  reaproveitada.
+- **Falha:** timeout ou saída inválida mantêm o par separado e não mudam fonte, decisão nem o gate
+  de conclusão.
 
 ---
 
@@ -1886,8 +1908,9 @@ par nunca é cortado entre pedidos. O adaptador Noul desta seção e o seu parse
 
 **Prompts da memória** (D-138): `memory-prompts/v1`, independentes de `v1` e de `notes/v1`, com
 oito etapas (typing, relações, alias, tempo implícito, routing, scoring, parada, consolidação),
-critérios verdadeiro/falso explícitos e o aviso de dados não confiáveis em cada instrução. O
-rescore desta seção não muda.
+critérios verdadeiro/falso explícitos e o aviso de dados não confiáveis em cada instrução. As
+perguntas da consolidação falam de `pairs[c].newer` e `pairs[c].older`, para um request levar
+até quatro pares (D-140). O rescore desta seção não muda.
 
 ### 23.4 Composição em `context_for_task`
 

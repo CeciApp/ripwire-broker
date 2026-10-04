@@ -99,6 +99,7 @@
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
 | 2026-10-03 17:00 | Fase 2 do plano do `--memory` (controle Jev) feita em TDD (T2.1 a T2.13; T2.0 escrita, pendente de rodada com a chave): Choice e pedidos de estado, decisões tipadas, transporte comum, `memory-prompts/v1`, fila com leases por lock e quota de 24 h, worker com typing, candidatos e relações, commit por par, falhas do provider, teto único de requisições, worker no `serve --memory` e `memory drain --online`, métricas de custo; PRD principal §23.1/§23.2/§23.3/§23.5 autorizam o worker | [D-138](#d-138--fase-2-do---memory-controle-jev) |
 | 2026-10-03 21:33 | Fase 3 do plano do `--memory` (leitura e entrega) feita em TDD (T3.1 a T3.10; T3.11, validação nos hosts, pendente e manual): índice lexical e de entidades com RRF, routing, scoring, beam e limites, parada, prazo de 750 ms, fontes mudadas omitidas e revalidadas, `memories[]` e `provenance.memory`, orçamento da memória com reserva, seção legível no texto MCP, leitura paralela em `context_for_task` com snapshot quente, hooks prontos para memórias; revisão com 12 achados corrigidos, entre eles a quota em `quota.json` e a chave do cache pela geração | [D-139](#d-139--fase-3-do---memory-leitura-e-entrega) |
+| 2026-10-03 22:52 | Fase 4 do plano do `--memory` (consolidação) feita em TDD (T4.1 a T4.3): cadência durável de 20 enriquecimentos ou 24 h, sem timer entre processos; rodadas de até 4 pares, 20 perguntas, 5 s e 4 tentativas, com cursor; decisões por par e `RepresentationDecision`, ligação `linked` a partir de 0,60, originais nunca apagados; nota derivada só pelo gate (`merge`/`promote` ≥ 0,85, contradição < 0,85), `memory-consolidation/v1`, validador de caminhos e IDs, cache só com versão confiável do sumarizador | [D-140](#d-140--fase-4-do---memory-consolidação) |
 | 2026-10-03 15:12 | Fase 1 do plano do `--memory` feita em TDD (T1.1 a T1.16, um commit por tarefa, mutação em cada uma): `--memory` e `--memory-*` no parse; registro `memory/v1`, identidade, admissão, relógio e sequência; store privado com spool, snapshot, tetos, lock, retenção, `forget` com tombstones e revogação; `memory status\|forget\|add\|resume`; coleta pelas tools e pelo `hook --memory`; `install`/`doctor`. O `serve --memory` ainda não liga a coleta (T2.11) | [D-137](#d-137--fase-1-do---memory-store-e-coleta) |
 | 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
@@ -5887,3 +5888,67 @@ não validam memória); a validação nos hosts (T3.11); o diagrama de `spec/dia
 **Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos (44) e
 `props_fs` (10) verdes; CA-10 sem crate de rede; guarda de fixtures verde; nenhum `reqwest`,
 `secrecy`, `println!` ou `unsafe` em `src/memory/`.
+
+## D-140 — Fase 4 do `--memory`: consolidação
+
+**Data:** 2026-10-03 22:52.
+
+**Decisão:** a Fase 4 do [plano](plan/jev-mem-plan.md) está feita em TDD (T4.1 a T4.3), uma
+tarefa por commit, com o teste vermelho visto falhar, mutações que o derrubaram, documentação e
+os cinco portões; o registro de evidência (§9 do plano) tem a linha de cada tarefa.
+
+**O que entrou:** `memory::consolidate`. Uma rodada fica devida depois de 20 enriquecimentos
+desde a anterior ou quando um par espera há 24 h; contador, início da espera, cursor e decisões
+moram no snapshot, então uma queda não perde nenhum deles, e sem processo nada é agendado: o
+worker do `serve --memory` e o `memory drain` rodam o que venceu. Cada rodada pergunta sobre no
+máximo 4 pares (20 perguntas), em tão poucos requests quanto couberem, com prazo de 5 s e 4
+tentativas; um par só é decidido com as cinco respostas válidas. `link_usefulness` ≥ 0,60 cria
+uma aresta semântica `linked`; nenhuma observação original é apagada. Com `--summarizer-cmd`, um
+par com `merge`/`promote` ≥ 0,85 e contradição < 0,85 recebe uma nota derivada
+(`memory-consolidation/v1`), escrita a partir dos dois pais inteiros (até 2.000 caracteres), com
+no máximo 600 caracteres, descartada se nomear caminho ou ID que os pais não nomeiam. Testes:
+639 → 653 no build padrão, 655 → 669 com `online`.
+
+**Decisões tomadas no caminho:**
+
+- **Os pares são a vizinhança da escrita.** Cada observação enriquecida (job `done`, nunca uma
+  nota derivada) forma par com os seus candidatos da escrita (`controller::candidates`, K = 4):
+  entidade compartilhada, depois palavras, depois a mais próxima. Palavras sozinhas não serviam,
+  porque o texto renderizado de quase toda observação compartilha vocabulário.
+- **As perguntas da consolidação passaram a falar de `pairs[c].newer` e `pairs[c].older`**, em
+  vez de `new_memory` e `candidates[c]`, para um request levar vários pares. Elas nunca tinham sido
+  enviadas, então nenhum cache dependia do texto antigo e a versão `memory-prompts/v1` ficou.
+- **Uma decisão vale por conteúdo, modelo e prompt.** A chave inclui os hashes dos dois pais, o
+  modelo do classificador e a versão do prompt: trocar o `--jev-model` volta os pares a pendentes.
+- **Rodada que falhou:** o contador é zerado e a espera recomeça (a próxima tentativa vem em 24 h
+  ou depois de mais 20 enriquecimentos), para uma falha do provider não virar laço. O cursor
+  avança sempre que algo foi enviado, para um par que sempre falha não bloquear os outros.
+- **O cache de notas** (`Consolidation.notes`) guarda só IDs, nunca texto, e só para um
+  sumarizador com versão confiável (`--summarizer-version-cmd`, novo `Summarizer::trusted_version`).
+  Ele serve quando o mesmo par é decidido de novo, por exemplo com outro modelo do classificador.
+  Sem versão confiável, o sumarizador é chamado de novo. O `forget` e a retenção levam a nota, a
+  decisão e a entrada do cache.
+- **A nota derivada** herda entidades e fontes dos pais (fica velha junto com eles), expira com o
+  primeiro pai, não ganha job, e registra o modelo do sumarizador, a versão do prompt e, na decisão
+  que a autorizou, o seu ID.
+- **O `memory drain` consolida sem sumarizador:** ele não recebe `--summarizer-cmd`, então faz
+  decisões e ligações e nenhuma nota. O `serve --memory --summarizer-cmd` dá o mesmo modelo das
+  notas arquiteturais às rodadas.
+- **Métricas:** `rounds`, `notes`, `notes_rejected` e a operação `consolidation` (tentativas,
+  perguntas, bytes, falhas) entram nas métricas do worker.
+- **Mutantes equivalentes:** no par, a guarda `Decision::Choice` e a leitura da probabilidade da
+  opção cobrem o mesmo caso (o parser já recusa Choice sem a opção escolhida); tirar uma sozinha
+  não muda nada. A expiração da nota pelo mínimo dos pais não tem teste próprio: a retenção já
+  remove os descendentes de um pai expirado.
+- **Erro meu na verificação, corrigido:** no zsh, `$T` sem aspas não se divide em palavras, e as
+  primeiras rodadas de mutação passavam `--test memory_consolidation` como um argumento só; o cargo
+  recusava e o script contava "morta". Todas foram refeitas com os argumentos separados; uma
+  sobreviveu de verdade (resposta ausente virando zero), e o teste
+  `a_pair_missing_any_one_answer_is_not_decided` entrou para ela.
+
+**Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos (44) e
+`props_fs` (10) verdes; CA-10 sem crate de rede; guarda de fixtures verde; nenhum `reqwest`,
+`secrecy`, `println!` ou `unsafe` em `src/memory/`.
+
+**O que ficou de fora, registrado:** a nota derivada não passa por Jev (sem typing nem relações);
+o `memory status` não mostra a cadência; o diagrama de `spec/diagrams/`.

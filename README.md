@@ -323,8 +323,27 @@ spent, jobs stay pending and keep their runs. A job runs twice at
 most and then waits for `memory retry`. The worker stops with the server; what it did not
 finish waits on disk.
 The status resource's `memory` field adds what the worker cost, by operation (typing,
-relations): attempts, retries, questions, bytes sent, failures by category and quota refusals,
+relations, consolidation): attempts, retries, questions, bytes sent, failures by category and
+quota refusals, plus the consolidation rounds run and the derived notes kept or discarded,
 counts only. `memory status` shows the attempts and questions spent in the last 24 hours.
+
+**Consolidation:** after 20 enrichments since the last round, or once a pair of memories has
+waited 24 hours, the worker (or `memory drain`) runs a round. The counter, the cursor and the
+decisions are on disk, so a crash at the 19th enrichment keeps 19; with no process running
+nothing is scheduled, and the next `serve --memory` or `memory drain` runs what came due. A round
+asks about at most four pairs of neighbouring memories (the write's candidates), twenty
+questions, within 5 s and four attempts, and starts after the pairs the previous one asked about.
+For each pair it records redundancy, contradiction, obsolescence, link usefulness and a
+representation (`keep_separate`, `merge`, `promote`, `uncertain`; nothing to do with a Git
+merge), only when every answer came back; a link usefulness of 0.60 or more adds a `linked`
+relation. No memory is ever deleted or rewritten. With `--summarizer-cmd`, a pair the classifier
+wants merged or promoted with probability 0.85 or more, contradicting itself below 0.85, gets a
+derived note (`memory-consolidation/v1`): written from both whole memories (2,000 characters at
+most, or no note), at most 600 characters, and thrown away when it names a file or an id they
+do not. The note is a hypothesis about its parents, keeps them, goes stale with their sources and
+expires with the first of them. A summarizer that fails or answers badly leaves the pair
+separate. A note is reused from disk only when `--summarizer-version-cmd` pins the model's
+weights; `memory drain` makes decisions and links but no notes.
 
 **Reading:** with `--memory`, `context_for_task` reads memory alongside the structural context
 and adds at most three memories (600 tokens, a fifth of the budget) in a `memories` field, with

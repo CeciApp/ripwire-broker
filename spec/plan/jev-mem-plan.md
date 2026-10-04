@@ -1,10 +1,12 @@
 # Memória persistente com Jev (`--memory`) — Plano de implementação
 
-**Data:** 2026-10-03 · **Status:** plano validado contra o código; Fases 0, 1 e 2 feitas
+**Data:** 2026-10-03 · **Status:** plano validado contra o código; Fases 0 a 4 feitas
 ([D-136](../changelog.md#d-136--fase-0-do---memory-prd-jev-mem-v03),
 [D-137](../changelog.md#d-137--fase-1-do---memory-store-e-coleta),
-[D-138](../changelog.md#d-138--fase-2-do---memory-controle-jev)), com a T2.0 pendente de
-rodada manual; Fase 3 em diante não começada.
+[D-138](../changelog.md#d-138--fase-2-do---memory-controle-jev),
+[D-139](../changelog.md#d-139--fase-3-do---memory-leitura-e-entrega),
+[D-140](../changelog.md#d-140--fase-4-do---memory-consolidação)), com a T3.11 pendente de
+rodada manual nos hosts; Fase 5 em diante não começada.
 **Spec:** [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) v0.3. Onde este plano diz "PRD §N", é esse documento;
 "PRD principal" é [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md). "CA-N" é o critério
 verificável N do PRD §14.
@@ -475,14 +477,14 @@ atualizado (archify fora desta sessão).
 
 ### Fase 4 — Consolidação
 
-- [ ] **T4.1 · Cadência durável: 20 enriquecimentos ou 24 h.** CA-7.
+- [x] **T4.1 · Cadência durável: 20 enriquecimentos ou 24 h.** CA-7.
   **Vermelho:** `tests/memory_consolidation.rs`: `a_crash_at_write_19_keeps_the_counter_at_19`;
   `pairs_pending_for_24h_trigger_without_the_twentieth_write`; `no_background_timer_runs_without_a_process`;
   `the_cursor_does_not_repeat_the_same_pairs`.
-- [ ] **T4.2 · Decisões por par e `RepresentationDecision`.** CA-14.
+- [x] **T4.2 · Decisões por par e `RepresentationDecision`.** CA-14.
   **Vermelho:** `tests/memory_consolidation.rs`: `a_round_asks_at_most_four_pairs_twenty_questions_in_five_seconds`;
   `originals_are_never_deleted`; `links_and_decisions_work_without_a_summarizer`.
-- [ ] **T4.3 · Nota derivada só pelo gate.** CA-14.
+- [x] **T4.3 · Nota derivada só pelo gate.** CA-14.
   **Vermelho:** `tests/memory_consolidation.rs`, com `tests/common/summarizer.rs`:
   `only_merge_or_promote_at_085_with_contradiction_below_085_calls_the_summarizer`;
   `parents_that_do_not_fit_are_not_summarized`; `a_note_naming_unknown_paths_or_ids_is_discarded`;
@@ -490,6 +492,16 @@ atualizado (archify fora desta sessão).
   `without_a_trusted_version_cmd_generated_notes_are_not_cached_on_disk`.
   **Verde:** `src/memory/consolidate.rs`, prompt e cache `memory-consolidation/v1`, reutilizando
   `CommandSummarizer`. **Docs:** README, PRD principal §7/§10.
+
+**Saída da Fase 4:** CA-7 (cadência) e CA-14 cobertos; PR único.
+
+**Como a Fase 4 saiu ([D-140](../changelog.md#d-140--fase-4-do---memory-consolidação)):** os pares
+de uma rodada são a vizinhança da escrita (os candidatos de cada observação enriquecida); as
+perguntas da consolidação passaram a falar de `pairs[c]` para um request levar vários pares; uma
+rodada que falhou zera o contador e recomeça a espera, para não virar laço; o cache de notas guarda
+só IDs e só existe com sumarizador de versão confiável; o `memory drain` consolida sem
+sumarizador (decisões e ligações, sem nota); o teste extra
+`a_pair_missing_any_one_answer_is_not_decided` nasceu de um mutante sobrevivente.
 
 ### Fase 5 — Avaliação
 
@@ -631,3 +643,6 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T3.10 | `tests/broker.rs`: `memory_is_read_alongside_the_structural_context`, `a_provider_failure_a_full_disk_or_a_corrupt_store_keeps_the_structural_answer`, `memory_never_changes_ready_or_attention_required`, `a_cold_large_snapshot_omits_memory_with_a_limitation_and_warms_up`, `the_query_is_never_persisted`, `a_memory_goes_out_once_per_session`, `a_store_broken_during_the_read_delivers_no_memory`; `tests/memory_controller.rs::serve_with_memory_reads_with_its_flags`: `unresolved import ReadSetup`, `no field read on MemoryConfig`; depois `context_for_task reads memory` (o `serve` não montava a leitura) | `7c6a734` | sem `attach`; limitações descartadas; memórias não lembradas na sessão; sem cache quente (20 s frios); esperar a carga inteira; memórias mantidas sem a reconferência; `ProviderError` fora de `memory_incomplete`: todas mortas. Sem mutação: a leitura em paralelo (só tempo) e "a consulta nunca é gravada" (guarda; não há escrita a mutar) | PRD principal §9.1 (leitura, limitações `memory_cold`/`memory_unavailable`/`memory_incomplete`); README "Reading" e linha de `--memory` | 614 / 630 |
 | T3.11 | **Pendente (manual).** Pede uma sessão real do Claude Code e do Codex com `serve --memory` e a chave, e a fixture gravada de cada uma; nenhum host foi validado nesta fase | — | — | README: integração por host "não validada" até a rodada | — |
 | Revisão F3 | Achados 1–12 do revisor independente (D-139): `memory_and_the_count_of_those_left_out_never_pass_the_budget_by_a_token`, `untrusted_memory_fields_cannot_forge_lines_in_the_section`, `an_entity_is_named_only_by_the_whole_path`, `depth_two_expands_only_from_a_beam_of_the_four_strongest_relations`, `notes_and_memory_together_stay_inside_the_budget`, `discovery_and_the_memory_read_share_one_jev_request_limit`, `only_what_a_read_is_about_to_use_has_its_sources_checked`, `checking_sources_counts_against_the_deadline`, `a_stale_memory_reached_by_a_relation_is_not_scored_either`, `the_last_checks_keep_their_time_when_the_provider_takes_all_of_it`, `a_short_deadline_still_leaves_the_requests_most_of_it`, `bookkeeping_writes_keep_the_snapshot_warm`, `a_snapshot_rewritten_with_the_same_size_and_time_is_still_seen`, `the_generation_is_recorded_beside_every_snapshot`, `reads_are_charged_to_the_24_hour_quota`, `a_spent_quota_stops_reads_from_asking`, `reads_in_a_row_count_what_the_ones_before_spent`, `a_read_asks_no_more_questions_than_the_quota_has_left`, `a_store_from_before_the_quota_file_keeps_the_quota_it_recorded`, `the_quota_a_snapshot_recorded_carries_over_to_its_own_file`, todos vistos vermelhos; os testes da T3.6 refeitos por `Recall` (o de `fit` saiu com ele); `the_deadline_cuts_http_and_local_loops` renomeado `the_deadline_cuts_the_requests`; `the_text_block_carries_the_historical_memory_section_once` e o teste da seção nos hooks pedem o texto uma vez só | `6c110e6`, `e7b8e7f`, `7f902e2`, `a356d4c`, `0368b6c`, `4b6a9f3`, `8e5d480`, `db1ac0e` | 33 mutações derrubadas; sobreviveram a parada por prazo dentro do laço de hashes (o `timeout_at` já responde; ela só libera a thread de bloqueio) e o recomeço de um carregamento em pânico (inalcançável pela interface); a checagem "geração do selo = geração carregada" sobreviveu e saiu, por desnecessária | D-139 (seção da revisão); README (leitura, quota, `--memory-read-request-limit`); spec §9.1 e §23.5 | 639 / 655 |
+| T4.1 | `tests/memory_consolidation.rs`: `a_crash_at_write_19_keeps_the_counter_at_19`, `pairs_pending_for_24h_trigger_without_the_twentieth_write`, `no_background_timer_runs_without_a_process`, `the_cursor_does_not_repeat_the_same_pairs`: `unresolved import ripwire_broker::memory::consolidate`, `no field consolidation on type State` | `950a007` | gatilho de 20 → 19; espera de 24 h menos 1 ms; cursor ignorado; contador não gravado na rodada; início da espera em 0 em vez da hora do lease; espera não recomeçada com pares pendentes; `drain` sem rodada: todas mortas | — | suíte alvo verde; portões completos na T4.3 |
+| T4.2 | `tests/memory_consolidation.rs`: `a_round_asks_at_most_four_pairs_twenty_questions_in_five_seconds`, `links_and_decisions_work_without_a_summarizer`: `cannot find value DEADLINE/MAX_QUESTIONS/MAX_ATTEMPTS/LINK in consolidate`; depois `one pair was worth linking` (nenhuma aresta); `originals_are_never_deleted` nasceu verde (guarda: não há remoção a desfazer), provada por mutação | `914ae2b` | 5 pares; prazo ×2; 1 tentativa; limiar da ligação 0,2; ligação não gravada; grafo da ligação trocado; o mais antigo removido quando obsoleto: todas mortas. Resposta ausente virando 0 **sobreviveu**: teste novo `a_pair_missing_any_one_answer_is_not_decided` (no commit da T4.3) a mata para as quatro Nouls. Equivalente: a guarda `Decision::Choice` e a probabilidade da opção cobrem o mesmo caso | — | suíte alvo verde; portões completos na T4.3 |
+| T4.3 | `tests/memory_consolidation.rs` (com `tests/common/summarizer.rs`): `only_merge_or_promote_at_085_with_contradiction_below_085_calls_the_summarizer`, `parents_that_do_not_fit_are_not_summarized`, `a_note_naming_unknown_paths_or_ids_is_discarded`, `a_timeout_or_invalid_output_keeps_the_pair_separate_and_changes_no_gate`, `without_a_trusted_version_cmd_generated_notes_are_not_cached_on_disk`: `cannot find NOTE_PROMPT_VERSION`, `no method versioned/with_summarizer`, `no field note/notes`; `the_worker_gives_its_rounds_the_servers_summarizer`: `no method named set_summarizer` | `d9a7ddb` | `>=` → `>` no 0,85; `<` → `<=` na contradição; `keep_separate` autorizando nota; teto dos pais ×2; validador que aceita tudo; IDs não verificados; caminho com `/` não verificado (sobreviveu: o caso tinha extensão; caso `docs/internal/README` acrescentado); 601 caracteres aceitos; cache sem versão confiável; cache não lido; `forget` sem limpar o cache; erro do sumarizador virando nota; pais faltando em `derived_from`; modelo não gravado; pai fora do prompt; sumarizador não passado à rodada; notas fora das métricas: todas mortas. Contador de notas nas métricas acrescentado junto com o código, provado só por mutação. Sem teste próprio: a expiração pelo mínimo dos pais (a retenção já leva os descendentes) | README (Consolidation, métricas); PRD principal §7.2, §10.3, §23.3 | 653 / 669 |
