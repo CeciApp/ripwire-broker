@@ -6246,6 +6246,16 @@ leitor injetável, não há como escrever um teste vermelho determinístico de b
 quando o leitor tiver uma costura. Também fica o status `ready` com `items[]` vazio quando o
 orçamento corta tudo: o `budget.truncated` e o `next_step` já dizem o que aconteceu.
 
+**O CI travou, e por quê:** os dois jobs do PR #55 estouraram o limite sem deixar log, e o passo de
+testes ficou `in_progress` além do próprio limite (o runner tinha morrido). Num container Ubuntu
+24.04, o `/usr/bin/kill` do procps (4.0.4) leu `-KILL -<pgid>` errado: um pid negativo pequeno vira
+número de sinal, e num dos testes o comando matou o próprio script que o chamou, o que no runner
+alcança todos os processos do usuário. A correção do timeout do eval passou a usar o `kill` embutido
+do `sh`, na forma POSIX `kill -s KILL -- -<pgid>`, conferida no Ubuntu 24.04 e no macOS com pgids
+pequenos e grandes; o teste ganhou uma testemunha que tem de sobreviver. Ficam no CI um limite por
+teste do nextest (`.config/nextest.toml`, 3 minutos) e um limite no passo de testes (12 minutos),
+para que uma trava futura deixe log e nome.
+
 **Datas corrigidas:** os horários do D-141, do D-142 e do D-143 tinham sido escritos sem consultar o
 relógio; passam a ser os dos seus commits (23:49, 01:01 e 03:40).
 
