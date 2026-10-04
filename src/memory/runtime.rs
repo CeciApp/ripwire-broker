@@ -121,12 +121,17 @@ impl Runtime {
     /// disk work (spool, retention) runs in the blocking pool, and a stage that starts failing is
     /// said on stderr (D-146).
     pub fn start(&mut self, tick: Duration) {
+        self.start_reporting(tick, |line| eprintln!("{line}"));
+    }
+
+    /// [`Runtime::start`], with what the worker says going to `say` instead of stderr.
+    pub fn start_reporting(&mut self, tick: Duration, say: impl Fn(&str) + Send + 'static) {
         let (store, worker, cancel) =
             (self.store.clone(), self.worker.clone(), self.cancel.clone());
         let enrich = self.selection == Selection::Jev;
         self.task = Some(tokio::spawn(async move {
             let mut swept_at: Option<u64> = None;
-            let mut said = Said::default();
+            let mut said = Said::new(say);
             loop {
                 let now = SystemClock.now_ms();
                 if swept_at.is_none_or(|at| now.saturating_sub(at) >= SWEEP_EVERY_MS) {
@@ -156,6 +161,16 @@ impl Runtime {
                     }
                     let round = worker.consolidate(SystemClock.now_ms()).await;
                     said.note("consolidation", Ok(round));
+                    // A 401/403 comes back as a run, not a refusal, and suspends the worker for
+                    // the life of the process.
+                    if worker.is_suspended() {
+                        said.failed(
+                            "provider",
+                            "the provider refused the credential (401/403); jobs wait for a \
+                             server restart"
+                                .into(),
+                        );
+                    }
                 }
                 tokio::select! {
                     _ = cancel.cancelled() => return,
@@ -166,25 +181,37 @@ impl Runtime {
     }
 }
 
-/// What each stage of the worker last said on stderr: a store that stays broken is said once,
-/// when the stage starts failing or fails differently, and a success clears it. A store held by
-/// another writer is not a failure.
-#[derive(Default)]
-struct Said(std::collections::HashMap<&'static str, String>);
+/// What each stage of the worker last said: a store that stays broken is said once, when the
+/// stage starts failing or fails differently, and a success clears it. A store held by another
+/// writer is not a failure.
+struct Said {
+    last: std::collections::HashMap<&'static str, String>,
+    say: Box<dyn Fn(&str) + Send>,
+}
 
 impl Said {
+    fn new(say: impl Fn(&str) + Send + 'static) -> Self {
+        Self {
+            last: Default::default(),
+            say: Box::new(say),
+        }
+    }
+
     fn note<T>(&mut self, stage: &'static str, ran: Result<Result<T, Refusal>, JoinError>) {
-        let why = match ran {
+        match ran {
             Ok(Ok(_)) | Ok(Err(Refusal::Locked)) => {
-                self.0.remove(stage);
-                return;
+                self.last.remove(stage);
             }
-            Ok(Err(refusal)) => format!("{refusal:?}"),
-            Err(_) => "panicked".to_string(),
-        };
-        if self.0.get(stage) != Some(&why) {
-            eprintln!("ripwire-broker: memory worker: {stage}: {why}");
-            self.0.insert(stage, why);
+            Ok(Err(refusal)) => self.failed(stage, format!("{refusal:?}")),
+            Err(_) => self.failed(stage, "panicked".into()),
+        }
+    }
+
+    /// Says `why` for `stage`, unless it is what the stage said last.
+    fn failed(&mut self, stage: &'static str, why: String) {
+        if self.last.get(stage) != Some(&why) {
+            (self.say)(&format!("ripwire-broker: memory worker: {stage}: {why}"));
+            self.last.insert(stage, why);
         }
     }
 }

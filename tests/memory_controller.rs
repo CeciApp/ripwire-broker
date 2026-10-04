@@ -1600,3 +1600,36 @@ fn the_worker_says_once_on_stderr_when_it_cannot_use_the_store() {
     }
     assert!(worker.iter().all(|l| l.contains("Corrupt")), "{worker:#?}");
 }
+
+/// A provider that refuses the credential stops the worker until the server restarts, and the
+/// worker says so, once (D-146): the job that met the 401 comes back as a run, and every call after
+/// it finds the worker suspended, neither of which is a failure of the store.
+#[tokio::test]
+async fn a_refused_credential_is_said_once() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let fake = Scripted::new(vec![Some(ClassifyError::Auth(401))]);
+    let args = serve(&["--workspace", ws.path().to_str().unwrap(), "--memory"]);
+    let mut rt = runtime::from_serve(&args, state.path(), Some(fake.clone()))
+        .unwrap()
+        .unwrap();
+    let store = Store::new(state.path(), rt.workspace_id());
+    store.enqueue(&rec(1, "cache layer", &["e"])).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let tx = std::sync::Mutex::new(tx);
+    rt.start_reporting(std::time::Duration::from_millis(20), move |line| {
+        let _ = tx.lock().unwrap().send(line.to_string());
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while fake.sent() == 0 {
+        assert!(std::time::Instant::now() < deadline, "the job was sent");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Several ticks of a suspended worker.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    drop(rt);
+
+    let said: Vec<String> = rx.try_iter().collect();
+    assert_eq!(said.len(), 1, "{said:#?}");
+    assert!(said[0].contains("refused the credential"), "{said:#?}");
+}
