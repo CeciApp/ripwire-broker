@@ -408,9 +408,6 @@ impl OnlineEngine {
                 .unwrap_or_else(Scored::unknown);
             let (decision, _) = file_decision(&[scored.probability]);
             let lookahead = rp.origin == super::PathOrigin::Lookahead;
-            if lookahead && decision == FileDecision::Admitted {
-                disc.semantic_only += 1;
-            }
             disc.files.push(FileEvidence {
                 path: snap.path.clone(),
                 content_hash: snap.content_hash.clone(),
@@ -500,6 +497,12 @@ impl OnlineEngine {
         let mut keep = fresh.iter();
         disc.files.retain(|_| *keep.next().unwrap_or(&false));
         disc.changed_files += before - disc.files.len();
+        // The gain beyond ripwire is what remains: a sibling dropped as changed is none.
+        disc.semantic_only = disc
+            .files
+            .iter()
+            .filter(|f| f.lookahead && f.decision == FileDecision::Admitted)
+            .count();
 
         let mut totals = self.totals.lock().unwrap();
         totals.requests += disc.requests as u64;

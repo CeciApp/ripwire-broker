@@ -889,6 +889,39 @@ fn with_siblings() -> tempfile::TempDir {
     ws
 }
 
+/// A semantic-only file dropped because it changed during discovery is no gain (D-149): it was
+/// counted when admitted, before the freshness check removed it from the answer.
+#[tokio::test]
+async fn a_semantic_only_file_that_changed_is_not_counted_as_gain() {
+    let ws = with_siblings();
+    let root = ws.path().to_path_buf();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let classifier = budget_is_evidence().on_call(move |stage| {
+        if stage == SemanticStage::SourceSelection
+            && !done.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            common::write(&root, "src/budget.py", &BUDGET_PY.replace("fit", "fits"));
+        }
+    });
+    let s = online_in(ws, explore(), classifier).await;
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    assert!(
+        items(&out).iter().all(|i| i["path"] != "src/budget.py"),
+        "the changed file is dropped: {out:#}"
+    );
+    assert_eq!(
+        json(&s.broker.status().await)["online"]["semantic_only_candidates"],
+        0
+    );
+}
+
 #[tokio::test]
 async fn lookahead_admits_eligible_siblings_of_admitted_planner_paths() {
     let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;
