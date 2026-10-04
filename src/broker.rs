@@ -1322,7 +1322,8 @@ impl Broker {
                 already_delivered: 0,
             },
         };
-        let entries = normalize::cap_items(entries, self.max_item_tokens as usize * 4);
+        let cap = self.max_item_tokens as usize * 4;
+        let entries = normalize::cap_items(entries, cap);
         // With a summarizer, `add_notes` runs after this and always writes at least the record
         // that notes did not fit. Holding that room back here is what keeps it from evicting an
         // item whose body `attach_notes` has already sent to the local model (D-103).
@@ -1337,6 +1338,7 @@ impl Broker {
         };
         if !self.incremental {
             budget::fill(&mut env, entries, reserve);
+            drop_unshown_cuts(&mut env, cap);
             let included = env.items.clone();
             return (env, included);
         }
@@ -1379,6 +1381,7 @@ impl Broker {
         }
         drop(memory);
         budget::fill(&mut env, entries, reserve);
+        drop_unshown_cuts(&mut env, cap);
         let included = env
             .items
             .iter()
@@ -1394,6 +1397,24 @@ impl Broker {
             })
             .collect();
         (env, included)
+    }
+}
+
+/// Keeps an `item_truncated` limitation only for an item the answer still shows with content: the
+/// cut is made before the session and the budget decide, and a body sent as a short reference or
+/// left out has no cut to declare (D-148).
+fn drop_unshown_cuts(env: &mut Envelope, cap: usize) {
+    let shown: Vec<String> = env
+        .items
+        .iter()
+        .filter(|i| i.content.is_some())
+        .map(|i| normalize::cut_detail(i, cap))
+        .collect();
+    let before = env.limitations.len();
+    env.limitations
+        .retain(|l| l.kind != "item_truncated" || shown.contains(&l.detail));
+    if env.limitations.len() != before {
+        env.budget.estimated_tokens = budget::estimate_tokens(env);
     }
 }
 

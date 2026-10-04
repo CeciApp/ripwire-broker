@@ -944,6 +944,13 @@ pub fn summary(lead: &str, entries: &[Entry]) -> String {
     }
 }
 
+/// What an `item_truncated` limitation says about `item`; also how it is found again, once the
+/// budget has decided what is shown (D-148).
+pub(crate) fn cut_detail(item: &Item, max_bytes: usize) -> String {
+    let what = item.symbol.as_deref().unwrap_or(&item.path);
+    format!("content of {what} cut to {max_bytes} bytes; fetch the rest on demand")
+}
+
 /// Cuts any item content above `max_bytes` (at a char boundary) and declares the cut.
 pub fn cap_items(entries: Vec<Entry>, max_bytes: usize) -> Vec<Entry> {
     let mut out = Vec::with_capacity(entries.len());
@@ -961,11 +968,10 @@ pub fn cap_items(entries: Vec<Entry>, max_bytes: usize) -> Vec<Entry> {
                 end -= 1;
             }
             c.untrusted_repository_data = text[..end].to_string();
-            let what = item.symbol.clone().unwrap_or_else(|| item.path.clone());
             cut.push(limitation(
                 item.source.verb,
                 "item_truncated",
-                format!("content of {what} cut to {max_bytes} bytes; fetch the rest on demand"),
+                cut_detail(item, max_bytes),
             ));
         }
         out.push(e);

@@ -1045,6 +1045,38 @@ async fn the_gate_summary_states_what_blocks_ready() {
     assert!(summary.contains("1 missing co-change partner"), "{summary}");
 }
 
+/// A cut is declared only about content the answer carries (D-148): `item_truncated` was written
+/// before the session and the budget decided, so a body sent again as a short reference, or left
+/// out, still came with "content of X cut".
+#[tokio::test]
+async fn a_cut_is_declared_only_for_content_that_is_shown() {
+    let body = format!("def giant():\n{}", "    x = 1\n".repeat(2000));
+    let payload = format!(
+        r#"<ctx schema="ripwire.pack-task/v1"><sigs><d l="1" n="giant" p="src/giant.py" r="1">def giant():</d></sigs><bodies shown="1" total="1"><b t="fn" l="1" p="src/giant.py" n="giant"><![CDATA[{body}]]></b></bodies></ctx>"#
+    );
+    let (b, _fake, _ws) =
+        incremental_broker(FakeUpstream::new().answer_text("explore", &payload)).await;
+    let ask = || {
+        let mut req = TaskRequest::new("how does the giant thing work?");
+        req.budget_tokens = 50_000;
+        req
+    };
+    let first = to_json(&b.context_for_task(ask()).await.unwrap());
+    assert!(limitation_kinds(&first).contains(&"item_truncated".to_string()));
+
+    let again = to_json(&b.context_for_task(ask()).await.unwrap());
+
+    assert!(
+        again["items"][0].get("content").is_none_or(|c| c.is_null()),
+        "sent again as a reference: {again:#}"
+    );
+    assert!(
+        !limitation_kinds(&again).contains(&"item_truncated".to_string()),
+        "{:#}",
+        again["limitations"]
+    );
+}
+
 #[tokio::test]
 async fn one_huge_body_cannot_take_the_whole_budget() {
     let body = format!(
