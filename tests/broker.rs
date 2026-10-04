@@ -327,6 +327,42 @@ async fn a_documentation_question_recalls_docs() {
 }
 
 #[tokio::test]
+async fn words_inside_other_words_do_not_route_a_task() {
+    let fake = || {
+        FakeUpstream::new()
+            .answer("explore", "explore_export_auth")
+            .answer("find_symbol", "find_symbol_login")
+            .answer("memory_recall", "memory_recall_auth")
+            .answer("impact", "impact_login")
+            .answer("fetch_body", "fetch_body_login")
+    };
+    let cases = [
+        // "adr" inside "padrão", "decision" inside a type name: not documentation.
+        ("qual o padrão de retry em `login`?", "symbol"),
+        ("onde está `DecisionTree::split`?", "symbol"),
+        // "fix" inside "prefix", "change" inside "exchange", "alter" inside "alternative",
+        // "add" inside "address": not changes.
+        ("what does `strip_prefix` do?", "symbol"),
+        ("explain the exchange rate module", "orient"),
+        ("list the alternatives to the session cache", "orient"),
+        ("where is the address parser?", "orient"),
+        // A phrase is its words in order, not any one of them.
+        ("why the cache was slow in `login`", "symbol"),
+        // The words themselves, and their inflections, still route.
+        ("fix the expired token check in `login`", "change"),
+        ("the login check was renamed; update the callers", "change"),
+        ("adicionar validação em `login`", "change"),
+        ("read the ADR on authentication", "docs"),
+        ("por que foi tomada a decisão de usar JWT?", "docs"),
+    ];
+    for (task, intent) in cases {
+        let (b, _fake, _ws) = broker(fake()).await;
+        let out = to_json(&b.context_for_task(TaskRequest::new(task)).await.unwrap());
+        assert_eq!(out["intent"], intent, "{task}");
+    }
+}
+
+#[tokio::test]
 async fn an_explicit_mode_overrides_the_router() {
     let (b, fake, _ws) = broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
     let mut req = TaskRequest::new("how does `login` work?");

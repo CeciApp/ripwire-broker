@@ -76,55 +76,68 @@ fn is_code_identifier(t: &str) -> bool {
     snake || camel
 }
 
-/// Word stems (English and Portuguese) that signal a modification.
+/// Requests to change code. Each entry is the start of a word ("refator" in "refatorar"); one
+/// ending in `$` is a whole word only, where a stem would match inside others ("fix" in
+/// "prefix", "add" in "address", "alter" in "alternative").
 const CHANGE_WORDS: &[&str] = &[
     "change",
-    "modify",
-    "rename",
+    "modif",
+    "renam",
     "refactor",
-    "update",
-    "remove",
-    "delete",
-    "replace",
-    "add ",
+    "updat",
+    "remov",
+    "delet",
+    "replac",
+    "add$",
+    "adds$",
+    "added$",
+    "adding$",
     "signature",
-    "migrate",
+    "migrat",
     "implement",
-    "fix",
-    "alter",
+    "fix$",
+    "fixes$",
+    "fixed$",
+    "fixing$",
+    "alter$",
+    "alters$",
+    "altered$",
+    "altering$",
     "mude",
     "mudar",
-    "modifi",
+    "altera",
+    "altere",
     "renome",
     "refator",
     "atualiz",
-    "remov",
     "apag",
     "substitu",
     "assinatura",
     "adicion",
-    "implement",
     "corrij",
     "corrig",
 ];
 
-/// Requests about documentation, design or past decisions.
+/// Requests about documentation, design or past decisions, by the same rule; several words are
+/// a phrase, word after word.
 const DOC_WORDS: &[&str] = &[
-    "documentation",
-    "docs",
+    "documenta",
+    "docs$",
     "readme",
-    "adr",
-    "decision",
+    "adr$",
+    "adrs$",
+    "decision$",
+    "decisions$",
     "design doc",
     "rationale",
     "why was",
-    "documenta",
-    "decisão",
-    "decisões",
-    "decisao",
+    "decisão$",
+    "decisões$",
+    "decisao$",
+    "decisoes$",
     "arquitetura",
     "por que foi",
-    "motivo",
+    "motivo$",
 ];
 
 /// Whole words (English and Portuguese) asking to review existing work; "preview" is not one.
@@ -138,9 +151,24 @@ const REVIEW_WORDS: &[&str] = &[
     "revisao",
 ];
 
+/// Whether some entry of `words` names a word of `task`, by the rule of [`CHANGE_WORDS`]:
+/// never a match inside another word.
 fn has_any(task: &str, words: &[&str]) -> bool {
     let lower = task.to_lowercase();
-    words.iter().any(|w| lower.contains(w))
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let part = |entry: &str, token: &str| match entry.strip_suffix('$') {
+        Some(word) => token == word,
+        None => token.starts_with(entry),
+    };
+    words.iter().any(|w| {
+        let parts: Vec<&str> = w.split_whitespace().collect();
+        tokens
+            .windows(parts.len())
+            .any(|window| parts.iter().zip(window).all(|(p, t)| part(p, t)))
+    })
 }
 
 fn has_word(task: &str, words: &[&str]) -> bool {
