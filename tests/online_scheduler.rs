@@ -940,3 +940,41 @@ async fn without_memory_discovery_keeps_its_client_and_its_per_query_ceiling() {
     let (_, memory) = for_process(Arc::new(Probe::default()), 4, true);
     assert!(memory.is_some(), "with memory, one shared client for both");
 }
+
+/// A classifier whose every call panics (a poisoned lock inside a client, say).
+struct Panicking;
+
+#[async_trait::async_trait]
+impl ripwire_broker::online::classifier::Classifier for Panicking {
+    fn model(&self) -> &str {
+        "jev-1.13.0"
+    }
+
+    async fn classify(
+        &self,
+        _: &ripwire_broker::online::request::JevRequest,
+    ) -> Result<Vec<Option<f64>>, ClassifyError> {
+        panic!("the client's lock was poisoned")
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_classifier_task_that_panics_frees_its_slot() {
+    // One slot: a panicked task that kept it would stall every other job until the deadline.
+    let scheduler = Scheduler::new(Arc::new(Panicking), config(1, 24));
+    let (tx, rx) = scheduler.queue();
+    tokio::spawn(async move {
+        for j in [job(1), job(2)] {
+            tx.send(j).await.unwrap();
+        }
+    });
+    let report = tokio::time::timeout(
+        Duration::from_secs(60),
+        scheduler.run(rx, CancellationToken::new()),
+    )
+    .await
+    .expect("the run ends without waiting for a cancellation");
+    assert_eq!(report.requests, 2, "the second job was sent too");
+    assert_eq!(report.unfinished, vec![1, 2], "neither got an answer");
+    assert_ne!(report.stop, Some(Stop::Cancelled));
+}

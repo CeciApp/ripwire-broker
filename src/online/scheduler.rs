@@ -159,7 +159,9 @@ impl Scheduler {
     pub async fn run(&self, mut jobs: mpsc::Receiver<Job>, cancel: CancellationToken) -> Report {
         let mut report = Report::default();
         let mut tasks: JoinSet<Done> = JoinSet::new();
-        let mut in_flight: Vec<usize> = vec![];
+        // Each running task, by its id, with the job it carries: a task that panics still frees
+        // its slot, and its job is unfinished.
+        let mut in_flight: Vec<(tokio::task::Id, usize)> = vec![];
         // Retries and split halves; they go before new jobs from the producer.
         let mut again: VecDeque<Attempt> = VecDeque::new();
         let mut admitting = true;
@@ -194,12 +196,21 @@ impl Scheduler {
                     report.stop = Some(Stop::Cancelled);
                     break;
                 }
-                Some(done) = tasks.join_next(), if !tasks.is_empty() => {
-                    let Ok((attempt, result)) = done else { continue };
-                    if let Some(i) = in_flight.iter().position(|i| *i == attempt.job.id) {
-                        in_flight.swap_remove(i);
+                Some(done) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                    let task = match &done {
+                        Ok((task, _)) => *task,
+                        Err(e) => e.id(),
+                    };
+                    let job = in_flight
+                        .iter()
+                        .position(|(t, _)| *t == task)
+                        .map(|i| in_flight.swap_remove(i).1);
+                    match done {
+                        Ok((_, (attempt, result))) => {
+                            self.settle(attempt, result, &mut report, &mut again, &mut cooldown)
+                        }
+                        Err(_) => report.unfinished.extend(job),
                     }
-                    self.settle(attempt, result, &mut report, &mut again, &mut cooldown);
                 }
                 _ = tokio::time::sleep_until(cooling.unwrap_or_else(Instant::now)), if cooling.is_some() => {}
                 job = jobs.recv(), if admitting && room => match job {
@@ -217,7 +228,9 @@ impl Scheduler {
         }
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
-        report.unfinished.extend(in_flight);
+        report
+            .unfinished
+            .extend(in_flight.iter().map(|(_, job)| *job));
         report.unfinished.extend(again.iter().map(|a| a.job.id));
         jobs.close();
         while let Ok(job) = jobs.try_recv() {
@@ -234,7 +247,7 @@ impl Scheduler {
         &self,
         attempt: Attempt,
         tasks: &mut JoinSet<Done>,
-        in_flight: &mut Vec<usize>,
+        in_flight: &mut Vec<(tokio::task::Id, usize)>,
         report: &mut Report,
         again: &mut VecDeque<Attempt>,
     ) {
@@ -254,12 +267,13 @@ impl Scheduler {
         if attempt.number > 1 {
             report.retries += 1;
         }
-        in_flight.push(attempt.job.id);
+        let job = attempt.job.id;
         let classifier = self.classifier.clone();
-        tasks.spawn(async move {
+        let task = tasks.spawn(async move {
             let result = classifier.classify(&attempt.job.request).await;
             (attempt, result)
         });
+        in_flight.push((task.id(), job));
     }
 
     /// Records a finished attempt, or queues its retry or its two halves.
