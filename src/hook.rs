@@ -446,7 +446,6 @@ fn failure(e: &BrokerError) -> Value {
 /// Handles one hook event. `None` means: print nothing, let the host continue. Broker
 /// failures become a notice and never block the host (PRD 21.4).
 pub async fn handle(
-    _host: Host,
     event: Event,
     input: &Value,
     broker: &Broker,
@@ -899,7 +898,7 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     };
     let out = match planned {
         Some(planned) => ask_with(args.event, planned, &broker, &mut state, &policy).await,
-        None => handle(args.host, args.event, &input, &broker, &mut state, &policy).await,
+        None => handle(args.event, &input, &broker, &mut state, &policy).await,
     };
     finish(&state);
     out

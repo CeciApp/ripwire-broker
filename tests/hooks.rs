@@ -4,7 +4,7 @@ mod common;
 
 use common::fake::FakeUpstream;
 use ripwire_broker::broker::{Broker, BrokerConfig};
-use ripwire_broker::cli::{Event, Host};
+use ripwire_broker::cli::Event;
 use ripwire_broker::hook::{self, Policy, SessionState};
 use ripwire_broker::statusline_state::{self as projection, AnalysisStatus};
 use serde_json::{Value, json};
@@ -47,7 +47,6 @@ async fn a_first_prompt_with_only_limitations_injects_nothing_but_records_the_an
     ripwire_broker::statusline_state::bind(&mut state, "k");
 
     let out = hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &input,
         &b,
@@ -79,7 +78,6 @@ async fn the_first_prompt_gets_task_context_as_additional_context() {
     let mut state = SessionState::default();
 
     let out = hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &input,
         &b,
@@ -177,7 +175,6 @@ async fn hook_output_stays_under_the_host_limit() {
     };
 
     let out = hook::handle(
-        Host::Codex,
         Event::UserPromptSubmit,
         &input,
         &b,
@@ -212,14 +209,14 @@ async fn later_prompts_are_not_injected_unless_every_prompt_is_set() {
         every_prompt: true,
         ..Policy::default()
     };
-    let (ev, cc) = (Event::UserPromptSubmit, Host::ClaudeCode);
+    let ev = Event::UserPromptSubmit;
 
-    let first = hook::handle(cc, ev, &input, &b, &mut state, &Policy::default()).await;
-    let second = hook::handle(cc, ev, &input, &b, &mut state, &Policy::default()).await;
+    let first = hook::handle(ev, &input, &b, &mut state, &Policy::default()).await;
+    let second = hook::handle(ev, &input, &b, &mut state, &Policy::default()).await;
     assert!(first.is_some());
     assert!(second.is_none(), "second prompt: silent");
     assert_eq!(fake.called().len(), 1, "and no upstream call");
-    let third = hook::handle(cc, ev, &input, &b, &mut state, &every).await;
+    let third = hook::handle(ev, &input, &b, &mut state, &every).await;
     assert!(third.is_some());
     assert_eq!(state.prompts_seen, 3);
 }
@@ -236,25 +233,9 @@ async fn an_opt_out_marker_silences_the_session_until_opt_in() {
     let mut state = SessionState::default();
 
     input["prompt"] = "#ripwire-off let me explore on my own".into();
-    let off = hook::handle(
-        Host::ClaudeCode,
-        Event::UserPromptSubmit,
-        &input,
-        &b,
-        &mut state,
-        &every,
-    )
-    .await;
+    let off = hook::handle(Event::UserPromptSubmit, &input, &b, &mut state, &every).await;
     input["prompt"] = "how are the routes authenticated?".into();
-    let still_off = hook::handle(
-        Host::ClaudeCode,
-        Event::UserPromptSubmit,
-        &input,
-        &b,
-        &mut state,
-        &every,
-    )
-    .await;
+    let still_off = hook::handle(Event::UserPromptSubmit, &input, &b, &mut state, &every).await;
 
     assert!(state.opted_out);
     assert!(fake.called().is_empty(), "no upstream call while opted out");
@@ -276,29 +257,13 @@ async fn an_opt_out_marker_silences_the_session_until_opt_in() {
         (Event::PostToolUse, "claude_code_post_tool_use"),
         (Event::Stop, "claude_code_stop"),
     ] {
-        let quiet = hook::handle(
-            Host::ClaudeCode,
-            ev,
-            &event(name, ws.path()),
-            &b,
-            &mut state,
-            &gate,
-        )
-        .await;
+        let quiet = hook::handle(ev, &event(name, ws.path()), &b, &mut state, &gate).await;
         assert!(quiet.is_none(), "{name} while opted out: {quiet:?}");
     }
     assert!(fake.called().is_empty(), "no upstream call while opted out");
 
     input["prompt"] = "#ripwire-on how are the routes authenticated?".into();
-    let on = hook::handle(
-        Host::ClaudeCode,
-        Event::UserPromptSubmit,
-        &input,
-        &b,
-        &mut state,
-        &every,
-    )
-    .await;
+    let on = hook::handle(Event::UserPromptSubmit, &input, &b, &mut state, &every).await;
     assert!(!state.opted_out);
     assert_eq!(injected(&on.unwrap())["tool"], "context_for_task");
     assert_eq!(
@@ -320,15 +285,7 @@ async fn a_marker_only_counts_as_the_first_or_last_word_of_the_prompt() {
     let mut state = SessionState::default();
     let mut say = async |state: &mut SessionState, prompt: &str| {
         input["prompt"] = prompt.into();
-        hook::handle(
-            Host::ClaudeCode,
-            Event::UserPromptSubmit,
-            &input,
-            &b,
-            state,
-            &every,
-        )
-        .await
+        hook::handle(Event::UserPromptSubmit, &input, &b, state, &every).await
     };
 
     // A marker quoted or mentioned inside the text is not a command.
@@ -359,21 +316,8 @@ fn edit_fake() -> FakeUpstream {
         .answer("impact", "impact_login")
 }
 
-async fn post_tool_use(
-    host: Host,
-    input: &Value,
-    b: &Broker,
-    state: &mut SessionState,
-) -> Option<Value> {
-    hook::handle(
-        host,
-        Event::PostToolUse,
-        input,
-        b,
-        state,
-        &Policy::default(),
-    )
-    .await
+async fn post_tool_use(input: &Value, b: &Broker, state: &mut SessionState) -> Option<Value> {
+    hook::handle(Event::PostToolUse, input, b, state, &Policy::default()).await
 }
 
 #[tokio::test]
@@ -382,7 +326,7 @@ async fn an_edit_injects_what_it_may_have_affected() {
     std::fs::write(ws.path().join("a.txt"), "hello.").unwrap();
     let input = event("claude_code_post_tool_use", ws.path());
 
-    let out = post_tool_use(Host::ClaudeCode, &input, &b, &mut SessionState::default())
+    let out = post_tool_use(&input, &b, &mut SessionState::default())
         .await
         .expect("injected");
 
@@ -421,7 +365,7 @@ async fn a_shell_edit_gets_the_edit_context_for_the_files_run_found() {
     };
     let input = shell_event(ws.path(), "echo hello. > a.txt");
 
-    let out = post_tool_use(Host::ClaudeCode, &input, &b, &mut state)
+    let out = post_tool_use(&input, &b, &mut state)
         .await
         .expect("injected");
 
@@ -436,7 +380,7 @@ async fn a_shell_command_with_no_files_asks_nothing() {
     let (b, fake, ws) = hook_broker(edit_fake()).await;
     let input = shell_event(ws.path(), "ls");
 
-    let out = post_tool_use(Host::ClaudeCode, &input, &b, &mut SessionState::default()).await;
+    let out = post_tool_use(&input, &b, &mut SessionState::default()).await;
 
     assert!(out.is_none());
     assert!(fake.calls().is_empty(), "{:?}", fake.calls());
@@ -458,13 +402,7 @@ async fn a_large_shell_change_sends_at_most_the_cap() {
         ..SessionState::default()
     };
 
-    post_tool_use(
-        Host::ClaudeCode,
-        &shell_event(ws.path(), "gen"),
-        &b,
-        &mut state,
-    )
-    .await;
+    post_tool_use(&shell_event(ws.path(), "gen"), &b, &mut state).await;
 
     let sent = fake.calls()[0].1["files"].as_str().unwrap().to_string();
     assert_eq!(sent.split(',').count(), hook::MAX_BASH_EDIT_FILES, "{sent}");
@@ -484,13 +422,7 @@ async fn a_shell_deletion_still_reaches_the_edit_context() {
         ..SessionState::default()
     };
 
-    post_tool_use(
-        Host::ClaudeCode,
-        &shell_event(ws.path(), "rm gone.txt"),
-        &b,
-        &mut state,
-    )
-    .await;
+    post_tool_use(&shell_event(ws.path(), "rm gone.txt"), &b, &mut state).await;
 
     assert_eq!(fake.calls()[0].1["files"], "gone.txt");
 }
@@ -525,7 +457,7 @@ async fn a_codex_patch_names_the_changed_files() {
         *** End Patch"
         .into();
 
-    post_tool_use(Host::Codex, &input, &b, &mut SessionState::default())
+    post_tool_use(&input, &b, &mut SessionState::default())
         .await
         .expect("injected");
 
@@ -545,8 +477,8 @@ async fn an_edit_outside_the_workspace_is_ignored_without_upstream_calls() {
     codex["tool_input"]["command"] =
         "*** Begin Patch\n*** Update File: ../escape.txt\n@@\n-a\n+b\n*** End Patch".into();
 
-    let a = post_tool_use(Host::ClaudeCode, &claude, &b, &mut SessionState::default()).await;
-    let c = post_tool_use(Host::Codex, &codex, &b, &mut SessionState::default()).await;
+    let a = post_tool_use(&claude, &b, &mut SessionState::default()).await;
+    let c = post_tool_use(&codex, &b, &mut SessionState::default()).await;
 
     assert!(
         a.is_none() && c.is_none(),
@@ -560,7 +492,7 @@ async fn an_edit_outside_the_workspace_is_ignored_without_upstream_calls() {
     // A patch touching both sides still reports the inside file.
     codex["tool_input"]["command"] =
         "*** Begin Patch\n*** Update File: ../escape.txt\n*** Update File: src/in.py\n*** End Patch".into();
-    let mixed = post_tool_use(Host::Codex, &codex, &b, &mut SessionState::default()).await;
+    let mixed = post_tool_use(&codex, &b, &mut SessionState::default()).await;
     assert!(mixed.is_some());
     assert_eq!(fake.calls()[0].1["files"], "src/in.py");
 }
@@ -571,8 +503,8 @@ async fn an_edit_with_nothing_new_injects_nothing() {
     let input = event("claude_code_post_tool_use", ws.path());
     let mut state = SessionState::default();
 
-    let first = post_tool_use(Host::ClaudeCode, &input, &b, &mut state).await;
-    let again = post_tool_use(Host::ClaudeCode, &input, &b, &mut state).await;
+    let first = post_tool_use(&input, &b, &mut state).await;
+    let again = post_tool_use(&input, &b, &mut state).await;
 
     assert!(first.is_some());
     assert!(
@@ -587,20 +519,12 @@ fn finish_fake() -> FakeUpstream {
         .answer("quality_delta", "quality_delta_clean")
 }
 
-async fn stop(host: Host, input: &Value, b: &Broker, gate: bool) -> Option<Value> {
+async fn stop(input: &Value, b: &Broker, gate: bool) -> Option<Value> {
     let policy = Policy {
         gate,
         ..Policy::default()
     };
-    hook::handle(
-        host,
-        Event::Stop,
-        input,
-        b,
-        &mut SessionState::default(),
-        &policy,
-    )
-    .await
+    hook::handle(Event::Stop, input, b, &mut SessionState::default(), &policy).await
 }
 
 #[tokio::test]
@@ -608,7 +532,7 @@ async fn the_stop_gate_blocks_once_when_attention_is_required() {
     let (b, _fake, ws) = hook_broker(finish_fake()).await;
     let mut input = event("claude_code_stop", ws.path());
 
-    let blocked = stop(Host::ClaudeCode, &input, &b, true).await.unwrap();
+    let blocked = stop(&input, &b, true).await.unwrap();
     assert_eq!(blocked["decision"], "block");
     let reason = blocked["reason"].as_str().unwrap();
     assert!(reason.chars().count() <= hook::MAX_CONTEXT_CHARS);
@@ -621,7 +545,7 @@ async fn the_stop_gate_blocks_once_when_attention_is_required() {
 
     // The host is already continuing because of a block: never loop.
     input["stop_hook_active"] = true.into();
-    let again = stop(Host::ClaudeCode, &input, &b, true).await.unwrap();
+    let again = stop(&input, &b, true).await.unwrap();
     assert!(again.get("decision").is_none(), "{again}");
     assert!(
         again["systemMessage"]
@@ -636,7 +560,7 @@ async fn without_the_gate_stop_only_warns() {
     let (b, _fake, ws) = hook_broker(finish_fake()).await;
     let input = event("codex_stop", ws.path());
 
-    let out = stop(Host::Codex, &input, &b, false).await.unwrap();
+    let out = stop(&input, &b, false).await.unwrap();
 
     assert!(out.get("decision").is_none(), "{out}");
     let note = out["systemMessage"].as_str().unwrap();
@@ -656,7 +580,7 @@ async fn an_unknown_gate_never_blocks_and_a_ready_gate_stays_silent() {
         .answer("quality_delta", "quality_delta_clean");
     let (b, _fake, ws) = hook_broker(unknown_fake).await;
     let input = event("claude_code_stop", ws.path());
-    let out = stop(Host::ClaudeCode, &input, &b, true).await.unwrap();
+    let out = stop(&input, &b, true).await.unwrap();
     assert!(out.get("decision").is_none(), "{out}");
     assert!(out["systemMessage"].as_str().unwrap().contains("unknown"));
 
@@ -665,7 +589,7 @@ async fn an_unknown_gate_never_blocks_and_a_ready_gate_stays_silent() {
         .answer("quality_delta", "quality_delta_clean");
     let (b, _fake, ws) = hook_broker(ready_fake).await;
     let input = event("claude_code_stop", ws.path());
-    assert_eq!(stop(Host::ClaudeCode, &input, &b, true).await, None);
+    assert_eq!(stop(&input, &b, true).await, None);
 }
 
 #[tokio::test]
@@ -682,16 +606,9 @@ async fn a_broker_failure_never_breaks_the_host() {
             gate: true,
             ..Policy::default()
         };
-        let out = hook::handle(
-            Host::ClaudeCode,
-            ev,
-            &input,
-            &b,
-            &mut SessionState::default(),
-            &policy,
-        )
-        .await
-        .unwrap_or_else(|| panic!("{name}: the failure is reported"));
+        let out = hook::handle(ev, &input, &b, &mut SessionState::default(), &policy)
+            .await
+            .unwrap_or_else(|| panic!("{name}: the failure is reported"));
         assert!(
             out.get("hookSpecificOutput").is_none(),
             "{name}: no context is fabricated"
@@ -720,7 +637,6 @@ async fn malformed_or_unrelated_events_are_ignored() {
         (Event::PostToolUse, read_tool),
     ] {
         let out = hook::handle(
-            Host::ClaudeCode,
             ev,
             &input,
             &b,
@@ -743,7 +659,6 @@ async fn session_state_is_private_and_holds_no_prompt_or_code() {
     let session_id = input["session_id"].as_str().unwrap();
     let mut state = SessionState::default();
     hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &input,
         &b,
@@ -805,7 +720,6 @@ async fn request_ids_keep_counting_across_hook_processes() {
     std::fs::write(ws.path().join("a.txt"), "x").unwrap();
     let mut state = SessionState::default();
     let prompt = hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &event("claude_code_user_prompt_submit", ws.path()),
         &first,
@@ -820,7 +734,6 @@ async fn request_ids_keep_counting_across_hook_processes() {
     config.incremental = true;
     let second = Broker::connect(Arc::new(fixture()), config).await.unwrap();
     let edit = hook::handle(
-        Host::ClaudeCode,
         Event::PostToolUse,
         &event("claude_code_post_tool_use", ws.path()),
         &second,
@@ -845,7 +758,6 @@ async fn a_stop_notice_does_not_mark_tests_as_delivered() {
     let mut state = SessionState::default();
 
     let notice = hook::handle(
-        Host::ClaudeCode,
         Event::Stop,
         &event("claude_code_stop", ws.path()),
         &b,
@@ -857,7 +769,6 @@ async fn a_stop_notice_does_not_mark_tests_as_delivered() {
     assert!(notice.get("decision").is_none(), "only a notice: {notice}");
 
     let edit = hook::handle(
-        Host::ClaudeCode,
         Event::PostToolUse,
         &event("claude_code_post_tool_use", ws.path()),
         &b,
@@ -885,7 +796,7 @@ async fn the_gate_notice_never_repeats_a_risk_kind() {
     let (b, _fake, ws) = hook_broker(fake).await;
     let input = event("claude_code_stop", ws.path());
 
-    let out = stop(Host::ClaudeCode, &input, &b, false).await.unwrap();
+    let out = stop(&input, &b, false).await.unwrap();
 
     let note = out["systemMessage"].as_str().unwrap();
     assert!(note.contains("attention_required"), "{note}");
@@ -914,15 +825,7 @@ async fn post_tool_use_at(
     state: &mut SessionState,
     policy: &Policy,
 ) -> Option<Value> {
-    hook::handle(
-        Host::ClaudeCode,
-        Event::PostToolUse,
-        input,
-        b,
-        state,
-        policy,
-    )
-    .await
+    hook::handle(Event::PostToolUse, input, b, state, policy).await
 }
 
 #[tokio::test]
@@ -1044,7 +947,7 @@ async fn session_hits_survive_across_hook_processes() {
     let input = event("claude_code_post_tool_use", ws.path());
     let mut state = SessionState::default();
 
-    let out = post_tool_use(Host::ClaudeCode, &input, &first, &mut state)
+    let out = post_tool_use(&input, &first, &mut state)
         .await
         .expect("the first edit has news");
     let delivered = whole(&injected(&out));
@@ -1056,7 +959,7 @@ async fn session_hits_survive_across_hook_processes() {
     let second = Broker::connect(Arc::new(edit_fake()), config)
         .await
         .unwrap();
-    let again = post_tool_use(Host::ClaudeCode, &input, &second, &mut state).await;
+    let again = post_tool_use(&input, &second, &mut state).await;
     assert!(again.is_none(), "nothing new: {again:?}");
 
     let hits_in_second =
@@ -1080,7 +983,6 @@ async fn only_what_reached_the_model_counts_as_delivered() {
     let mut state = SessionState::default();
 
     let notice = hook::handle(
-        Host::ClaudeCode,
         Event::Stop,
         &event("claude_code_stop", ws.path()),
         &b,
@@ -1131,26 +1033,12 @@ async fn a_reference_to_something_already_delivered_is_a_hit_not_a_delivery() {
     let input = event("claude_code_user_prompt_submit", ws.path());
     let mut state = SessionState::default();
 
-    let first = hook::handle(
-        Host::ClaudeCode,
-        Event::UserPromptSubmit,
-        &input,
-        &b,
-        &mut state,
-        &every,
-    )
-    .await
-    .expect("injected");
-    let second = hook::handle(
-        Host::ClaudeCode,
-        Event::UserPromptSubmit,
-        &input,
-        &b,
-        &mut state,
-        &every,
-    )
-    .await
-    .expect("every prompt is injected");
+    let first = hook::handle(Event::UserPromptSubmit, &input, &b, &mut state, &every)
+        .await
+        .expect("injected");
+    let second = hook::handle(Event::UserPromptSubmit, &input, &b, &mut state, &every)
+        .await
+        .expect("every prompt is injected");
 
     let (first, second) = (injected(&first), injected(&second));
     let references = second["items"]
@@ -1194,7 +1082,6 @@ async fn an_injection_records_the_analysis_and_the_delivery() {
         hook_broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
     let mut state = bound();
     hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &event("claude_code_user_prompt_submit", ws.path()),
         &b,
@@ -1219,7 +1106,6 @@ async fn a_silent_ready_stop_replaces_an_earlier_attention() {
     let mut state = bound();
     let input = event("claude_code_stop", ws.path());
     hook::handle(
-        Host::ClaudeCode,
         Event::Stop,
         &input,
         &b,
@@ -1239,15 +1125,7 @@ async fn a_silent_ready_stop_replaces_an_earlier_attention() {
             .answer("quality_delta", "quality_delta_clean"),
     )
     .await;
-    let out = hook::handle(
-        Host::ClaudeCode,
-        Event::Stop,
-        &input,
-        &ready,
-        &mut state,
-        &Policy::default(),
-    )
-    .await;
+    let out = hook::handle(Event::Stop, &input, &ready, &mut state, &Policy::default()).await;
     assert!(out.is_none(), "ready stays silent");
     assert_eq!(last(&state), Some(AnalysisStatus::Ready));
     assert_eq!(
@@ -1262,7 +1140,6 @@ async fn an_event_without_analysis_keeps_the_summary() {
     let (b, fake, ws) = hook_broker(finish_fake()).await;
     let mut state = bound();
     hook::handle(
-        Host::ClaudeCode,
         Event::Stop,
         &event("claude_code_stop", ws.path()),
         &b,
@@ -1278,7 +1155,6 @@ async fn an_event_without_analysis_keeps_the_summary() {
     let calls = fake.called().len();
     state.prompts_seen = 1;
     hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &event("claude_code_user_prompt_submit", ws.path()),
         &b,
@@ -1298,7 +1174,6 @@ async fn opt_out_and_opt_in_show_in_the_projection() {
     let mut input = event("claude_code_user_prompt_submit", ws.path());
     input["prompt"] = "stop it #ripwire-off".into();
     hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &input,
         &b,
@@ -1310,7 +1185,6 @@ async fn opt_out_and_opt_in_show_in_the_projection() {
     assert!(last(&state).is_none(), "a pause analyses nothing");
     input["prompt"] = "back #ripwire-on".into();
     hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &input,
         &b,
@@ -1333,7 +1207,6 @@ async fn a_broker_failure_becomes_an_error_analysis_with_its_kind_only() {
     .await;
     let mut state = bound();
     hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &event("claude_code_user_prompt_submit", ws.path()),
         &b,
@@ -1391,7 +1264,7 @@ async fn an_edit_without_news_still_updates_the_last_analysis() {
     std::fs::write(ws.path().join("a.txt"), "x").unwrap();
     let input = event("claude_code_post_tool_use", ws.path());
     let mut state = bound();
-    post_tool_use(Host::ClaudeCode, &input, &first, &mut state)
+    post_tool_use(&input, &first, &mut state)
         .await
         .expect("the first edit has news");
     let delivery = state.statusline.as_ref().unwrap().last_delivery.clone();
@@ -1404,7 +1277,7 @@ async fn an_edit_without_news_still_updates_the_last_analysis() {
     let second = Broker::connect(Arc::new(edit_fake()), config)
         .await
         .unwrap();
-    let again = post_tool_use(Host::ClaudeCode, &input, &second, &mut state).await;
+    let again = post_tool_use(&input, &second, &mut state).await;
     assert!(again.is_none(), "nothing new: {again:?}");
     assert!(
         last(&state).is_some(),
@@ -1459,21 +1332,10 @@ async fn paths_that_run_no_analysis_leave_the_last_analysis_untouched() {
     let (mut state, sentinel) = with_sentinel();
     state.opted_out = true;
     let edit = event("claude_code_post_tool_use", ws.path());
-    assert!(
-        post_tool_use(Host::ClaudeCode, &edit, &b, &mut state)
-            .await
-            .is_none()
-    );
+    assert!(post_tool_use(&edit, &b, &mut state).await.is_none());
     let stop_event = event("claude_code_stop", ws.path());
     let policy = Policy::default();
-    let stopped = hook::handle(
-        Host::ClaudeCode,
-        Event::Stop,
-        &stop_event,
-        &b,
-        &mut state,
-        &policy,
-    );
+    let stopped = hook::handle(Event::Stop, &stop_event, &b, &mut state, &policy);
     assert!(stopped.await.is_none());
     sentinel_left(&state, &sentinel, "an opted-out edit");
 
@@ -1481,11 +1343,7 @@ async fn paths_that_run_no_analysis_leave_the_last_analysis_untouched() {
     let (mut state, sentinel) = with_sentinel();
     let mut outside = event("claude_code_post_tool_use", ws.path());
     outside["tool_input"]["file_path"] = "/etc/hosts".into();
-    assert!(
-        post_tool_use(Host::ClaudeCode, &outside, &b, &mut state)
-            .await
-            .is_none()
-    );
+    assert!(post_tool_use(&outside, &b, &mut state).await.is_none());
     sentinel_left(&state, &sentinel, "an edit outside the workspace");
     assert!(fake.called().is_empty());
 
@@ -1551,7 +1409,7 @@ async fn a_hook_with_memory_enqueues_its_edit() {
     std::fs::write(ws.path().join("a.txt"), "hello.").unwrap();
     let input = event("claude_code_post_tool_use", ws.path());
 
-    post_tool_use(Host::ClaudeCode, &input, &b, &mut SessionState::default()).await;
+    post_tool_use(&input, &b, &mut SessionState::default()).await;
 
     assert_eq!(
         store.pending().unwrap(),
@@ -1573,7 +1431,6 @@ async fn ripwire_off_stops_capture_for_that_session_only() {
 
     let mut quiet = SessionState::default();
     hook::handle(
-        Host::ClaudeCode,
         Event::UserPromptSubmit,
         &prompt,
         &b,
@@ -1581,14 +1438,14 @@ async fn ripwire_off_stops_capture_for_that_session_only() {
         &Policy::default(),
     )
     .await;
-    post_tool_use(Host::ClaudeCode, &edit, &b, &mut quiet).await;
+    post_tool_use(&edit, &b, &mut quiet).await;
     assert_eq!(
         store.pending().unwrap(),
         0,
         "the opted-out session captures nothing"
     );
 
-    post_tool_use(Host::ClaudeCode, &edit, &b, &mut SessionState::default()).await;
+    post_tool_use(&edit, &b, &mut SessionState::default()).await;
     assert_eq!(store.pending().unwrap(), 1, "another session still does");
 }
 
@@ -1617,15 +1474,7 @@ async fn submit(
     text: &str,
 ) -> Option<Value> {
     let input = prompt(r.ws.path(), text);
-    hook::handle(
-        Host::ClaudeCode,
-        Event::UserPromptSubmit,
-        &input,
-        &r.broker,
-        state,
-        policy,
-    )
-    .await
+    hook::handle(Event::UserPromptSubmit, &input, &r.broker, state, policy).await
 }
 
 /// The envelope of an injected context, the memory section after it set aside.
@@ -1826,7 +1675,6 @@ async fn hook_output_stays_under_the_host_limit_with_many_cut_bodies() {
     input["prompt"] = "how are requests handled?".into();
 
     let out = hook::handle(
-        Host::Codex,
         Event::UserPromptSubmit,
         &input,
         &b,

@@ -89,20 +89,10 @@ pub struct ServeArgs {
     pub ripwire_max_rss_mb: Option<u64>,
     /// The remote classifier (PRD §23); `None` keeps the process offline (RF-ONLINE-01).
     pub online: Option<OnlineArgs>,
-    /// Whether `--online` was asked for or implied by `--memory`; `None` when offline.
-    pub online_origin: Option<OnlineOrigin>,
     /// Persistent memory (PRD jev-mem §4); implies `online`. `None` keeps no history.
     pub memory: Option<MemoryArgs>,
     /// Where memory lives, as for the hooks and the `memory` commands; `None`: the default.
     pub state_dir: Option<PathBuf>,
-}
-
-/// How the effective online mode came about, kept for diagnostics (PRD jev-mem §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnlineOrigin {
-    Explicit,
-    /// `--memory` without `--online`.
-    Implied,
 }
 
 /// `--memory` and its `--memory-*` companions (PRD jev-mem §4).
@@ -403,14 +393,6 @@ impl Flags {
         }))
     }
 
-    fn online_origin(&self) -> Option<OnlineOrigin> {
-        match (self.on("--online"), self.on("--memory")) {
-            (true, _) => Some(OnlineOrigin::Explicit),
-            (false, true) => Some(OnlineOrigin::Implied),
-            (false, false) => None,
-        }
-    }
-
     fn memory(&self) -> Result<Option<MemoryArgs>, String> {
         if !self.on("--memory") {
             return match self.memory.is_empty() {
@@ -663,7 +645,6 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 summarizer: f.summarizer()?,
                 ripwire_max_rss_mb: f.max_rss_mb,
                 online: f.online()?,
-                online_origin: f.online_origin(),
                 memory: f.memory()?,
                 state_dir: f.state_dir.clone(),
             }))
