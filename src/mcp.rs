@@ -141,6 +141,15 @@ impl Inflight {
     }
 }
 
+/// Removes a call from `Inflight::running` when dropped.
+struct Finish<'a>(&'a Inflight, String);
+
+impl Drop for Finish<'_> {
+    fn drop(&mut self) {
+        self.0.finish(&self.1);
+    }
+}
+
 /// Feeds raw requests to `Inflight`; see there.
 struct CancelObserver(Arc<Inflight>);
 
@@ -472,6 +481,9 @@ impl ServerHandler for BrokerServer {
         let Some((id, cancelled)) = self.inflight.start(&params) else {
             return Ok(tool_result(self.dispatch(&params).await).into());
         };
+        // The call leaves `running` however this ends: answered, cancelled, dropped by the SDK
+        // or unwound by a panic (D-148).
+        let _finish = Finish(&self.inflight, id);
         // Dropping `dispatch` on cancellation stops the rest of its upstream work; the
         // broker records the call as `cancelled` (RF-14).
         let result = tokio::select! {
@@ -481,7 +493,6 @@ impl ServerHandler for BrokerServer {
                 message: "cancelled by the client".into(),
             }),
         };
-        self.inflight.finish(&id);
         Ok(tool_result(result).into())
     }
 
