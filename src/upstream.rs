@@ -110,6 +110,10 @@ impl RipwireUpstream {
         match tokio::time::timeout(self.config.timeout, client.call_tool(params)).await {
             Err(_) => Err(UpstreamError::Timeout),
             Ok(Err(e)) => Err(classify(e)),
+            // A tool-level error is ripwire saying no, like a JSON-RPC error (D-148).
+            Ok(Ok(res)) if res.is_error == Some(true) => {
+                Err(UpstreamError::Refused(text_of(&res.content)))
+            }
             Ok(Ok(res)) => Ok(text_of(&res.content)),
         }
     }
