@@ -5089,3 +5089,47 @@ fn install_recognises_its_hooks_by_program_not_by_substring() {
     let groups = after["hooks"]["Stop"].as_array().unwrap();
     assert!(groups.iter().any(|g| g["matcher"] == "kept"), "{after}");
 }
+
+/// A session's saved state is read like the other private files (D-147): opened once without
+/// following a link or blocking on a FIFO, and only a regular file. A FIFO in its place held the
+/// hook forever; a link was followed.
+#[test]
+fn a_session_state_that_is_a_fifo_or_a_link_reads_as_fresh() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let name = |id: &str| {
+        dir.path()
+            .join(format!("{:x}.json", Sha256::digest(id.as_bytes())))
+    };
+    assert!(
+        Proc::new("mkfifo")
+            .arg(name("fifo"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    // A real, valid state elsewhere: what a followed link would load.
+    let outside = tempfile::tempdir().unwrap();
+    let elsewhere = ripwire_broker::state::StateStore::new(outside.path().to_path_buf());
+    let paused = ripwire_broker::hook::SessionState {
+        opted_out: true,
+        ..Default::default()
+    };
+    elsewhere.save("x", &paused).unwrap();
+    let real = outside
+        .path()
+        .join(format!("{:x}.json", Sha256::digest(b"x")));
+    assert!(elsewhere.load("x").opted_out);
+    std::os::unix::fs::symlink(&real, name("link")).unwrap();
+    let store = ripwire_broker::state::StateStore::new(dir.path().to_path_buf());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((store.load("fifo").opted_out, store.load("link").opted_out));
+    });
+
+    let (fifo, link) = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("loading a FIFO blocked");
+
+    assert!(!fifo && !link, "neither is read");
+}
