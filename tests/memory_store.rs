@@ -72,12 +72,7 @@ fn a_symlink_or_an_open_directory_reads_as_unavailable() {
     store.publish(&s).unwrap();
 
     // The snapshot swapped for a link to a file that would parse.
-    let snapshot = fs::read_dir(store.dir())
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let snapshot = store.dir().join("snapshot.json");
     let real = elsewhere.path().join("planted.json");
     fs::rename(&snapshot, &real).unwrap();
     std::os::unix::fs::symlink(&real, &snapshot).unwrap();
@@ -116,12 +111,7 @@ fn an_unknown_schema_or_a_corrupt_snapshot_is_never_overwritten() {
         ..Default::default()
     };
     store.publish(&s).unwrap();
-    let snapshot = fs::read_dir(store.dir())
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let snapshot = store.dir().join("snapshot.json");
 
     for (bytes, why) in [
         (
@@ -143,8 +133,16 @@ fn an_unknown_schema_or_a_corrupt_snapshot_is_never_overwritten() {
         );
         assert_eq!(fs::read(&snapshot).unwrap(), bytes, "byte for byte");
     }
-    let leftovers = fs::read_dir(store.dir()).unwrap().count();
-    assert_eq!(leftovers, 1, "no temporary left behind");
+    let mut leftovers: Vec<String> = fs::read_dir(store.dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    leftovers.sort();
+    assert_eq!(
+        leftovers,
+        ["generation", "snapshot.json"],
+        "no temporary left behind"
+    );
 }
 
 #[test]

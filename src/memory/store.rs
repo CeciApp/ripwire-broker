@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT: &str = "snapshot.json";
+/// The generation of the last snapshot written, beside it: what tells a kept copy of the
+/// memories is still current without reading the snapshot.
+const GENERATION: &str = "generation";
 const SPOOL: &str = "spool";
 const LOCK: &str = "lock";
 /// Written by `forget --all`; only `memory resume` removes it (PD-4).
@@ -202,6 +205,17 @@ fn on_disk(state: &State) -> Result<Vec<u8>, Unavailable> {
     .map_err(|_| Unavailable::Io)
 }
 
+/// What identifies the memories on disk, for a copy kept in memory to be compared with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Version {
+    Generation(u64),
+    File {
+        len: u64,
+        modified: std::time::SystemTime,
+        inode: u64,
+    },
+}
+
 pub struct Store {
     dir: PathBuf,
     limits: Limits,
@@ -229,21 +243,43 @@ impl Store {
         Ok(self.read()?.unwrap_or_default())
     }
 
-    /// The snapshot file's length and modification time, which change with every publication;
-    /// `None` without one. A stat, never a read: what tells a kept copy is still current.
-    pub fn snapshot_version(&self) -> Option<(u64, std::time::SystemTime)> {
+    /// What identifies the memories on disk now, without reading the snapshot; `None` without
+    /// one. The generation beside it changes only when a memory or a relation does, so writes
+    /// that change neither (a quota charge, a lease, a finished job) leave it alone. Without that
+    /// record, the snapshot file itself: length, modification time and inode, which a rename to
+    /// a new file always changes.
+    pub fn snapshot_version(&self) -> Option<Version> {
         let meta = fs::symlink_metadata(self.dir.join(SNAPSHOT)).ok()?;
-        Some((meta.len(), meta.modified().ok()?))
+        let generation = fs::read_to_string(self.dir.join(GENERATION))
+            .ok()
+            .and_then(|g| g.trim().parse().ok());
+        Some(match generation {
+            Some(g) => Version::Generation(g),
+            None => Version::File {
+                len: meta.len(),
+                modified: meta.modified().ok()?,
+                inode: std::os::unix::fs::MetadataExt::ino(&meta),
+            },
+        })
     }
 
     /// Publishes `state` as the new generation, unless the current one cannot be read.
     pub fn publish(&self, state: &State) -> Result<(), Unavailable> {
         self.read()?;
-        self.write_snapshot(&on_disk(state)?)
+        self.write_snapshot(state.generation, &on_disk(state)?)
     }
 
-    fn write_snapshot(&self, bytes: &[u8]) -> Result<(), Unavailable> {
+    /// Writes the snapshot of `generation`, then the record of it: a reader that sees the new
+    /// generation finds the new snapshot.
+    fn write_snapshot(&self, generation: u64, bytes: &[u8]) -> Result<(), Unavailable> {
         crate::state::write_private(&self.dir, &self.dir.join(SNAPSHOT), bytes)
+            .and_then(|()| {
+                crate::state::write_private(
+                    &self.dir,
+                    &self.dir.join(GENERATION),
+                    generation.to_string().as_bytes(),
+                )
+            })
             .and_then(|()| fs::File::open(&self.dir)?.sync_all())
             .map_err(|_| Unavailable::Io)
     }
@@ -435,7 +471,7 @@ impl Store {
             if bytes.len() as u64 > self.limits.snapshot_bytes {
                 return Err(Refusal::Full(Full::Snapshot));
             }
-            self.write_snapshot(&bytes)?;
+            self.write_snapshot(state.generation, &bytes)?;
         }
         if crash == Some(Step::AfterPublish) {
             return Err(Refusal::Crashed);
@@ -479,7 +515,7 @@ impl Store {
         }
         state.tombstones.retain(|_, until| *until > now_ms);
         state.trusted_ms = now_ms;
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(Swept {
             removed: gone.len(),
             suspended: false,
@@ -504,7 +540,7 @@ impl Store {
             .edges
             .retain(|_, e| !gone.contains(&e.source) && !gone.contains(&e.target));
         state.generation += 1;
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         let spool = self.dir.join(SPOOL);
         let _ = fs::remove_file(spool.join(name));
         for id in gone.iter().filter(|id| *id != node_id) {
@@ -542,7 +578,7 @@ impl Store {
             state.tombstones.insert(id, until_ms);
         }
         state.generation += 1;
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(removed)
     }
 
@@ -613,7 +649,7 @@ impl Store {
             break;
         }
         if changed {
-            self.write_snapshot(&on_disk(&state)?)?;
+            self.write_snapshot(state.generation, &on_disk(&state)?)?;
         }
         Ok(taken)
     }
@@ -662,7 +698,7 @@ impl Store {
             }
         };
         state.enriched += u64::from(newly_counted);
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         drop(lease);
         Ok(())
     }
@@ -681,7 +717,7 @@ impl Store {
             n += 1;
         }
         if n > 0 {
-            self.write_snapshot(&on_disk(&state)?)?;
+            self.write_snapshot(state.generation, &on_disk(&state)?)?;
         }
         Ok(n)
     }
@@ -740,7 +776,7 @@ impl Store {
                 return Err(Refusal::Full(Full::Snapshot));
             }
         }
-        self.write_snapshot(&bytes)?;
+        self.write_snapshot(state.generation, &bytes)?;
         Ok(true)
     }
 
@@ -756,7 +792,7 @@ impl Store {
             return Ok(false);
         };
         (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(true)
     }
 
@@ -771,7 +807,7 @@ impl Store {
             self.limits.attempts_per_day,
             self.limits.questions_per_day,
         );
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         match fits {
             true => Ok(()),
             false => Err(Refusal::Full(Full::Quota)),

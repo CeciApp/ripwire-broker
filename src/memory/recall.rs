@@ -3,20 +3,18 @@
 //! the structural answer always goes out.
 
 use super::retrieve::{self, Read, ReadConfig, ReadSetup, StopReason};
-use super::store::{State, Unavailable};
+use super::store::{State, Unavailable, Version};
 use crate::model::{Basis, Limitation, Source};
 use crate::online::reader::WorkspaceReader;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use tokio::sync::watch;
 
-type Version = Option<(u64, SystemTime)>;
 type Loaded = Option<Result<Arc<State>, Unavailable>>;
 
 #[derive(Default)]
 struct Warm {
     /// The last snapshot loaded, with the version of the file it came from.
-    state: Option<(Version, Arc<State>)>,
+    state: Option<(Option<Version>, Arc<State>)>,
     /// The load under way; there is never more than one.
     loading: Option<watch::Receiver<Loaded>>,
 }
@@ -105,7 +103,7 @@ impl Recall {
         }
     }
 
-    /// The current snapshot: the warm copy while the file is unchanged, otherwise a load, awaited
+    /// The current snapshot: the warm copy while its version is current, otherwise a load, awaited
     /// for at most `within`. A load outlives the wait and warms the copy for the next call.
     async fn state(&self, within: std::time::Duration) -> Result<Arc<State>, Miss> {
         let store = self.setup.store.clone();
@@ -116,7 +114,8 @@ impl Recall {
             {
                 return Ok(state.clone());
             }
-            match &warm.loading {
+            // A load whose sender is gone panicked: it is started again, never waited on.
+            match warm.loading.as_ref().filter(|l| l.has_changed().is_ok()) {
                 Some(loading) => loading.clone(),
                 None => {
                     let (tx, rx) = watch::channel(None);
@@ -127,6 +126,10 @@ impl Recall {
                         let state = store.load().map(Arc::new);
                         let mut w = warm.lock().unwrap();
                         w.loading = None;
+                        // The version is read before the snapshot, which a writer replaces
+                        // before the version: a write in between leaves a newer copy under an
+                        // older version, loaded again on the next call, never an older copy
+                        // under a newer one.
                         if let Ok(s) = &state {
                             w.state = Some((version, s.clone()));
                         }

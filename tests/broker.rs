@@ -2601,6 +2601,58 @@ async fn a_cold_large_snapshot_omits_memory_with_a_limitation_and_warms_up() {
 }
 
 #[tokio::test]
+async fn bookkeeping_writes_keep_the_snapshot_warm() {
+    let cfg = ReadConfig {
+        deadline: std::time::Duration::from_millis(100),
+        ..Default::default()
+    };
+    let (b, _ws, _st, store) = remembering(Arc::new(Agreeable::default()), cfg).await;
+    // A snapshot slow to load, from its relations, with one memory to read.
+    let mut s = store.load().unwrap();
+    let one = s.nodes.values().next().unwrap().clone();
+    let mut relation = s.edges.values().next().cloned();
+    for n in 0..30_000 {
+        let e = relation.get_or_insert_with(|| {
+            serde_json::from_value(json!({
+                "source": one.node_id, "target": "", "graph": "semantic", "relation": "",
+                "basis": "jev_inference", "policy": "p", "generation": 1
+            }))
+            .unwrap()
+        });
+        e.target = format!("gone{n}");
+        e.relation = format!("related_to_{n}_{}", "x".repeat(200));
+        s.edges.insert(e.key(), e.clone());
+    }
+    store.publish(&s).unwrap();
+    let ask = || {
+        b.context_for_task(TaskRequest {
+            include_seen: true,
+            ..TaskRequest::new("how is the cache evicted?")
+        })
+    };
+    let warm = |env: &ripwire_broker::model::Envelope| {
+        !env.limitations
+            .iter()
+            .any(|l| l.kind.starts_with("memory_"))
+            && !env.memories.is_empty()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !warm(&ask().await.unwrap()) {
+        assert!(std::time::Instant::now() < deadline, "it warms up");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // The quota is charged: the snapshot file is written again, no memory changed.
+    store.charge(1, 1, 1).unwrap();
+    let env = ask().await.unwrap();
+    assert!(
+        warm(&env),
+        "still warm after a write that changed no memory: {:?}",
+        env.limitations
+    );
+}
+
+#[tokio::test]
 async fn the_query_is_never_persisted() {
     let (b, _ws, st, store) =
         remembering(Arc::new(Agreeable::default()), ReadConfig::default()).await;
@@ -2655,13 +2707,15 @@ async fn a_memory_goes_out_once_per_session() {
     );
 }
 
-/// Agrees, after breaking the store under the read.
+/// Agrees, after a new generation is recorded under the read with a snapshot that cannot be
+/// read.
 struct Breaking(std::path::PathBuf);
 
 #[async_trait::async_trait]
 impl MemoryClassifier for Breaking {
     async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
-        std::fs::write(&self.0, "{broken").unwrap();
+        std::fs::write(self.0.join("snapshot.json"), "{broken").unwrap();
+        std::fs::write(self.0.join("generation"), "999").unwrap();
         Agreeable::default().decide(req).await
     }
 }
@@ -2669,7 +2723,7 @@ impl MemoryClassifier for Breaking {
 #[tokio::test]
 async fn a_store_broken_during_the_read_delivers_no_memory() {
     let breaking = |store: &Store| -> Arc<dyn MemoryClassifier> {
-        Arc::new(Breaking(store.dir().join("snapshot.json")))
+        Arc::new(Breaking(store.dir().to_path_buf()))
     };
     let (b, _ws, _st, _store) = remembering_with(breaking, ReadConfig::default()).await;
     let out = to_json(

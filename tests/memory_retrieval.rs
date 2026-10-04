@@ -1179,6 +1179,64 @@ async fn hashes_and_generation_are_revalidated_right_before_delivery() {
 }
 
 #[tokio::test]
+async fn a_snapshot_rewritten_with_the_same_size_and_time_is_still_seen() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &ws));
+    store
+        .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction"))
+        .unwrap();
+    store.ingest().unwrap();
+    // A store without the record of its generation: only the file says what changed.
+    std::fs::remove_file(store.dir().join("generation")).unwrap();
+    let warm = recall(&store, root.path(), passing());
+    assert_eq!(warm.read("eviction").await.read.unwrap().memories.len(), 1);
+
+    // Replaced through a rename, same length, same modification time: another memory.
+    let snapshot = store.dir().join("snapshot.json");
+    let before = std::fs::metadata(&snapshot).unwrap().modified().unwrap();
+    let text = std::fs::read_to_string(&snapshot).unwrap();
+    assert!(text.contains("eviction"));
+    let next = store.dir().join("snapshot.next");
+    std::fs::write(&next, text.replace("eviction", "zzzzzzzz")).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&next)
+        .unwrap()
+        .set_modified(before)
+        .unwrap();
+    std::fs::rename(&next, &snapshot).unwrap();
+    assert_eq!(
+        std::fs::metadata(&snapshot).unwrap().modified().unwrap(),
+        before
+    );
+    let got = warm.read("eviction").await.read.unwrap();
+    assert!(
+        got.memories.is_empty(),
+        "the copy kept is not served after the file changed"
+    );
+}
+
+#[tokio::test]
+async fn the_generation_is_recorded_beside_every_snapshot() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Store::new(st.path(), &ws);
+    let record = observed(root.path(), &ws, "src/a.rs", "eviction");
+    store.enqueue(&record).unwrap();
+    store.ingest().unwrap();
+    let recorded = || std::fs::read_to_string(store.dir().join("generation")).unwrap();
+    assert_eq!(recorded(), store.load().unwrap().generation.to_string());
+    store.charge(1, 1, 1).unwrap();
+    assert_eq!(recorded(), "1", "a charge changes no memory");
+    store.forget(&record.node_id, u64::MAX).unwrap();
+    assert_eq!(recorded(), store.load().unwrap().generation.to_string());
+    assert_eq!(recorded(), "2");
+}
+
+#[tokio::test]
 async fn pending_writes_are_reported_and_not_awaited() {
     let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     common::write(root.path(), "src/a.rs", "fn a() {}\n");
