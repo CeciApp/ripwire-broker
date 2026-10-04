@@ -3656,17 +3656,14 @@ mod shell_edits {
 
     /// A `git` that appends a line to `calls` and then runs `then`, first on the returned PATH.
     fn fake_git(dir: &Path, then: &str) -> (std::ffi::OsString, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let calls = dir.join("calls");
         let script = bin.join("git");
-        std::fs::write(
+        crate::common::write_executable(
             &script,
             format!("#!/bin/sh\necho call >> '{}'\n{then}\n", calls.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut path = vec![bin];
         path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         (std::env::join_paths(path).unwrap(), calls)
@@ -3839,10 +3836,21 @@ mod shell_edits {
         assert_eq!(calls(&counter), after_prompt, "no more git in this session");
     }
 
-    /// A `git` that answers right but takes ~60 ms per call: over the gate, far under the timeout.
+    /// A `git` that answers right but takes at least 30 ms per call. A fingerprint makes two, so it
+    /// is over the 50 ms gate; the margin to the 500 ms timeout is what a loaded machine eats into
+    /// (60 ms per call failed there now and then, D-147).
+    const _: () = assert!(ripwire_broker::hook::SLOW_FINGERPRINT.as_millis() < 2 * 30);
     fn slow_real_git(tools: &Path) -> (std::ffi::OsString, std::path::PathBuf) {
-        let then = format!("sleep 0.06\nexec '{}' \"$@\"", real_git().display());
-        fake_git(tools, &then)
+        let then = format!("sleep 0.03\nexec '{}' \"$@\"", real_git().display());
+        let (path, calls) = fake_git(tools, &then);
+        // The first run of a new executable can be slow on its own (macOS checks it): pay it
+        // here, not inside the hook's 500 ms.
+        let warm = std::process::Command::new(tools.join("bin/git"))
+            .arg("--version")
+            .output();
+        assert!(warm.is_ok_and(|o| o.status.success()));
+        let _ = std::fs::remove_file(&calls);
+        (path, calls)
     }
 
     #[test]
