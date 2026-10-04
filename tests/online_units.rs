@@ -1159,3 +1159,14 @@ fn a_decision_is_noul_choice_or_unknown_and_never_zero() {
         "an infinite number is not JSON"
     );
 }
+
+/// A delay too large for a `u64` is a very long wait, never "unreadable" (D-149): `None` made the
+/// scheduler retry after its 1 s default, where a long `Retry-After` must make it give up.
+#[test]
+fn a_delay_past_u64_is_the_longest_wait() {
+    let now = UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+
+    let wait = retry_after::parse("99999999999999999999", now);
+
+    assert_eq!(wait, Some(Duration::MAX));
+}
