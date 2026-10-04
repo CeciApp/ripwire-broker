@@ -100,9 +100,10 @@
 | 2026-10-03 17:00 | Fase 2 do plano do `--memory` (controle Jev) feita em TDD (T2.1 a T2.13; T2.0 escrita, pendente de rodada com a chave): Choice e pedidos de estado, decisões tipadas, transporte comum, `memory-prompts/v1`, fila com leases por lock e quota de 24 h, worker com typing, candidatos e relações, commit por par, falhas do provider, teto único de requisições, worker no `serve --memory` e `memory drain --online`, métricas de custo; PRD principal §23.1/§23.2/§23.3/§23.5 autorizam o worker | [D-138](#d-138--fase-2-do---memory-controle-jev) |
 | 2026-10-03 21:33 | Fase 3 do plano do `--memory` (leitura e entrega) feita em TDD (T3.1 a T3.10; T3.11, validação nos hosts, pendente e manual): índice lexical e de entidades com RRF, routing, scoring, beam e limites, parada, prazo de 750 ms, fontes mudadas omitidas e revalidadas, `memories[]` e `provenance.memory`, orçamento da memória com reserva, seção legível no texto MCP, leitura paralela em `context_for_task` com snapshot quente, hooks prontos para memórias; revisão com 12 achados corrigidos, entre eles a quota em `quota.json` e a chave do cache pela geração | [D-139](#d-139--fase-3-do---memory-leitura-e-entrega) |
 | 2026-10-03 22:52 | Fase 4 do plano do `--memory` (consolidação) feita em TDD (T4.1 a T4.3): cadência durável de 20 enriquecimentos ou 24 h, sem timer entre processos; rodadas de até 4 pares, 20 perguntas, 5 s e 4 tentativas, com cursor; decisões por par e `RepresentationDecision`, ligação `linked` a partir de 0,60, originais nunca apagados; nota derivada só pelo gate (`merge`/`promote` ≥ 0,85, contradição < 0,85), `memory-consolidation/v1`, validador de caminhos e IDs, cache só com versão confiável do sumarizador; revisão com um achado alto (rodada com commit falho comprada de novo a cada tick) e três médios corrigidos, entre eles os pares gravados pelo enriquecimento | [D-140](#d-140--fase-4-do---memory-consolidação) |
-| 2026-10-04 00:10 | Recorte da Fase 5 do `--memory` decidido pelo mantenedor: o braço C usa uma flag nova e experimental do `serve`, `--memory-selection deterministic` (mesma coleta e store, sem worker de enriquecimento, leitura pelas âncoras locais com revalidação, identidade separada); o corpus do eval ganha `sequence`, sessões em ordem no mesmo caminho e store por (sequência, braço, repetição) | [D-141](#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências) |
-| 2026-10-04 01:30 | Fase 5 do plano do `--memory` (avaliação) feita em TDD (T5.0 a T5.2; T5.3, a rodada, manual): `serve --memory-selection deterministic`; braços `broker-memory` e `broker-memory-deterministic` no `ripwire-eval`; `sequence` no corpus, com store por rodada; relatório com recuperação, ingestão e latência do agente separadas, jobs deixados por sessão e versões; revisão com quatro achados médios corrigidos e as divergências do PRD §14 registradas para a T5.3 | [D-142](#d-142--fase-5-do---memory-avaliação) |
-| 2026-10-04 09:30 | Auditoria do sistema (ferramentas do ripwire, clippy pedante e cinco revisores só de leitura, ~100 achados): os cinco defeitos mais graves corrigidos em TDD — o corpus por caminho relativo e as edições commitadas no eval, a sessão restaurada que deixava de lembrar, o `Retry-After` que derrubava o worker e o símbolo desconhecido que derrubava o `context_after_edit`; o resto registrado | [D-143](#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves) |
+| 2026-10-03 23:49 | Recorte da Fase 5 do `--memory` decidido pelo mantenedor: o braço C usa uma flag nova e experimental do `serve`, `--memory-selection deterministic` (mesma coleta e store, sem worker de enriquecimento, leitura pelas âncoras locais com revalidação, identidade separada); o corpus do eval ganha `sequence`, sessões em ordem no mesmo caminho e store por (sequência, braço, repetição) | [D-141](#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências) |
+| 2026-10-04 01:01 | Fase 5 do plano do `--memory` (avaliação) feita em TDD (T5.0 a T5.2; T5.3, a rodada, manual): `serve --memory-selection deterministic`; braços `broker-memory` e `broker-memory-deterministic` no `ripwire-eval`; `sequence` no corpus, com store por rodada; relatório com recuperação, ingestão e latência do agente separadas, jobs deixados por sessão e versões; revisão com quatro achados médios corrigidos e as divergências do PRD §14 registradas para a T5.3 | [D-142](#d-142--fase-5-do---memory-avaliação) |
+| 2026-10-04 03:40 | Auditoria do sistema (ferramentas do ripwire, clippy pedante e cinco revisores só de leitura, ~100 achados): os cinco defeitos mais graves corrigidos em TDD — o corpus por caminho relativo e as edições commitadas no eval, a sessão restaurada que deixava de lembrar, o `Retry-After` que derrubava o worker e o símbolo desconhecido que derrubava o `context_after_edit`; o resto registrado | [D-143](#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves) |
+| 2026-10-04 04:40 | Achados médios da auditoria corrigidos em TDD (16, mais um achado no caminho): roteador por início de palavra, hook que só lança o ripwire quando vai perguntar, variáveis de diretório vazias ou relativas ignoradas, três do online, três da memória, quatro do eval, o TOML do Codex, o dedup de corpos e de riscos e o resumo; a leitura bloqueante do online fica registrada, sem teste determinístico | [D-144](#d-144--auditoria-de-2026-10-04-os-achados-médios) |
 | 2026-10-03 15:12 | Fase 1 do plano do `--memory` feita em TDD (T1.1 a T1.16, um commit por tarefa, mutação em cada uma): `--memory` e `--memory-*` no parse; registro `memory/v1`, identidade, admissão, relógio e sequência; store privado com spool, snapshot, tetos, lock, retenção, `forget` com tombstones e revogação; `memory status\|forget\|add\|resume`; coleta pelas tools e pelo `hook --memory`; `install`/`doctor`. O `serve --memory` ainda não liga a coleta (T2.11) | [D-137](#d-137--fase-1-do---memory-store-e-coleta) |
 | 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
@@ -6009,7 +6010,7 @@ o `memory status` não mostra a cadência; o diagrama de `spec/diagrams/`.
 
 ## D-141 — Recorte da Fase 5 do `--memory`: braço determinístico e sequências
 
-**Data:** 2026-10-04 00:10.
+**Data:** 2026-10-03 23:49.
 
 **Contexto:** a T5.1 do [plano](plan/jev-mem-plan.md) previa os braços B (`broker-memory`) e C
 (`broker-memory-deterministic`) só em `src/eval/arm.rs`. Lendo o código, dois pontos não cabiam:
@@ -6022,7 +6023,7 @@ o `memory status` não mostra a cadência; o diagrama de `spec/diagrams/`.
   store vazio, e B e C nunca veriam o histórico que o PRD quer medir (sequências de duas ou mais
   sessões).
 
-**Decisão do mantenedor (2026-10-04):**
+**Decisão do mantenedor (2026-10-03):**
 
 - **Braço C por flag do `serve`:** `--memory-selection jev|deterministic`, padrão `jev`, só com
   `--memory`, documentada como experimental e para avaliação. Em `deterministic`: a mesma coleta e
@@ -6042,7 +6043,7 @@ o `memory status` não mostra a cadência; o diagrama de `spec/diagrams/`.
 
 ## D-142 — Fase 5 do `--memory`: avaliação
 
-**Data:** 2026-10-04 01:30.
+**Data:** 2026-10-04 01:01.
 
 **Decisão:** a Fase 5 do [plano](plan/jev-mem-plan.md) está feita em TDD no recorte do
 [D-141](#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências) (T5.0 a T5.2), uma
@@ -6115,7 +6116,7 @@ verdes; CA-10 sem crate de rede; guarda de fixtures verde.
 
 ## D-143 — Auditoria de 2026-10-04: os cinco defeitos mais graves
 
-**Data:** 2026-10-04 09:30.
+**Data:** 2026-10-04 03:40.
 
 **Contexto:** a pedido do mantenedor, uma auditoria do sistema inteiro atrás de bugs, código que nunca
 executa e simplificações. Ferramentas: `ripwire --dead-code`, `--clones` e `--quality-panel`, o clippy
@@ -6181,3 +6182,75 @@ resto fica registrado abaixo para tarefas próprias.
   lugar das listas longas de parâmetros; um só lugar para os defaults repetidos (`"jev-1.13.0"` em três).
 
 **Testes:** 675 → 680 no build padrão, 691 → 696 com `online`.
+
+## D-144 — Auditoria de 2026-10-04: os achados médios
+
+**Data:** 2026-10-04 04:40.
+
+**Decisão:** os achados médios do [D-143](#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves)
+corrigidos em TDD, um commit por achado, com o teste vermelho visto falhar e mutações que o
+derrubaram. Um deles fica registrado sem correção, por falta de um teste determinístico.
+
+**Corrigidos:**
+
+- **Roteador:** casava substrings (`"adr"` em "padrão", `"decision"` em `DecisionTree`, `"fix"` em
+  "prefix", `"change"` em "exchange", `"alter"` em "alternative", `"add"` em "address"). Agora uma
+  entrada casa o começo de uma palavra, uma terminada em `$` só a palavra inteira, e uma expressão
+  palavra a palavra; "altera"/"altere" entram nos radicais portugueses ("altere" só casava por acaso).
+- **Hook:** lançava o ripwire (e listava as tools) antes de decidir se o evento perguntaria algo:
+  prompts depois do primeiro, sessões pausadas, edições seguradas pela janela do D-106 e edições fora
+  do workspace pagavam um lançamento. A decisão virou uma etapa pura, antes de lançar o ripwire ou
+  ler sua versão; se o lançamento falha, a sessão volta ao que era. Dois testes antigos passaram a
+  perguntar com `--every-prompt`, e eventos que não precisam do ripwire contam nas estatísticas da
+  sessão, como contavam com o ripwire presente.
+- **Variáveis de diretório:** `XDG_STATE_HOME` vazio ou relativo gravava estado e spool dentro do
+  workspace (o diretório de um hook); `CLAUDE_CONFIG_DIR` vazio fazia o instalador ler
+  `./settings.json` e não ver a barra do usuário. Um helper só aceita caminho absoluto não vazio
+  (diretório de estado, configurações do usuário, home do Codex).
+- **Online:**
+  - uma pergunta respondida duas vezes era aceita pela última resposta; agora a descoberta recusa a
+    resposta, como a memória;
+  - uma task do classificador em pânico não liberava a vaga e travava o scheduler até o prazo; agora
+    as tasks são seguidas pelo id, e o pânico libera a vaga e deixa o job sem resposta;
+  - `--jev-max-source-bytes` era gasto na ordem do planner; agora os blocos que mantêm fonte são
+    escolhidos primeiro pela probabilidade.
+- **Memória:**
+  - um `Quota`/`Busy` nas relações, depois de a tipagem já ter sido paga, devolvia a execução ao
+    job; agora é `Retry`;
+  - o arquivo `generation` era regravado depois do snapshot, e uma queda entre os dois mantinha a
+    cópia quente com memórias esquecidas; agora o registro antigo sai primeiro (novo ponto de queda
+    de teste `Step::MidPublish`), e uma geração igual não é regravada;
+  - o tick ocioso do worker pegava o lock de escrita e relia o snapshot sem nada no spool; agora o
+    `ingest` volta na hora (um store revogado continua dizendo `Revoked`).
+- **Eval:**
+  - o timeout matava só o filho direto; agora o agente e cada `setup`/`check`/`teardown` têm um grupo
+    de processos próprio, morto inteiro (`kill -KILL -<pgid>`, sem `unsafe`);
+  - `{repo}`/`{fix}` no `env` chegavam ao agente; o `check` agora os recusa no `env`;
+  - as barras comparavam médias de conjuntos diferentes; agora cada comparação usa os pares
+    (tarefa, repetição) válidos nos dois braços; `test_recall` sem testes de referência passou a
+    faltar em vez de valer 1,0; e a coluna "recall apresentados" conta como 0 o braço com broker que
+    não apresentou nada, como a barra já contava.
+- **Instalador:** o snippet TOML do Codex usava o `{:?}` do Rust, inválido em TOML com marcas
+  combinantes (comuns em caminhos do macOS); agora escreve strings básicas do TOML.
+- **Dedup:** a chave do corpo não tinha caminho, e um segundo símbolo com corpo idêntico sumia
+  inteiro; agora fica, sem o corpo.
+- **Resumo:** era calculado antes do dedup e do orçamento, contava repetições e parecia descrever o
+  que foi entregue; agora conta o que foi achado, uma vez cada, e diz "found".
+- **Achado no caminho, corrigido:** a chave do dedup de riscos não tinha a mensagem, e quatro
+  regressões de qualidade do mesmo símbolo chegavam ao gate de conclusão como uma (o resumo antigo,
+  contado antes do dedup, dizia quatro e escondia a perda).
+
+**Registrado sem correção:** a leitura e o hash de arquivos do modo online rodam na thread
+assíncrona (snapshots iniciais, lookahead, frescura final e o `Freshness` do scheduler). Sem um
+leitor injetável, não há como escrever um teste vermelho determinístico de bloqueio; fica para
+quando o leitor tiver uma costura. Também fica o status `ready` com `items[]` vazio quando o
+orçamento corta tudo: o `budget.truncated` e o `next_step` já dizem o que aconteceu.
+
+**Datas corrigidas:** os horários do D-141, do D-142 e do D-143 tinham sido escritos sem consultar o
+relógio; passam a ser os dos seus commits (23:49, 01:01 e 03:40).
+
+**Um tropeço meu:** um comando de diagnóstico guardou as mudanças não commitadas num `git stash`
+antes de ser recusado; nada se perdeu (o stash foi reaplicado e conferido), e diagnósticos passaram
+a ser feitos só com edições pontuais.
+
+**Testes:** 680 → 694 no build padrão, 696 → 710 com `online`.
