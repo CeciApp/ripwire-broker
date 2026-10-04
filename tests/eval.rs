@@ -1317,7 +1317,7 @@ fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versio
         "--out",
         out.to_str().unwrap(),
         "--arms",
-        "broker,broker-memory",
+        "broker,broker-online,broker-memory",
         "--agent-cmd",
         &agent_cmd,
     ]);
@@ -1327,7 +1327,7 @@ fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versio
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    let (plain, memory) = (&records[0], &records[1]);
+    let (plain, memory) = (&records[0], &records[2]);
     for r in [plain, memory] {
         assert_eq!(
             r["presented_recall"], 1.0,
@@ -1362,6 +1362,10 @@ fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versio
         (&json!(3), &json!(10)),
         "what the store spent, less what the reads did: {memory}"
     );
+    // The note `memory add` left is a job the session's worker did not run: the next session's
+    // server will, and pay for it there.
+    assert_eq!(memory["memory_jobs_left"], 1, "{memory}");
+    assert!(plain.get("memory_jobs_left").is_none());
 
     let versions: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("versions.json")).unwrap()).unwrap();
@@ -1381,9 +1385,59 @@ fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versio
         .lines()
         .find(|l| l.starts_with("| broker-memory |") && l.contains("3"))
         .unwrap_or_else(|| panic!("a memory cost row: {md}"));
-    for cell in ["2", "30", "3", "10", "5000"] {
-        assert!(row.contains(cell), "{cell} in {row}");
-    }
+    let cells: Vec<&str> = row
+        .split('|')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            "broker-memory",
+            "1",
+            "2.000",
+            "30.000",
+            "1.000",
+            cells[5],
+            "3.000",
+            "10.000",
+            "1.000",
+            "5000.000"
+        ],
+        "{row}"
+    );
+    assert!(
+        md.contains("jobs pendentes"),
+        "the caveat is in the report: {md}"
+    );
+    // Arm A beside them, for its wait on context_for_task; no memory column, never a zero.
+    let section = md.split("## Custo da memória").nth(1).unwrap();
+    let section = section.split("\n## ").next().unwrap();
+    let a = section
+        .lines()
+        .find(|l| l.starts_with("| broker-online |"))
+        .unwrap_or_else(|| panic!("arm A in the memory cost table: {md}"));
+    let a: Vec<&str> = a
+        .split('|')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    assert_eq!(a[2], "—", "{a:?}");
+    assert_ne!(a[5], "—", "its context_for_task wait: {a:?}");
+
+    let json = eval(&["report", "--out", out.to_str().unwrap(), "--json"]);
+    let json: Value = serde_json::from_slice(&json.stdout).unwrap();
+    let b = json["memory_cost"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["arm"] == "broker-memory")
+        .expect("arm B in the JSON report");
+    assert_eq!(b["ingestion_attempts"], 3.0, "{b}");
+    assert_eq!(
+        json["versions"]["ripwire_broker"],
+        versions["ripwire_broker"]
+    );
     assert!(
         md.contains("## Versões") && md.contains("ripwire-broker 0.1.0"),
         "{md}"

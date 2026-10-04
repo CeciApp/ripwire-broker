@@ -218,9 +218,9 @@ fn run_agent(
     Ok(AgentRun { events, timed_out })
 }
 
-/// Attempts and questions the round's store charged in the last 24 hours (`memory status`), as
-/// its server sees it; `None` when it cannot be read.
-fn spent(cfg: &RunConfig, work: &Path, state: &Path) -> Option<(u64, u64)> {
+/// The round's store as its server sees it (`memory status`): attempts and questions charged in
+/// the last 24 hours, and observations plus jobs not processed yet; `None` when it cannot be read.
+fn spent(cfg: &RunConfig, work: &Path, state: &Path) -> Option<(u64, u64, u64)> {
     let out = Command::new(&cfg.tools.broker)
         .args(["memory", "status", "--workspace"])
         .arg(work)
@@ -230,7 +230,11 @@ fn spent(cfg: &RunConfig, work: &Path, state: &Path) -> Option<(u64, u64)> {
         .output()
         .ok()?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    Some((v["attempts_24h"].as_u64()?, v["questions_24h"].as_u64()?))
+    Some((
+        v["attempts_24h"].as_u64()?,
+        v["questions_24h"].as_u64()?,
+        v["pending"].as_u64()? + v["jobs_pending"].as_u64()?,
+    ))
 }
 
 fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) -> RunRecord {
@@ -269,6 +273,7 @@ fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) ->
         memories_delivered: memory(read.delivered),
         memory_ingestion_attempts: None,
         memory_ingestion_questions: None,
+        memory_jobs_left: None,
     }
 }
 
@@ -366,6 +371,7 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRe
             let read = s.memory_read.unwrap_or_default();
             r.memory_ingestion_attempts = Some(a.0.saturating_sub(b.0 + read.requests));
             r.memory_ingestion_questions = Some(a.1.saturating_sub(b.1 + read.questions));
+            r.memory_jobs_left = Some(a.2);
         }
         Ok::<_, String>(r)
     })();
