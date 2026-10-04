@@ -32,6 +32,9 @@ pub struct CommandSummarizer {
     trusted_version: bool,
 }
 
+/// How long `--summarizer-version-cmd` may take (`ollama show` against a stuck server hangs).
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn split_command(command: &str) -> Result<Vec<String>, String> {
     let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
     if argv.is_empty() {
@@ -53,16 +56,27 @@ impl CommandSummarizer {
         let mut model_id = argv.join(" ");
         if let Some(v) = version_cmd {
             let vargv = split_command(v)?;
-            let out = std::process::Command::new(&vargv[0])
-                .args(&vargv[1..])
-                .env_remove(crate::online::KEY_VAR)
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|e| format!("{}: {e}", vargv[0]))?;
-            if !out.status.success() {
-                return Err(format!("{} exited with {}", vargv[0], out.status));
+            let mut command = std::process::Command::new(&vargv[0]);
+            command.args(&vargv[1..]).env_remove(crate::online::KEY_VAR);
+            // It runs before `serve` answers its host: a command that hangs must not hang it.
+            let deadline = std::time::Instant::now() + VERSION_TIMEOUT;
+            let (status, stdout) = match crate::bounded::output(command, deadline) {
+                Ok(done) => done,
+                Err(crate::bounded::Stop::Late) => {
+                    return Err(format!(
+                        "{} did not finish within {} s",
+                        vargv[0],
+                        VERSION_TIMEOUT.as_secs()
+                    ));
+                }
+                Err(crate::bounded::Stop::Failed) => {
+                    return Err(format!("{}: could not run it", vargv[0]));
+                }
+            };
+            if !status.success() {
+                return Err(format!("{} exited with {}", vargv[0], status));
             }
-            let digest = format!("{:x}", Sha256::digest(&out.stdout));
+            let digest = format!("{:x}", Sha256::digest(&stdout));
             model_id = format!("{model_id} @{}", &digest[..16]);
         }
         Ok(Self {

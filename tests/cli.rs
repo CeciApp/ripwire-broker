@@ -1324,6 +1324,37 @@ fn install_codex_merges_hooks_json_and_prints_the_toml_snippet() {
     );
 }
 
+/// A summarizer version command that never ends costs at most its timeout (D-147): it runs before
+/// `serve` answers its host and in `doctor`.
+#[test]
+fn a_summarizer_version_command_that_hangs_fails_within_the_timeout() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let llm = bin.path().join("llm");
+    common::write_executable(&llm, "#!/bin/sh\necho note\n");
+    let version = bin.path().join("llm-version");
+    common::write_executable(&version, "#!/bin/sh\nsleep 30; echo v1\n");
+    let started = std::time::Instant::now();
+
+    let (_, report, _) = doctor(
+        ws.path(),
+        &[
+            "--summarizer-cmd",
+            llm.to_str().unwrap(),
+            "--summarizer-version-cmd",
+            version.to_str().unwrap(),
+        ],
+    );
+
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(20), "{took:?}");
+    let detail = check(&report, "summarizer")["detail"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(detail.contains("version command failed"), "{detail}");
+}
+
 /// A ripwire that never answers `--version` costs at most the version timeout (D-146): one that
 /// keeps running, and one that exits but leaves a process holding its stdout open. `doctor` is one
 /// of the four callers; `serve`, `hook` and `prompt` read the version through the same function.
