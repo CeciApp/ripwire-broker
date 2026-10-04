@@ -600,8 +600,12 @@ fn plan(
             // so holding an event back delays news by at most one edit and never drops it; the
             // `Stop` gate covers the tail of a turn in any case.
             if let (Some(now), true) = (policy.now_ms, policy.edit_interval_ms > 0) {
-                let waited = now.saturating_sub(state.last_edit_ms);
-                if state.last_edit_ms != 0 && waited < policy.edit_interval_ms {
+                // A clock set back past the last answered edit closes the window: holding until
+                // the wall clock caught up would hold every edit of the session.
+                let inside = now
+                    .checked_sub(state.last_edit_ms)
+                    .is_some_and(|waited| waited < policy.edit_interval_ms);
+                if state.last_edit_ms != 0 && inside {
                     for f in files {
                         if !state.held_edits.contains(&f) && state.held_edits.len() < MAX_HELD_EDITS
                         {
