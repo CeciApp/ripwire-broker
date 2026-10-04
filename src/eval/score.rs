@@ -17,8 +17,8 @@ pub struct Score {
     pub presented_recall: Option<f64>,
     /// 1-based position of the first reference file among those presented.
     pub first_correct_rank: Option<usize>,
-    /// Reference tests the agent was shown or ran; 1.0 when the reference names none.
-    pub test_recall: f64,
+    /// Reference tests the agent was shown or ran; `None` when the reference names none.
+    pub test_recall: Option<f64>,
     /// The task's `check` passed; `None` when the task has none.
     pub correct: Option<bool>,
 }
@@ -53,7 +53,8 @@ pub fn score(task: &Task, s: &Summary, modified: &[String], correct: Option<bool
             )
         }),
         first_correct_rank: presented.iter().position(is_ref).map(|p| p + 1),
-        test_recall: fraction(named_tests, task.reference.tests.len()),
+        test_recall: (!task.reference.tests.is_empty())
+            .then(|| fraction(named_tests, task.reference.tests.len())),
         correct,
     }
 }
