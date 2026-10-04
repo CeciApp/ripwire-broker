@@ -902,13 +902,7 @@ impl Broker {
             }
         }
         let open_obligation = has_gate_risk(&entries);
-        let status = if regressions > 0 || (req.strict && minor > 0) || open_obligation {
-            Status::AttentionRequired
-        } else if unknown {
-            Status::Unknown
-        } else {
-            Status::Ready
-        };
+        let status = gate_status(regressions, minor, req.strict, open_obligation, unknown);
         let env = self.envelope(
             Shape {
                 tool: "context_before_finish",
@@ -1300,18 +1294,7 @@ impl Broker {
         };
         let cap = self.max_item_tokens as usize * 4;
         let entries = normalize::cap_items(entries, cap);
-        // With a summarizer, `add_notes` runs after this and always writes at least the record
-        // that notes did not fit. Holding that room back here is what keeps it from evicting an
-        // item whose body `attach_notes` has already sent to the local model (D-103).
-        let reserve = match self.notes.is_some() {
-            true => budget::notes_reserve(),
-            false => 0,
-        };
-        // The same for what a memory read writes after the entries are fitted.
-        let reserve = match self.recall.is_some() {
-            true => reserve + budget::memory_reserve(),
-            false => reserve,
-        };
+        let reserve = self.reserve();
         if !self.incremental {
             budget::fill(&mut env, entries, reserve);
             drop_unshown_cuts(&mut env, cap);
@@ -1325,54 +1308,62 @@ impl Broker {
                 _ => None,
             })
             .collect();
-        let memory = self.session.lock().unwrap();
-        let mut entries = entries;
-        if suppress_seen {
-            let before = entries.len();
-            entries = entries
-                .into_iter()
-                .filter_map(|e| match e {
-                    Entry::Item(p, i) if memory.has(&session::item_fingerprint(&i)) => {
-                        Some(Entry::Item(p, session::reference(&i)))
-                    }
-                    Entry::Test(_, t) if memory.has(&session::test_fingerprint(&t)) => None,
-                    Entry::Risk(_, r)
-                        if !GATE_RISKS.contains(&r.kind)
-                            && memory.has(&session::risk_fingerprint(&r)) =>
-                    {
-                        None
-                    }
-                    other => Some(other),
-                })
-                .collect();
-            env.budget.already_delivered = before - entries.len();
-            let references = entries
-                .iter()
-                .filter(
-                    |e| matches!(e, Entry::Item(_, i) if i.why_included == session::SEEN_REFERENCE),
-                )
-                .count();
-            self.metrics.lock().unwrap().session_hits +=
-                (env.budget.already_delivered + references) as u64;
-        }
-        drop(memory);
+        let entries = match suppress_seen {
+            true => self.suppress_seen(&mut env, entries),
+            false => entries,
+        };
         budget::fill(&mut env, entries, reserve);
         drop_unshown_cuts(&mut env, cap);
-        let included = env
-            .items
-            .iter()
-            .map(|i| {
-                originals
-                    .iter()
-                    .find(|o| {
-                        i.why_included == session::SEEN_REFERENCE
-                            && (&o.path, o.line, &o.symbol) == (&i.path, i.line, &i.symbol)
-                    })
-                    .unwrap_or(i)
-                    .clone()
+        let included = included(&env.items, &originals);
+        (env, included)
+    }
+
+    /// Room held back from the entries for what is written after them. With a summarizer,
+    /// `add_notes` always writes at least the record that notes did not fit; holding that room
+    /// back is what keeps it from evicting an item whose body `attach_notes` has already sent to
+    /// the local model (D-103). The same for what a memory read writes.
+    fn reserve(&self) -> u32 {
+        let notes = match self.notes.is_some() {
+            true => budget::notes_reserve(),
+            false => 0,
+        };
+        let memory = match self.recall.is_some() {
+            true => budget::memory_reserve(),
+            false => 0,
+        };
+        notes + memory
+    }
+
+    /// What this session already received becomes a short reference (an item) or goes (a test, a
+    /// risk that is not gate evidence); counted in `already_delivered` and in the session hits.
+    fn suppress_seen(&self, env: &mut Envelope, entries: Vec<Entry>) -> Vec<Entry> {
+        let memory = self.session.lock().unwrap();
+        let before = entries.len();
+        let entries: Vec<Entry> = entries
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Item(p, i) if memory.has(&session::item_fingerprint(&i)) => {
+                    Some(Entry::Item(p, session::reference(&i)))
+                }
+                Entry::Test(_, t) if memory.has(&session::test_fingerprint(&t)) => None,
+                Entry::Risk(_, r)
+                    if !GATE_RISKS.contains(&r.kind)
+                        && memory.has(&session::risk_fingerprint(&r)) =>
+                {
+                    None
+                }
+                other => Some(other),
             })
             .collect();
-        (env, included)
+        drop(memory);
+        env.budget.already_delivered = before - entries.len();
+        let references = entries
+            .iter()
+            .filter(|e| matches!(e, Entry::Item(_, i) if i.why_included == session::SEEN_REFERENCE))
+            .count();
+        self.metrics.lock().unwrap().session_hits +=
+            (env.budget.already_delivered + references) as u64;
+        entries
     }
 }
 
@@ -1381,6 +1372,42 @@ pub fn shown_workspace(root: &std::path::Path, redact: bool) -> String {
     match redact {
         true => "<redacted>".into(),
         false => root.display().to_string(),
+    }
+}
+
+/// The items as included, each short reference resolved back to the full item it stands for, so
+/// what is remembered is what the item was.
+fn included(items: &[Item], originals: &[Item]) -> Vec<Item> {
+    items
+        .iter()
+        .map(|i| {
+            originals
+                .iter()
+                .find(|o| {
+                    i.why_included == session::SEEN_REFERENCE
+                        && (&o.path, o.line, &o.symbol) == (&i.path, i.line, &i.symbol)
+                })
+                .unwrap_or(i)
+                .clone()
+        })
+        .collect()
+}
+
+/// The finish gate: attention for a quality regression (or, `strict`, a minor finding) or an open
+/// obligation; otherwise unknown when evidence is missing, else ready (CA-05, D-013).
+fn gate_status(
+    regressions: usize,
+    minor: usize,
+    strict: bool,
+    open: bool,
+    unknown: bool,
+) -> Status {
+    if regressions > 0 || (strict && minor > 0) || open {
+        Status::AttentionRequired
+    } else if unknown {
+        Status::Unknown
+    } else {
+        Status::Ready
     }
 }
 
