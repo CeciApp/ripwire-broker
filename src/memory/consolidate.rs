@@ -54,8 +54,6 @@ pub const NOTE_GATE: f64 = 0.85;
 /// Both parents together, whole, or no note.
 pub const MAX_PARENT_CHARS: usize = crate::notes::MAX_EVIDENCE_CHARS;
 pub const MAX_NOTE_CHARS: usize = crate::notes::MAX_NOTE_CHARS;
-/// The neighbours of an observation it is paired with: the write's candidates.
-const NEIGHBOURS: usize = 4;
 /// Questions about one pair: four Nouls and the representation Choice.
 const PER_PAIR: usize = 5;
 
@@ -67,7 +65,7 @@ pub struct Pair {
 }
 
 impl Pair {
-    fn new(a: &str, b: &str) -> Self {
+    pub fn of(a: &str, b: &str) -> Self {
         let (first, second) = if a < b { (a, b) } else { (b, a) };
         Pair {
             first: first.into(),
@@ -136,6 +134,9 @@ pub struct Consolidation {
     pub pending_since_ms: Option<u64>,
     /// The last pair a round asked about: the next one starts after it.
     pub cursor: Option<String>,
+    /// Every observation with the candidates its write compared it with, recorded when the
+    /// enrichment commits: finding the pairs never scans the store.
+    pub pairs: BTreeSet<Pair>,
     /// By [`decision_key`]: a pair is decided once per content, model and prompt.
     pub decisions: BTreeMap<String, PairDecision>,
     /// Derived notes by [`note_key`], to reuse instead of asking the summarizer again. Kept
@@ -146,6 +147,8 @@ pub struct Consolidation {
 impl Consolidation {
     /// Forgets what was decided about nodes that are gone.
     pub(crate) fn drop_nodes(&mut self, gone: &BTreeSet<String>) {
+        self.pairs
+            .retain(|p| !gone.contains(&p.first) && !gone.contains(&p.second));
         self.decisions
             .retain(|_, d| !gone.contains(&d.pair.first) && !gone.contains(&d.pair.second));
         for d in self.decisions.values_mut() {
@@ -194,23 +197,20 @@ fn consolidable(state: &State, id: &str) -> bool {
             .is_some_and(|j| j.state == JobState::Done)
 }
 
-/// The pairs not decided yet, in a stable order: each enriched observation with its write
-/// candidates (shared entities, then shared words, then the nearest earlier one).
+/// The pairs not decided yet, in a stable order: each enriched observation with the
+/// candidates its write compared it with (shared entities, then shared words, then the nearest
+/// earlier one). Reads only what the enrichments recorded.
 pub fn pending(state: &State, model: &str) -> Vec<Pair> {
-    let mut pairs = BTreeSet::new();
-    for id in state.nodes.keys().filter(|id| consolidable(state, id)) {
-        for c in controller::candidates(state, id, NEIGHBOURS) {
-            if consolidable(state, &c) {
-                pairs.insert(Pair::new(id, &c));
-            }
-        }
-    }
-    pairs
-        .into_iter()
+    state
+        .consolidation
+        .pairs
+        .iter()
+        .filter(|p| consolidable(state, &p.first) && consolidable(state, &p.second))
         .filter(|p| {
             decision_key(state, p, model)
                 .is_some_and(|k| !state.consolidation.decisions.contains_key(&k))
         })
+        .cloned()
         .collect()
 }
 

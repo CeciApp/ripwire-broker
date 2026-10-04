@@ -395,6 +395,7 @@ pub async fn enrich(
                 None,
                 EnrichmentState::Failed,
                 vec![],
+                &[],
             )?;
             store.finish(
                 lease,
@@ -498,7 +499,15 @@ pub async fn enrich(
         false => EnrichmentState::Complete,
     };
     metrics.jobs_done = u64::from(owed.is_none());
-    store.commit_enrichment(&node.node_id, node.generation, Some(types), outcome, edges)?;
+    let neighbours: Vec<String> = chosen.iter().map(|c| c.node_id.clone()).collect();
+    store.commit_enrichment(
+        &node.node_id,
+        node.generation,
+        Some(types),
+        outcome,
+        edges,
+        &neighbours,
+    )?;
     store.finish(lease, owed.unwrap_or(Outcome::Done))?;
     Ok(Enriched {
         state: outcome,

@@ -723,6 +723,7 @@ fn the_enrichment_counter_increments_exactly_once_per_node() {
             None,
             EnrichmentState::Complete,
             vec![],
+            &[],
         )
         .unwrap();
     assert!(
@@ -1358,7 +1359,7 @@ fn commits_stay_inside_the_edge_and_snapshot_caps() {
     let g = store.load().unwrap().nodes[&id(1)].generation;
     let three = vec![edge(1, 2, "a"), edge(1, 3, "b"), edge(2, 3, "c")];
     store
-        .commit_enrichment(&id(1), g, None, EnrichmentState::Complete, three)
+        .commit_enrichment(&id(1), g, None, EnrichmentState::Complete, three, &[])
         .unwrap();
     assert_eq!(
         store.load().unwrap().edges.len(),
@@ -1392,7 +1393,7 @@ fn commits_stay_inside_the_edge_and_snapshot_caps() {
         ..Default::default()
     };
     tight
-        .commit_enrichment(&id(1), g, Some(types), EnrichmentState::Complete, wide)
+        .commit_enrichment(&id(1), g, Some(types), EnrichmentState::Complete, wide, &[])
         .unwrap();
     let s = tight.load().unwrap();
     assert!(

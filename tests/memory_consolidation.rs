@@ -52,10 +52,25 @@ fn stored(dir: &std::path::Path, records: &[Record]) -> Store {
     store
 }
 
-/// `n` jobs finish their planned stages at `at_ms`, as the worker would end them.
+/// `n` jobs finish their planned stages at `at_ms`, as the worker would end them: each node
+/// committed with the candidates it was compared with.
 fn enrich(store: &Store, n: usize, at_ms: u64) {
+    use ripwire_broker::memory::model::EnrichmentState;
     for _ in 0..n {
         let lease = store.lease_next(at_ms).unwrap().expect("a job");
+        let state = store.load().unwrap();
+        let node = &state.nodes[lease.node_id()];
+        let neighbours = controller::candidates(&state, lease.node_id(), 4);
+        store
+            .commit_enrichment(
+                lease.node_id(),
+                node.generation,
+                None,
+                EnrichmentState::Complete,
+                vec![],
+                &neighbours,
+            )
+            .unwrap();
         store.finish(lease, Outcome::Done).unwrap();
     }
 }
@@ -731,6 +746,13 @@ async fn without_a_trusted_version_cmd_generated_notes_are_not_cached_on_disk() 
             assert!(!s.nodes.contains_key(&first[0].node_id));
             assert!(s.consolidation.notes.is_empty());
             assert!(s.consolidation.decisions.is_empty());
+            assert!(
+                s.consolidation
+                    .pairs
+                    .iter()
+                    .all(|p| p.first != id(1) && p.second != id(1)),
+                "no pair keeps the forgotten id"
+            );
         }
     }
 }
@@ -821,17 +843,6 @@ async fn a_round_that_cannot_be_committed_does_not_run_again_at_once() {
     assert_eq!(fake.requests(), 2);
 }
 
-/// Fails every request with `error`, counting them.
-struct Refusing(fn() -> ClassifyError, std::sync::atomic::AtomicUsize);
-
-#[async_trait]
-impl MemoryClassifier for Refusing {
-    async fn decide(&self, _: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
-        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Err((self.0)())
-    }
-}
-
 #[tokio::test]
 async fn a_round_that_sent_nothing_keeps_its_trigger() {
     use ripwire_broker::memory::store::Limits;
@@ -890,7 +901,10 @@ async fn a_round_split_over_requests_moves_the_cursor_only_past_what_went_out() 
     let seen = fake.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1, "the second request did not fit the budget");
     let first = seen[0].state["pairs"].as_array().unwrap().len();
-    assert!((1..4).contains(&first), "{first} pairs in the first request");
+    assert!(
+        (1..4).contains(&first),
+        "{first} pairs in the first request"
+    );
     assert_eq!(round.decided, first, "every pair sent was decided");
     assert_eq!(
         store.load().unwrap().consolidation.cursor,
@@ -916,4 +930,71 @@ async fn a_round_split_over_requests_moves_the_cursor_only_past_what_went_out() 
             assert!(i < pairs, "pairs[{i}] asked in a request of {pairs}");
         }
     }
+}
+
+#[test]
+fn the_pairs_of_a_store_at_its_cap_are_found_without_scanning_it() {
+    use ripwire_broker::memory::queue::{Job, JobState};
+    use ripwire_broker::memory::store::State;
+    // 2,000 memories of 2 KB, each with the four neighbours its write compared it with.
+    let mut state = State::default();
+    let text = "cache layer change ".repeat(100);
+    for n in 1..=2_000u64 {
+        let mut r = rec(n, &text, &["src/cache.rs"]);
+        r.ingest_seq = n;
+        state.nodes.insert(id(n), r);
+        let job = Job {
+            state: JobState::Done,
+            ..Job::default()
+        };
+        state.jobs.insert(id(n), job);
+    }
+    for n in 5..=2_000u64 {
+        for c in n - 4..n {
+            state
+                .consolidation
+                .pairs
+                .insert(consolidate::Pair::of(&id(n), &id(c)));
+        }
+    }
+    let start = std::time::Instant::now();
+    let pending = consolidate::pending(&state, MODEL);
+    let took = start.elapsed();
+    assert_eq!(pending.len(), 4 * 1_996);
+    assert!(took < Duration::from_millis(500), "{took:?}");
+}
+
+/// Answers every question with 0.5.
+struct Halfway;
+
+#[async_trait]
+impl MemoryClassifier for Halfway {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        Ok(req.questions.0.iter().map(|_| noul(0.5)).collect())
+    }
+}
+
+#[tokio::test]
+async fn the_pairs_are_the_neighbours_an_enrichment_compared() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &same_file(3));
+    let cfg = controller::Config {
+        model: MODEL.into(),
+        candidates: 4,
+    };
+    for _ in 0..3 {
+        let lease = store.lease_next(T0).unwrap().unwrap();
+        controller::enrich(&store, &Halfway, lease, &cfg, T0)
+            .await
+            .unwrap();
+    }
+    let s = store.load().unwrap();
+    let pairs: Vec<_> = s.consolidation.pairs.iter().cloned().collect();
+    let expected = [
+        consolidate::Pair::of(&id(1), &id(2)),
+        consolidate::Pair::of(&id(1), &id(3)),
+        consolidate::Pair::of(&id(2), &id(3)),
+    ];
+    assert_eq!(pairs, expected);
+    assert_eq!(consolidate::pending(&s, MODEL), expected);
 }

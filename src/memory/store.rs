@@ -755,6 +755,7 @@ impl Store {
         types: Option<Types>,
         enrichment: EnrichmentState,
         edges: Vec<Edge>,
+        neighbours: &[String],
     ) -> Result<bool, Refusal> {
         let _writer = self.writer_waiting()?;
         let mut state = self.load()?;
@@ -772,6 +773,15 @@ impl Store {
         }
         node.enrichment.state = enrichment;
         node.enrichment.prompt_version = Some(super::prompts::VERSION.into());
+        // What consolidation will pair it with (derived notes are left out there).
+        for n in neighbours.iter().filter(|n| *n != node_id) {
+            if state.nodes.contains_key(n) {
+                state
+                    .consolidation
+                    .pairs
+                    .insert(consolidate::Pair::of(node_id, n));
+            }
+        }
         let mut added = Vec::new();
         for mut edge in edges {
             if !state.nodes.contains_key(&edge.source) || !state.nodes.contains_key(&edge.target) {
