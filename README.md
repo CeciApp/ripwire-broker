@@ -331,7 +331,8 @@ kept in its own file (`quota.json`), that a restart or a clock set back does not
 spent, jobs stay pending and keep their runs. A job runs twice at
 most and then waits for `memory retry`. The worker stops with the server; what it did not
 finish waits on disk. A stage that starts failing (retention, ingest, enrichment, consolidation),
-say over a snapshot that no longer parses, is said once on stderr, not on every tick.
+say over a snapshot that no longer parses, is said once on stderr, not on every tick; so is a
+provider that refuses the key.
 The status resource's `memory` field adds what the worker cost, by operation (typing,
 relations, consolidation): attempts, retries, questions, bytes sent, failures by category and
 quota refusals, plus the consolidation rounds run and the derived notes kept or discarded,

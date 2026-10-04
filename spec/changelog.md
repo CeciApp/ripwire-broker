@@ -6353,13 +6353,18 @@ mutações que o derrubaram:
   nunca processar. Agora cada etapa (retenção, ingestão, enriquecimento, consolidação) diz no stderr
   quando começa a falhar ou falha de outro jeito, uma vez, e um sucesso limpa o registro; `Locked`
   não é falha. Retenção e ingestão, que fazem `fsync`, passaram ao pool bloqueante; essa mudança não
-  tem teste vermelho determinístico, porque o store não abre nada que possa bloquear.
+  tem teste vermelho determinístico, porque o store não abre nada que possa bloquear. Achado do
+  CodeRabbit no PR #57: um 401/403 volta como execução (`Enriched.auth_failed`), não como recusa, e
+  suspende o worker até o servidor reiniciar; as chamadas seguintes voltam vazias, e nada era dito.
+  Agora o worker suspenso diz isso uma vez, na etapa `provider`. O teste usa
+  `Runtime::start_reporting`, que recebe as linhas em vez do stderr.
 
 **Mutações:** três no leitor (sem `O_NOFOLLOW`, sem `O_NONBLOCK`, sem a conferência de arquivo
 regular); três na leitura fora da thread (o `on_disk` inline, a frescura final inline, a frescura do
 scheduler inline); seis na chave (cada um dos seis pontos); três no prazo (o prazo de 60 s, a espera
 sem prazo pelo leitor, o filho não morto no prazo); três no worker (sem o `eprintln!`, sem a
-deduplicação, a ingestão silenciosa). Todas derrubadas.
+deduplicação, a ingestão silenciosa) e duas na suspensão (sem o aviso, sem a deduplicação). Todas
+derrubadas.
 
 **Registrado sem correção:**
 - o pânico do worker de memória fora do pool bloqueante segue sem ser observado (não há costura
@@ -6371,5 +6376,13 @@ deduplicação, a ingestão silenciosa). Todas derrubadas.
 - no eval, `is_error` sem distinguir falha de infraestrutura (falta um transcript real de erro de
   API) e o `run_agent` que escreve o prompt antes de ler.
 
-**Testes:** 694 → 701 no build padrão, 710 → 718 com `online` (mais dois ignorados, os filhos dos testes de reexecução).
+**Falha intermitente, 4ª ocorrência:** `shell_edits::a_fast_fingerprint_resets_the_slow_count`
+falhou uma vez nos gates locais e uma vez em cinco execuções isoladas logo depois, sempre na primeira
+asserção. Depois disso, não se repetiu em 30 execuções isoladas nem em 6 execuções do binário `cli`
+inteiro, nem no `master` (15 isoladas, 6 inteiras). O teste põe um `git` atrás de `sleep 0.06` nas
+duas chamadas e conta com terminar nos 500 ms do orçamento; sob carga de processos, estourar o
+orçamento desliga a detecção em vez de contar uma impressão lenta. O `bounded::output` repete o laço
+anterior (o mesmo poll de 2 ms), então a falha fica registrada como sensível a carga, sem correção.
+
+**Testes:** 694 → 702 no build padrão, 710 → 719 com `online` (mais dois ignorados, os filhos dos testes de reexecução).
 
