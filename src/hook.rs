@@ -420,9 +420,7 @@ fn gate_notice(env: &Envelope) -> String {
     let mut kinds: Vec<&str> = env.risks.iter().map(|r| r.kind).collect();
     // `dedup` only drops adjacent duplicates, and risks arrive in priority order, not by
     // kind: sort first, or the same kind is listed twice.
-    if !kinds.is_sorted() {
-        kinds.sort_unstable();
-    }
+    kinds.sort_unstable();
     kinds.dedup();
     format!(
         "ripwire-broker: finish gate {} · risks: {} · {} tests to run",
@@ -779,7 +777,7 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
                 Err(why) => state.worktree_off = why.switches_off(),
             }
         }
-        if is_shell(args.event, &input) {
+        if shell {
             let mut changed = match (&before, &state.worktree) {
                 (Some(b), Some(a)) => crate::worktree::changed(b, a),
                 _ => vec![],

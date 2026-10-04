@@ -550,12 +550,10 @@ fn flags(args: impl Iterator<Item = String>, allowed: &[&str]) -> Result<Flags, 
             "--color" => f.color = Some(value),
             "--id" => f.id = Some(value),
             "--file" => f.file = Some(value.into()),
-            jev if JEV.contains(&jev) => {
-                let key = JEV.iter().find(|k| **k == jev).unwrap();
+            jev if let Some(key) = JEV.iter().find(|k| **k == jev) => {
                 f.jev.insert(key, value);
             }
-            memory if MEMORY.contains(&memory) => {
-                let key = MEMORY.iter().find(|k| **k == memory).unwrap();
+            memory if let Some(key) = MEMORY.iter().find(|k| **k == memory) => {
                 f.memory.insert(key, value);
             }
             _ => return Err(usage(format_args!("unknown argument '{a}'"))),
@@ -660,7 +658,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 ripwire_max_rss_mb: f.max_rss_mb,
                 online: f.online()?,
                 memory: f.memory()?,
-                state_dir: f.state_dir.clone(),
+                state_dir: f.state_dir,
             }))
         }
         Some("__supervise") => {
@@ -895,7 +893,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             Ok(Command::Memory(MemoryCommand {
                 action,
                 workspace: f.workspace()?,
-                state_dir: f.state_dir.clone(),
+                state_dir: f.state_dir,
             }))
         }
         Some(other) => Err(usage(format_args!("unknown command '{other}'"))),
