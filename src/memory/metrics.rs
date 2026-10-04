@@ -36,6 +36,9 @@ impl Operation {
 pub struct Metrics {
     pub typing: Operation,
     pub relations: Operation,
+    pub consolidation: Operation,
+    /// Consolidation rounds run.
+    pub rounds: u64,
     /// Jobs that finished their planned stages (complete or partial).
     pub jobs_done: u64,
     pub jobs_failed: u64,
@@ -45,6 +48,8 @@ impl Metrics {
     pub fn add(&mut self, run: &Metrics) {
         self.typing.add(&run.typing);
         self.relations.add(&run.relations);
+        self.consolidation.add(&run.consolidation);
+        self.rounds += run.rounds;
         self.jobs_done += run.jobs_done;
         self.jobs_failed += run.jobs_failed;
     }

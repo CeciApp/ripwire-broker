@@ -124,6 +124,7 @@ impl Runtime {
                         return;
                     }
                 }
+                let _ = worker.consolidate(SystemClock.now_ms()).await;
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = tokio::time::sleep(tick) => {}
@@ -163,7 +164,7 @@ pub struct Drained {
 }
 
 /// `memory drain`: incorporates the spool and runs ready jobs, at most `max_jobs` and for at
-/// most `deadline`. A job cut by the deadline has used its run (runs are counted on disk), and
+/// most `deadline`, then a consolidation round if one came due. A job cut by the deadline has used its run (runs are counted on disk), and
 /// its lease is free for the next process.
 pub async fn drain(
     store: &Store,
@@ -204,6 +205,19 @@ pub async fn drain(
             }
             Ok(Ok(Some(_))) => jobs += 1,
             Ok(Ok(None)) => {
+                if worker.is_suspended() {
+                    return Ok(Drained {
+                        jobs,
+                        stop: DrainStop::Suspended,
+                    });
+                }
+                // No job is ready: a consolidation round that came due runs now.
+                let left = until.saturating_duration_since(tokio::time::Instant::now());
+                if let Ok(ran) =
+                    tokio::time::timeout(left, worker.consolidate(clock.now_ms())).await
+                {
+                    ran?;
+                }
                 let stop = match worker.is_suspended() {
                     true => DrainStop::Suspended,
                     false => DrainStop::Empty,

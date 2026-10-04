@@ -8,6 +8,7 @@
 //! hook never waits. One writer at a time incorporates them into a new generation and only then
 //! removes them: a crash in between replays the spool, and a replay is the same node.
 
+use super::consolidate::{self, Consolidation, PairDecision};
 use super::model::{Edge, EnrichmentState, Record, Rejected, Types};
 use super::queue::{Job, JobState, Lease, Ledger, MAX_RUNS, Outcome};
 use super::time::Sequence;
@@ -185,6 +186,8 @@ pub struct State {
     pub jobs: BTreeMap<String, Job>,
     /// Where the quota was before it had a file of its own; read only for such a store.
     pub ledger: Ledger,
+    /// The consolidation cadence, cursor and decisions (PRD jev-mem §9).
+    pub consolidation: Consolidation,
 }
 
 /// What one retention sweep did.
@@ -516,6 +519,7 @@ impl Store {
             state.nodes.remove(id);
             state.jobs.remove(id);
         }
+        state.consolidation.drop_nodes(&gone);
         state
             .edges
             .retain(|_, e| !gone.contains(&e.source) && !gone.contains(&e.target));
@@ -545,6 +549,7 @@ impl Store {
             state.jobs.remove(id);
             state.tombstones.insert(id.clone(), until_ms);
         }
+        state.consolidation.drop_nodes(&gone);
         state
             .edges
             .retain(|_, e| !gone.contains(&e.source) && !gone.contains(&e.target));
@@ -583,6 +588,7 @@ impl Store {
         let removed = state.nodes.len();
         state.jobs.clear();
         state.edges.clear();
+        state.consolidation = Consolidation::default();
         for id in std::mem::take(&mut state.nodes).into_keys() {
             state.tombstones.insert(id, until_ms);
         }
@@ -653,6 +659,7 @@ impl Store {
             taken = Some(Lease {
                 node_id: id.clone(),
                 run: job.runs,
+                at_ms: now_ms,
                 _lock: lock,
             });
             break;
@@ -707,6 +714,13 @@ impl Store {
             }
         };
         state.enriched += u64::from(newly_counted);
+        if newly_counted {
+            // Its pairs wait from now; an older wait is kept.
+            state
+                .consolidation
+                .pending_since_ms
+                .get_or_insert(lease.at_ms);
+        }
         self.write_snapshot(state.generation, &on_disk(&state)?)?;
         drop(lease);
         Ok(())
@@ -787,6 +801,43 @@ impl Store {
         }
         self.write_snapshot(state.generation, &bytes)?;
         Ok(true)
+    }
+
+    /// Ends a consolidation round in one new snapshot: the decisions about pairs whose
+    /// memories are still there unchanged, the counter at `seen_enriched`, the cursor when the
+    /// pairs were asked, and the wait restarted while pairs are still pending. Returns how many
+    /// pairs were decided.
+    pub fn commit_round(
+        &self,
+        seen_enriched: u64,
+        cursor: Option<String>,
+        decisions: Vec<(String, PairDecision)>,
+        model: &str,
+        now_ms: u64,
+    ) -> Result<usize, Refusal> {
+        let _writer = self.writer_waiting()?;
+        let mut state = self.load()?;
+        let intact = |state: &State, id: &str, hash: &str| {
+            state.nodes.get(id).is_some_and(|r| r.content_hash == hash)
+        };
+        let mut decided = 0;
+        for (key, d) in decisions {
+            if intact(&state, &d.pair.first, &d.hashes.0)
+                && intact(&state, &d.pair.second, &d.hashes.1)
+            {
+                state.consolidation.decisions.insert(key, d);
+                decided += 1;
+            }
+        }
+        let still = !consolidate::pending(&state, model).is_empty();
+        let c = &mut state.consolidation;
+        c.counted = c.counted.max(seen_enriched);
+        if cursor.is_some() {
+            c.cursor = cursor;
+        }
+        c.pending_since_ms = still.then_some(now_ms);
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
+        Ok(decided)
     }
 
     /// The explicit action that gives a failed job its runs back. `false` when it is not failed.

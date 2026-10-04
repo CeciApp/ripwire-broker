@@ -179,7 +179,7 @@ pub fn pair_edges(
     out
 }
 
-fn item(r: &Record) -> Value {
+pub(crate) fn item(r: &Record) -> Value {
     json!({
         "id": r.node_id,
         "content": r.content,
@@ -218,7 +218,7 @@ pub const MAX_ATTEMPTS: u32 = 4;
 pub const RUN_DEADLINE: std::time::Duration = std::time::Duration::from_millis(5_000);
 
 /// Why a request got no decisions.
-enum Failure {
+pub(crate) enum Failure {
     /// 401/403: the worker stops until reauthorized.
     Auth,
     /// A 429 whose wait does not fit the run: try again no sooner than this many ms.
@@ -231,15 +231,15 @@ enum Failure {
     Busy,
 }
 
-struct Budget {
-    attempts_left: u32,
-    deadline: tokio::time::Instant,
-    sent: usize,
+pub(crate) struct Budget {
+    pub(crate) attempts_left: u32,
+    pub(crate) deadline: tokio::time::Instant,
+    pub(crate) sent: usize,
 }
 
 /// One request, with at most one retry: for a transient failure, or a 429 whose wait fits the
 /// run. Every attempt is charged to the 24-hour quota first.
-async fn send(
+pub(crate) async fn send(
     store: &Store,
     classifier: &dyn MemoryClassifier,
     req: &StateRequest,
@@ -552,6 +552,35 @@ impl Worker {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(Some(ran))
+    }
+
+    /// Runs a consolidation round if one is due (PRD jev-mem §9); `None` when none is, when
+    /// another worker holds the workspace, or when the worker is suspended.
+    pub async fn consolidate(
+        &self,
+        now_ms: u64,
+    ) -> Result<Option<super::consolidate::Round>, Refusal> {
+        if self.is_suspended() {
+            return Ok(None);
+        }
+        let Some(_slot) = self.store.remote_slot()? else {
+            return Ok(None);
+        };
+        let cfg = super::consolidate::Config::new(&self.cfg.model);
+        let Some(round) =
+            super::consolidate::round(&self.store, &*self.classifier, &cfg, now_ms).await?
+        else {
+            return Ok(None);
+        };
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.consolidation.add(&round.metrics);
+        metrics.rounds += 1;
+        drop(metrics);
+        if round.auth_failed {
+            self.suspended
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(Some(round))
     }
 
     /// The live handle to [`Worker::metrics`], for the status resource.
