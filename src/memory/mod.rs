@@ -1,6 +1,6 @@
 //! Persistent per-workspace memory behind `--memory` (PRD `docs/jev-mem-prd.md`). The domain
-//! and the store compile in the default build, without a network stack (CA-10); the Jev
-//! controller lives behind the `online` feature.
+//! and the store compile in the default build, without a network stack (CA-10), and so does the
+//! controller; only its link to the HTTP client (`JevClient`) needs the `online` feature.
 
 pub mod admission;
 pub mod command;

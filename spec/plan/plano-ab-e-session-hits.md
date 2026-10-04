@@ -85,14 +85,16 @@ grafo do `cargo tree -e normal` fica idêntico (CA-10 intacto), e isso é confer
 
 ### Braços
 
-A união do §16.2 com o §23.15:
+A união do §16.2 com o §23.15, e os dois da memória (PRD jev-mem §14, D-141):
 
 | braço | MCP do agente |
 | --- | --- |
 | `none` | nenhum |
-| `ripwire` | `ripwire mcp` direto |
+| `ripwire` | `ripwire <workspace> --mcp` direto |
 | `broker` | `ripwire-broker serve` |
 | `broker-online` | `ripwire-broker serve --online` (só com a chave no ambiente, por consentimento) |
+| `broker-memory` | `ripwire-broker serve --memory` (implica `--online`; store próprio por rodada) |
+| `broker-memory-deterministic` | `serve --memory --memory-selection deterministic` (o controle, sem Jev para memória) |
 
 **Isolamento.** O agente de cada braço roda sem configuração nenhuma: o template padrão usa
 `--strict-mcp-config` e `--setting-sources local` (era `project` até o
@@ -120,8 +122,9 @@ média; ela aparece no relatório como inválida.
    - tempo até a primeira edição;
    - arquivos apresentados pelo broker (os `items[].path` dos envelopes, em ordem).
 4. Pontua contra a referência:
-   - arquivos modificados (`git status`) contra os arquivos do patch de referência: recall
-     e precisão;
+   - arquivos modificados (o diff contra o `base` da tarefa, mais os não rastreados, separados
+     por NUL, para contar também o que o agente commitou; D-143) contra os arquivos do patch de
+     referência: recall e precisão;
    - posição do primeiro arquivo correto apresentado;
    - testes de referência citados;
    - correção pelo comando `check` da tarefa (código de saída 0).
@@ -138,8 +141,10 @@ do desenho original levaria `2a646f3` para dentro da cópia do agente. O teste
 
 ### Barras (relatório)
 
-Cada barra sai como `pass`, `fail` ou `insuficiente`. É `insuficiente` quando o corpus não
-tem ≥ 30 tarefas e ≥ 3 repositórios, ou quando falta o braço.
+Cada barra sai como `passa`, `falha` ou `insuficiente`. Ela compara os dois braços sobre os
+pares (tarefa, repetição) válidos em ambos (D-144), e é `insuficiente` quando esses pares não
+cobrem ≥ 30 tarefas em ≥ 3 repositórios. Uma tarefa sem testes de referência não tem recall de
+testes, em vez de um recall cheio.
 
 - **§17, `broker` × `none`:**
   - tokens −35%;

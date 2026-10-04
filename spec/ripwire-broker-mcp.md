@@ -10,6 +10,7 @@
 > **Dependência principal:** servidor MCP do [Ripwire](https://github.com/redhat-et/ripwire)
 > **Postura padrão:** local, offline, read-only e com orçamento explícito de contexto
 > **Adaptador opcional:** `--online`, classificador semântico remoto desligado por padrão ([§23](#23-adaptador-opcional---online))
+> **Memória opcional:** `--memory`, memória persistente por workspace, experimental ([PRD jev-mem](../docs/jev-mem-prd.md), [§19](#memória-persistente---memory))
 > **Barra de status:** `ripwire-broker statusline` para o Claude Code, implementada e validada numa sessão real ([§24](#24-barra-de-status-do-claude-code))
 
 ---
@@ -582,7 +583,7 @@ o `explore` recebe o orçamento inteiro
   "tool": "context_for_task",
   "status": "ready",
   "intent": "change",
-  "summary": "change: focus validateToken (src/auth.ts:42); 7 items, 2 tests, 1 limitation",
+  "summary": "change: focus validateToken (src/auth.ts:42); found 7 items, 2 tests, 1 limitation",
   "items": [
     {
       "kind": "symbol",
@@ -654,7 +655,9 @@ Notas sobre o envelope implementado:
     remote_classifier`.
   Num processo `--online`, `context_for_task` exige 512 tokens.
 - `summary` é inferência determinística feita só com nomes, caminhos e contagens
-  ([D-016](changelog.md#d-016--resumo-limite-por-item-e-orçamento-mínimo)).
+  ([D-016](changelog.md#d-016--resumo-limite-por-item-e-orçamento-mínimo)). As contagens dizem o que
+  a análise achou, uma vez cada (depois do dedup e antes do orçamento), e por isso vêm com "found";
+  o que foi entregue está em `budget` ([D-144](changelog.md#d-144--auditoria-de-2026-10-04-os-achados-médios)).
 - A estimativa é `ceil(bytes do JSON serializado / 4)` sobre o envelope inteiro.
   O orçamento mínimo é 256
   ([D-007](changelog.md#d-007--orçamento-e-estimativa-de-tokens)).
@@ -1273,10 +1276,14 @@ Cada corpus deve executar a mesma tarefa em três braços:
 2. agente com Ripwire MCP direto;
 3. agente com `ripwire-broker`.
 
+A avaliação do `--online` (§23.15) acrescenta o `broker-online`, e a da memória
+([PRD jev-mem §14](../docs/jev-mem-prd.md#14-observabilidade-avaliação-e-critérios-de-aceitação)) os
+braços `broker-memory` e `broker-memory-deterministic` (D-141).
+
 **Estado:** o instrumento existe, o binário `ripwire-eval`
 ([plano](plan/plano-ab-e-session-hits.md),
-[D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real)). Ele roda os três
-braços e o `broker-online` do §23.15, extrai as métricas do §16.3–16.4 do transcript do agente e
+[D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real)). Ele roda os seis
+braços acima, extrai as métricas do §16.3–16.4 do transcript do agente e
 julga as barras do §17 e do §23.15. A medição real ainda não foi feita: depende da escolha dos
 repositórios e da autorização do gasto.
 
@@ -1498,6 +1505,15 @@ validação foram fechadas no D-129 a D-131 ([plano](plan/status-bar-plan.md), �
 Vem antes da Fase 6 por ser pequena, local e independente dela, e por tornar visível o uso dos hooks
 que a medição do §21.3 precisa.
 
+### Memória persistente (`--memory`)
+
+Fora da numeração original, com PRD e plano próprios
+([PRD jev-mem](../docs/jev-mem-prd.md), [plano](plan/jev-mem-plan.md)).
+
+**Estado:** Fases 0 a 5 do plano implementadas (D-136 a D-142), com as correções da auditoria nos
+D-143 e D-144; **experimental**. Pendentes: a validação nos hosts (T3.11), a rodada da avaliação
+(T5.3) e o fechamento (Fase 6 do plano).
+
 ### Fase 6 — Times e CI
 
 - Streamable HTTP autenticado;
@@ -1684,7 +1700,7 @@ e somente pelo `env` do servidor MCP é ***sem fonte na v0.1*** (§23.17).
 1. Ausência de `--online` **e** de `--memory` significa **zero chamada ao
    classificador** e nenhum cliente HTTP dele inicializado na execução normal.
    `--memory` implica `--online` ([PRD jev-mem §4](../docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento),
-   D-135); os comandos locais `memory status\|forget\|add\|resume` nunca usam a rede. O
+   D-135); os comandos locais `memory status\|forget\|add\|retry\|resume` nunca usam a rede. O
    CA-10 continua valendo sem alteração no build sem a feature `online`.
 2. Presença de `--online` significa consentimento explícito para enviar somente o
    conteúdo elegível da raiz configurada.
@@ -2052,7 +2068,8 @@ individual acima do limite gera `request_too_large`. O lote fecha antes de passa
 **Cooldown** [v0.1 §11.8]: ao receber `429`, interpretar `Retry-After` como segundos
 ou data HTTP; atualizar um deadline compartilhado com o maior valor observado;
 impedir novas tentativas até ele; permitir cancelamento durante a espera; não
-ocupar permit do semáforo enquanto só aguarda cooldown.
+ocupar permit do semáforo enquanto só aguarda cooldown. Um `Retry-After` acima de 30 s
+(`MAX_COOLDOWN`) não é esperado: a descoberta termina incompleta.
 
 **Retry e split** [v0.1 §11.9]: avaliação de fonte, até duas tentativas; lote de
 admissão com vários itens, uma tentativa; lote singleton, até duas; `429` pode ganhar
@@ -2091,7 +2108,8 @@ retornar `interrupted` quando ainda for possível responder. A relação com o
 processo (`--jev-max-in-flight`, um cliente compartilhado), sem segunda cota. Um workspace
 tem no máximo um job de memória falando com o provider por vez (lock de arquivo, entre
 processos), no máximo 4 tentativas por job (retries e divisões incluídos), um retry por lote
-para falha transitória, e um 429 só espera dentro do prazo de 5 s do job. 401/403 suspendem o
+para falha transitória, e um 429 só espera dentro do prazo de 5 s do job; um `Retry-After` maior
+adia o job por no máximo uma hora (D-143). 401/403 suspendem o
 worker até um novo processo. Cada workspace tem uma quota persistida de 1.000 tentativas e
 20.000 perguntas em 24 h móveis, cobrada antes de cada tentativa, que reinício e relógio
 atrasado não liberam. Ela fica em `quota.json`, fora do snapshot e com lock próprio, e as
@@ -2404,7 +2422,8 @@ live deve ser validada no Sprint 0 antes da implementação de produção
 ### 23.15 Avaliação e barras de merge
 
 **Braços** [v0.1 §23.1]: agente sem broker; `ripwire-broker` offline;
-`ripwire-broker --online`.
+`ripwire-broker --online`. Na avaliação da memória, o `--online` é o braço A, e os braços B
+(`broker-memory`) e C (`broker-memory-deterministic`) vêm do PRD jev-mem §14 (D-141).
 
 **Métricas** [v0.1 §23.2–23.4]:
 
