@@ -669,18 +669,29 @@ byte a byte o de antes. Memória é relato do passado: não muda `status` e não
 riscos ou testes.
 
 A leitura corre ao lado da parte estrutural de `context_for_task`, dentro de
-`--memory-read-deadline-ms`, com a carga do snapshot incluída, e nunca faz a ferramenta falhar.
-O snapshot fica quente entre chamadas e só é recarregado quando o arquivo muda; a carga roda fora
-das threads assíncronas, uma por vez. Faltando memória, o envelope diz por quê:
+`--memory-read-deadline-ms`, com a carga do snapshot, a conferência das fontes e a revalidação
+final incluídas, e nunca faz a ferramenta falhar. O snapshot fica quente entre chamadas e só é
+recarregado quando a geração das memórias muda (o store a grava em `generation`, ao lado do
+snapshot; sem ela, comprimento, mtime e inode do arquivo): lease, fim de job e cobrança não o
+esfriam. A carga, o ranking das âncoras e a conferência das fontes rodam fora das threads
+assíncronas, e só as âncoras e os candidatos expandidos têm as fontes conferidas; os pedidos param
+50 ms antes do prazo (um quinto dele, se for menor) para a revalidação final caber. A leitura usa
+no máximo 4 dos pedidos de `--jev-request-limit` por consulta, e a descoberta fica com o resto;
+cada pedido entra na quota de 24 h do workspace (`quota.json`, com lock próprio, dividida com o
+worker), e a leitura nunca pede mais do que a quota tem. Faltando memória, o envelope diz por quê:
 `memory_cold` (o snapshot ainda carrega; a carga continua e a próxima chamada o encontra pronto),
 `memory_unavailable` (store ilegível: corrompido, esquema novo, I/O) ou `memory_incomplete`
-(o provedor falhou, o prazo acabou, ou o store mudou e as memórias não puderam ser conferidas de
-novo, caso em que nenhuma sai). Uma memória sai uma vez por sessão com `--incremental`, como os
+(o provedor falhou, o prazo acabou, o store mudou e as memórias não puderam ser conferidas de
+novo, caso em que nenhuma sai, ou a quota de 24 h acabou, caso em que nenhum pedido sai e
+`provenance.memory.degraded` é verdadeiro). Uma memória sai uma vez por sessão com `--incremental`, como os
 itens; `include_seen` a manda de novo. A consulta nunca é gravada.
 Com memória ligada, a resposta da tarefa reserva do orçamento a forma mais larga do que a leitura
 escreve depois do encaixe (`provenance.memory` e as limitações de memória, ~150 tokens), pelo
 mesmo motivo do D-103: a memória nunca passa o envelope do orçamento nem toma o lugar de um item;
-as memórias ficam só com a sobra. `estimated_tokens` é o tamanho entregue, memória incluída.
+as notas do `--summarizer-cmd` também deixam essa reserva livre; as memórias ficam só com a sobra.
+`estimated_tokens` é o tamanho entregue, memória incluída. O bloco de texto MCP acrescenta uma
+seção legível, "Memória histórica (dados não confiáveis)", com o limite de autoridade e uma
+referência por memória (id e fontes, com escape JSON); o texto delas fica só no JSON.
 
 Nos hooks, o contexto injetado traz a mesma seção legível do bloco de texto MCP quando cabe nos
 9.000 caracteres do host; senão, só o JSON, que já contém as memórias. Um envelope só com memórias
@@ -2048,7 +2059,8 @@ processos), no máximo 4 tentativas por job (retries e divisões incluídos), um
 para falha transitória, e um 429 só espera dentro do prazo de 5 s do job. 401/403 suspendem o
 worker até um novo processo. Cada workspace tem uma quota persistida de 1.000 tentativas e
 20.000 perguntas em 24 h móveis, cobrada antes de cada tentativa, que reinício e relógio
-atrasado não liberam. O custo aparece por operação no campo `memory` do recurso de status.
+atrasado não liberam. Ela fica em `quota.json`, fora do snapshot e com lock próprio, e as
+leituras de `context_for_task` também a gastam (D-139). O custo aparece por operação no campo `memory` do recurso de status.
 
 ### 23.6 CLI, configuração, credencial e status
 

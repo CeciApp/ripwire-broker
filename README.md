@@ -70,7 +70,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
 | `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Being built** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects, enriches and reads memories back in `context_for_task`; the hooks do not deliver them yet |
 | `--memory-read-deadline-ms N` | `750` | 1–750; longest a task waits for memory |
-| `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read; 0 serves only the local index |
+| `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read, taken out of `--jev-request-limit` (discovery keeps the rest); 0 serves only the local index |
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
 | `--memory-retention-days N` | `30` | 1–365 |
 | `--memory-max-nodes N` | `2000` | 1–2000 memories per workspace |
@@ -317,8 +317,9 @@ its answers came back; an unknown answer is never read as no. Each job gets four
 attempts at most, one retry for a transient failure, and waits for a 429 only inside its 5 s;
 401/403 stops the worker until the server restarts. One job per workspace talks to the provider
 at a time, memory and discovery share the four requests in flight, and the workspace has a
-persisted budget of 1,000 attempts and 20,000 questions per 24 hours that a restart or a clock
-set back does not reset; with it spent, jobs stay pending and keep their runs. A job runs twice at
+persisted budget of 1,000 attempts and 20,000 questions per 24 hours, shared with the reads and
+kept in its own file (`quota.json`), that a restart or a clock set back does not reset; with it
+spent, jobs stay pending and keep their runs. A job runs twice at
 most and then waits for `memory retry`. The worker stops with the server; what it did not
 finish waits on disk.
 The status resource's `memory` field adds what the worker cost, by operation (typing,
@@ -331,16 +332,27 @@ and adds at most three memories (600 tokens, a fifth of the budget) in a `memori
 never changes `status`. When it is missing the answer says why: `memory_cold` (a large snapshot
 is still loading; the next call finds it warm), `memory_unavailable` (the store cannot be read)
 or `memory_incomplete` (the provider failed, time ran out, or the store changed under the read,
-in which case none goes out). With `--incremental` a memory goes out once per session. The task
-text is sent to the classifier and never written to disk. With memory on, a task answer holds
-back about 150 tokens of its budget for that record, so memory never pushes it past the budget
-nor takes the place of an item; memories only get what is left over.
+in which case none goes out, or the 24-hour budget is spent, in which case no request is sent).
+With `--incremental` a memory goes out once per session. The task text is sent to the classifier
+and never written to disk. A read takes at most four of `--jev-request-limit`'s requests per call
+and discovery the rest (the status shows discovery's share), and what it sends is charged to the
+workspace's 24-hour budget. Only the memories a read is about to use have their sources checked,
+off the async threads and inside the deadline, so a large store never holds the structural answer
+up. With memory on, a task answer holds back about 150 tokens of its budget for that record, so
+memory never pushes it past the budget nor takes the place of an item, with or without notes;
+memories only get what is left over. The MCP text block adds a readable section that says the
+memories are untrusted history and names each one by id and sources; their text is in the JSON
+only, never twice.
 
 **In the hooks:** a hook never reads memory, since it makes no HTTP request, so a hook's context
 carries no memories today. The hooks are ready for them: an answer with only memories counts as
 content, a memory the session was not told is news, and the injected context gets the same
 readable section as the MCP text block when it fits the host's 9,000 characters (the memories
 stay in the JSON either way). `#ripwire-off` stops injection for that session only.
+
+**Hosts: not validated.** Whether Claude Code and Codex actually use the `memories` field or the
+readable section has not been checked in a real session yet
+([plan](spec/plan/jev-mem-plan.md), T3.11); until it is, neither host counts as consuming memory.
 
 **Forgetting:** forgetting a memory removes it, every note derived from it and its pending
 copies, in a new generation, and keeps its id from coming back for the retention period, even
