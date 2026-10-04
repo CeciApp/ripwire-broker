@@ -245,9 +245,8 @@ fn merge_statusline(mut settings: Value, command: &str) -> Value {
 }
 
 fn user_settings() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
+    crate::state::env_dir("CLAUDE_CONFIG_DIR")
+        .or_else(|| crate::state::env_dir("HOME").map(|h| h.join(".claude")))
         .map(|d| d.join("settings.json"))
 }
 
@@ -454,7 +453,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
             let home = args
                 .codex_home
                 .clone()
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+                .or_else(|| crate::state::env_dir("HOME").map(|h| h.join(".codex")))
                 .ok_or("no HOME: pass --codex-home")?;
             let mut extra = String::new();
             if args.online {

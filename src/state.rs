@@ -9,6 +9,15 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// A directory named by an environment variable: only a non-empty absolute path. An empty or
+/// relative value would resolve against the current directory, which for a hook is the
+/// workspace; it counts as unset (the XDG specification says to ignore a relative one).
+pub fn env_dir(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
 pub struct StateStore {
     dir: PathBuf,
 }
@@ -20,9 +29,8 @@ impl StateStore {
 
     /// `$XDG_STATE_HOME/ripwire-broker`, else `~/.local/state/ripwire-broker`.
     pub fn default_dir() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+        let base = env_dir("XDG_STATE_HOME")
+            .or_else(|| env_dir("HOME").map(|h| h.join(".local/state")))?;
         Some(base.join("ripwire-broker"))
     }
 

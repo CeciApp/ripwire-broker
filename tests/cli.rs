@@ -4595,3 +4595,78 @@ fn memory_retry_brings_failed_jobs_back() {
         "local only"
     );
 }
+
+// --- audit of 2026-10-04 (D-143) ---
+
+#[test]
+fn an_empty_or_relative_directory_variable_never_puts_state_in_the_workspace() {
+    use std::io::Write as _;
+    let ws = common::sample_repo();
+    for value in ["", "relative/state"] {
+        let home = tempfile::tempdir().unwrap();
+        // A hook runs with the workspace as its directory.
+        let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+            .current_dir(ws.path())
+            .args([
+                "hook",
+                "claude-code",
+                "user-prompt-submit",
+                "--workspace",
+                ws.path().to_str().unwrap(),
+                "--ripwire",
+                "/nonexistent/ripwire",
+            ])
+            .env("XDG_STATE_HOME", value)
+            .env("HOME", home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(prompt_event(ws.path(), "s-1", "hello").as_bytes())
+            .unwrap();
+        child.wait().unwrap();
+        assert!(
+            !ws.path().join("ripwire-broker").exists() && !ws.path().join("relative").exists(),
+            "XDG_STATE_HOME={value:?}: nothing in the workspace"
+        );
+        assert!(
+            home.path().join(".local/state/ripwire-broker").exists(),
+            "XDG_STATE_HOME={value:?}: the default under HOME"
+        );
+
+        // The installer reads the user's settings, likewise: here, a bar of their own that ours
+        // would shadow, so nothing is written.
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/settings.json"),
+            r#"{"statusLine": {"type": "command", "command": "my-own-bar"}}"#,
+        )
+        .unwrap();
+        let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+            .current_dir(ws.path())
+            .args([
+                "install",
+                "claude-code",
+                "--workspace",
+                ws.path().to_str().unwrap(),
+                "--statusline",
+                "--write",
+            ])
+            .env("CLAUDE_CONFIG_DIR", value)
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let project = std::fs::read_to_string(ws.path().join(".claude/settings.json"))
+            .unwrap_or_default();
+        assert!(
+            !project.contains("statusLine"),
+            "CLAUDE_CONFIG_DIR={value:?}: the user's own bar was seen: {project}"
+        );
+    }
+}
