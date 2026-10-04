@@ -1744,3 +1744,25 @@ sleep 30
         .success();
     assert!(!alive, "the check's process went with it");
 }
+
+#[test]
+fn the_agent_is_never_handed_the_source_repository_or_the_fix() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let task = |env: Value| {
+        let mut t = auth_task("t", repo.path(), &head, None);
+        t["env"] = env;
+        t
+    };
+    // `env` reaches the agent: with the source repository's path, `git log --all` there is the
+    // answer. Commands may name them; `env` may not.
+    for (var, value) in [("SRC", "{repo}"), ("ANSWER", "x{fix}y")] {
+        let corpus: Corpus =
+            serde_json::from_value(json!({"tasks": [task(json!({ var: value }))]})).unwrap();
+        let errors = corpus.validate().unwrap_err().join("\n");
+        assert!(errors.contains(var) && errors.contains("env"), "{errors}");
+    }
+    let run_only: Corpus =
+        serde_json::from_value(json!({"tasks": [task(json!({"DB": "db_{run}"}))]})).unwrap();
+    assert_eq!(run_only.validate(), Ok(()));
+}

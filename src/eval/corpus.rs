@@ -38,8 +38,8 @@ pub struct Task {
     #[serde(default)]
     pub teardown: Option<String>,
     /// Environment for setup, agent, check and teardown. `{run}` becomes the run's id, safe for
-    /// a database name, so that runs never share state. The commands also take `{run}`, plus
-    /// `{repo}` (the source repository) and `{fix}`.
+    /// a database name, so that runs never share state; `{repo}` and `{fix}` are refused here,
+    /// since the agent sees this environment. The commands take all three.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Tasks with the same sequence are sessions of one history (PRD jev-mem §14): they run in
@@ -104,6 +104,17 @@ impl Corpus {
         // would carry over.
         let mut sequences: BTreeMap<&str, &Path> = BTreeMap::new();
         for t in &self.tasks {
+            // `env` reaches the agent too: the source repository's path or the fix would hand
+            // it the answer (`git log --all` there). Only the commands may name them.
+            for (k, v) in &t.env {
+                if v.contains("{repo}") || v.contains("{fix}") {
+                    errors.push(format!(
+                        "{}: env {k} names {{repo}} or {{fix}}, which the agent would see; only \
+                         setup, check and teardown may",
+                        t.id
+                    ));
+                }
+            }
             match t.sequence.as_deref() {
                 Some("") => errors.push(format!("{}: empty sequence name", t.id)),
                 Some(s) => {
