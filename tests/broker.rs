@@ -3212,3 +3212,21 @@ async fn notes_and_memory_together_stay_inside_the_budget() {
         assert!(env.provenance.memory.is_some());
     }
 }
+
+/// An empty task is invalid input, refused before ripwire is asked (D-148). The schema says
+/// `minLength: 1` but nothing enforced it, and ripwire's refusal became `upstream_refused`.
+#[tokio::test]
+async fn an_empty_task_is_invalid_input() {
+    for task in ["", "   \n"] {
+        let (b, fake, _ws) =
+            broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+
+        let err = b
+            .context_for_task(TaskRequest::new(task))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.error, "invalid_input", "{task:?}: {err:?}");
+        assert!(fake.called().is_empty(), "{task:?}: ripwire was asked");
+    }
+}

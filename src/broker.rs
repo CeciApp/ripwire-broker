@@ -954,6 +954,13 @@ impl Broker {
     /// §10). Memory only adds to the answer: it never fails it and never changes its status.
     async fn context_for_task_inner(&self, req: TaskRequest) -> Result<Envelope, BrokerError> {
         check_budget_at(req.budget_tokens, self.min_task_budget())?;
+        // The schema's `minLength: 1`, enforced: ripwire's refusal would read as `upstream_refused`.
+        if req.task.trim().is_empty() {
+            return Err(BrokerError {
+                error: "invalid_input",
+                message: "task is empty".into(),
+            });
+        }
         let recall = async {
             match &self.recall {
                 Some(r) => Some(r.read(&req.task).await),
