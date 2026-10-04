@@ -307,7 +307,7 @@ fn change(path: PathBuf, edit: impl FnOnce(Value) -> Value) -> Result<Change, St
 }
 
 /// The variable the server reads its credential from (PRD §23.6).
-const KEY_VAR: &str = "RIPWIRE_BROKER_JEV_API_KEY";
+use crate::online::KEY_VAR;
 
 /// Shown with every `--online` install (PRD §23.6: mandatory in the documentation of the flag).
 const CONSENT: &str =

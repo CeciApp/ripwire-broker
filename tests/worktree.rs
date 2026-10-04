@@ -1,4 +1,6 @@
 //! The working-tree fingerprint (D-129): which files a shell command changed, from `git status`.
+mod common;
+
 use ripwire_broker::worktree::{
     Fingerprint, MAX_FINGERPRINT_ENTRIES, Unusable, changed, fingerprint, fingerprint_within,
 };
@@ -208,4 +210,65 @@ fn a_held_index_lock_does_not_stop_the_fingerprint() {
         "index untouched"
     );
     assert!(lock.exists(), "the user's lock is left alone");
+}
+
+/// `git` never receives the provider key (D-146). The test runs its own binary again with a spy
+/// `git` first on the `PATH` and the key in the child's environment only; the child is the ignored
+/// test below.
+#[test]
+fn git_never_inherits_the_provider_key() {
+    let dir = repo();
+    let bin = tempfile::tempdir().unwrap();
+    let seen = bin.path().join("seen");
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let spy = bin.path().join("git");
+    common::write_executable(
+        &spy,
+        format!(
+            "#!/bin/sh\nprintf 'key=%s\\n' \"${{RIPWIRE_BROKER_JEV_API_KEY-}}\" >> '{}'\nexec '{}' \"$@\"\n",
+            seen.display(),
+            real_git.trim()
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "the_fingerprint_runs_with_the_key_in_this_process",
+            "--ignored",
+        ])
+        .env("PATH", path)
+        .env("RIPWIRE_BROKER_JEV_API_KEY", "tok-git-leak")
+        .env("RIPWIRE_BROKER_TEST_REPO", root_of(&dir))
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let seen = std::fs::read_to_string(&seen).unwrap();
+    assert!(seen.starts_with("key=\n"), "{seen}");
+    assert!(!seen.contains("tok-git-leak"), "{seen}");
+}
+
+/// Only meaningful when started by the test above.
+#[test]
+#[ignore = "started by git_never_inherits_the_provider_key"]
+fn the_fingerprint_runs_with_the_key_in_this_process() {
+    let Ok(root) = std::env::var("RIPWIRE_BROKER_TEST_REPO") else {
+        return;
+    };
+    assert!(std::env::var("RIPWIRE_BROKER_JEV_API_KEY").is_ok());
+
+    assert!(fingerprint(Path::new(&root)).is_ok());
 }

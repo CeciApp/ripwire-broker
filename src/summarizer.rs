@@ -55,6 +55,7 @@ impl CommandSummarizer {
             let vargv = split_command(v)?;
             let out = std::process::Command::new(&vargv[0])
                 .args(&vargv[1..])
+                .env_remove(crate::online::KEY_VAR)
                 .stdin(Stdio::null())
                 .output()
                 .map_err(|e| format!("{}: {e}", vargv[0]))?;
@@ -77,8 +78,10 @@ impl CommandSummarizer {
 impl Summarizer for CommandSummarizer {
     async fn summarize(&self, prompt: &str) -> Result<String, String> {
         let program = &self.argv[0];
+        // The model is someone else's program: it never sees the provider key (D-146).
         let mut child = tokio::process::Command::new(program)
             .args(&self.argv[1..])
+            .env_remove(crate::online::KEY_VAR)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

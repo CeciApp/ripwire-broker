@@ -165,6 +165,7 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, Unusabl
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
+        .env_remove(crate::online::KEY_VAR)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

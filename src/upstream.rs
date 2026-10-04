@@ -140,7 +140,10 @@ async fn launch(config: &UpstreamConfig) -> Result<Arc<ClientRuntime>, UpstreamE
         timeout: config.timeout * 2,
         ..Default::default()
     };
-    let transport = StdioTransport::create_with_server_launch(program, args, None, options)
+    // The SDK only adds variables to the inherited environment: the key is overridden with an
+    // empty value, which reads as unset, so ripwire never receives it (D-146).
+    let env = std::collections::HashMap::from([(crate::online::KEY_VAR.into(), String::new())]);
+    let transport = StdioTransport::create_with_server_launch(program, args, Some(env), options)
         .map_err(|e| UpstreamError::Unavailable(e.to_string()))?;
     let details = ClientDetails {
         client_info: Implementation {
@@ -286,6 +289,7 @@ pub fn binary_stamp(binary: &Path) -> Option<(String, u64, u64)> {
 pub fn ripwire_version(binary: &std::path::Path) -> String {
     std::process::Command::new(binary)
         .arg("--version")
+        .env_remove(crate::online::KEY_VAR)
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())

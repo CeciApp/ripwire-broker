@@ -241,6 +241,7 @@ async fn probe_from_env(_: &DoctorArgs) -> Check {
 fn git_history(r: &mut Report, ws: &std::path::Path) {
     let head = std::process::Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .env_remove(crate::online::KEY_VAR)
         .current_dir(ws)
         .output();
     match head {

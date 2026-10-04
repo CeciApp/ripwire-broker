@@ -3,7 +3,7 @@
 
 use secrecy::{ExposeSecret, SecretString};
 
-pub const ENV_VAR: &str = "RIPWIRE_BROKER_JEV_API_KEY";
+pub const ENV_VAR: &str = super::KEY_VAR;
 
 /// A redacted token: `Debug` never shows it, and there is no `Serialize` or `Display`.
 #[derive(Debug)]
