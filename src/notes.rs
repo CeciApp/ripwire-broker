@@ -5,7 +5,6 @@
 use crate::model::{Basis, Item, Limitation, Note, Source, Untrusted};
 use crate::summarizer::Summarizer;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -101,12 +100,7 @@ pub fn prompt(scope: &str, evidence: &str) -> String {
 
 /// Changing the prompt version, the model or any evidence gives a new key (PRD 10.3).
 pub fn key(model_id: &str, scope: &str, evidence: &str) -> String {
-    let mut h = Sha256::new();
-    for part in [PROMPT_VERSION, model_id, scope, evidence] {
-        h.update(part.len().to_le_bytes());
-        h.update(part.as_bytes());
-    }
-    format!("{:x}", h.finalize())
+    crate::memory::identity::hash(&[PROMPT_VERSION, model_id, scope, evidence])
 }
 
 /// Terminal escape sequences out whole: CSI (`ESC [ … final`) and OSC (`ESC ] … BEL|ST`).

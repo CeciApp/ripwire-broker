@@ -2,7 +2,6 @@
 
 use crate::model::{Item, Note, Risk, TestItem};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 
 /// `why_included` of an item already delivered unchanged in this session.
@@ -33,12 +32,7 @@ impl PartialEq for SessionMemory {
 }
 
 fn digest(parts: &[&str]) -> String {
-    let mut h = Sha256::new();
-    for p in parts {
-        h.update(p.len().to_le_bytes());
-        h.update(p.as_bytes());
-    }
-    format!("{:x}", h.finalize())
+    crate::memory::identity::hash(parts)
 }
 
 /// Location, name, signature and body: a changed body is a different item.

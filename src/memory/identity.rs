@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 /// SHA-256 in hex over the components, each preceded by its length: moving a boundary between
 /// components is another identity.
+/// The crate's one framed SHA-256: each part prefixed by its length, so no two lists of parts
+/// collide. Note keys and session fingerprints use it too.
 pub fn hash(parts: &[&str]) -> String {
     let mut h = Sha256::new();
     for p in parts {
