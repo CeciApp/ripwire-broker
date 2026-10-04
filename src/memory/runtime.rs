@@ -168,9 +168,26 @@ pub struct Drained {
     pub stop: DrainStop,
 }
 
+/// No job is ready: a consolidation round that came due runs in the time left (none while the
+/// worker is suspended). Then how the drain stops.
+async fn idle(
+    worker: &Worker,
+    clock: &dyn Clock,
+    until: tokio::time::Instant,
+) -> Result<DrainStop, Refusal> {
+    let left = until.saturating_duration_since(tokio::time::Instant::now());
+    if let Ok(ran) = tokio::time::timeout(left, worker.consolidate(clock.now_ms())).await {
+        ran?;
+    }
+    Ok(match worker.is_suspended() {
+        true => DrainStop::Suspended,
+        false => DrainStop::Empty,
+    })
+}
+
 /// `memory drain`: incorporates the spool and runs ready jobs, at most `max_jobs` and for at
-/// most `deadline`, then a consolidation round if one came due. A job cut by the deadline has used its run (runs are counted on disk), and
-/// its lease is free for the next process.
+/// most `deadline`, then a consolidation round if one came due. A job cut by the deadline has
+/// used its run (runs are counted on disk), and its lease is free for the next process.
 pub async fn drain(
     store: &Store,
     worker: &Worker,
@@ -210,23 +227,7 @@ pub async fn drain(
             }
             Ok(Ok(Some(_))) => jobs += 1,
             Ok(Ok(None)) => {
-                if worker.is_suspended() {
-                    return Ok(Drained {
-                        jobs,
-                        stop: DrainStop::Suspended,
-                    });
-                }
-                // No job is ready: a consolidation round that came due runs now.
-                let left = until.saturating_duration_since(tokio::time::Instant::now());
-                if let Ok(ran) =
-                    tokio::time::timeout(left, worker.consolidate(clock.now_ms())).await
-                {
-                    ran?;
-                }
-                let stop = match worker.is_suspended() {
-                    true => DrainStop::Suspended,
-                    false => DrainStop::Empty,
-                };
+                let stop = idle(worker, clock, until).await?;
                 return Ok(Drained { jobs, stop });
             }
             Ok(Err(e)) => return Err(e),

@@ -527,11 +527,9 @@ fn gated(
 }
 
 fn notes(store: &Store) -> Vec<Record> {
-    let s = store.load().unwrap();
-    s.nodes
-        .into_values()
-        .filter(|r| r.kind == Kind::DerivedNote)
-        .collect()
+    let mut nodes = store.load().unwrap().nodes;
+    nodes.retain(|_, r| r.kind == Kind::DerivedNote);
+    nodes.into_values().collect()
 }
 
 const TWO: [&str; 2] = ["cache layer change one", "cache layer change two"];
