@@ -20,8 +20,15 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT: &str = "snapshot.json";
+/// The generation of the last snapshot written, beside it: what tells a kept copy of the
+/// memories is still current without reading the snapshot.
+const GENERATION: &str = "generation";
 const SPOOL: &str = "spool";
 const LOCK: &str = "lock";
+/// The 24-hour quota, apart from the snapshot: charging it rewrites a few entries, never the
+/// memories, and never waits on their writer.
+const QUOTA: &str = "quota.json";
+const QUOTA_LOCK: &str = "quota.lock";
 /// Written by `forget --all`; only `memory resume` removes it (PD-4).
 const REVOKED: &str = "revoked";
 /// Lease lock files, one per job; a held lock is a live run.
@@ -176,6 +183,7 @@ pub struct State {
     pub enriched: u64,
     /// Enrichment jobs, by `node_id`.
     pub jobs: BTreeMap<String, Job>,
+    /// Where the quota was before it had a file of its own; read only for such a store.
     pub ledger: Ledger,
 }
 
@@ -200,6 +208,17 @@ fn on_disk(state: &State) -> Result<Vec<u8>, Unavailable> {
         state: state.clone(),
     })
     .map_err(|_| Unavailable::Io)
+}
+
+/// What identifies the memories on disk, for a copy kept in memory to be compared with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Version {
+    Generation(u64),
+    File {
+        len: u64,
+        modified: std::time::SystemTime,
+        inode: u64,
+    },
 }
 
 pub struct Store {
@@ -229,20 +248,53 @@ impl Store {
         Ok(self.read()?.unwrap_or_default())
     }
 
+    /// What identifies the memories on disk now, without reading the snapshot; `None` without
+    /// one. The generation beside it changes only when a memory or a relation does, so writes
+    /// that change neither (a quota charge, a lease, a finished job) leave it alone. Without that
+    /// record, the snapshot file itself: length, modification time and inode, which a rename to
+    /// a new file always changes.
+    pub fn snapshot_version(&self) -> Option<Version> {
+        let meta = fs::symlink_metadata(self.dir.join(SNAPSHOT)).ok()?;
+        let generation = fs::read_to_string(self.dir.join(GENERATION))
+            .ok()
+            .and_then(|g| g.trim().parse().ok());
+        Some(match generation {
+            Some(g) => Version::Generation(g),
+            None => Version::File {
+                len: meta.len(),
+                modified: meta.modified().ok()?,
+                inode: std::os::unix::fs::MetadataExt::ino(&meta),
+            },
+        })
+    }
+
     /// Publishes `state` as the new generation, unless the current one cannot be read.
     pub fn publish(&self, state: &State) -> Result<(), Unavailable> {
         self.read()?;
-        self.write_snapshot(&on_disk(state)?)
+        self.write_snapshot(state.generation, &on_disk(state)?)
     }
 
-    fn write_snapshot(&self, bytes: &[u8]) -> Result<(), Unavailable> {
+    /// Writes the snapshot of `generation`, then the record of it: a reader that sees the new
+    /// generation finds the new snapshot.
+    fn write_snapshot(&self, generation: u64, bytes: &[u8]) -> Result<(), Unavailable> {
         crate::state::write_private(&self.dir, &self.dir.join(SNAPSHOT), bytes)
+            .and_then(|()| {
+                crate::state::write_private(
+                    &self.dir,
+                    &self.dir.join(GENERATION),
+                    generation.to_string().as_bytes(),
+                )
+            })
             .and_then(|()| fs::File::open(&self.dir)?.sync_all())
             .map_err(|_| Unavailable::Io)
     }
 
     /// The exclusive writer, held until dropped. Never waits: a held store is [`Refusal::Locked`].
     pub fn writer(&self) -> Result<fs::File, Refusal> {
+        self.lock(LOCK)
+    }
+
+    fn lock(&self, name: &str) -> Result<fs::File, Refusal> {
         self.check_dir()?;
         fs::DirBuilder::new()
             .recursive(true)
@@ -255,7 +307,7 @@ impl Store {
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(self.dir.join(LOCK))
+            .open(self.dir.join(name))
             .map_err(|_| Unavailable::Io)?;
         match file.try_lock() {
             Ok(()) => Ok(file),
@@ -428,7 +480,7 @@ impl Store {
             if bytes.len() as u64 > self.limits.snapshot_bytes {
                 return Err(Refusal::Full(Full::Snapshot));
             }
-            self.write_snapshot(&bytes)?;
+            self.write_snapshot(state.generation, &bytes)?;
         }
         if crash == Some(Step::AfterPublish) {
             return Err(Refusal::Crashed);
@@ -472,7 +524,7 @@ impl Store {
         }
         state.tombstones.retain(|_, until| *until > now_ms);
         state.trusted_ms = now_ms;
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(Swept {
             removed: gone.len(),
             suspended: false,
@@ -497,7 +549,7 @@ impl Store {
             .edges
             .retain(|_, e| !gone.contains(&e.source) && !gone.contains(&e.target));
         state.generation += 1;
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         let spool = self.dir.join(SPOOL);
         let _ = fs::remove_file(spool.join(name));
         for id in gone.iter().filter(|id| *id != node_id) {
@@ -535,7 +587,7 @@ impl Store {
             state.tombstones.insert(id, until_ms);
         }
         state.generation += 1;
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(removed)
     }
 
@@ -559,7 +611,7 @@ impl Store {
     /// Takes the next job that may run at `now_ms`: a pending one past its time, or a leased
     /// one whose holder is gone (its lease lock can be taken). A job out of runs fails instead.
     pub fn lease_next(&self, now_ms: u64) -> Result<Option<Lease>, Refusal> {
-        let _writer = self.writer()?;
+        let _writer = self.writer_waiting()?;
         let mut state = self.load()?;
         let leases = self.dir.join(LEASES);
         fs::DirBuilder::new()
@@ -606,7 +658,7 @@ impl Store {
             break;
         }
         if changed {
-            self.write_snapshot(&on_disk(&state)?)?;
+            self.write_snapshot(state.generation, &on_disk(&state)?)?;
         }
         Ok(taken)
     }
@@ -655,7 +707,7 @@ impl Store {
             }
         };
         state.enriched += u64::from(newly_counted);
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         drop(lease);
         Ok(())
     }
@@ -674,7 +726,7 @@ impl Store {
             n += 1;
         }
         if n > 0 {
-            self.write_snapshot(&on_disk(&state)?)?;
+            self.write_snapshot(state.generation, &on_disk(&state)?)?;
         }
         Ok(n)
     }
@@ -733,7 +785,7 @@ impl Store {
                 return Err(Refusal::Full(Full::Snapshot));
             }
         }
-        self.write_snapshot(&bytes)?;
+        self.write_snapshot(state.generation, &bytes)?;
         Ok(true)
     }
 
@@ -749,26 +801,66 @@ impl Store {
             return Ok(false);
         };
         (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
-        self.write_snapshot(&on_disk(&state)?)?;
+        self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(true)
+    }
+
+    /// The 24-hour quota spent so far, by every process. A store from before the quota had its
+    /// own file still has it in the snapshot.
+    pub fn ledger(&self) -> Result<Ledger, Unavailable> {
+        match self.quota_file()? {
+            Some(ledger) => Ok(ledger),
+            None => Ok(self.load()?.ledger),
+        }
+    }
+
+    /// The quota's own file, without the snapshot; `None` before anything was charged to it.
+    pub fn quota_file(&self) -> Result<Option<Ledger>, Unavailable> {
+        if !self.check_dir()? {
+            return Ok(None);
+        }
+        read_checked(&self.dir.join(QUOTA), self.limits.snapshot_bytes)?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| Unavailable::Corrupt))
+            .transpose()
+    }
+
+    /// `change` applied to the quota under its own lock, waiting up to [`WRITER_WAIT`] for it.
+    fn quota<T>(&self, change: impl FnOnce(&mut Ledger) -> T) -> Result<T, Refusal> {
+        let until = std::time::Instant::now() + WRITER_WAIT;
+        let _lock = loop {
+            match self.lock(QUOTA_LOCK) {
+                Err(Refusal::Locked) if std::time::Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => break other?,
+            }
+        };
+        let mut ledger = self.ledger()?;
+        let out = change(&mut ledger);
+        let bytes = serde_json::to_vec(&ledger).map_err(|_| Unavailable::Io)?;
+        crate::state::write_private(&self.dir, &self.dir.join(QUOTA), &bytes)
+            .and_then(|()| fs::File::open(&self.dir)?.sync_all())
+            .map_err(|_| Unavailable::Io)?;
+        Ok(out)
     }
 
     /// Charges the 24-hour quota before a request is sent; refused, nothing is sent.
     pub fn charge(&self, now_ms: u64, attempts: u32, questions: u32) -> Result<(), Refusal> {
-        let _writer = self.writer_waiting()?;
-        let mut state = self.load()?;
-        let fits = state.ledger.charge(
-            now_ms,
-            attempts,
-            questions,
-            self.limits.attempts_per_day,
-            self.limits.questions_per_day,
-        );
-        self.write_snapshot(&on_disk(&state)?)?;
-        match fits {
+        let (max_attempts, max_questions) =
+            (self.limits.attempts_per_day, self.limits.questions_per_day);
+        match self.quota(|l| l.charge(now_ms, attempts, questions, max_attempts, max_questions))? {
             true => Ok(()),
             false => Err(Refusal::Full(Full::Quota)),
         }
+    }
+
+    /// Records requests a read already sent (PRD jev-mem §8.2): nothing is refused.
+    pub fn spend(&self, now_ms: u64, attempts: u32, questions: u32) -> Result<(), Refusal> {
+        self.quota(|l| l.record(now_ms, attempts, questions))
+    }
+
+    pub fn limits(&self) -> &Limits {
+        &self.limits
     }
 
     /// A temporary older than [`DEAD_TEMPORARY`] belongs to a writer that died between create and

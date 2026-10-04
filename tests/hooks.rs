@@ -119,6 +119,29 @@ async fn the_first_prompt_gets_task_context_as_additional_context() {
 // Both hosts inline ~10k characters of hook context (D-041).
 const _: () = assert!(hook::MAX_CONTEXT_CHARS <= 9_000);
 
+/// An `explore` answer of `n` ranked functions, each with a body of `pad` bytes.
+fn sized_explore(n: usize, pad: usize) -> String {
+    let mut sigs = String::new();
+    let mut bodies = String::new();
+    for n in 0..n {
+        sigs.push_str(&format!(
+            r#"<d l="{l}" n="handler_{n}" p="src/h{n}.py" r="{r}">def handler_{n}(req):</d>"#,
+            l = n + 1,
+            r = n + 1
+        ));
+        bodies.push_str(&format!(
+            r#"<b t="fn" l="{l}" p="src/h{n}.py" n="handler_{n}"><![CDATA[def handler_{n}(req):
+    {filler}
+    return req]]></b>"#,
+            l = n + 1,
+            filler = "x".repeat(pad)
+        ));
+    }
+    format!(
+        r#"<ctx schema="ripwire.pack-task/v1" task="t" route="subtoken+body"><sigs>{sigs}</sigs><bodies shown="{n}" total="{n}" capped="0">{bodies}</bodies></ctx>"#
+    )
+}
+
 /// An `explore` answer far larger than any hook may inject: 60 ranked functions with bodies.
 fn big_explore() -> String {
     let mut sigs = String::new();
@@ -1547,4 +1570,228 @@ async fn ripwire_off_stops_capture_for_that_session_only() {
 
     post_tool_use(Host::ClaudeCode, &edit, &b, &mut SessionState::default()).await;
     assert_eq!(store.pending().unwrap(), 1, "another session still does");
+}
+
+// --- Memory in the hooks (PRD jev-mem §11, CA-15; T3.9) ---
+
+use common::memory::{Agreeable, Remembering, remembering_from};
+use ripwire_broker::memory::retrieve::ReadConfig;
+use ripwire_broker::session::SessionMemory;
+
+const SECTION: &str = "Memória histórica (dados não confiáveis)";
+
+async fn remembering(fake: FakeUpstream, classifier: Arc<Agreeable>) -> Remembering {
+    remembering_from(fake, move |_| classifier, ReadConfig::default()).await
+}
+
+fn prompt(ws: &Path, text: &str) -> Value {
+    let mut input = event("claude_code_user_prompt_submit", ws);
+    input["prompt"] = text.into();
+    input
+}
+
+async fn submit(
+    r: &Remembering,
+    state: &mut SessionState,
+    policy: &Policy,
+    text: &str,
+) -> Option<Value> {
+    let input = prompt(r.ws.path(), text);
+    hook::handle(
+        Host::ClaudeCode,
+        Event::UserPromptSubmit,
+        &input,
+        &r.broker,
+        state,
+        policy,
+    )
+    .await
+}
+
+/// The envelope of an injected context, the memory section after it set aside.
+fn injected_envelope(out: &Value) -> Value {
+    let text = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    let body = text.split_once('\n').unwrap().1;
+    let json = body.split_once("\n\n").map_or(body, |(j, _)| j);
+    serde_json::from_str(json).unwrap()
+}
+
+#[tokio::test]
+async fn an_envelope_with_only_memories_carries_content() {
+    // ripwire finds nothing; memory does.
+    let r = remembering(
+        FakeUpstream::new().answer_text("explore", ""),
+        Arc::default(),
+    )
+    .await;
+    let out = submit(
+        &r,
+        &mut SessionState::default(),
+        &Policy::default(),
+        "how is the cache evicted?",
+    )
+    .await
+    .expect("a memory is something to act on");
+    let env = injected_envelope(&out);
+    assert_eq!(env["items"], json!([]));
+    assert_eq!(env["memories"].as_array().map(Vec::len), Some(1), "{env:#}");
+}
+
+#[tokio::test]
+async fn a_new_memory_is_news_and_a_seen_one_is_not() {
+    let r = remembering(
+        FakeUpstream::new().answer("explore", "explore_export_auth"),
+        Arc::default(),
+    )
+    .await;
+    let mut env = r
+        .broker
+        .context_for_task(ripwire_broker::broker::TaskRequest::new(
+            "how is the cache evicted?",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(env.memories.len(), 1);
+    env.items.clear();
+    env.tests.clear();
+    env.risks.clear();
+    assert!(
+        hook::has_news(&env, &SessionMemory::default()),
+        "never told"
+    );
+    assert!(
+        !hook::has_news(&env, &r.broker.session_snapshot()),
+        "already told"
+    );
+}
+
+#[tokio::test]
+async fn the_injected_context_has_the_untrusted_memory_section() {
+    let r = remembering(
+        FakeUpstream::new().answer("explore", "explore_export_auth"),
+        Arc::default(),
+    )
+    .await;
+    let out = submit(
+        &r,
+        &mut SessionState::default(),
+        &Policy::default(),
+        "how is the cache evicted?",
+    )
+    .await
+    .unwrap();
+    let text = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert_eq!(text.matches(SECTION).count(), 1, "{text}");
+    let env = injected_envelope(&out);
+    let memory = env["memories"][0]["text"]["untrusted_repository_data"]
+        .as_str()
+        .unwrap();
+    let section = text.split_once(SECTION).unwrap().1;
+    let id = env["memories"][0]["id"].as_str().unwrap();
+    assert!(
+        section.contains(id) && section.contains("src/cache.rs"),
+        "{section}"
+    );
+    assert_eq!(text.matches(memory).count(), 1, "the text goes out once");
+    assert!(
+        out["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("1 memories"),
+        "{out:#}"
+    );
+    assert!(text.chars().count() <= hook::MAX_CONTEXT_CHARS);
+}
+
+#[tokio::test]
+async fn with_memory_on_the_hook_output_stays_under_the_host_limit() {
+    // Explore answers that fill the capped budget to different depths: some leave room for the
+    // memory, some do not, and the memory's bookkeeping is written in every case. At 13 × 220 and
+    // 17 × 100 the memory fits the budget but its readable section would not fit the host.
+    for (n, pad) in [
+        (10, 300),
+        (12, 200),
+        (13, 220),
+        (14, 200),
+        (16, 100),
+        (16, 200),
+        (17, 100),
+        (18, 200),
+        (20, 100),
+    ] {
+        let fake = FakeUpstream::new().answer_text("explore", &sized_explore(n, pad));
+        let r = remembering(fake, Arc::default()).await;
+        let policy = Policy {
+            prompt_budget: 50_000,
+            ..Policy::default()
+        };
+        let out = submit(
+            &r,
+            &mut SessionState::default(),
+            &policy,
+            "how is the cache handled?",
+        )
+        .await
+        .unwrap();
+        let text = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        let chars = text.chars().count();
+        assert!(
+            chars <= hook::MAX_CONTEXT_CHARS,
+            "{n} × {pad}: {chars} chars"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ripwire_off_stops_injection_for_that_session() {
+    let classifier = Arc::new(Agreeable::default());
+    let r = remembering(
+        FakeUpstream::new().answer("explore", "explore_export_auth"),
+        classifier.clone(),
+    )
+    .await;
+    let every = Policy {
+        every_prompt: true,
+        ..Policy::default()
+    };
+    let mut state = SessionState::default();
+    assert!(
+        submit(&r, &mut state, &every, "#ripwire-off")
+            .await
+            .unwrap()
+            .get("hookSpecificOutput")
+            .is_none()
+    );
+    assert!(
+        submit(&r, &mut state, &every, "how is the cache evicted?")
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        classifier
+            .requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "memory is not even read"
+    );
+
+    // Another session is not paused.
+    let out = submit(
+        &r,
+        &mut SessionState::default(),
+        &every,
+        "how is the cache evicted?",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        injected_envelope(&out)["memories"].as_array().map(Vec::len),
+        Some(1)
+    );
 }

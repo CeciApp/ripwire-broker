@@ -72,12 +72,7 @@ fn a_symlink_or_an_open_directory_reads_as_unavailable() {
     store.publish(&s).unwrap();
 
     // The snapshot swapped for a link to a file that would parse.
-    let snapshot = fs::read_dir(store.dir())
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let snapshot = store.dir().join("snapshot.json");
     let real = elsewhere.path().join("planted.json");
     fs::rename(&snapshot, &real).unwrap();
     std::os::unix::fs::symlink(&real, &snapshot).unwrap();
@@ -116,12 +111,7 @@ fn an_unknown_schema_or_a_corrupt_snapshot_is_never_overwritten() {
         ..Default::default()
     };
     store.publish(&s).unwrap();
-    let snapshot = fs::read_dir(store.dir())
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let snapshot = store.dir().join("snapshot.json");
 
     for (bytes, why) in [
         (
@@ -143,8 +133,16 @@ fn an_unknown_schema_or_a_corrupt_snapshot_is_never_overwritten() {
         );
         assert_eq!(fs::read(&snapshot).unwrap(), bytes, "byte for byte");
     }
-    let leftovers = fs::read_dir(store.dir()).unwrap().count();
-    assert_eq!(leftovers, 1, "no temporary left behind");
+    let mut leftovers: Vec<String> = fs::read_dir(store.dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    leftovers.sort();
+    assert_eq!(
+        leftovers,
+        ["generation", "snapshot.json"],
+        "no temporary left behind"
+    );
 }
 
 #[test]
@@ -824,6 +822,21 @@ fn a_job_runs_at_most_twice_and_then_stays_failed_until_asked() {
 }
 
 #[test]
+fn the_quota_a_snapshot_recorded_carries_over_to_its_own_file() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"q".repeat(64));
+    let mut s = State::default();
+    s.ledger.entries.push((5 * DAY, 1_000, 0));
+    store.publish(&s).unwrap();
+    assert_eq!(
+        store.charge(5 * DAY, 1, 0),
+        Err(Refusal::Full(Full::Quota)),
+        "the 1,000 attempts the snapshot recorded still count"
+    );
+    assert_eq!(store.ledger().unwrap().used(5 * DAY), (1_000, 0));
+}
+
+#[test]
 fn the_24h_ledger_survives_a_restart_and_a_clock_rollback() {
     assert_eq!(
         (
@@ -892,17 +905,14 @@ fn the_worker_bookkeeping_waits_briefly_for_another_writer() {
     let store = Store::new(state.path(), &"w".repeat(64));
     store.enqueue(&record(1)).unwrap();
     store.ingest().unwrap();
-    // Another process ingests for a moment: a quota charge waits for it instead of failing.
+    // Another process ingests for a moment: taking a job waits for it instead of failing.
     let held = store.writer().unwrap();
     let release = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
         drop(held);
     });
-    assert_eq!(
-        store.charge(5 * DAY, 1, 4),
-        Ok(()),
-        "a brief lock is waited for"
-    );
+    let lease = store.lease_next(5 * DAY);
+    assert!(matches!(lease, Ok(Some(_))), "a brief lock is waited for");
     release.join().unwrap();
     assert_eq!(
         store.ingest().map(|_| ()),
@@ -912,11 +922,15 @@ fn the_worker_bookkeeping_waits_briefly_for_another_writer() {
 
     let held = store.writer().unwrap();
     let started = std::time::Instant::now();
-    assert_eq!(
-        store.charge(5 * DAY, 1, 4),
-        Err(Refusal::Locked),
+    assert!(
+        matches!(store.lease_next(5 * DAY), Err(Refusal::Locked)),
         "but not forever"
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(4));
+
+    // The quota has a lock of its own: a charge never waits on the memories' writer.
+    let started = std::time::Instant::now();
+    assert_eq!(store.charge(5 * DAY, 1, 4), Ok(()));
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
     drop(held);
 }

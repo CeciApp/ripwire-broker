@@ -98,6 +98,7 @@
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
 | 2026-10-03 17:00 | Fase 2 do plano do `--memory` (controle Jev) feita em TDD (T2.1 a T2.13; T2.0 escrita, pendente de rodada com a chave): Choice e pedidos de estado, decisões tipadas, transporte comum, `memory-prompts/v1`, fila com leases por lock e quota de 24 h, worker com typing, candidatos e relações, commit por par, falhas do provider, teto único de requisições, worker no `serve --memory` e `memory drain --online`, métricas de custo; PRD principal §23.1/§23.2/§23.3/§23.5 autorizam o worker | [D-138](#d-138--fase-2-do---memory-controle-jev) |
+| 2026-10-03 21:33 | Fase 3 do plano do `--memory` (leitura e entrega) feita em TDD (T3.1 a T3.10; T3.11, validação nos hosts, pendente e manual): índice lexical e de entidades com RRF, routing, scoring, beam e limites, parada, prazo de 750 ms, fontes mudadas omitidas e revalidadas, `memories[]` e `provenance.memory`, orçamento da memória com reserva, seção legível no texto MCP, leitura paralela em `context_for_task` com snapshot quente, hooks prontos para memórias; revisão com 12 achados corrigidos, entre eles a quota em `quota.json` e a chave do cache pela geração | [D-139](#d-139--fase-3-do---memory-leitura-e-entrega) |
 | 2026-10-03 15:12 | Fase 1 do plano do `--memory` feita em TDD (T1.1 a T1.16, um commit por tarefa, mutação em cada uma): `--memory` e `--memory-*` no parse; registro `memory/v1`, identidade, admissão, relógio e sequência; store privado com spool, snapshot, tetos, lock, retenção, `forget` com tombstones e revogação; `memory status\|forget\|add\|resume`; coleta pelas tools e pelo `hook --memory`; `install`/`doctor`. O `serve --memory` ainda não liga a coleta (T2.11) | [D-137](#d-137--fase-1-do---memory-store-e-coleta) |
 | 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
@@ -5794,3 +5795,95 @@ achados, 2 altos. Dez corrigidos em TDD (teste vermelho, correção, mutação q
   uma referência de tempo confiável que o broker não tem); a E/S de disco do worker roda nas threads
   do tokio e cada cobrança regrava o snapshot (tirar o livro-razão do snapshot é uma mudança de
   formato; fica para quando o tamanho do store pesar).
+
+## D-139 — Fase 3 do `--memory`: leitura e entrega
+
+**Data:** 2026-10-03 21:33.
+
+**Decisão:** a Fase 3 do [plano](plan/jev-mem-plan.md) está feita em TDD (T3.1 a T3.10), uma
+tarefa por commit, com o teste vermelho visto falhar, mutação que o derrubou, documentação e os
+cinco portões; o registro de evidência (§9 do plano) tem a linha de cada tarefa e a da revisão. A
+T3.11 (validação manual no Claude Code e no Codex) fica pendente: pede sessões reais do mantenedor,
+e até lá nenhum host conta como consumidor de memória.
+
+**O que entrou:** o índice local (`memory::index`: palavras com idf, entidades exatas, fusão por RRF
+k = 60, no máximo 8 âncoras); a leitura (`memory::retrieve`): routing nas quatro visões com 12
+expansões por maiores restos, scoring 0,40/0,20/0,15/0,15/0,10 com entrada em 0,60, beam 4,
+profundidade 2, tetos de 16 nós e 128 arestas, todos os `stop_reason`, prazo de 750 ms com 250 ms
+por tentativa, sem retry, e o quarto pedido reservado à parada; fontes mudadas omitidas e
+revalidadas antes da entrega; `memories[]` e `provenance.memory` no envelope, ausentes sem
+`--memory`; o orçamento da memória (3 itens, 600 tokens, 20 %, só a sobra) e a seção legível do
+bloco de texto MCP; `memory::recall`, que lê ao lado da parte estrutural de `context_for_task` e
+mantém o snapshot quente entre chamadas; os hooks prontos para memórias (conteúdo, novidade,
+seção). Testes: 562 → 639 no build padrão, 578 → 655 com `online` (com as correções da revisão).
+
+**Decisões tomadas no caminho:**
+
+- **A T3.10 veio antes da T3.9.** Os testes dos hooks precisam de um broker que leia memória.
+- **Os hooks não trazem memórias na v1.** O hook nunca faz HTTP e não há cache de decisões, então
+  não há como validar uma memória num hook. A T3.9 deixou pronto o resto: um envelope só com
+  memórias conta como conteúdo, uma memória não recebida é novidade, e o contexto injetado leva a
+  seção legível quando cabe nos 9.000 caracteres.
+- **A reserva do orçamento para a memória** (`budget::memory_reserve`, ~150 tokens): achado na
+  T3.9, a T3.8/T3.10 escreviam `provenance.memory` e as limitações depois do encaixe, e um envelope
+  cheio passava do orçamento em ~100 tokens com `estimated_tokens` desatualizado. Agora a forma mais
+  larga desse registro fica reservada das entradas (o raciocínio do D-103), as memórias são medidas
+  com o registro no lugar e a estimativa é refeita no fim.
+- **Mutante equivalente:** trocar `MAX_VISITED` na reserva por um número menor não muda o número de
+  dígitos e não muda a reserva.
+- **Testes instáveis sob carga** (macOS com `syspolicyd` varrendo binários novos): a família
+  `shell_edits`, o summarizer, `memory_retry` e um `Locked` em `memory_retrieval`. Passam isolados e
+  na suíte em máquina folgada; não são regressões desta fase.
+
+**Revisão independente do diff (plano §7, item 6), por um agente revisor só de leitura:** 12
+achados, 2 altos. Todos corrigidos em TDD (teste vermelho, correção, mutação que derrubou):
+
+- **Alto — a checagem de frescor era bloqueante, sem teto, na thread assíncrona e fora do prazo:**
+  cada chamada clonava o snapshot e calculava o hash das fontes de todas as memórias antes de o
+  prazo começar, o que segurava também a resposta estrutural ao lado. Agora só as âncoras e os
+  candidatos expandidos são conferidos, no pool de bloqueio e dentro do prazo (o ranking das âncoras
+  também); os pedidos param 50 ms antes (um quinto do prazo, se menor) para a revalidação final ter
+  o seu tempo; `pending()` também sai da thread assíncrona. `stale_omitted` passa a contar as
+  memórias velhas que a leitura teria usado, não as do store inteiro.
+- **Alto — com `--summarizer-cmd` e `--memory`, as notas comiam a reserva da memória:** `add_notes`
+  encaixava contra o orçamento inteiro. Agora deixa a reserva livre.
+- **Médio — a leitura não dividia o `--jev-request-limit`:** com `--memory` eram 24 + 4 pedidos por
+  consulta. Agora `Broker::connect` dá à leitura até 4 deles e à descoberta o resto; o status mostra
+  em `online.request_limit` a parte da descoberta.
+- **Médio — as leituras não eram cobradas na quota de 24 h:** uma quota esgotada não as parava.
+  Agora a leitura pede no máximo o que resta (nada: nenhuma inferência nova, `degraded` e a
+  limitação `memory_incomplete` dizendo que a quota acabou) e cobra o que enviou fora do caminho da
+  resposta. Para isso a quota saiu do snapshot para `quota.json`, com lock próprio: cobrar não
+  regrava mais as memórias nem espera o escritor delas (o achado "cada cobrança regrava o snapshot"
+  que o D-138 deixara registrado). Um store que guardava a quota no snapshot a herda.
+- **Médio — escritas do worker esfriavam o cache:** lease, fim de job e cobrança regravam
+  `snapshot.json`, e a chave do cache era o arquivo. Agora o store grava ao lado de cada snapshot a
+  geração das memórias (`generation`), e a cópia quente só é trocada quando ela muda; sem esse
+  registro, comprimento, mtime e inode do arquivo. Consequência registrada: um `snapshot.json`
+  danificado por fora do store, sem geração nova, só é notado na próxima carga.
+- **Médio — o bloco de texto repetia o texto de cada memória fora do orçamento.** Agora a seção
+  legível traz o aviso de autoridade e uma referência por memória (id e fontes); o texto fica só no
+  JSON.
+- **Baixo/médio (segurança) — campos não confiáveis entravam crus na seção:** uma memória podia
+  forjar linhas. Agora id e caminhos saem com escape JSON, e o texto não entra mais na seção.
+- **Baixo:** `add_memories` podia passar 1 token (agora mede com a estimativa mais larga e conta as
+  já entregues antes de encaixar); entidade casada por substring (`a.rs` em `src/data.rs`; agora o
+  caminho inteiro); a profundidade 2 expandia de todos os nós alcançados (agora de um beam dos 4 com
+  as relações mais fortes); os testes da T3.6 passavam por `read_store`, que a produção não usava
+  (agora passam por `Recall`, com o cache quente; `read_store` e `fit` saíram, e o teste
+  `budget_omitted` de `fit` saiu com eles, já coberto por `risks_and_tests_are_never_evicted_to_make_room_for_memory`);
+  `the_deadline_cuts_http_and_local_loops` não exercitava laço local (renomeado
+  `the_deadline_cuts_the_requests`; o laço local tem teste próprio); um carregamento que entrasse em
+  pânico travava as leituras seguintes (agora recomeça).
+- **Um achado meu na correção:** `--memory-read-deadline-ms` aceita de 1 a 750, e uma reserva fixa
+  de 50 ms zerava a leitura abaixo disso; a reserva passou a ser 50 ms ou um quinto do prazo.
+- **Mutantes sobreviventes, registrados:** a parada por prazo dentro do laço de hashes (a resposta
+  já sai pelo `timeout_at`; ela só libera a thread de bloqueio mais cedo) e o recomeço de um
+  carregamento em pânico (não há como provocar pânico em `Store::load` pela interface).
+
+**O que ficou de fora, registrado:** cache de decisões (sem ele, hooks e `--memory-read-request-limit 0`
+não validam memória); a validação nos hosts (T3.11); o diagrama de `spec/diagrams/`.
+
+**Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos (44) e
+`props_fs` (10) verdes; CA-10 sem crate de rede; guarda de fixtures verde; nenhum `reqwest`,
+`secrecy`, `println!` ou `unsafe` em `src/memory/`.

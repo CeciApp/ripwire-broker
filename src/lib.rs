@@ -9,7 +9,9 @@
 #![deny(clippy::print_stdout, clippy::dbg_macro)]
 
 pub mod broker;
-mod budget;
+/// Public for the property that memory never pushes an envelope past its budget (PRD jev-mem
+/// §8.2). Internal: no stability promise.
+pub mod budget;
 pub mod cli;
 mod dedup;
 pub mod doctor;

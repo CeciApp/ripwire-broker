@@ -74,6 +74,32 @@ pub fn notes_reserve() -> u32 {
     record + tokens(widest_next_step.len())
 }
 
+/// Room held back from the entries of a `context_for_task` that reads memory, for what the read
+/// writes after them (D-103's reasoning; PRD jev-mem §8.2): `provenance.memory` and the memory
+/// limitations, in their widest reachable form, and a digit `estimated_tokens` may gain. Memories
+/// themselves only get what is left over: they give way, never an entry.
+pub fn memory_reserve() -> u32 {
+    let limits = crate::memory::store::Limits::default();
+    let widest = crate::model::MemoryProvenance {
+        schema_version: crate::memory::retrieve::MEMORY_SCHEMA,
+        stop_reason: "low_expected_gain".into(),
+        requests: 4,
+        questions: crate::memory::retrieve::ReadConfig::default().max_questions,
+        visited: crate::memory::retrieve::MAX_VISITED,
+        stale_omitted: limits.max_nodes,
+        pending_writes: limits.spool_entries,
+        partial: false,
+        degraded: false,
+        assessment_before_truncation: false,
+    };
+    let provenance = r#","memory":"#.len() + serde_json::to_string(&widest).map_or(0, |s| s.len());
+    let limitations: usize = crate::memory::recall::widest_limitations()
+        .iter()
+        .map(|l| serde_json::to_string(l).map_or(0, |s| s.len() + 1))
+        .sum();
+    (provenance + limitations + 1).div_ceil(4) as u32
+}
+
 /// Adds entries in priority order while they fit; limitations are always kept (PRD 10.2 #1).
 /// `reserve` is budget held back from the entries, for bookkeeping a later step must be able to
 /// write without evicting anything already decided.
@@ -196,8 +222,9 @@ fn next_step(env: &Envelope) -> Option<String> {
 
 /// Adds notes after the items (peripheral context, PRD 10.2 #9) and the note limitations.
 /// Over budget, the last notes give way first, then the lowest-ranked items, which are
-/// counted as omitted.
-pub fn add_notes(env: &mut Envelope, notes: Vec<Note>, limitations: Vec<Limitation>) {
+/// counted as omitted. `reserve` is room a later step still has to write in, kept free of notes.
+pub fn add_notes(env: &mut Envelope, notes: Vec<Note>, limitations: Vec<Limitation>, reserve: u32) {
+    let limit = env.budget.requested_tokens.saturating_sub(reserve);
     let mut left_out = 0;
     env.notes.extend(notes);
     env.limitations.extend(limitations);
@@ -209,7 +236,7 @@ pub fn add_notes(env: &mut Envelope, notes: Vec<Note>, limitations: Vec<Limitati
             counted = left_out;
         }
         env.budget.estimated_tokens = env.budget.requested_tokens; // widest value while measuring
-        if !over(env) {
+        if estimate_tokens(env) <= limit {
             break;
         }
         if env.notes.pop().is_some() {
@@ -227,4 +254,63 @@ pub fn add_notes(env: &mut Envelope, notes: Vec<Note>, limitations: Vec<Limitati
         env.budget.next_step = next_step(env);
     }
     env.budget.estimated_tokens = estimate_tokens(env);
+}
+
+/// Memory's share of an answer (PRD jev-mem §8.2): at most this many memories…
+pub const MEMORY_MAX_ITEMS: usize = 3;
+/// …this many tokens…
+pub const MEMORY_MAX_TOKENS: u32 = 600;
+/// …and this percentage of the requested budget; always inside what is left of it.
+pub const MEMORY_SHARE_PERCENT: u32 = 20;
+
+/// What fitting memories into an envelope did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryFit {
+    pub delivered: Vec<String>,
+    /// Left out for the budget.
+    pub omitted: usize,
+    /// Left out because this session already received them.
+    pub already: usize,
+}
+
+/// Adds `items`, best first, inside memory's share and inside what the envelope has left: memory
+/// is what gives way, never an item, a test or a risk already there. `seen` says which ids this
+/// session already received; they are counted in `already_delivered` before anything is fitted,
+/// so the count is room taken like the rest.
+pub fn add_memories(
+    env: &mut Envelope,
+    items: Vec<crate::model::MemoryItem>,
+    seen: &dyn Fn(&str) -> bool,
+) -> MemoryFit {
+    let (already, items): (Vec<_>, Vec<_>) = items.into_iter().partition(|m| seen(&m.id));
+    let mut fit = MemoryFit {
+        already: already.len(),
+        ..MemoryFit::default()
+    };
+    env.budget.already_delivered += fit.already;
+    let requested = env.budget.requested_tokens;
+    env.budget.estimated_tokens = requested; // widest value while measuring
+    let base = estimate_tokens(env);
+    let left = requested.saturating_sub(base);
+    let cap = MEMORY_MAX_TOKENS
+        .min(requested * MEMORY_SHARE_PERCENT / 100)
+        .min(left);
+    for item in items {
+        env.memories.push(item);
+        // Measured on the envelope itself: the item, its comma and the `memories` key.
+        let used = estimate_tokens(env).saturating_sub(base);
+        if env.memories.len() > MEMORY_MAX_ITEMS || used > cap {
+            env.memories.pop();
+            fit.omitted += 1;
+            continue;
+        }
+        fit.delivered.push(
+            env.memories
+                .last()
+                .map(|m| m.id.clone())
+                .unwrap_or_default(),
+        );
+    }
+    env.budget.estimated_tokens = estimate_tokens(env);
+    fit
 }

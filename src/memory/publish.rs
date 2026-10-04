@@ -25,6 +25,8 @@ pub struct MemoryConfig {
     pub max_in_flight: usize,
     /// The worker's running cost, shown in the status resource; `None` without a worker.
     pub worker: Option<Arc<Mutex<super::metrics::Metrics>>>,
+    /// What `context_for_task` reads memory with; `None` collects without reading.
+    pub read: Option<super::retrieve::ReadSetup>,
 }
 
 impl std::fmt::Debug for MemoryConfig {
@@ -45,6 +47,7 @@ impl MemoryConfig {
             wait: Duration::from_millis(25),
             max_in_flight: 4,
             worker: None,
+            read: None,
         }
     }
 }

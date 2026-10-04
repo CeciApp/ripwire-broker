@@ -116,6 +116,10 @@ fn status(store: &Store, as_json: bool) -> String {
     let usage = store.usage().unwrap_or_default();
     let error = state.as_ref().err().map(|u| u.as_str());
     let state = state.unwrap_or_default();
+    let used = store
+        .ledger()
+        .unwrap_or_default()
+        .used(SystemClock.now_ms());
     let v = json!({
         "schema_version": super::store::SCHEMA_VERSION,
         "error": error,
@@ -126,8 +130,8 @@ fn status(store: &Store, as_json: bool) -> String {
         "pending": usage.pending,
         "spool_bytes": usage.spool_bytes,
         "snapshot_bytes": usage.snapshot_bytes,
-        "attempts_24h": state.ledger.used(SystemClock.now_ms()).0,
-        "questions_24h": state.ledger.used(SystemClock.now_ms()).1,
+        "attempts_24h": used.0,
+        "questions_24h": used.1,
     });
     if as_json {
         return serde_json::to_string_pretty(&v).unwrap_or_default();

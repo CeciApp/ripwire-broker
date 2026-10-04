@@ -3,6 +3,8 @@
 use crate::budget;
 use crate::memory::admission::Event as MemoryEvent;
 use crate::memory::publish::{MemoryConfig, MemoryStatus, Publisher};
+use crate::memory::recall::{Recall, Recalled};
+use crate::memory::retrieve;
 use crate::metrics::{Metrics, RequestRecord, StageSpan, UpstreamSpan};
 use crate::model::*;
 use crate::normalize::{self, Entry};
@@ -319,6 +321,8 @@ pub struct Broker {
     notes: Option<NoteEngine>,
     online: Option<OnlineEngine>,
     memory: Option<Publisher>,
+    /// The memory read of `context_for_task`, with `--memory`.
+    recall: Option<Recall>,
     metrics: Mutex<Metrics>,
     last_error: Mutex<Option<&'static str>>,
     /// The last availability probe and when it finished, so back-to-back reads of the status
@@ -384,8 +388,18 @@ pub struct UpstreamStatus {
 impl Broker {
     pub async fn connect(
         upstream: Arc<dyn Upstream>,
-        config: BrokerConfig,
+        mut config: BrokerConfig,
     ) -> Result<Self, BrokerError> {
+        // One `--jev-request-limit` per query for discovery and the memory read together: memory
+        // takes at most four of it, discovery keeps the rest (PRD jev-mem §8.2).
+        if let (Some(online), Some(read)) = (
+            config.online.as_mut(),
+            config.memory.as_mut().and_then(|m| m.read.as_mut()),
+        ) {
+            let (memory, discovery) = retrieve::slots(read.cfg.request_limit, online.request_limit);
+            read.cfg.request_limit = memory;
+            online.request_limit = discovery;
+        }
         check_version(&config.ripwire_version)?;
         let tools = upstream.list_tools().await?;
         let missing: Vec<&str> = REQUIRED_VERBS
@@ -414,7 +428,20 @@ impl Broker {
                 error: "workspace_violation",
                 message,
             })?;
-        let memory = config.memory.map(|m| Publisher::new(m, workspace.root()));
+        let (memory, recall) = match config.memory {
+            Some(mut m) => {
+                let read = m.read.take();
+                let recall = read
+                    .map(|r| Recall::new(r, workspace.root()))
+                    .transpose()
+                    .map_err(|message| BrokerError {
+                        error: "workspace_violation",
+                        message,
+                    })?;
+                (Some(Publisher::new(m, workspace.root())), recall)
+            }
+            None => (None, None),
+        };
         Ok(Self {
             upstream,
             workspace,
@@ -429,6 +456,7 @@ impl Broker {
                 .map(|m| NoteEngine::new(m, config.summarizer_wait)),
             online,
             memory,
+            recall,
             metrics: Mutex::new(Metrics::default()),
             last_error: Mutex::new(None),
             probe: Mutex::new(None),
@@ -886,8 +914,37 @@ impl Broker {
             .await
     }
 
+    /// The structural context and, with `--memory`, the memory read, side by side (PRD jev-mem
+    /// §10). Memory only adds to the answer: it never fails it and never changes its status.
     async fn context_for_task_inner(&self, req: TaskRequest) -> Result<Envelope, BrokerError> {
         check_budget_at(req.budget_tokens, self.min_task_budget())?;
+        let recall = async {
+            match &self.recall {
+                Some(r) => Some(r.read(&req.task).await),
+                None => None,
+            }
+        };
+        let (env, recalled) = tokio::join!(self.structural_task(&req), recall);
+        let mut env = env?;
+        if let Some(recalled) = recalled {
+            self.attach_memory(&mut env, recalled, !req.include_seen);
+        }
+        self.remember(&env);
+        Ok(env)
+    }
+
+    /// `memories` and `provenance.memory`, and what kept the read short as limitations.
+    fn attach_memory(&self, env: &mut Envelope, recalled: Recalled, skip_seen: bool) {
+        env.limitations.extend(recalled.limitations);
+        if let Some(read) = recalled.read {
+            let session = self.session.lock().unwrap();
+            let seen = |id: &str| skip_seen && session.has(&session::memory_fingerprint(id));
+            retrieve::attach(env, &read, &seen);
+        }
+        env.budget.estimated_tokens = budget::estimate_tokens(env);
+    }
+
+    async fn structural_task(&self, req: &TaskRequest) -> Result<Envelope, BrokerError> {
         let route = router::route(&req.task, req.mode);
         let mut verbs = Vec::new();
         let entries = match (route.intent, route.symbol.as_deref()) {
@@ -935,11 +992,11 @@ impl Broker {
                             .await?;
                         let mut entries = normalize::ctx("explore", &payload);
                         entries.push(normalize::symbol_not_found(symbol));
-                        return Ok(self.complete_task(&req, route.intent, verbs, entries).await);
+                        return Ok(self.complete_task(req, route.intent, verbs, entries).await);
                     }
                     Err(e) => return Err(e.into()),
                 };
-                let mut entries = self.symbol_context(&found, &req, &mut verbs).await?;
+                let mut entries = self.symbol_context(&found, req, &mut verbs).await?;
                 if intent == Intent::Change {
                     verbs.push("impact");
                     let payload = self.call("impact", json!({"symbol": symbol})).await?;
@@ -970,7 +1027,7 @@ impl Broker {
                 entries
             }
         };
-        Ok(self.complete_task(&req, route.intent, verbs, entries).await)
+        Ok(self.complete_task(req, route.intent, verbs, entries).await)
     }
 
     /// The task's envelope, with notes when a local model is configured (PRD 10.3).
@@ -992,7 +1049,6 @@ impl Broker {
             self.attach_notes(engine, &mut env, &included, !req.include_seen)
                 .await;
         }
-        self.remember(&env);
         env
     }
 
@@ -1063,6 +1119,9 @@ impl Broker {
         for n in &env.notes {
             memory.remember(session::note_fingerprint(n));
         }
+        for m in &env.memories {
+            memory.remember(session::memory_fingerprint(&m.id));
+        }
     }
 
     /// Notes from the items this envelope includes, in full even when the session sent
@@ -1105,7 +1164,12 @@ impl Broker {
             env.budget.already_delivered += repeated;
             self.metrics.lock().unwrap().session_hits += repeated as u64;
         }
-        budget::add_notes(env, fresh, limitations);
+        // What a memory read writes comes after the notes: they leave its room alone.
+        let reserve = match self.recall.is_some() {
+            true => budget::memory_reserve(),
+            false => 0,
+        };
+        budget::add_notes(env, fresh, limitations, reserve);
     }
 
     /// Applies the task's switches (docs, bodies) and shapes the envelope.
@@ -1200,6 +1264,7 @@ impl Broker {
             risks: vec![],
             limitations: vec![],
             notes: vec![],
+            memories: vec![],
             provenance: Provenance {
                 request_id: REQUEST.try_with(|c| c.id).unwrap_or(0),
                 upstream_tools: verbs,
@@ -1207,6 +1272,7 @@ impl Broker {
                 ripwire_version: self.ripwire_version.clone(),
                 broker_version: env!("CARGO_PKG_VERSION"),
                 online,
+                memory: None,
             },
             budget: Budget {
                 requested_tokens: budget,
@@ -1225,6 +1291,11 @@ impl Broker {
         let reserve = match self.notes.is_some() {
             true => budget::notes_reserve(),
             false => 0,
+        };
+        // The same for what a memory read writes after the entries are fitted.
+        let reserve = match self.recall.is_some() {
+            true => reserve + budget::memory_reserve(),
+            false => reserve,
         };
         if !self.incremental {
             budget::fill(&mut env, entries, reserve);

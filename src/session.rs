@@ -77,6 +77,11 @@ pub(crate) fn note_fingerprint(n: &Note) -> String {
     digest(&["note", &n.scope, &n.text.untrusted_repository_data])
 }
 
+/// A persistent memory, by node id (PRD jev-mem §10.9): delivered once per session.
+pub(crate) fn memory_fingerprint(id: &str) -> String {
+    digest(&["memory", id])
+}
+
 /// The same item reduced to a pointer.
 pub(crate) fn reference(i: &Item) -> Item {
     Item {

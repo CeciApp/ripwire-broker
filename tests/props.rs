@@ -466,6 +466,7 @@ fn envelope_carrying(text: &str) -> Envelope {
         risks: vec![],
         limitations: vec![],
         notes: vec![],
+        memories: vec![],
         provenance: Provenance {
             request_id: 1,
             upstream_tools: vec!["route"],
@@ -473,6 +474,7 @@ fn envelope_carrying(text: &str) -> Envelope {
             ripwire_version: text.to_string(),
             broker_version: "0.1.0",
             online: None,
+            memory: None,
         },
         budget: Budget {
             requested_tokens: 2500,
@@ -1004,5 +1006,93 @@ proptest! {
                 false => prop_assert!(caused_by >= 0.6 && e.source == cand.node_id && e.target == new.node_id),
             }
         }
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// The anchors depend on the snapshot's contents only, never on the order nodes arrived in.
+    #[test]
+    fn ranking_is_a_pure_function_of_the_snapshot(
+        words in prop::collection::vec(prop::sample::select(vec!["cache", "router", "eviction", "src", "table"]), 1..6),
+        nodes in prop::collection::vec(prop::collection::vec(prop::sample::select(vec!["cache", "router", "eviction", "src", "table", "x"]), 0..5), 1..10),
+        seed in any::<u64>(),
+    ) {
+        use ripwire_broker::memory::{index, model::Record, store::State};
+        let rec = |n: usize, content: String| -> Record {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "policy_version": "memory-policy/v1",
+                "node_id": format!("{n:064}"), "content_hash": format!("{n:064}"),
+                "workspace_id": "w", "event_key": "e", "kind": "edit_observation", "content": content,
+                "observed_at_ms": 1, "ingest_seq": n, "timestamp_role": "observation",
+                "expires_at_ms": 9, "generation": 1
+            })).unwrap()
+        };
+        let records: Vec<Record> = nodes.iter().enumerate().map(|(n, w)| rec(n, w.join(" "))).collect();
+        let build = |order: &[usize]| {
+            let mut s = State::default();
+            for &i in order {
+                s.nodes.insert(records[i].node_id.clone(), records[i].clone());
+            }
+            s
+        };
+        let forward: Vec<usize> = (0..records.len()).collect();
+        let mut shuffled = forward.clone();
+        shuffled.rotate_left((seed as usize) % records.len());
+        let query = words.join(" ");
+        prop_assert_eq!(index::anchors(&build(&forward), &query), index::anchors(&build(&shuffled), &query));
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Every active view gets at least one expansion, and they add up to the twelve exactly.
+    #[test]
+    fn the_split_never_exceeds_twelve_and_is_never_negative(
+        needs in prop::collection::vec(prop::option::of(0.0f64..=1.0), 4),
+    ) {
+        use ripwire_broker::memory::retrieve;
+        use ripwire_broker::online::response::{Decision, Unknown};
+        let names = ["semantic", "temporal", "causal", "entity"];
+        let answers = names.iter().zip(&needs).map(|(n, p)| (*n, match p {
+            Some(p) => Decision::Noul { probability: *p },
+            None => Decision::Unknown { reason: Unknown::Absent },
+        })).collect();
+        let route = retrieve::route(&answers);
+        let total: usize = route.budget.iter().map(|(_, n)| n).sum();
+        let active = needs.iter().flatten().filter(|p| **p >= 0.10).count();
+        prop_assert_eq!(route.budget.len(), active);
+        prop_assert!(route.budget.iter().all(|(_, n)| *n >= 1));
+        prop_assert_eq!(total, if active == 0 { 0 } else { retrieve::EXPANSIONS });
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Memory takes what is left of the budget and never more: the estimate never grows past it.
+    #[test]
+    fn the_memory_budget_is_never_negative_and_never_exceeds_the_total(
+        budget in 256u32..20_000, sizes in prop::collection::vec(1usize..2_000, 0..8),
+    ) {
+        use ripwire_broker::budget::{add_memories, estimate_tokens};
+        use ripwire_broker::model::{MemoryItem, MemoryScores, Untrusted};
+        let mut env = envelope_carrying("x");
+        env.budget.requested_tokens = budget;
+        let before = estimate_tokens(&env);
+        let items = sizes.iter().enumerate().map(|(i, n)| MemoryItem {
+            id: format!("m{i}"),
+            text: Untrusted { untrusted_repository_data: "x".repeat(*n) },
+            kind: "edit_observation".into(), sources: vec![], observed_at_ms: 0,
+            time_basis: "observation".into(), basis: "jev_scored", derived_from: vec![], stale: false,
+            why_included: "w".into(),
+            scores: MemoryScores { relevance: 1.0, new_information: 1.0, relation_usefulness: 1.0, supports_current_evidence: 1.0, score: 1.0 },
+        }).collect();
+        let fit = add_memories(&mut env, items, &|_| false);
+        prop_assert!(env.memories.len() <= 3);
+        prop_assert_eq!(env.memories.len() + fit.omitted, sizes.len());
+        prop_assert!(estimate_tokens(&env) <= budget.max(before), "{} > {}", estimate_tokens(&env), budget);
     }
 }

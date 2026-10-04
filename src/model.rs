@@ -187,6 +187,9 @@ pub struct Provenance {
     /// Only on `context_for_task` of a process started with `--online`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online: Option<OnlineProvenance>,
+    /// Only when memory took part in the answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryProvenance>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -223,6 +226,63 @@ pub struct Envelope {
     /// Phase 3 notes; omitted when no local model is configured (D-037).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<Note>,
+    /// Memories from earlier sessions (`--memory`); omitted when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub memories: Vec<MemoryItem>,
     pub provenance: Provenance,
     pub budget: Budget,
+}
+
+/// Where a memory's evidence came from: a file and the hash of its bytes then.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemorySource {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// The four scoring answers and the score they made (PRD jev-mem §10.6).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemoryScores {
+    pub relevance: f64,
+    pub new_information: f64,
+    pub relation_usefulness: f64,
+    pub supports_current_evidence: f64,
+    pub score: f64,
+}
+
+/// A memory from earlier sessions (PRD jev-mem §11): history recorded by the broker, untrusted,
+/// never a fact about the code as it is now. Its own field, never an item with a role.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemoryItem {
+    pub id: String,
+    pub text: Untrusted,
+    pub kind: String,
+    pub sources: Vec<MemorySource>,
+    pub observed_at_ms: u64,
+    /// What `observed_at_ms` means: when it was observed, not when anything happened.
+    pub time_basis: String,
+    /// How it was chosen: scored by the classifier against the task.
+    pub basis: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub derived_from: Vec<String>,
+    /// Always false: a memory whose source changed is left out, not delivered as stale.
+    pub stale: bool,
+    pub why_included: String,
+    pub scores: MemoryScores,
+}
+
+/// How the memory part of an answer was made (`ripwire-broker.memory/v1`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemoryProvenance {
+    pub schema_version: &'static str,
+    pub stop_reason: String,
+    pub requests: usize,
+    pub questions: usize,
+    pub visited: usize,
+    pub stale_omitted: usize,
+    pub pending_writes: usize,
+    pub partial: bool,
+    pub degraded: bool,
+    /// The read judged a set of memories that the budget later cut (PRD jev-mem §10.9).
+    pub assessment_before_truncation: bool,
 }

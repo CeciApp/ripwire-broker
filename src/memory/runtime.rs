@@ -6,6 +6,7 @@
 use super::controller::{Config, Worker};
 use super::identity;
 use super::publish::MemoryConfig;
+use super::retrieve::{ReadConfig, ReadSetup};
 use super::store::{Limits, Refusal, Store};
 use super::time::{Clock, SystemClock};
 use crate::cli::ServeArgs;
@@ -63,9 +64,20 @@ pub fn from_serve(
         workspace_id.clone(),
         u64::from(memory.retention_days) * DAY_MS,
     );
+    let read = ReadSetup {
+        store: store.clone(),
+        classifier: classifier.clone(),
+        cfg: ReadConfig {
+            model: config.model.clone(),
+            deadline: memory.read_deadline,
+            request_limit: memory.read_request_limit,
+            ..ReadConfig::default()
+        },
+    };
     let worker = Arc::new(Worker::new(store.clone(), classifier, config.clone()));
     let publish = MemoryConfig {
         worker: Some(worker.metrics_handle()),
+        read: Some(read),
         ..publish
     };
     Ok(Some(Runtime {
