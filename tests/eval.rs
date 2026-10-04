@@ -1193,7 +1193,11 @@ fn each_round_gets_an_isolated_store() {
             !Path::new(store).exists(),
             "removed with its round: {store}"
         );
-        assert!(!store.starts_with(&line[0]), "outside the agent's copy");
+        // The round's place holds the copy (`work`) and, beside it, the server's state.
+        assert!(
+            store.ends_with("/state") && line[0].ends_with("/work"),
+            "{line:?}"
+        );
     }
     assert_eq!(stores.len(), 4, "two memory arms, two repeats");
 }
@@ -1369,7 +1373,8 @@ fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versio
 
     let versions: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("versions.json")).unwrap()).unwrap();
-    assert_eq!(versions["ripwire_broker"], "ripwire-broker 0.1.0");
+    let broker = format!("ripwire-broker {}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(versions["ripwire_broker"], broker.as_str());
     assert_eq!(versions["jev_model"], "jev-1.13.0");
     assert_eq!(versions["summarizer"], "none");
     assert!(versions["ripwire"].is_string(), "{versions}");
@@ -1438,10 +1443,7 @@ fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versio
         json["versions"]["ripwire_broker"],
         versions["ripwire_broker"]
     );
-    assert!(
-        md.contains("## Versões") && md.contains("ripwire-broker 0.1.0"),
-        "{md}"
-    );
+    assert!(md.contains("## Versões") && md.contains(&broker), "{md}");
     assert!(md.contains("- agente: `9.9.9 fake-model`"), "{md}");
 }
 

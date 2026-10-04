@@ -214,6 +214,8 @@ pub struct Read {
     pub stale_omitted: usize,
     /// Observations in the spool, not incorporated yet: not awaited.
     pub pending_writes: usize,
+    /// How it chose: what its memories' `basis` says.
+    pub selection: Selection,
 }
 
 /// A candidate to score: the node and, after expansion, the edge that reached it.
@@ -454,6 +456,7 @@ async fn read_with(
         degraded: false,
         stale_omitted: 0,
         pending_writes: 0,
+        selection: cfg.selection,
     };
     let (ranked, q) = (state.clone(), query.to_string());
     let Some(anchors) = local
@@ -736,9 +739,9 @@ pub fn items(read: &Read) -> Vec<crate::model::MemoryItem> {
                 .collect(),
             observed_at_ms: f.record.observed_at_ms,
             time_basis: snake(json!(f.record.timestamp_role)),
-            basis: match f.scores {
-                Some(_) => "jev_scored",
-                None => "deterministic_rank",
+            basis: match read.selection {
+                Selection::Jev => "jev_scored",
+                Selection::Deterministic => "deterministic_rank",
             },
             derived_from: f
                 .record

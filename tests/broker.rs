@@ -2177,6 +2177,7 @@ fn a_read() -> ripwire_broker::memory::retrieve::Read {
         degraded: false,
         stale_omitted: 2,
         pending_writes: 1,
+        selection: ripwire_broker::memory::retrieve::Selection::Jev,
     }
 }
 
