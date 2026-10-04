@@ -1229,6 +1229,39 @@ fn install_codex_merges_hooks_json_and_prints_the_toml_snippet() {
     );
 }
 
+/// A ripwire that never answers `--version` costs at most the version timeout (D-146): one that
+/// keeps running, and one that exits but leaves a process holding its stdout open. `doctor` is one
+/// of the four callers; `serve`, `hook` and `prompt` read the version through the same function.
+#[test]
+fn a_ripwire_that_hangs_on_version_is_unavailable_within_the_timeout() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    for (name, version) in [
+        ("running", "sleep 30; echo 'ripwire 0.6.4'"),
+        ("left-behind", "(sleep 30 &); exit 0"),
+    ] {
+        let hang = bin.path().join(name);
+        common::write_executable(
+            &hang,
+            format!("#!/bin/sh\ncase \"$1\" in --version) {version};; esac\nexit 1\n"),
+        );
+        let started = std::time::Instant::now();
+
+        let (_, report, _) = doctor(ws.path(), &["--ripwire", hang.to_str().unwrap()]);
+
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(15),
+            "{name}: {took:?}"
+        );
+        assert_eq!(
+            check(&report, "ripwire_binary")["status"],
+            "fail",
+            "{name}: {report}"
+        );
+    }
+}
+
 /// `doctor` keeps the provider key out of what it starts: ripwire's `--version`, `git` and the
 /// summarizer's version command (D-146). Spies write what they received.
 #[test]
