@@ -1718,6 +1718,8 @@ sleep 30
         json!({ "tasks": [task] }).to_string(),
     )
     .unwrap();
+    // A process outside those groups, which no timeout may touch.
+    let mut witness = Command::new("sleep").arg("60").spawn().unwrap();
     let started = std::time::Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
         .args([
@@ -1750,6 +1752,12 @@ sleep 30
         .unwrap()
         .success();
     assert!(!alive, "the check's process went with it");
+    assert!(
+        witness.try_wait().unwrap().is_none(),
+        "nothing outside the timed-out groups was killed"
+    );
+    witness.kill().unwrap();
+    witness.wait().unwrap();
 }
 
 #[test]

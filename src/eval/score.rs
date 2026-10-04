@@ -97,10 +97,12 @@ pub fn modified_files(workdir: &Path, base: &str) -> Vec<String> {
 }
 
 /// Kills `pid`'s process group: what a timed-out command started goes with it (a test runner
-/// holding a database, a child holding a pipe open). Without `unsafe`, through `kill(1)`.
+/// holding a database, a child holding a pipe open). Without `unsafe`, through the shell's own
+/// `kill`, in its POSIX form: procps' `/usr/bin/kill` (Ubuntu 24.04) misreads `-KILL -<pgid>`
+/// and can signal every process of the user, the CI runner included.
 pub(crate) fn kill_group(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", &format!("-{pid}")])
+    let _ = Command::new("sh")
+        .args(["-c", "kill -s KILL -- -\"$1\"", "sh", &pid.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
