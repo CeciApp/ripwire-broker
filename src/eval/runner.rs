@@ -261,6 +261,7 @@ fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) ->
         first_correct_rank: sc.first_correct_rank,
         test_recall: sc.test_recall,
         correct: sc.correct,
+        history_incomplete: false,
         agent: s.agent.clone(),
         context_for_task_ms: (s.context_calls > 0).then_some(s.context_ms),
         memory_retrieval_requests: memory(read.requests),
@@ -446,8 +447,22 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
         ));
     }
     std::fs::create_dir_all(cfg.out.join("transcripts")).map_err(|e| e.to_string())?;
-    std::fs::write(cfg.out.join("versions.json"), versions(cfg).to_string())
-        .map_err(|e| e.to_string())?;
+    let versions = versions(cfg);
+    let recorded = cfg.out.join("versions.json");
+    // One set of binaries per results file: a resume with others would mix them unseen.
+    match std::fs::read_to_string(&recorded)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    {
+        Some(old) if old != versions => {
+            return Err(format!(
+                "{} was written by other binaries ({old}), not these ({versions}): use a new --out",
+                recorded.display()
+            ));
+        }
+        Some(_) => {}
+        None => std::fs::write(&recorded, versions.to_string()).map_err(|e| e.to_string())?,
+    }
     let done: std::collections::HashSet<_> =
         report::load(&cfg.out).iter().map(RunRecord::key).collect();
     let mut results = std::fs::OpenOptions::new()
@@ -455,22 +470,52 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
         .append(true)
         .open(cfg.out.join("results.jsonl"))
         .map_err(|e| e.to_string())?;
-    let mut made = 0;
-    for round in rounds(&cfg.corpus.tasks) {
+    let rounds = rounds(&cfg.corpus.tasks);
+    let recorded = |task: &Task, arm: Arm, repeat: u32| {
+        done.contains(&(task.id.clone(), arm.name().to_string(), repeat))
+    };
+    // A round is recorded whole, at its end. One recorded in part (a session added to a
+    // sequence, an interrupted write) cannot be resumed: the rest would start without its history.
+    for round in &rounds {
         for repeat in 1..=cfg.repeats {
             for &arm in &cfg.arms {
-                // A round is recorded whole, at its end: done when its first task is.
-                if done.contains(&(round[0].id.clone(), arm.name().to_string(), repeat)) {
+                let (have, missing): (Vec<&&Task>, Vec<&&Task>) =
+                    round.iter().partition(|t| recorded(t, arm, repeat));
+                if !have.is_empty() && !missing.is_empty() {
+                    let ids = |ts: &[&&Task]| {
+                        ts.iter()
+                            .map(|t| t.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    return Err(format!(
+                        "sequence {} · {} · {repeat}: recorded for {} but not for {}; remove its \
+                         lines from results.jsonl to run it whole",
+                        round[0].sequence.as_deref().unwrap_or(&round[0].id),
+                        arm.name(),
+                        ids(&have),
+                        ids(&missing)
+                    ));
+                }
+            }
+        }
+    }
+    let mut made = 0;
+    for round in rounds {
+        for repeat in 1..=cfg.repeats {
+            for &arm in &cfg.arms {
+                if recorded(round[0], arm, repeat) {
                     continue;
                 }
                 let dir = scratch()?;
-                let mut records = vec![];
+                let mut records: Vec<RunRecord> = vec![];
                 for task in &round {
                     log(&format!("{} · {} · {repeat}", task.id, arm.name()));
-                    let r = one(cfg, task, arm, repeat, &dir);
+                    let mut r = one(cfg, task, arm, repeat, &dir);
                     if let Some(why) = &r.invalid {
                         log(&format!("  invalid: {why}"));
                     }
+                    r.history_incomplete = records.iter().any(|p| !p.valid);
                     records.push(r);
                 }
                 let _ = std::fs::remove_dir_all(&dir);

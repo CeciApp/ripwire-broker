@@ -35,6 +35,10 @@ pub struct RunRecord {
     pub first_correct_rank: Option<usize>,
     pub test_recall: f64,
     pub correct: Option<bool>,
+    /// An earlier session of its sequence was invalid: the memory this one started from is not
+    /// the history the corpus describes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_incomplete: bool,
     /// The agent's version and model, from its session (PRD jev-mem §14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,

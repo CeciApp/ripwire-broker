@@ -95,7 +95,24 @@ impl Corpus {
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = vec![];
         let mut ids = BTreeSet::new();
+        // A sequence's sessions share one place, so one repository: another one's memories
+        // would carry over.
+        let mut sequences: BTreeMap<&str, &Path> = BTreeMap::new();
         for t in &self.tasks {
+            match t.sequence.as_deref() {
+                Some("") => errors.push(format!("{}: empty sequence name", t.id)),
+                Some(s) => {
+                    let repo = *sequences.entry(s).or_insert(&t.repo);
+                    if repo != t.repo {
+                        errors.push(format!(
+                            "{}: sequence {s} runs in {}, not in this task's repository",
+                            t.id,
+                            repo.display()
+                        ));
+                    }
+                }
+                None => {}
+            }
             if !ids.insert(&t.id) {
                 errors.push(format!("{}: duplicate id", t.id));
             }

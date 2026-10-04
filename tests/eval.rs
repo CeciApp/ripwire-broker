@@ -1090,7 +1090,7 @@ fn logging_agent(dir: &Path) -> std::path::PathBuf {
     common::write_executable(
         &path,
         r##"#!/bin/sh
-cat > /dev/null
+prompt=$(cat)
 cfg=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "--mcp-config" ]; then cfg="$2"; shift; fi
@@ -1101,6 +1101,8 @@ before=$(grep -c 'expired tokens' src/auth.py)
 echo "$(pwd -P) ${state:--} $before" >> "$LOG"
 # What the server would leave there.
 if [ -n "$state" ]; then mkdir -p "$state/ripwire-broker"; fi
+# A session that dies before its result.
+case "$prompt" in *BREAK*) echo '{"type":"system","subtype":"init","tools":[],"mcp_servers":[]}'; exit 0;; esac
 servers='[{"name":"ripwire-broker","status":"connected"}]'
 echo "{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"Read\",\"Edit\"],\"mcp_servers\":$servers}"
 echo '{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/auth.py"}}]}}'
@@ -1387,4 +1389,141 @@ fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versio
         "{md}"
     );
     assert!(md.contains("- agente: `9.9.9 fake-model`"), "{md}");
+}
+
+/// `ripwire-eval run` of `tasks` with the logging agent, in `work` (its corpus, `out/` and
+/// `log` there), so that a second call resumes the first.
+fn run_in(work: &Path, tasks: Value, arms: &str, extra: &[&str]) -> std::process::Output {
+    let agent = logging_agent(work);
+    let corpus = work.join("corpus.json");
+    std::fs::write(&corpus, json!({ "tasks": tasks }).to_string()).unwrap();
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+    let mut args = vec![
+        "run".to_string(),
+        "--corpus".into(),
+        corpus.to_string_lossy().into(),
+        "--out".into(),
+        work.join("out").to_string_lossy().into(),
+        "--arms".into(),
+        arms.into(),
+        "--agent-cmd".into(),
+        agent_cmd,
+    ];
+    args.extend(extra.iter().map(|a| a.to_string()));
+    Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .args(&args)
+        .env("LOG", work.join("log"))
+        .env("RIPWIRE_BROKER_JEV_API_KEY", "synthetic-not-a-credential")
+        .output()
+        .unwrap()
+}
+
+fn logged(work: &Path) -> usize {
+    std::fs::read_to_string(work.join("log")).map_or(0, |l| l.lines().count())
+}
+
+#[test]
+fn a_sequence_partly_recorded_is_refused_not_resumed_in_part() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let two = json!([
+        auth_task("first", repo.path(), &head, Some("login")),
+        auth_task("second", repo.path(), &head, Some("login")),
+    ]);
+    assert!(
+        run_in(work.path(), two.clone(), "broker-memory", &[])
+            .status
+            .success()
+    );
+    assert_eq!(logged(work.path()), 2);
+    // Run again: recorded whole, nothing reruns.
+    assert!(
+        run_in(work.path(), two, "broker-memory", &[])
+            .status
+            .success()
+    );
+    assert_eq!(logged(work.path()), 2);
+
+    // A third session joins the sequence: its history would be missing, so the run stops.
+    let three = json!([
+        auth_task("first", repo.path(), &head, Some("login")),
+        auth_task("second", repo.path(), &head, Some("login")),
+        auth_task("third", repo.path(), &head, Some("login")),
+    ]);
+    let out = run_in(work.path(), three, "broker-memory", &[]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("login") && err.contains("third"), "{err}");
+    assert_eq!(logged(work.path()), 2, "nothing ran");
+}
+
+#[test]
+fn a_sequence_stays_in_one_repository() {
+    let (a, b) = (common::sample_repo(), common::sample_repo());
+    let head = |r: &tempfile::TempDir| git(r.path(), &["rev-parse", "HEAD"]);
+    let corpus: Corpus = serde_json::from_value(json!({"tasks": [
+        auth_task("one", a.path(), &head(&a), Some("s")),
+        auth_task("two", b.path(), &head(&b), Some("s")),
+        auth_task("three", a.path(), &head(&a), Some("")),
+    ]}))
+    .unwrap();
+    let errors = corpus.validate().unwrap_err().join("\n");
+    assert!(
+        errors.contains("two") && errors.contains("sequence s"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("three") && errors.contains("empty sequence"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn a_session_after_an_invalid_one_says_its_history_is_incomplete() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let mut first = auth_task("first", repo.path(), &head, Some("login"));
+    first["prompt"] = json!("BREAK before the result");
+    let runs = logged_run(
+        json!([
+            first,
+            auth_task("second", repo.path(), &head, Some("login"))
+        ]),
+        "broker-memory",
+        "1",
+    );
+    let (first, second) = (&runs[0].1, &runs[1].1);
+    assert_eq!(first["valid"], false, "{first}");
+    assert!(first.get("history_incomplete").is_none(), "{first}");
+    assert_eq!(second["valid"], true, "{second}");
+    assert_eq!(second["history_incomplete"], true, "{second}");
+}
+
+#[test]
+fn versions_that_change_between_runs_are_refused() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let tasks = json!([auth_task("t", repo.path(), &head, None)]);
+    assert!(
+        run_in(work.path(), tasks.clone(), "none", &[])
+            .status
+            .success()
+    );
+    let other = work.path().join("other-broker");
+    common::write_executable(&other, "#!/bin/sh\necho 'ripwire-broker 9.9.9'\n");
+    let out = run_in(
+        work.path(),
+        tasks,
+        "none",
+        &["--repeats", "2", "--broker", other.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("versions.json") && err.contains("9.9.9"),
+        "{err}"
+    );
+    assert_eq!(logged(work.path()), 1, "the second repeat did not run");
 }
