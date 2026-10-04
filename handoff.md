@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-04, até o
-[D-145](spec/changelog.md#d-145--documentação-sincronizada-com-o-código-depois-da-auditoria).
+[D-146](spec/changelog.md#d-146--revisão-de-2026-10-04-os-cinco-de-maior-impacto).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -25,6 +25,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
 | auditoria de 2026-10-04 (D-143, D-144) | os cinco defeitos mais graves e os achados médios corrigidos em TDD; ficam os baixos, o código morto e as simplificações (lista abaixo) |
+| revisão de 2026-10-04 (D-146) | os cinco achados de maior impacto em produção corrigidos em TDD (leitura do online fora da thread assíncrona, TOCTOU do leitor, chave fora dos processos filhos, prazo no `ripwire --version`, erros do worker de memória no stderr); os demais ficam na lista abaixo |
 | `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 5 feitas (D-136 a D-142): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory`, `memory drain --online`, a leitura em `context_for_task` (`memories[]`, `provenance.memory`, seção legível no texto MCP), a consolidação (cadência de 20 enriquecimentos ou 24 h, decisões e ligações por par, nota derivada pelo `--summarizer-cmd` só com o gate de 0,85) e o instrumento da avaliação (`--memory-selection deterministic`, braços `broker-memory` e `broker-memory-deterministic`, sequências no corpus, custo da memória no relatório). A T2.0 (Choice no modelo pinado) rodou com a chave real. Pendente: a T3.11, validar num Claude Code e num Codex reais que os hosts usam as memórias; os hooks não as trazem na v1 (não fazem HTTP e não há cache de decisões). Pendente também a T5.3, a rodada da avaliação (≥ 30 tarefas em sequências, fora do repositório; o plano lista o que o instrumento ainda não faz). Fase 6 (fechamento) não começada; **experimental** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
@@ -71,7 +72,7 @@ cargo fmt --check
   `notes`, `summarizer`, `worktree`, `upstream_ripwire`, `online*`, `memory_*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-145, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-146, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -127,8 +128,6 @@ Os instrumentos estão prontos; as medições, não.
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.
 - **Auditoria de 2026-10-04, o que ficou (D-143, D-144):**
-  - a leitura e o hash de arquivos do modo online rodam na thread assíncrona (sem leitor
-    injetável, não há teste vermelho determinístico);
   - cerca de 35 achados baixos: `println!` do hook que entra em pânico com o pipe fechado (sai com
     101), `--budget` acima de `u32` que vira 0, `--help` reconhecido dentro do texto da tarefa,
     arquivos de lease e de sessão nunca apagados, `--summarizer-version-cmd` sem timeout,
@@ -140,6 +139,13 @@ Os instrumentos estão prontos; as medições, não.
   - código que nunca executa (`admission::RENDERER_VERSION`, `transcript::read`,
     `Role::{Config, Test, Risk}`, entre outros), cerca de 25 itens de API pública usados só por
     testes, e as simplificações listadas no D-143.
+- **Revisão de 2026-10-04, o que ficou (D-146):** o pânico do worker de memória fora do pool
+  bloqueante segue sem ser observado; o worker ainda grava (enriquecimento, consolidação) na thread
+  assíncrona; `unwrap` de mutex dentro de `Drop` (`broker.rs`); `StateStore::load` sem
+  `O_NOFOLLOW`/`O_NONBLOCK`; entradas do `Inflight` sem guarda de drop; stdout do summarizer sem
+  limite; o `__watch` que pode matar um pid reaproveitado; no eval, `is_error` sem distinguir falha
+  de infraestrutura (falta um transcript real de erro de API) e o `run_agent` que escreve o prompt
+  antes de ler.
 - **Memória, registrado nas Fases 2 a 5 (D-138 a D-142):** o cache de decisões (sem ele os hooks
   não entregam memória e `--memory-read-request-limit 0` não serve nada), as notas derivadas fora
   dos 5 s da rodada, a cadência fora do `memory status`, e os demais itens dos D-140 e D-142.

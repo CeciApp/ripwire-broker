@@ -126,8 +126,9 @@ URL) cannot use the broker today: the MVP is stdio only.
 
 The online mode reads its key only from `RIPWIRE_BROKER_JEV_API_KEY` in the server's
 environment. It is never accepted as an argument, never written by `install` (which
-references the variable by name), and never shown in errors, the status or logs. Set it in the
-environment the host starts from, not in a committed file.
+references the variable by name), and never shown in errors, the status or logs. No process the
+broker starts receives it: ripwire, the summarizer, its version command and `git` run without it,
+in every build. Set it in the environment the host starts from, not in a committed file.
 
 When Streamable HTTP is added
 ([roadmap phase 6](spec/ripwire-broker-mcp.md#fase-6--times-e-ci)), its bearer token must also
@@ -329,7 +330,8 @@ persisted budget of 1,000 attempts and 20,000 questions per 24 hours, shared wit
 kept in its own file (`quota.json`), that a restart or a clock set back does not reset; with it
 spent, jobs stay pending and keep their runs. A job runs twice at
 most and then waits for `memory retry`. The worker stops with the server; what it did not
-finish waits on disk.
+finish waits on disk. A stage that starts failing (retention, ingest, enrichment, consolidation),
+say over a snapshot that no longer parses, is said once on stderr, not on every tick.
 The status resource's `memory` field adds what the worker cost, by operation (typing,
 relations, consolidation): attempts, retries, questions, bytes sent, failures by category and
 quota refusals, plus the consolidation rounds run and the derived notes kept or discarded,
