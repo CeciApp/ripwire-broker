@@ -1,5 +1,7 @@
 //! Seam: consolidation (PRD jev-mem §9): when a round is due, which pairs it asks about, what it
 //! records and what it never touches. A classifier stand-in, no network.
+mod common;
+
 use async_trait::async_trait;
 use ripwire_broker::memory::consolidate::{self, Config};
 use ripwire_broker::memory::controller::{self, Worker};
@@ -442,4 +444,324 @@ async fn links_and_decisions_work_without_a_summarizer() {
         s.nodes.values().all(|r| r.kind != Kind::DerivedNote),
         "no note without a summarizer"
     );
+}
+
+#[tokio::test]
+async fn a_pair_missing_any_one_answer_is_not_decided() {
+    for missing in [
+        "redundancy",
+        "contradiction",
+        "obsolescence",
+        "link_usefulness",
+        "representation",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = stored(dir.path(), &same_file(3));
+        enrich(&store, 3, T0);
+        let pairs = consolidate::pending(&store.load().unwrap(), MODEL);
+        // The first pair lacks one answer; absence is never a zero.
+        let fake = Fake::new(move |pair, name| match (pair, name) {
+            (0, n) if n == missing => unknown(0, n),
+            (_, "representation") => choice("merge", 0.9),
+            _ => noul(0.9),
+        });
+        let round = consolidate::round(&store, &fake, &Config::new(MODEL), T0 + DAY_MS)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(round.decided, 2, "{missing}");
+        assert_eq!(
+            consolidate::pending(&store.load().unwrap(), MODEL),
+            [pairs[0].clone()],
+            "{missing}: still pending"
+        );
+        let links = store.load().unwrap().edges.len();
+        assert_eq!(links, 2, "{missing}: no link for the undecided pair");
+    }
+}
+
+// ---------------------------------------------------------------- derived notes (T4.3, CA-14)
+
+use common::summarizer::FakeSummarizer;
+use ripwire_broker::memory::model::Kind;
+
+const NOTE: &str = "Observed twice: a cache layer change in src/cache.rs; tests unknown.";
+
+/// Two enriched observations of `src/cache.rs` with these contents, and one round of `answer`
+/// with `summarizer`.
+async fn consolidated(
+    contents: [&str; 2],
+    answer: impl Fn(usize, &str) -> Decision + Send + Sync + 'static,
+    summarizer: Option<Arc<FakeSummarizer>>,
+) -> (tempfile::TempDir, Store) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(
+        dir.path(),
+        &[
+            rec(1, contents[0], &["src/cache.rs"]),
+            rec(2, contents[1], &["src/cache.rs"]),
+        ],
+    );
+    enrich(&store, 2, T0);
+    let mut cfg = Config::new(MODEL);
+    if let Some(s) = summarizer {
+        cfg = cfg.with_summarizer(s);
+    }
+    consolidate::round(&store, &Fake::new(answer), &cfg, T0 + DAY_MS)
+        .await
+        .unwrap()
+        .expect("due");
+    (dir, store)
+}
+
+fn gated(
+    representation: &'static str,
+    p: f64,
+    contradiction: f64,
+) -> impl Fn(usize, &str) -> Decision {
+    move |_, name| match name {
+        "representation" => choice(representation, p),
+        "contradiction" => noul(contradiction),
+        _ => noul(0.5),
+    }
+}
+
+fn notes(store: &Store) -> Vec<Record> {
+    let s = store.load().unwrap();
+    s.nodes
+        .into_values()
+        .filter(|r| r.kind == Kind::DerivedNote)
+        .collect()
+}
+
+const TWO: [&str; 2] = ["cache layer change one", "cache layer change two"];
+
+#[tokio::test]
+async fn only_merge_or_promote_at_085_with_contradiction_below_085_calls_the_summarizer() {
+    let cases = [
+        ("merge", 0.85, 0.84, true),
+        ("promote", 0.99, 0.0, true),
+        ("merge", 0.84, 0.0, false),
+        ("merge", 0.99, 0.85, false),
+        ("keep_separate", 0.99, 0.0, false),
+        ("uncertain", 0.99, 0.0, false),
+    ];
+    for (representation, p, contradiction, calls) in cases {
+        let summarizer = Arc::new(FakeSummarizer::replying(NOTE));
+        let (_dir, store) = consolidated(
+            TWO,
+            gated(representation, p, contradiction),
+            Some(summarizer.clone()),
+        )
+        .await;
+        let case = format!("{representation} {p}, contradiction {contradiction}");
+        let s = store.load().unwrap();
+        let decision = s.consolidation.decisions.values().next().expect("decided");
+        let notes = notes(&store);
+        assert_eq!(summarizer.prompts().len(), usize::from(calls), "{case}");
+        assert_eq!(notes.len(), usize::from(calls), "{case}");
+        if !calls {
+            assert_eq!(decision.note, None, "{case}");
+            continue;
+        }
+        let prompt = &summarizer.prompts()[0];
+        assert!(
+            prompt.contains(TWO[0]) && prompt.contains(TWO[1]),
+            "{case}: whole parents"
+        );
+        let note = &notes[0];
+        assert_eq!(note.content, NOTE);
+        let parents: Vec<(&str, &str)> = note
+            .derived_from
+            .iter()
+            .map(|p| (p.node_id.as_str(), p.content_hash.as_str()))
+            .collect();
+        let (one, two) = (&s.nodes[&id(1)], &s.nodes[&id(2)]);
+        assert_eq!(
+            parents,
+            [
+                (one.node_id.as_str(), one.content_hash.as_str()),
+                (two.node_id.as_str(), two.content_hash.as_str())
+            ]
+        );
+        assert_eq!(note.enrichment.model.as_deref(), Some("fake-model"));
+        assert_eq!(
+            note.enrichment.prompt_version.as_deref(),
+            Some(consolidate::NOTE_PROMPT_VERSION)
+        );
+        assert_eq!(
+            decision.note.as_deref(),
+            Some(note.node_id.as_str()),
+            "the authorizing decision"
+        );
+        assert!(
+            s.nodes.contains_key(&id(1)) && s.nodes.contains_key(&id(2)),
+            "parents stay"
+        );
+    }
+}
+
+#[tokio::test]
+async fn parents_that_do_not_fit_are_not_summarized() {
+    for (size, calls) in [(1_100, 0), (900, 1)] {
+        let (a, b) = (
+            format!("one {}", "x".repeat(size)),
+            format!("two {}", "y".repeat(size)),
+        );
+        let summarizer = Arc::new(FakeSummarizer::replying(NOTE));
+        let (_dir, store) = consolidated(
+            [&a, &b],
+            gated("merge", 0.99, 0.0),
+            Some(summarizer.clone()),
+        )
+        .await;
+        assert_eq!(
+            summarizer.prompts().len(),
+            calls,
+            "parents of {size} characters"
+        );
+        assert_eq!(notes(&store).len(), calls);
+        assert_eq!(store.load().unwrap().consolidation.decisions.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_note_naming_unknown_paths_or_ids_is_discarded() {
+    let replies = [
+        (
+            "Merged: the change also touched src/other.rs.".to_string(),
+            false,
+        ),
+        (
+            "Merged; see docs/internal/README for more.".to_string(),
+            false,
+        ),
+        (format!("Same change as {}.", id(7)), false),
+        (
+            format!("Merged {} and {} in src/cache.rs.", id(1), id(2)),
+            true,
+        ),
+        (NOTE.to_string(), true),
+    ];
+    for (reply, kept) in replies {
+        let summarizer = Arc::new(FakeSummarizer::replying(&reply));
+        let (_dir, store) =
+            consolidated(TWO, gated("merge", 0.99, 0.0), Some(summarizer.clone())).await;
+        assert_eq!(summarizer.prompts().len(), 1);
+        assert_eq!(notes(&store).len(), usize::from(kept), "{reply}");
+    }
+}
+
+#[tokio::test]
+async fn a_timeout_or_invalid_output_keeps_the_pair_separate_and_changes_no_gate() {
+    let summarizers = [
+        FakeSummarizer::failing("timeout after 60000 ms"),
+        FakeSummarizer::replying(&"a".repeat(601)),
+        FakeSummarizer::replying("  \n "),
+    ];
+    for summarizer in summarizers {
+        let summarizer = Arc::new(summarizer);
+        let (_dir, store) =
+            consolidated(TWO, gated("merge", 0.99, 0.0), Some(summarizer.clone())).await;
+        assert_eq!(summarizer.prompts().len(), 1);
+        let s = store.load().unwrap();
+        assert_eq!(s.nodes.len(), 2, "the two stay separate");
+        assert_eq!(s.nodes[&id(1)].content, TWO[0]);
+        assert_eq!(s.nodes[&id(2)].content, TWO[1]);
+        let d = s.consolidation.decisions.values().next().unwrap();
+        assert_eq!(
+            (
+                d.representation,
+                d.probability,
+                d.contradiction,
+                d.note.clone()
+            ),
+            (consolidate::RepresentationDecision::Merge, 0.99, 0.0, None),
+            "the decision is as the classifier made it"
+        );
+        assert!(s.consolidation.notes.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn without_a_trusted_version_cmd_generated_notes_are_not_cached_on_disk() {
+    for versioned in [false, true] {
+        let mut fake = FakeSummarizer::replying(NOTE);
+        if versioned {
+            fake = fake.versioned();
+        }
+        let summarizer = Arc::new(fake);
+        let (_dir, store) =
+            consolidated(TWO, gated("merge", 0.99, 0.0), Some(summarizer.clone())).await;
+        let first = notes(&store);
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            store.load().unwrap().consolidation.notes.len(),
+            usize::from(versioned)
+        );
+
+        // Another classifier model decides the same pair again, a day later.
+        let mut s = store.load().unwrap();
+        s.consolidation.pending_since_ms = Some(T0);
+        s.generation += 1;
+        store.publish(&s).unwrap();
+        let cfg = Config::new("jev-2.0.0").with_summarizer(summarizer.clone());
+        let round = consolidate::round(
+            &store,
+            &Fake::new(gated("merge", 0.99, 0.0)),
+            &cfg,
+            T0 + 2 * DAY_MS,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(round.decided, 1);
+        let calls = if versioned { 1 } else { 2 };
+        assert_eq!(summarizer.prompts().len(), calls, "versioned: {versioned}");
+        let s = store.load().unwrap();
+        assert!(
+            s.consolidation
+                .decisions
+                .values()
+                .all(|d| d.note.as_deref() == Some(first[0].node_id.as_str())),
+            "the same note either way"
+        );
+        if versioned {
+            // Forgetting a parent takes the note and what pointed at it.
+            store.forget(&id(1), u64::MAX).unwrap();
+            let s = store.load().unwrap();
+            assert!(!s.nodes.contains_key(&first[0].node_id));
+            assert!(s.consolidation.notes.is_empty());
+            assert!(s.consolidation.decisions.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_worker_gives_its_rounds_the_servers_summarizer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(
+        dir.path(),
+        &[
+            rec(1, TWO[0], &["src/cache.rs"]),
+            rec(2, TWO[1], &["src/cache.rs"]),
+        ],
+    ));
+    enrich(&store, 2, T0);
+    let summarizer = Arc::new(FakeSummarizer::replying(NOTE));
+    let worker = Worker::new(
+        store.clone(),
+        Arc::new(Fake::new(gated("merge", 0.99, 0.0))),
+        controller::Config {
+            model: MODEL.into(),
+            candidates: 4,
+        },
+    );
+    worker.set_summarizer(summarizer.clone());
+    let round = worker.consolidate(T0 + DAY_MS).await.unwrap().expect("due");
+    assert_eq!((round.decided, round.notes), (1, 1));
+    assert_eq!(summarizer.prompts().len(), 1);
+    assert_eq!(notes(&store).len(), 1);
+    let m = worker.metrics();
+    assert_eq!((m.rounds, m.notes, m.notes_rejected), (1, 1, 0));
 }

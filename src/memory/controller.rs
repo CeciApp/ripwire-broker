@@ -517,6 +517,8 @@ pub struct Worker {
     cfg: Config,
     suspended: std::sync::atomic::AtomicBool,
     metrics: Arc<std::sync::Mutex<Metrics>>,
+    /// `--summarizer-cmd`, for the derived notes of consolidation rounds.
+    summarizer: std::sync::OnceLock<Arc<dyn crate::summarizer::Summarizer>>,
 }
 
 impl Worker {
@@ -531,6 +533,7 @@ impl Worker {
             cfg,
             suspended: Default::default(),
             metrics: Default::default(),
+            summarizer: Default::default(),
         }
     }
 
@@ -566,7 +569,10 @@ impl Worker {
         let Some(_slot) = self.store.remote_slot()? else {
             return Ok(None);
         };
-        let cfg = super::consolidate::Config::new(&self.cfg.model);
+        let mut cfg = super::consolidate::Config::new(&self.cfg.model);
+        if let Some(s) = self.summarizer.get() {
+            cfg = cfg.with_summarizer(s.clone());
+        }
         let Some(round) =
             super::consolidate::round(&self.store, &*self.classifier, &cfg, now_ms).await?
         else {
@@ -575,12 +581,19 @@ impl Worker {
         let mut metrics = self.metrics.lock().unwrap();
         metrics.consolidation.add(&round.metrics);
         metrics.rounds += 1;
+        metrics.notes += round.notes as u64;
+        metrics.notes_rejected += round.notes_rejected as u64;
         drop(metrics);
         if round.auth_failed {
             self.suspended
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(Some(round))
+    }
+
+    /// Gives consolidation rounds the server's summarizer; the first one given stays.
+    pub fn set_summarizer(&self, summarizer: Arc<dyn crate::summarizer::Summarizer>) {
+        let _ = self.summarizer.set(summarizer);
     }
 
     /// The live handle to [`Worker::metrics`], for the status resource.

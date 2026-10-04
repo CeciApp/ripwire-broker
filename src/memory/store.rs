@@ -804,7 +804,7 @@ impl Store {
     }
 
     /// Ends a consolidation round in one new snapshot: the decisions about pairs whose
-    /// memories are still there unchanged, with their links, the counter at `seen_enriched`,
+    /// memories are still there unchanged, with their links and derived notes, the counter at `seen_enriched`,
     /// the cursor when the pairs were asked, and the wait restarted while pairs are still
     /// pending. Returns how many pairs were decided.
     pub fn commit_round(
@@ -823,6 +823,7 @@ impl Store {
         };
         let mut count = 0;
         let mut added = Vec::new();
+        let mut added_notes: Vec<String> = Vec::new();
         for d in decided {
             let p = &d.decision;
             if !intact(&state, &p.pair.first, &p.hashes.0)
@@ -839,7 +840,36 @@ impl Store {
                     }
                 }
             }
-            state.consolidation.decisions.insert(d.key, d.decision);
+            let mut decision = d.decision;
+            if let Some(mut note) = d.note {
+                let id = note.node_id.clone();
+                let blocked = state.tombstones.contains_key(&id);
+                if !blocked
+                    && !state.nodes.contains_key(&id)
+                    && state.nodes.len() < self.limits.max_nodes
+                {
+                    note.ingest_seq = state
+                        .sequence
+                        .advance()
+                        .ok_or(Full::Nodes)
+                        .map_err(Refusal::Full)?;
+                    note.generation = generation;
+                    state.nodes.insert(id.clone(), note);
+                    added_notes.push(id.clone());
+                }
+                if let Some(key) = d.cache {
+                    state.consolidation.notes.insert(key, id);
+                }
+            }
+            // A note that could not be added, or was forgotten meanwhile, is not pointed at.
+            if decision
+                .note
+                .as_ref()
+                .is_some_and(|n| !state.nodes.contains_key(n))
+            {
+                decision.note = None;
+            }
+            state.consolidation.decisions.insert(d.key, decision);
             count += 1;
         }
         let still = !consolidate::pending(&state, model).is_empty();
@@ -849,15 +879,20 @@ impl Store {
             c.cursor = cursor;
         }
         c.pending_since_ms = still.then_some(now_ms);
-        if !added.is_empty() {
+        if !added.is_empty() || !added_notes.is_empty() {
             state.generation = generation;
         }
         let mut bytes = on_disk(&state)?;
         if bytes.len() as u64 > self.limits.snapshot_bytes {
-            // The links would overflow the snapshot: keep the decisions without them.
+            // The links and notes would overflow the snapshot: keep the decisions without them.
             for key in &added {
                 state.edges.remove(key);
             }
+            let gone: BTreeSet<String> = added_notes.into_iter().collect();
+            for id in &gone {
+                state.nodes.remove(id);
+            }
+            state.consolidation.drop_nodes(&gone);
             bytes = on_disk(&state)?;
             if bytes.len() as u64 > self.limits.snapshot_bytes {
                 return Err(Refusal::Full(Full::Snapshot));

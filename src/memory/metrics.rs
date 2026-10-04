@@ -39,6 +39,9 @@ pub struct Metrics {
     pub consolidation: Operation,
     /// Consolidation rounds run.
     pub rounds: u64,
+    /// Derived notes kept, and those the summarizer failed or the validator discarded.
+    pub notes: u64,
+    pub notes_rejected: u64,
     /// Jobs that finished their planned stages (complete or partial).
     pub jobs_done: u64,
     pub jobs_failed: u64,
@@ -50,6 +53,8 @@ impl Metrics {
         self.relations.add(&run.relations);
         self.consolidation.add(&run.consolidation);
         self.rounds += run.rounds;
+        self.notes += run.notes;
+        self.notes_rejected += run.notes_rejected;
         self.jobs_done += run.jobs_done;
         self.jobs_failed += run.jobs_failed;
     }

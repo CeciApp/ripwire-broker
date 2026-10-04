@@ -100,6 +100,11 @@ impl Runtime {
         &self.config
     }
 
+    /// `--summarizer-cmd`: consolidation rounds may write derived notes with it.
+    pub fn set_summarizer(&self, summarizer: Arc<dyn crate::summarizer::Summarizer>) {
+        self.worker.set_summarizer(summarizer);
+    }
+
     /// What the broker's tools publish to.
     pub fn publish(&self) -> &MemoryConfig {
         &self.publish
