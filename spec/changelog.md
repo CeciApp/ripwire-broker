@@ -99,7 +99,7 @@
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
 | 2026-10-03 17:00 | Fase 2 do plano do `--memory` (controle Jev) feita em TDD (T2.1 a T2.13; T2.0 escrita, pendente de rodada com a chave): Choice e pedidos de estado, decisões tipadas, transporte comum, `memory-prompts/v1`, fila com leases por lock e quota de 24 h, worker com typing, candidatos e relações, commit por par, falhas do provider, teto único de requisições, worker no `serve --memory` e `memory drain --online`, métricas de custo; PRD principal §23.1/§23.2/§23.3/§23.5 autorizam o worker | [D-138](#d-138--fase-2-do---memory-controle-jev) |
 | 2026-10-03 21:33 | Fase 3 do plano do `--memory` (leitura e entrega) feita em TDD (T3.1 a T3.10; T3.11, validação nos hosts, pendente e manual): índice lexical e de entidades com RRF, routing, scoring, beam e limites, parada, prazo de 750 ms, fontes mudadas omitidas e revalidadas, `memories[]` e `provenance.memory`, orçamento da memória com reserva, seção legível no texto MCP, leitura paralela em `context_for_task` com snapshot quente, hooks prontos para memórias; revisão com 12 achados corrigidos, entre eles a quota em `quota.json` e a chave do cache pela geração | [D-139](#d-139--fase-3-do---memory-leitura-e-entrega) |
-| 2026-10-03 22:52 | Fase 4 do plano do `--memory` (consolidação) feita em TDD (T4.1 a T4.3): cadência durável de 20 enriquecimentos ou 24 h, sem timer entre processos; rodadas de até 4 pares, 20 perguntas, 5 s e 4 tentativas, com cursor; decisões por par e `RepresentationDecision`, ligação `linked` a partir de 0,60, originais nunca apagados; nota derivada só pelo gate (`merge`/`promote` ≥ 0,85, contradição < 0,85), `memory-consolidation/v1`, validador de caminhos e IDs, cache só com versão confiável do sumarizador | [D-140](#d-140--fase-4-do---memory-consolidação) |
+| 2026-10-03 22:52 | Fase 4 do plano do `--memory` (consolidação) feita em TDD (T4.1 a T4.3): cadência durável de 20 enriquecimentos ou 24 h, sem timer entre processos; rodadas de até 4 pares, 20 perguntas, 5 s e 4 tentativas, com cursor; decisões por par e `RepresentationDecision`, ligação `linked` a partir de 0,60, originais nunca apagados; nota derivada só pelo gate (`merge`/`promote` ≥ 0,85, contradição < 0,85), `memory-consolidation/v1`, validador de caminhos e IDs, cache só com versão confiável do sumarizador; revisão com um achado alto (rodada com commit falho comprada de novo a cada tick) e três médios corrigidos, entre eles os pares gravados pelo enriquecimento | [D-140](#d-140--fase-4-do---memory-consolidação) |
 | 2026-10-03 15:12 | Fase 1 do plano do `--memory` feita em TDD (T1.1 a T1.16, um commit por tarefa, mutação em cada uma): `--memory` e `--memory-*` no parse; registro `memory/v1`, identidade, admissão, relógio e sequência; store privado com spool, snapshot, tetos, lock, retenção, `forget` com tombstones e revogação; `memory status\|forget\|add\|resume`; coleta pelas tools e pelo `hook --memory`; `install`/`doctor`. O `serve --memory` ainda não liga a coleta (T2.11) | [D-137](#d-137--fase-1-do---memory-store-e-coleta) |
 | 2026-10-03 13:05 | Fase 0 do plano do `--memory`: o PRD jev-mem passa à v0.3, reconciliado com o estudo `docs/jev-mem.md` e o PDF (mesmo hash; citações do paper e do broker conferem; seis divergências do estudo decididas a favor do PRD) e com as superfícies do D-135 no §4 (`memory add`, `memory resume`, `hook --memory`, `install --memory`, `memory drain --online`) | [D-136](#d-136--fase-0-do---memory-prd-jev-mem-v03) |
 | 2026-10-03 12:50 | Aceitas as cinco decisões pendentes do plano do `--memory`: `memory add` entra na Fase 1; `--online` passa a valer também em `memory drain`; o hook liga a coleta com `hook --memory` (só spool local, sem HTTP, gravado por `install --memory`); `memory resume` reativa a coleta depois de `forget --all`; a Fase 2 pode começar antes do A/B do `--online`, como experimental | [D-135](#d-135--decisões-pd-1-a-pd-5-do---memory) |
@@ -5907,22 +5907,27 @@ uma aresta semântica `linked`; nenhuma observação original é apagada. Com `-
 par com `merge`/`promote` ≥ 0,85 e contradição < 0,85 recebe uma nota derivada
 (`memory-consolidation/v1`), escrita a partir dos dois pais inteiros (até 2.000 caracteres), com
 no máximo 600 caracteres, descartada se nomear caminho ou ID que os pais não nomeiam. Testes:
-639 → 653 no build padrão, 655 → 669 com `online`.
+639 → 663 no build padrão, 655 → 679 com `online` (653 / 669 antes da revisão).
 
 **Decisões tomadas no caminho:**
 
 - **Os pares são a vizinhança da escrita.** Cada observação enriquecida (job `done`, nunca uma
-  nota derivada) forma par com os seus candidatos da escrita (`controller::candidates`, K = 4):
-  entidade compartilhada, depois palavras, depois a mais próxima. Palavras sozinhas não serviam,
-  porque o texto renderizado de quase toda observação compartilha vocabulário.
+  nota derivada) forma par com os candidatos com que a sua escrita a comparou
+  (`--memory-write-candidates`, 4 por padrão): entidade compartilhada, depois palavras, depois a
+  mais próxima. Palavras sozinhas não serviam, porque o texto renderizado de quase toda observação
+  compartilha vocabulário. Os pares são gravados no commit do enriquecimento (achado da revisão,
+  abaixo); um store enriquecido antes desta fase só consolida o que for enriquecido depois.
 - **As perguntas da consolidação passaram a falar de `pairs[c].newer` e `pairs[c].older`**, em
   vez de `new_memory` e `candidates[c]`, para um request levar vários pares. Elas nunca tinham sido
   enviadas, então nenhum cache dependia do texto antigo e a versão `memory-prompts/v1` ficou.
-- **Uma decisão vale por conteúdo, modelo e prompt.** A chave inclui os hashes dos dois pais, o
-  modelo do classificador e a versão do prompt: trocar o `--jev-model` volta os pares a pendentes.
-- **Rodada que falhou:** o contador é zerado e a espera recomeça (a próxima tentativa vem em 24 h
-  ou depois de mais 20 enriquecimentos), para uma falha do provider não virar laço. O cursor
-  avança sempre que algo foi enviado, para um par que sempre falha não bloquear os outros.
+- **Uma decisão vale por conteúdo, modelo e prompt.** A chave inclui os IDs e hashes dos dois
+  pais, o modelo do classificador e as versões do prompt, da política e do schema: trocar o
+  `--jev-model` volta os pares a pendentes.
+- **Rodada que falhou:** se o provider falhou depois de algo ter saído, o contador é zerado e a
+  espera recomeça (a próxima vem em 24 h ou depois de mais 20 enriquecimentos), e o cursor passa
+  dos pares enviados, para um par que sempre falha não bloquear os outros. Se nada saiu (quota
+  gasta, store ocupado), nada é gravado e a rodada continua devida. Se o commit falhou, ver a
+  revisão abaixo.
 - **O cache de notas** (`Consolidation.notes`) guarda só IDs, nunca texto, e só para um
   sumarizador com versão confiável (`--summarizer-version-cmd`, novo `Summarizer::trusted_version`).
   Ele serve quando o mesmo par é decidido de novo, por exemplo com outro modelo do classificador.
@@ -5945,6 +5950,52 @@ no máximo 600 caracteres, descartada se nomear caminho ou ID que os pais não n
   recusava e o script contava "morta". Todas foram refeitas com os argumentos separados; uma
   sobreviveu de verdade (resposta ausente virando zero), e o teste
   `a_pair_missing_any_one_answer_is_not_decided` entrou para ela.
+
+**Revisão independente do diff (plano §7, item 6), por um agente revisor só de leitura:** um
+achado alto, três médios e vários baixos. Corrigidos em TDD (teste vermelho, correção, mutação
+que derrubou):
+
+- **Alto — uma rodada cujo commit falhava rodava de novo a cada tick, pagando de novo:** contador,
+  espera e cursor só eram gravados no commit; com o snapshot cheio, o writer ocupado por mais de
+  2 s ou o disco cheio, a rodada continuava devida e o worker a comprava a cada 5 s (a quota diária
+  acabaria em ~83 min, e com ela o enriquecimento e as leituras). Agora, sem lugar para as decisões,
+  a cadência é gravada sozinha; se nem isso der, o worker espera 10 min (`RETRY_AFTER_MS`) antes de
+  outra rodada.
+- **Médio — achar os pares crescia com o quadrado do store e rodava de novo dentro do lock de
+  escrita** (~56 s com 2.000 memórias; `forget` recusado e os commits dos outros processos
+  esperando): os pares agora são gravados pelo enriquecimento, e a rodada só filtra a lista.
+- **Médio — o `memory drain` podia cortar uma rodada já paga** antes do commit, e o drain seguinte
+  comprava os mesmos pares: agora ele só começa uma rodada se couberem os 5 s dela, e não a corta.
+- **Médio (testes) — o commit da rodada não tinha teste de falha nem de pai esquecido no meio:**
+  vieram `a_round_that_cannot_be_committed_does_not_run_again_at_once`,
+  `what_is_forgotten_during_a_round_is_neither_summarized_nor_recorded` e
+  `a_note_that_cannot_be_added_is_neither_pointed_at_nor_cached`.
+- **Baixos:** uma rodada que não enviou nada consumia o gatilho (agora nada é gravado); o cursor
+  passava de pares que não saíram numa rodada dividida (agora para no último enviado; a divisão em
+  dois requests e o remapeamento dos índices ganharam teste); um `forget --all` no meio da rodada
+  não parava os requests seguintes nem o sumarizador (agora a rodada relê o store antes das notas e
+  checa a revogação antes de cada request); o cache de notas podia guardar o ID de uma nota que não
+  entrou (teto de nós, tombstone) ou que o usuário esqueceu; o validador deixava passar `.env`,
+  `a.rs`, `x.svelte` e um commit abreviado (agora checa esses também, e um hex passa como prefixo de
+  hash conhecido); os pais entravam crus no prompt do sumarizador (agora como strings JSON); a
+  chave da decisão não tinha as versões da política e do schema.
+- **Raio de impacto (item 5):** `ripwire --quality-delta` contra `4663a0a` acusou `drain` acima dos
+  tetos de complexidade e de tamanho e um auxiliar de teste repetido; corrigidos sem mudança de
+  comportamento. O `--test-gate` lista símbolos "sem teste" que são, quase todos, nomes repetidos
+  que o resolvedor não liga (329 ambíguos).
+- **Registrados, sem correção:** a etapa das notas fica fora dos 5 s da rodada, limitada pelo
+  `--summarizer-timeout-ms` de cada nota (até 4 por rodada), com a vaga remota do workspace presa
+  nesse tempo; um par grande demais para qualquer request (`TooLarge`) derrubaria a rodada inteira,
+  mas é inalcançável com os tetos do registro; os candidatos da escrita podem incluir notas
+  derivadas, o que tira vagas de pares reais (o mesmo vale para as relações desde a Fase 2); a
+  frescura e a elegibilidade das fontes dos pais não são reconferidas antes do envio, como na
+  escrita; nomes sem extensão (`Makefile`) passam no validador; a primeira metade de
+  `no_background_timer_runs_without_a_process` é uma guarda (não há o que agendar) e
+  `a_crash_at_write_19_keeps_the_counter_at_19` reabre o store sem injetar falha no rename (coberto
+  pelos testes de queda da T1.8).
+- **Mais um erro meu, corrigido:** um caso novo do teste do validador nasceu errado (o fim de um ID
+  em vez do começo), e uma rodada de mutações correu com o teste já vermelho; todas foram refeitas
+  com a suíte verde.
 
 **Auditoria do fim da fase (plano §7):** portões verdes; propriedades com 4096 casos (44) e
 `props_fs` (10) verdes; CA-10 sem crate de rede; guarda de fixtures verde; nenhum `reqwest`,

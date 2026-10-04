@@ -859,15 +859,18 @@ com `--memory`, o mesmo `--summarizer-cmd` escreve notas derivadas na consolida�
 próprio, distinto das notas arquiteturais:
 
 - **Gatilho:** só um par que o classificador quer `merge` ou `promote` com probabilidade da opção
-  ≥ 0,85 e contradição < 0,85, com os dois pais ainda íntegros. Sem sumarizador, decisões e
+  ≥ 0,85 e contradição < 0,85, com os dois pais ainda íntegros quando a nota vai ser pedida (o store
+  é relido antes; um pai esquecido no meio da rodada não chega ao sumarizador). Sem sumarizador, decisões e
   ligações funcionam por inteiro, sem nota.
 - **Evidência:** os dois pais inteiros, até 2.000 caracteres juntos; se não couberem, nenhuma nota.
-- **Prompt e validação:** `memory-consolidation/v1`; a nota tem no máximo 600 caracteres, mantém
-  os qualificadores e é descartada se nomear caminho ou ID que os pais não nomeiam. Validar o
+- **Prompt e validação:** `memory-consolidation/v1`, com cada pai como string JSON; a nota tem no
+  máximo 600 caracteres, mantém os qualificadores e é descartada se nomear caminho (inclusive
+  arquivo oculto ou nome de uma letra) ou ID (inclusive hash ou commit abreviado) que os pais não
+  nomeiam. Cada nota espera no máximo `--summarizer-timeout-ms`, fora dos 5 s da rodada. Validar o
   formato não prova fidelidade: perda de detalhe e contradição entram na avaliação (Fase 5 do
   plano).
-- **Proveniência:** `derived_from` com IDs e hashes dos pais, o modelo do sumarizador, a versão do
-  prompt e a decisão que a autorizou. A nota é hipótese derivada, nunca fato confirmado pelo
+- **Proveniência:** `derived_from` com IDs e hashes dos pais, o modelo do sumarizador e a versão
+  do prompt; a decisão que a autorizou guarda o ID da nota. A nota é hipótese derivada, nunca fato confirmado pelo
   classificador; não substitui nem apaga os pais, fica velha com as fontes deles e expira com o
   primeiro.
 - **Cache:** em disco, só IDs, e só com `--summarizer-version-cmd`; sem ele, nenhuma nota é
