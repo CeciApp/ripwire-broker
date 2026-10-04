@@ -605,8 +605,16 @@ cargo build --release
   and plugins nor the ones a repository commits load. A run whose session shows a hook that ran, an MCP
   server the arm did not declare, or a context tool (`graft`, `ripwire`) run from the shell outside its arm,
   is recorded as invalid and left out of the averages.
-- **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped), and
-  `transcripts/`, which holds the agent's full session, repository code included. Keep it local.
+- **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped),
+  `versions.json` (the broker's and ripwire's versions, the pinned classifier model, the summarizer; the
+  agent's version and model come from each session's transcript), and `transcripts/`, which holds the
+  agent's full session, repository code included. Keep it local.
+- **Memory cost:** a memory arm's run records, apart, what its reads sent and delivered (from
+  `provenance.memory` in the answers), how long the agent waited for `context_for_task`, what the round's
+  store spent of its 24-hour quota during the session besides the reads (the worker's enrichment and
+  consolidation, read with `memory status`), and the agent's own duration. Other arms have none of these
+  fields, never zeros. The report's "Custo da memória" table averages them; questions are not turned into
+  dollars without verified pricing.
 - **Bars:** each one reads `passa`, `falha` or `insuficiente`. They stay `insuficiente` below 30 tasks in 3
   repositories.
 - **Binaries and timeouts:** `--broker BIN` defaults to the `ripwire-broker` next to `ripwire-eval` (then

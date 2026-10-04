@@ -50,6 +50,11 @@ impl Arm {
         }
     }
 
+    /// Whether its server keeps a memory store (arms B and C).
+    pub fn memory(self) -> bool {
+        matches!(self, Arm::BrokerMemory | Arm::BrokerMemoryDeterministic)
+    }
+
     /// Whether its server sends to the provider (`--memory` implies `--online`), and so needs
     /// the credential and the consent of PRD §23.6.
     pub fn needs_credential(self) -> bool {

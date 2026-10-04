@@ -218,7 +218,24 @@ fn run_agent(
     Ok(AgentRun { events, timed_out })
 }
 
+/// Attempts and questions the round's store charged in the last 24 hours (`memory status`), as
+/// its server sees it; `None` when it cannot be read.
+fn spent(cfg: &RunConfig, work: &Path, state: &Path) -> Option<(u64, u64)> {
+    let out = Command::new(&cfg.tools.broker)
+        .args(["memory", "status", "--workspace"])
+        .arg(work)
+        .arg("--json")
+        .env("XDG_STATE_HOME", state)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some((v["attempts_24h"].as_u64()?, v["questions_24h"].as_u64()?))
+}
+
 fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) -> RunRecord {
+    let read = s.memory_read.unwrap_or_default();
+    let memory = |v: u64| arm.memory().then_some(v);
     RunRecord {
         task: task.id.clone(),
         repo: task.repo_name(),
@@ -244,6 +261,13 @@ fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) ->
         first_correct_rank: sc.first_correct_rank,
         test_recall: sc.test_recall,
         correct: sc.correct,
+        agent: s.agent.clone(),
+        context_for_task_ms: (s.context_calls > 0).then_some(s.context_ms),
+        memory_retrieval_requests: memory(read.requests),
+        memory_retrieval_questions: memory(read.questions),
+        memories_delivered: memory(read.delivered),
+        memory_ingestion_attempts: None,
+        memory_ingestion_questions: None,
     }
 }
 
@@ -289,6 +313,7 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRe
                 .collect();
         let config = dir.join("mcp.json");
         let state = dir.join("state");
+        let before = arm.memory().then(|| spent(cfg, &work, &state)).flatten();
         std::fs::write(
             &config,
             arm.mcp_config(&cfg.tools, &work, &state).to_string(),
@@ -334,7 +359,14 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRe
             )
         });
         let sc = score::score(task, &s, &modified, correct);
-        Ok::<_, String>(record(task, arm, repeat, &s, &sc))
+        let mut r = record(task, arm, repeat, &s, &sc);
+        // Ingestion: what the store spent during the session, less what its reads sent.
+        if let (Some(b), Some(a)) = (before, before.and(spent(cfg, &work, &state))) {
+            let read = s.memory_read.unwrap_or_default();
+            r.memory_ingestion_attempts = Some(a.0.saturating_sub(b.0 + read.requests));
+            r.memory_ingestion_questions = Some(a.1.saturating_sub(b.1 + read.questions));
+        }
+        Ok::<_, String>(r)
     })();
     // Whatever happened after the copy existed: a database left behind by a failed run is still
     // a database left behind.
@@ -367,6 +399,36 @@ fn rounds(tasks: &[Task]) -> Vec<Vec<&Task>> {
     out
 }
 
+/// The first line `program --version` prints, or `unavailable`.
+fn version_of(program: &Path) -> String {
+    Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .map(|l| l.trim().to_string())
+        })
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| "unavailable".into())
+}
+
+/// What the runs were made with (PRD jev-mem §14): the executables, the classifier model the
+/// arms' servers pin, and the summarizer, which no arm configures. The agent's version is each
+/// run's own, from its transcript: running the agent's command outside a session is a run.
+fn versions(cfg: &RunConfig) -> serde_json::Value {
+    json!({
+        "ripwire_broker": version_of(&cfg.tools.broker),
+        "ripwire": version_of(&cfg.tools.ripwire),
+        "jev_model": crate::memory::runtime::DEFAULT_MODEL,
+        "summarizer": "none",
+    })
+}
+
 /// Runs what `results.jsonl` does not have yet; returns how many runs it made.
 pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> {
     cfg.corpus.validate().map_err(|e| e.join("\n"))?;
@@ -384,6 +446,8 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
         ));
     }
     std::fs::create_dir_all(cfg.out.join("transcripts")).map_err(|e| e.to_string())?;
+    std::fs::write(cfg.out.join("versions.json"), versions(cfg).to_string())
+        .map_err(|e| e.to_string())?;
     let done: std::collections::HashSet<_> =
         report::load(&cfg.out).iter().map(RunRecord::key).collect();
     let mut results = std::fs::OpenOptions::new()

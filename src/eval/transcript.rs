@@ -63,12 +63,31 @@ pub struct Summary {
     pub is_error: bool,
     pub first_edit_ms: Option<u64>,
     pub mcp_result_bytes: u64,
+    /// The agent's version and model as its session announced them (`claude_code_version`,
+    /// `model` in the init event).
+    pub agent: Option<String>,
+    /// `context_for_task` calls, and the time from each call to its answer (structure and
+    /// memory read together, as the agent waited for them).
+    pub context_calls: u64,
+    pub context_ms: u64,
+    /// What the broker's memory reads reported in `provenance.memory`, summed, and the memories
+    /// it delivered. `None` when no answer carried a memory read.
+    pub memory_read: Option<MemoryRead>,
     /// Files the broker presented, in the order it first presented them.
     pub presented_files: Vec<String>,
     pub presented_tests: Vec<String>,
     /// The agent's shell commands, for telling which reference tests it ran. Scoring only;
     /// never written to the results.
     pub commands: Vec<String>,
+}
+
+/// The memory reads of a session (PRD jev-mem §14: retrieval apart from ingestion).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct MemoryRead {
+    pub reads: u64,
+    pub requests: u64,
+    pub questions: u64,
+    pub delivered: u64,
 }
 
 impl Summary {
@@ -266,6 +285,13 @@ fn push_new(list: &mut Vec<String>, value: &str) {
 }
 
 fn on_init(s: &mut Summary, e: &Value) {
+    let announced: Vec<&str> = ["claude_code_version", "model"]
+        .iter()
+        .filter_map(|k| e[*k].as_str())
+        .collect();
+    if !announced.is_empty() {
+        s.agent = Some(announced.join(" "));
+    }
     for server in e["mcp_servers"].as_array().into_iter().flatten() {
         if let Some(name) = server["name"].as_str() {
             push_new(&mut s.mcp_servers, name);
@@ -280,11 +306,16 @@ fn on_init(s: &mut Summary, e: &Value) {
     }
 }
 
-/// One tool call: counted by class, its name kept for the result that answers it.
-fn on_tool_use(s: &mut Summary, names: &mut HashMap<String, String>, at: u64, block: &Value) {
+/// One tool call: counted by class, its name and time kept for the result that answers it.
+fn on_tool_use(
+    s: &mut Summary,
+    names: &mut HashMap<String, (String, u64)>,
+    at: u64,
+    block: &Value,
+) {
     let name = block["name"].as_str().unwrap_or("");
     if let Some(id) = block["id"].as_str() {
-        names.insert(id.to_string(), name.to_string());
+        names.insert(id.to_string(), (name.to_string(), at));
     }
     match classify(name, &block["input"]) {
         Class::Search => s.calls.search += 1,
@@ -308,8 +339,9 @@ fn on_tool_use(s: &mut Summary, names: &mut HashMap<String, String>, at: u64, bl
     }
 }
 
-/// The answer to an MCP call: its size, and what a broker envelope presented.
-fn on_mcp_result(s: &mut Summary, name: &str, text: &str) {
+/// The answer to an MCP call, `waited` after it: its size, what a broker envelope presented,
+/// and its memory read.
+fn on_mcp_result(s: &mut Summary, name: &str, text: &str, waited: u64) {
     s.mcp_result_bytes += text.len() as u64;
     if !BROKER_TOOLS
         .iter()
@@ -317,9 +349,25 @@ fn on_mcp_result(s: &mut Summary, name: &str, text: &str) {
     {
         return;
     }
-    let Ok(env) = serde_json::from_str::<Value>(text) else {
+    if name.ends_with("__context_for_task") {
+        s.context_calls += 1;
+        s.context_ms += waited;
+    }
+    // The envelope's JSON comes first; with memories, the readable section follows it.
+    let Some(Ok(env)) = serde_json::Deserializer::from_str(text)
+        .into_iter::<Value>()
+        .next()
+    else {
         return;
     };
+    let read = &env["provenance"]["memory"];
+    if read.is_object() {
+        let m = s.memory_read.get_or_insert_with(MemoryRead::default);
+        m.reads += 1;
+        m.requests += read["requests"].as_u64().unwrap_or(0);
+        m.questions += read["questions"].as_u64().unwrap_or(0);
+        m.delivered += env["memories"].as_array().map_or(0, |a| a.len() as u64);
+    }
     for (key, list) in [
         ("items", &mut s.presented_files),
         ("tests", &mut s.presented_tests),
@@ -358,7 +406,7 @@ fn blocks<'a>(e: &'a Value, kind: &'a str) -> impl Iterator<Item = &'a Value> {
 pub fn summarize(events: &[(u64, Value)]) -> Summary {
     let mut s = Summary::default();
     let (mut saw_init, mut saw_result) = (false, false);
-    let mut names: HashMap<String, String> = HashMap::new();
+    let mut names: HashMap<String, (String, u64)> = HashMap::new();
     for (at, e) in events {
         match e["type"].as_str() {
             Some("system") if e["subtype"] == "init" => {
@@ -380,8 +428,10 @@ pub fn summarize(events: &[(u64, Value)]) -> Summary {
             Some("user") => {
                 for block in blocks(e, "tool_result") {
                     let id = block["tool_use_id"].as_str().unwrap_or("");
-                    if let Some(name) = names.get(id).filter(|n| n.starts_with("mcp__")) {
-                        on_mcp_result(&mut s, name, &result_text(&block["content"]));
+                    if let Some((name, called)) = names.get(id).filter(|n| n.0.starts_with("mcp__"))
+                    {
+                        let waited = at.saturating_sub(*called);
+                        on_mcp_result(&mut s, name, &result_text(&block["content"]), waited);
                     }
                 }
             }

@@ -172,7 +172,8 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "report" => {
-            let records = report::load(&required(&a, "--out")?);
+            let out_dir = required(&a, "--out")?;
+            let records = report::load(&out_dir);
             if a.json {
                 let arms: Vec<_> = ripwire_broker::eval::arm::ALL
                     .iter()
@@ -183,6 +184,12 @@ fn run() -> Result<(), String> {
                 println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             } else {
                 print!("{}", report::render(&records));
+                let versions = std::fs::read_to_string(out_dir.join("versions.json"))
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+                if let Some(v) = versions {
+                    print!("{}", report::render_versions(&v, &records));
+                }
             }
             Ok(())
         }

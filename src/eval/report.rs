@@ -35,6 +35,26 @@ pub struct RunRecord {
     pub first_correct_rank: Option<usize>,
     pub test_recall: f64,
     pub correct: Option<bool>,
+    /// The agent's version and model, from its session (PRD jev-mem §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// `context_for_task` latency as the agent waited for it, summed over the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_for_task_ms: Option<u64>,
+    /// Memory arms only (PRD jev-mem §14), never a zero for the others: what the session's reads
+    /// sent and delivered...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_retrieval_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_retrieval_questions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memories_delivered: Option<u64>,
+    /// ...and what the store's 24-hour quota grew by during the session besides them: the
+    /// worker's enrichment and consolidation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ingestion_attempts: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ingestion_questions: Option<u64>,
 }
 
 impl RunRecord {
@@ -269,6 +289,74 @@ fn num(v: Option<f64>) -> String {
     v.map_or_else(|| "—".into(), |v| format!("{v:.3}"))
 }
 
+/// Memory's cost by arm, per valid run (PRD jev-mem §14): retrieval, ingestion and the agent's
+/// own latency apart. Empty without a memory arm.
+fn memory_cost(records: &[RunRecord]) -> String {
+    let rows: Vec<String> = super::arm::ALL
+        .into_iter()
+        .filter(|a| a.memory())
+        .filter_map(|arm| {
+            let v = valid(records, arm.name());
+            if v.is_empty() {
+                return None;
+            }
+            let f = |g: fn(&RunRecord) -> Option<u64>| {
+                num(mean(v.iter().filter_map(|r| g(r)).map(|n| n as f64)))
+            };
+            Some(format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                arm.name(),
+                v.len(),
+                f(|r| r.memory_retrieval_requests),
+                f(|r| r.memory_retrieval_questions),
+                f(|r| r.memories_delivered),
+                f(|r| r.context_for_task_ms),
+                f(|r| r.memory_ingestion_attempts),
+                f(|r| r.memory_ingestion_questions),
+                f(|r| Some(r.duration_ms)),
+            ))
+        })
+        .collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n## Custo da memória\n\nMédias por execução válida. Recuperação: o que as leituras de \
+         memória enviaram ao classificador e entregaram, e a espera do agente por \
+         `context_for_task` (estrutura e memória juntas). Ingestão: o quanto a quota de 24 h do store \
+         da rodada cresceu na sessão além das leituras (enriquecimento e consolidação). Perguntas \
+         não viram dólares sem preço verificado (PRD jev-mem §8.3).\n\n\
+         | braço | válidas | leitura: requests | leitura: perguntas | memórias entregues | \
+         context_for_task (ms) | ingestão: tentativas | ingestão: perguntas | agente (ms) |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    out.extend(rows);
+    out
+}
+
+/// What the runs were made with (PRD jev-mem §14): the run's `versions.json`, and the agent
+/// versions its sessions announced.
+pub fn render_versions(v: &serde_json::Value, records: &[RunRecord]) -> String {
+    let mut out = String::from("\n## Versões\n\n");
+    for (key, label) in [
+        ("ripwire_broker", "ripwire-broker"),
+        ("ripwire", "ripwire"),
+        ("jev_model", "modelo Jev"),
+        ("summarizer", "sumarizador"),
+    ] {
+        let value = v[key].as_str().unwrap_or("—");
+        out.push_str(&format!("- {label}: `{value}`\n"));
+    }
+    let agents: BTreeSet<&str> = records.iter().filter_map(|r| r.agent.as_deref()).collect();
+    let agents: Vec<String> = agents.iter().map(|a| format!("`{a}`")).collect();
+    let agents = match agents.is_empty() {
+        true => "não anunciado".to_string(),
+        false => agents.join(", "),
+    };
+    out.push_str(&format!("- agente: {agents}\n"));
+    out
+}
+
 /// The report in Markdown, in the PRD's language.
 pub fn render(records: &[RunRecord]) -> String {
     let mut out = String::from("# Avaliação A/B do ripwire-broker\n\n## Braços\n\n");
@@ -312,6 +400,7 @@ pub fn render(records: &[RunRecord]) -> String {
             b.verdict.label()
         ));
     }
+    out.push_str(&memory_cost(records));
     let invalid: Vec<&RunRecord> = records.iter().filter(|r| !r.valid).collect();
     if !invalid.is_empty() {
         out.push_str(&format!(

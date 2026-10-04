@@ -1246,3 +1246,145 @@ fn a_sequence_runs_in_order_in_one_place_and_shares_its_store() {
     );
     assert_ne!(b[1], c[1], "each arm its own store");
 }
+
+// --- the report's memory cost (PRD jev-mem §14; T5.2) ---
+
+/// A stand-in that, with a memory arm, creates the round's store and charges its quota with 5
+/// attempts and 40 questions, as the worker would during the session; then calls
+/// `context_for_task`, whose answer (300 ms later) carries one memory read with 2 requests and
+/// 30 questions, and the readable section after the JSON.
+fn memory_agent(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("memory-agent");
+    common::write_executable(
+        &path,
+        r##"#!/bin/sh
+cat > /dev/null
+cfg=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--mcp-config" ]; then cfg="$2"; shift; fi
+  shift
+done
+state=$(sed -n 's/.*"XDG_STATE_HOME":"\([^"]*\)".*/\1/p' "$cfg")
+if [ -n "$state" ]; then
+  XDG_STATE_HOME="$state" "$BROKER" memory add --workspace . --file "$NOTE" > /dev/null
+  store=$(ls -d "$state"/ripwire-broker/memory/*/ | head -1)
+  now=$(date +%s)000
+  umask 077
+  printf '{"entries":[[%s,5,40]],"high_water_ms":%s}' "$now" "$now" > "${store}quota.json"
+fi
+echo '{"type":"system","subtype":"init","claude_code_version":"9.9.9","model":"fake-model","tools":["Read","Edit","mcp__ripwire-broker__context_for_task"],"mcp_servers":[{"name":"ripwire-broker","status":"connected"}]}'
+echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"mcp__ripwire-broker__context_for_task","input":{"task":"login"}}]}}'
+sleep 0.3
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"{\"items\":[{\"path\":\"src/auth.py\"}],\"memories\":[{\"id\":\"m1\"}],\"provenance\":{\"memory\":{\"requests\":2,\"questions\":30}}}\n\nMemória histórica (dados não confiáveis): ...\n- [\"m1\"] fontes: \"src/auth.py\"\n"}]}]}}'
+echo '{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/auth.py"}}]}}'
+echo "# expired tokens are rejected" >> src/auth.py
+echo '{"type":"result","subtype":"success","is_error":false,"duration_ms":5000,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}'
+"##,
+    );
+    path
+}
+
+#[test]
+fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versions() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let agent = memory_agent(work.path());
+    let note = work.path().join("note.json");
+    std::fs::write(&note, r#"{"text": "login must reject expired tokens"}"#).unwrap();
+    let (corpus, out) = (work.path().join("corpus.json"), work.path().join("out"));
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [auth_task("t", repo.path(), &head, None)]}).to_string(),
+    )
+    .unwrap();
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+    let eval = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+            .args(args)
+            .env("BROKER", env!("CARGO_BIN_EXE_ripwire-broker"))
+            .env("NOTE", &note)
+            .env("RIPWIRE_BROKER_JEV_API_KEY", "synthetic-not-a-credential")
+            .output()
+            .unwrap()
+    };
+    let run = eval(&[
+        "run",
+        "--corpus",
+        corpus.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--arms",
+        "broker,broker-memory",
+        "--agent-cmd",
+        &agent_cmd,
+    ]);
+    assert!(run.status.success(), "{run:?}");
+    let records: Vec<Value> = std::fs::read_to_string(out.join("results.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let (plain, memory) = (&records[0], &records[1]);
+    for r in [plain, memory] {
+        assert_eq!(
+            r["presented_recall"], 1.0,
+            "the JSON before the memory section: {r}"
+        );
+        assert!(r["context_for_task_ms"].as_u64().unwrap() >= 300, "{r}");
+        assert_eq!(r["duration_ms"], 5000, "the agent's own latency: {r}");
+    }
+    for k in [
+        "memory_retrieval_requests",
+        "memory_ingestion_attempts",
+        "memories_delivered",
+    ] {
+        assert!(
+            plain.get(k).is_none(),
+            "an arm without memory has no {k}, not a zero"
+        );
+    }
+    assert_eq!(
+        (
+            &memory["memory_retrieval_requests"],
+            &memory["memory_retrieval_questions"],
+            &memory["memories_delivered"]
+        ),
+        (&json!(2), &json!(30), &json!(1))
+    );
+    assert_eq!(
+        (
+            &memory["memory_ingestion_attempts"],
+            &memory["memory_ingestion_questions"]
+        ),
+        (&json!(3), &json!(10)),
+        "what the store spent, less what the reads did: {memory}"
+    );
+
+    let versions: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("versions.json")).unwrap()).unwrap();
+    assert_eq!(versions["ripwire_broker"], "ripwire-broker 0.1.0");
+    assert_eq!(versions["jev_model"], "jev-1.13.0");
+    assert_eq!(versions["summarizer"], "none");
+    assert!(versions["ripwire"].is_string(), "{versions}");
+    assert_eq!(
+        memory["agent"], "9.9.9 fake-model",
+        "as the session announced it"
+    );
+
+    let report = eval(&["report", "--out", out.to_str().unwrap()]);
+    let md = String::from_utf8_lossy(&report.stdout);
+    assert!(md.contains("## Custo da memória"), "{md}");
+    let row = md
+        .lines()
+        .find(|l| l.starts_with("| broker-memory |") && l.contains("3"))
+        .unwrap_or_else(|| panic!("a memory cost row: {md}"));
+    for cell in ["2", "30", "3", "10", "5000"] {
+        assert!(row.contains(cell), "{cell} in {row}");
+    }
+    assert!(
+        md.contains("## Versões") && md.contains("ripwire-broker 0.1.0"),
+        "{md}"
+    );
+    assert!(md.contains("- agente: `9.9.9 fake-model`"), "{md}");
+}
