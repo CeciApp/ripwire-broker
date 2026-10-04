@@ -77,12 +77,17 @@ fn git_ok(repo: &Path, args: &[&str]) -> bool {
 }
 
 impl Corpus {
-    /// Reads a corpus file and resolves relative repositories against its directory.
+    /// Reads a corpus file and resolves relative repositories against its directory, as
+    /// absolute paths: every git command runs from inside a copy, never from here.
     pub fn load(path: &Path) -> Result<Corpus, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut corpus: Corpus =
             serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        let dir = path.parent().unwrap_or(Path::new("."));
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let dir = std::path::absolute(parent).map_err(|e| format!("{}: {e}", path.display()))?;
         for t in &mut corpus.tasks {
             if t.repo.is_relative() {
                 t.repo = dir.join(&t.repo);

@@ -1583,3 +1583,46 @@ fn versions_that_change_between_runs_are_refused() {
     );
     assert_eq!(logged(work.path()), 1, "the second repeat did not run");
 }
+
+// --- audit of 2026-10-04 (D-143) ---
+
+#[test]
+fn a_corpus_given_by_a_relative_path_still_finds_its_repositories() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(repo.path(), work.path().join("repo")).unwrap();
+    std::fs::write(
+        work.path().join("corpus.json"),
+        json!({"tasks": [auth_task("t", Path::new("repo"), &head, None)]}).to_string(),
+    )
+    .unwrap();
+    // As the README shows it: from the corpus's own directory, by a relative path.
+    let agent = logging_agent(work.path());
+    let out = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .current_dir(work.path())
+        .args([
+            "run",
+            "--corpus",
+            "corpus.json",
+            "--out",
+            "out",
+            "--arms",
+            "broker",
+            "--agent-cmd",
+            &format!("{} --mcp-config {{mcp_config}}", agent.display()),
+        ])
+        .env("LOG", work.path().join("log"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let record: Value = serde_json::from_str(
+        std::fs::read_to_string(work.path().join("out/results.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["valid"], true, "the copy was made: {record}");
+}
