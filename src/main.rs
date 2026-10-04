@@ -132,10 +132,15 @@ fn online_config(
 
 /// `memory drain --online` (PD-2): the spool incorporated and ready jobs sent, for at most 60 s or
 /// 20 jobs. Needs the `online` feature and the credential; nothing is downgraded.
-async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
+async fn memory_drain(
+    workspace: &std::path::Path,
+    state_dir: Option<std::path::PathBuf>,
+    model: Option<String>,
+    candidates: Option<usize>,
+) -> ExitCode {
     #[cfg(not(feature = "online"))]
     {
-        let _ = a;
+        let _ = (workspace, state_dir, model, candidates);
         eprintln!(
             "memory drain --online: this binary was built without the online feature; \
              rebuild it with `cargo build --release --features online`"
@@ -155,18 +160,15 @@ async fn memory_drain(a: &cli::MemoryCommand) -> ExitCode {
             Ok(k) => k,
             Err(e) => return fail(e.to_string()),
         };
-        let cli::MemoryAction::Drain { model, candidates } = &a.action else {
-            return ExitCode::from(2);
-        };
-        let model = model.clone().unwrap_or_else(|| DEFAULT_MODEL.into());
+        let model = model.unwrap_or_else(|| DEFAULT_MODEL.into());
         let client = match JevClient::new(key, &model, std::time::Duration::from_secs(15)) {
             Ok(c) => c,
             Err(e) => return fail(e),
         };
-        let Some(dir) = a.state_dir.clone().or_else(StateStore::default_dir) else {
+        let Some(dir) = state_dir.or_else(StateStore::default_dir) else {
             return fail("no state directory: pass --state-dir".into());
         };
-        let id = match memory::identity::workspace_id(&a.workspace) {
+        let id = match memory::identity::workspace_id(workspace) {
             Ok(id) => id,
             Err(e) => return fail(e),
         };
@@ -369,8 +371,12 @@ async fn main() -> ExitCode {
             );
             return ExitCode::SUCCESS;
         }
-        Ok(Command::Memory(a)) if matches!(a.action, cli::MemoryAction::Drain { .. }) => {
-            return memory_drain(&a).await;
+        Ok(Command::Memory(cli::MemoryCommand {
+            action: cli::MemoryAction::Drain { model, candidates },
+            workspace,
+            state_dir,
+        })) => {
+            return memory_drain(&workspace, state_dir, model, candidates).await;
         }
         Ok(Command::Memory(a)) => {
             // Dispatched before `settings`: local, never online (PRD jev-mem §4).

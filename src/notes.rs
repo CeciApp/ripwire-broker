@@ -402,7 +402,8 @@ impl NoteEngine {
         }
     }
 
-    /// Waits for the generation in flight, if any (tests; graceful shutdown).
+    /// Waits for the generation in flight, if any. Tests use it to observe a note settle; the
+    /// server never waits for one.
     pub async fn wait_background(&self) {
         let task = self.running.lock().unwrap().take();
         if let Some((_, handle)) = task {

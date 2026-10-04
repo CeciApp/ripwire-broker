@@ -393,6 +393,19 @@ impl Flags {
         }))
     }
 
+    /// The `--memory-*` option `k`, or `default`; a value outside `min..=max` is refused.
+    fn within(&self, k: &str, default: u64, min: u64, max: u64) -> Result<u64, String> {
+        let Some(v) = self.memory.get(k) else {
+            return Ok(default);
+        };
+        match v.parse::<u64>() {
+            Ok(n) if (min..=max).contains(&n) => Ok(n),
+            _ => Err(usage(format_args!(
+                "{k} takes a number from {min} to {max}"
+            ))),
+        }
+    }
+
     fn memory(&self) -> Result<Option<MemoryArgs>, String> {
         if !self.on("--memory") {
             return match self.memory.is_empty() {
@@ -401,17 +414,7 @@ impl Flags {
             };
         }
         // Each option with its default and its range (PRD jev-mem §4).
-        let within = |k: &str, default: u64, min: u64, max: u64| -> Result<u64, String> {
-            let Some(v) = self.memory.get(k) else {
-                return Ok(default);
-            };
-            match v.parse::<u64>() {
-                Ok(n) if (min..=max).contains(&n) => Ok(n),
-                _ => Err(usage(format_args!(
-                    "{k} takes a number from {min} to {max}"
-                ))),
-            }
-        };
+        let within = |k: &str, default: u64, min: u64, max: u64| self.within(k, default, min, max);
         Ok(Some(MemoryArgs {
             read_deadline: Duration::from_millis(within("--memory-read-deadline-ms", 750, 1, 750)?),
             read_request_limit: within("--memory-read-request-limit", 4, 0, 4)? as usize,
@@ -855,16 +858,9 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 (Some("drain"), ..) => match f.on("--online") {
                     true => MemoryAction::Drain {
                         model: f.jev.get("--jev-model").cloned(),
-                        candidates: match f.memory.get("--memory-write-candidates") {
-                            None => None,
-                            Some(v) => match v.parse::<usize>() {
-                                Ok(n) if n <= 10 => Some(n),
-                                _ => {
-                                    return Err(usage(
-                                        "--memory-write-candidates takes a number from 0 to 10",
-                                    ));
-                                }
-                            },
+                        candidates: match f.memory.contains_key("--memory-write-candidates") {
+                            true => Some(f.within("--memory-write-candidates", 4, 0, 10)? as usize),
+                            false => None,
                         },
                     },
                     false => {
@@ -880,7 +876,10 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                         .ok_or_else(|| usage("memory add needs --file PATH"))?,
                 },
                 (Some("retry"), ..) => MemoryAction::Retry,
-                _ => MemoryAction::Resume,
+                (Some("resume"), ..) => MemoryAction::Resume,
+                (other, ..) => {
+                    return Err(usage(format_args!("unknown memory command {other:?}")));
+                }
             };
             Ok(Command::Memory(MemoryCommand {
                 action,
