@@ -65,7 +65,11 @@ fn symbol_item(
     }
 }
 
-fn limitation(verb: &'static str, kind: &'static str, detail: impl Into<String>) -> Entry {
+pub(crate) fn limitation(
+    verb: &'static str,
+    kind: &'static str,
+    detail: impl Into<String>,
+) -> Entry {
     Entry::Limitation(Limitation {
         kind,
         detail: detail.into(),

@@ -710,6 +710,19 @@ impl Broker {
         if !symbols.is_empty() {
             push_once(&mut verbs, "edit_check");
         }
+        // The rest is named, never dropped in silence (D-148).
+        if let Some(rest) = req.symbols.get(symbols.len()..).filter(|r| !r.is_empty()) {
+            entries.push(normalize::limitation(
+                "edit_check",
+                "symbols_truncated",
+                format!(
+                    "checked the first {} of {} symbols; call again with the rest: {}",
+                    symbols.len(),
+                    req.symbols.len(),
+                    rest.join(", ")
+                ),
+            ));
+        }
         // A symbol ripwire refuses (the agent renamed or deleted it) is missing evidence, not a
         // failed call: the situation already fetched still answers. Only an unavailable
         // upstream fails the tool.

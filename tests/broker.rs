@@ -555,6 +555,34 @@ async fn an_unknown_symbol_after_an_edit_is_a_limitation_not_a_failed_call() {
     }
 }
 
+/// Symbols past the checks one call makes are named, never dropped in silence (D-148): only the
+/// first five are checked, and the answer said nothing about the rest.
+#[tokio::test]
+async fn symbols_past_the_checks_of_one_call_are_named() {
+    let (b, fake, ws) = broker(edit_fake()).await;
+    common::write(ws.path(), "src/auth.py", "changed");
+    let symbols: Vec<String> = (1..=7).map(|n| format!("s{n}")).collect();
+    let req = EditRequest {
+        files: vec!["src/auth.py".into()],
+        symbols,
+        ..EditRequest::default()
+    };
+
+    let out = to_json(&b.context_after_edit(req).await.unwrap());
+
+    let checks = fake.called().iter().filter(|v| *v == "edit_check").count();
+    assert_eq!(checks, 5, "the bound holds");
+    let cut = out["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "symbols_truncated")
+        .unwrap_or_else(|| panic!("the skipped symbols are named: {out:#}"));
+    let detail = cut["detail"].as_str().unwrap();
+    assert!(detail.contains("s6") && detail.contains("s7"), "{detail}");
+    assert!(!detail.contains("s5"), "{detail}");
+}
+
 #[tokio::test]
 async fn after_an_edit_the_broken_contract_and_its_callers_are_reported() {
     let (b, fake, ws) = broker(edit_fake()).await;
