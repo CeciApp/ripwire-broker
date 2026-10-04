@@ -5040,3 +5040,52 @@ fn a_new_session_prunes_sessions_untouched_for_thirty_days() {
         "the new session itself is saved"
     );
 }
+
+/// The installer knows its own hooks by their program and the word `hook`, as it knows its status
+/// line (D-147): a substring check missed a renamed binary, which left duplicates, and took any
+/// command that merely mentioned "ripwire-broker" and " hook ". A foreign group that was already
+/// empty is the user's, and stays.
+#[test]
+fn install_recognises_its_hooks_by_program_not_by_substring() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let settings = root.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let before = serde_json::json!({"hooks": {"Stop": [
+        {"hooks": [{"type": "command", "command": "'/opt/rb' hook claude-code stop"}]},
+        {"hooks": [{"type": "command", "command": "echo ripwire-broker hook notes"}]},
+        {"hooks": [{"type": "command", "command": "ripwire-broker hook-stats --json"}]},
+        {"matcher": "kept", "hooks": []},
+    ]}});
+    std::fs::write(&settings, before.to_string()).unwrap();
+    let Ok(Command::Install(args)) = parse(&[
+        "install",
+        "claude-code",
+        "--workspace",
+        root.to_str().unwrap(),
+        "--hooks",
+    ]) else {
+        panic!()
+    };
+
+    let plan = ripwire_broker::install::plan(&args, std::path::Path::new("/opt/rb")).unwrap();
+
+    let change = plan.changes.iter().find(|c| c.path == settings).unwrap();
+    let after: Value = serde_json::from_str(&change.after).unwrap();
+    let stop = commands(&after, "Stop");
+    assert_eq!(
+        stop.iter()
+            .filter(|c| c.contains(" hook claude-code stop"))
+            .count(),
+        1,
+        "the renamed binary's hook is replaced, not doubled: {stop:?}"
+    );
+    for foreign in [
+        "echo ripwire-broker hook notes",
+        "ripwire-broker hook-stats --json",
+    ] {
+        assert!(stop.contains(&foreign.to_string()), "{foreign}: {stop:?}");
+    }
+    let groups = after["hooks"]["Stop"].as_array().unwrap();
+    assert!(groups.iter().any(|g| g["matcher"] == "kept"), "{after}");
+}
