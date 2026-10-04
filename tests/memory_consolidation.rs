@@ -266,3 +266,180 @@ async fn the_cursor_does_not_repeat_the_same_pairs() {
         "after the cursor first, then around"
     );
 }
+
+// ---------------------------------------------------------------- a round (T4.2, CA-14)
+
+/// Answers like `inner`, each request after `delay`, or fails each one with `fail`.
+struct Slow<F> {
+    inner: F,
+    delay: Duration,
+    fail: Option<fn() -> ClassifyError>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl<F: MemoryClassifier> MemoryClassifier for Slow<F> {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        match self.fail {
+            Some(error) => Err(error()),
+            None => self.inner.decide(req).await,
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_round_asks_at_most_four_pairs_twenty_questions_in_five_seconds() {
+    assert_eq!(consolidate::MAX_PAIRS, 4);
+    assert_eq!(consolidate::MAX_QUESTIONS, 20);
+    assert_eq!(consolidate::DEADLINE, Duration::from_secs(5));
+    assert_eq!(consolidate::MAX_ATTEMPTS, 4);
+    let cfg = Config::new(MODEL);
+
+    // Ten pairs pending: one round asks about four of them, twenty questions.
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &same_file(5));
+    enrich(&store, 5, T0);
+    assert_eq!(
+        consolidate::pending(&store.load().unwrap(), MODEL).len(),
+        10
+    );
+    let fake = Fake::new(separate);
+    let round = consolidate::round(&store, &fake, &cfg, T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(round.asked.len(), 4);
+    let seen = fake.seen.lock().unwrap().clone();
+    let questions: usize = seen.iter().map(|r| r.questions.0.len()).sum();
+    assert_eq!(questions, 20);
+    assert_eq!(round.decided, 4);
+
+    // A provider slower than the round: it ends at five seconds, with nothing decided.
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &same_file(5));
+    enrich(&store, 5, T0);
+    let slow = Slow {
+        inner: Fake::new(separate),
+        delay: Duration::from_secs(30),
+        fail: None,
+        calls: Default::default(),
+    };
+    let start = tokio::time::Instant::now();
+    let round = consolidate::round(&store, &slow, &cfg, T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        start.elapsed() <= consolidate::DEADLINE + Duration::from_millis(10),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(round.decided, 0);
+    assert_eq!(
+        consolidate::pending(&store.load().unwrap(), MODEL).len(),
+        10
+    );
+
+    // A provider that keeps failing: a retry, inside the four attempts, and no more.
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &same_file(5));
+    enrich(&store, 5, T0);
+    let failing = Slow {
+        inner: Fake::new(separate),
+        delay: Duration::ZERO,
+        fail: Some(|| ClassifyError::Network),
+        calls: Default::default(),
+    };
+    let round = consolidate::round(&store, &failing, &cfg, T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    let calls = failing.calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!((2..=4).contains(&calls), "{calls} attempts");
+    assert_eq!(round.metrics.attempts as usize, calls);
+    assert_eq!(round.metrics.retries, 1);
+}
+
+#[tokio::test]
+async fn originals_are_never_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &same_file(3));
+    enrich(&store, 3, T0);
+    let before = store.load().unwrap().nodes;
+
+    // Everything says the two are one: redundant, the newer making the older obsolete, merge.
+    let fake = Fake::new(|_, name| match name {
+        "representation" => choice("merge", 0.99),
+        "contradiction" => noul(0.0),
+        _ => noul(0.99),
+    });
+    let round = consolidate::round(&store, &fake, &Config::new(MODEL), T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(round.decided, 3);
+    let s = store.load().unwrap();
+    assert_eq!(s.nodes, before, "every original, unchanged");
+    assert!(
+        s.consolidation
+            .decisions
+            .values()
+            .all(|d| d.obsolescence > 0.9 && d.redundancy > 0.9)
+    );
+}
+
+#[tokio::test]
+async fn links_and_decisions_work_without_a_summarizer() {
+    use ripwire_broker::memory::consolidate::RepresentationDecision;
+    use ripwire_broker::memory::model::{EdgeBasis, Graph, Kind};
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &same_file(3));
+    enrich(&store, 3, T0);
+    let pairs = consolidate::pending(&store.load().unwrap(), MODEL);
+    assert_eq!(pairs.len(), 3);
+
+    // Only the first pair is worth linking; the others are decided all the same.
+    let fake = Fake::new(|pair, name| match (pair, name) {
+        (_, "representation") => choice("promote", 0.95),
+        (0, "link_usefulness") => noul(0.9),
+        (_, "link_usefulness") => noul(0.3),
+        _ => noul(0.2),
+    });
+    let round = consolidate::round(&store, &fake, &Config::new(MODEL), T0 + DAY_MS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(round.decided, 3);
+
+    let s = store.load().unwrap();
+    let decisions: Vec<_> = s.consolidation.decisions.values().collect();
+    assert_eq!(decisions.len(), 3);
+    for d in &decisions {
+        assert_eq!(d.representation, RepresentationDecision::Promote);
+        assert_eq!(d.probability, 0.95);
+        assert_eq!(
+            (d.redundancy, d.contradiction, d.obsolescence),
+            (0.2, 0.2, 0.2)
+        );
+    }
+    let links: Vec<_> = s
+        .edges
+        .values()
+        .filter(|e| e.relation == consolidate::LINK)
+        .collect();
+    assert_eq!(links.len(), 1, "one pair was worth linking");
+    let link = links[0];
+    let mut ends = [link.source.clone(), link.target.clone()];
+    ends.sort();
+    assert_eq!(ends, [pairs[0].first.clone(), pairs[0].second.clone()]);
+    assert_eq!(
+        (link.graph, link.basis, link.score),
+        (Graph::Semantic, EdgeBasis::JevInference, Some(0.9))
+    );
+    assert!(
+        s.nodes.values().all(|r| r.kind != Kind::DerivedNote),
+        "no note without a summarizer"
+    );
+}

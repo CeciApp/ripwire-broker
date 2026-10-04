@@ -8,10 +8,11 @@
 use super::controller::{self, Budget, Failure};
 use super::identity;
 use super::metrics::Operation;
-use super::model::Kind;
+use super::model::{Edge, EdgeBasis, Graph, Kind, POLICY_VERSION};
 use super::prompts::{self, Stage};
 use super::queue::JobState;
 use super::store::{Refusal, State, Store};
+use super::wire::{self, Group};
 use crate::online::classifier::MemoryClassifier;
 use crate::online::request::StateRequest;
 use crate::online::response::Decision;
@@ -25,6 +26,14 @@ pub const EVERY_ENRICHMENTS: u64 = 20;
 pub const PENDING_FOR_MS: u64 = 24 * 60 * 60 * 1000;
 /// Pairs a round asks about.
 pub const MAX_PAIRS: usize = 4;
+/// Questions a round asks: four pairs of five.
+pub const MAX_QUESTIONS: usize = MAX_PAIRS * PER_PAIR;
+/// A round's deadline...
+pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// ...and its classifier attempts, retries included.
+pub const MAX_ATTEMPTS: u32 = 4;
+/// The relation of the link a round adds between a pair worth linking.
+pub const LINK: &str = "linked";
 /// The neighbours of an observation it is paired with: the write's candidates.
 const NEIGHBOURS: usize = 4;
 /// Questions about one pair: four Nouls and the representation Choice.
@@ -208,13 +217,17 @@ pub struct Round {
     pub metrics: Operation,
 }
 
+/// What a round commits about one pair: the decision and, when the pair is worth linking,
+/// the link.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decided {
+    pub key: String,
+    pub decision: PairDecision,
+    pub link: Option<Edge>,
+}
+
 /// The decision about one pair from its five answers; `None` unless all of them are valid.
-fn decided(
-    state: &State,
-    pair: &Pair,
-    answers: &[Decision],
-    model: &str,
-) -> Option<(String, PairDecision)> {
+fn decided(state: &State, pair: &Pair, answers: &[Decision], model: &str) -> Option<Decided> {
     let [
         redundancy,
         contradiction,
@@ -232,14 +245,14 @@ fn decided(
         state.nodes.get(&pair.first)?,
         state.nodes.get(&pair.second)?,
     );
-    let newer = match a.ingest_seq > b.ingest_seq {
-        true => &a.node_id,
-        false => &b.node_id,
+    let (older, newer) = match a.ingest_seq > b.ingest_seq {
+        true => (b, a),
+        false => (a, b),
     };
     let decision = PairDecision {
         pair: pair.clone(),
         hashes: (a.content_hash.clone(), b.content_hash.clone()),
-        newer: newer.clone(),
+        newer: newer.node_id.clone(),
         redundancy: redundancy.probability()?,
         contradiction: contradiction.probability()?,
         obsolescence: obsolescence.probability()?,
@@ -249,10 +262,37 @@ fn decided(
         model: model.into(),
         prompt_version: prompts::VERSION.into(),
     };
-    Some((decision_key(state, pair, model)?, decision))
+    let link = (decision.link_usefulness >= controller::EDGE_THRESHOLD).then(|| Edge {
+        source: newer.node_id.clone(),
+        target: older.node_id.clone(),
+        graph: Graph::Semantic,
+        relation: LINK.into(),
+        basis: EdgeBasis::JevInference,
+        score: Some(decision.link_usefulness),
+        model: Some(model.into()),
+        prompt_version: Some(prompts::VERSION.into()),
+        policy: POLICY_VERSION.into(),
+        generation: 0,
+    });
+    Some(Decided {
+        key: decision_key(state, pair, model)?,
+        decision,
+        link,
+    })
 }
 
-/// One round, when one is due (`None` otherwise). Nothing holds the store's lock while the
+/// A pair as the classifier sees it, the newer observation first.
+fn pair_item(state: &State, p: &Pair) -> serde_json::Value {
+    let (a, b) = (&state.nodes[&p.first], &state.nodes[&p.second]);
+    let (older, newer) = match a.ingest_seq > b.ingest_seq {
+        true => (b, a),
+        false => (a, b),
+    };
+    json!({"newer": controller::item(newer), "older": controller::item(older)})
+}
+
+/// One round, when one is due (`None` otherwise): its pairs in as few requests as fit, under
+/// one deadline and one budget of attempts. Nothing holds the store's lock while the
 /// classifier answers; the result is committed in one new snapshot.
 pub async fn round(
     store: &Store,
@@ -275,32 +315,37 @@ pub async fn round(
         asked: asked.clone(),
         ..Round::default()
     };
-    let mut decisions = Vec::new();
-    // The cursor moves on once the pairs were asked, whatever the answers were.
-    let mut cursor = None;
-    if !asked.is_empty() {
-        let items: Vec<_> = asked
-            .iter()
-            .map(|p| {
-                let (a, b) = (&state.nodes[&p.first], &state.nodes[&p.second]);
-                let (older, newer) = if a.ingest_seq > b.ingest_seq {
-                    (b, a)
-                } else {
-                    (a, b)
-                };
-                json!({"newer": controller::item(newer), "older": controller::item(older)})
-            })
-            .collect();
-        let questions = (0..asked.len())
-            .flat_map(|i| prompts::questions(Stage::Consolidation, i))
+    let groups = asked
+        .iter()
+        .enumerate()
+        .map(|(i, p)| Group {
+            item: pair_item(&state, p),
+            questions: prompts::questions(Stage::Consolidation, i)
+                .into_iter()
+                .map(|(n, q)| (n.to_string(), q))
+                .collect(),
+        })
+        .collect();
+    let mut budget = Budget {
+        attempts_left: MAX_ATTEMPTS,
+        deadline: tokio::time::Instant::now() + DEADLINE,
+        sent: 0,
+    };
+    let mut answers: Vec<Vec<Decision>> = vec![vec![]; asked.len()];
+    let batches = wire::batches(&cfg.model, &json!({}), "pairs", groups).unwrap_or_default();
+    for batch in batches {
+        // Within a request, a pair is `pairs[local]`: ask again with that index.
+        let order: Vec<usize> = batch.keys.iter().map(|(g, _)| *g).fold(vec![], |mut v, g| {
+            if v.last() != Some(&g) {
+                v.push(g);
+            }
+            v
+        });
+        let questions = (0..order.len())
+            .flat_map(|local| prompts::questions(Stage::Consolidation, local))
             .map(|(_, q)| q)
             .collect();
-        let req = StateRequest::new(&cfg.model, json!({"pairs": items}), questions);
-        let mut budget = Budget {
-            attempts_left: controller::MAX_ATTEMPTS,
-            deadline: tokio::time::Instant::now() + controller::RUN_DEADLINE,
-            sent: 0,
-        };
+        let req = StateRequest::new(&cfg.model, batch.request.state.clone(), questions);
         match controller::send(
             store,
             classifier,
@@ -311,23 +356,27 @@ pub async fn round(
         )
         .await
         {
-            Ok(answers) => {
-                cursor = asked.last().map(Pair::key);
-                decisions = asked
-                    .iter()
-                    .zip(answers.chunks(PER_PAIR))
-                    .filter_map(|(p, a)| decided(&state, p, a, &cfg.model))
-                    .collect();
+            Ok(decisions) => {
+                for ((g, _), d) in batch.keys.iter().zip(decisions) {
+                    answers[*g].push(d);
+                }
             }
             Err(failure) => {
                 round.auth_failed = matches!(failure, Failure::Auth);
-                if !matches!(failure, Failure::Quota | Failure::Busy) {
-                    cursor = asked.last().map(Pair::key);
-                }
+                break;
             }
         }
-        round.requests = budget.sent;
     }
-    round.decided = store.commit_round(state.enriched, cursor, decisions, &cfg.model, now_ms)?;
+    round.requests = budget.sent;
+    let decided = asked
+        .iter()
+        .zip(&answers)
+        .filter_map(|(p, a)| decided(&state, p, a, &cfg.model))
+        .collect();
+    // The cursor moves on once the pairs were asked, whatever the answers were.
+    let cursor = (budget.sent > 0)
+        .then(|| asked.last().map(Pair::key))
+        .flatten();
+    round.decided = store.commit_round(state.enriched, cursor, decided, &cfg.model, now_ms)?;
     Ok(Some(round))
 }

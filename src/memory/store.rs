@@ -8,7 +8,7 @@
 //! hook never waits. One writer at a time incorporates them into a new generation and only then
 //! removes them: a crash in between replays the spool, and a replay is the same node.
 
-use super::consolidate::{self, Consolidation, PairDecision};
+use super::consolidate::{self, Consolidation, Decided};
 use super::model::{Edge, EnrichmentState, Record, Rejected, Types};
 use super::queue::{Job, JobState, Lease, Ledger, MAX_RUNS, Outcome};
 use super::time::Sequence;
@@ -804,30 +804,43 @@ impl Store {
     }
 
     /// Ends a consolidation round in one new snapshot: the decisions about pairs whose
-    /// memories are still there unchanged, the counter at `seen_enriched`, the cursor when the
-    /// pairs were asked, and the wait restarted while pairs are still pending. Returns how many
-    /// pairs were decided.
+    /// memories are still there unchanged, with their links, the counter at `seen_enriched`,
+    /// the cursor when the pairs were asked, and the wait restarted while pairs are still
+    /// pending. Returns how many pairs were decided.
     pub fn commit_round(
         &self,
         seen_enriched: u64,
         cursor: Option<String>,
-        decisions: Vec<(String, PairDecision)>,
+        decided: Vec<Decided>,
         model: &str,
         now_ms: u64,
     ) -> Result<usize, Refusal> {
         let _writer = self.writer_waiting()?;
         let mut state = self.load()?;
+        let generation = state.generation + 1;
         let intact = |state: &State, id: &str, hash: &str| {
             state.nodes.get(id).is_some_and(|r| r.content_hash == hash)
         };
-        let mut decided = 0;
-        for (key, d) in decisions {
-            if intact(&state, &d.pair.first, &d.hashes.0)
-                && intact(&state, &d.pair.second, &d.hashes.1)
+        let mut count = 0;
+        let mut added = Vec::new();
+        for d in decided {
+            let p = &d.decision;
+            if !intact(&state, &p.pair.first, &p.hashes.0)
+                || !intact(&state, &p.pair.second, &p.hashes.1)
             {
-                state.consolidation.decisions.insert(key, d);
-                decided += 1;
+                continue;
             }
+            if let Some(mut link) = d.link {
+                let key = link.key();
+                if state.edges.len() < self.limits.max_edges || state.edges.contains_key(&key) {
+                    link.generation = generation;
+                    if state.edges.insert(key.clone(), link).is_none() {
+                        added.push(key);
+                    }
+                }
+            }
+            state.consolidation.decisions.insert(d.key, d.decision);
+            count += 1;
         }
         let still = !consolidate::pending(&state, model).is_empty();
         let c = &mut state.consolidation;
@@ -836,8 +849,22 @@ impl Store {
             c.cursor = cursor;
         }
         c.pending_since_ms = still.then_some(now_ms);
-        self.write_snapshot(state.generation, &on_disk(&state)?)?;
-        Ok(decided)
+        if !added.is_empty() {
+            state.generation = generation;
+        }
+        let mut bytes = on_disk(&state)?;
+        if bytes.len() as u64 > self.limits.snapshot_bytes {
+            // The links would overflow the snapshot: keep the decisions without them.
+            for key in &added {
+                state.edges.remove(key);
+            }
+            bytes = on_disk(&state)?;
+            if bytes.len() as u64 > self.limits.snapshot_bytes {
+                return Err(Refusal::Full(Full::Snapshot));
+            }
+        }
+        self.write_snapshot(state.generation, &bytes)?;
+        Ok(count)
     }
 
     /// The explicit action that gives a failed job its runs back. `false` when it is not failed.
