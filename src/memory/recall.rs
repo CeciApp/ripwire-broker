@@ -34,8 +34,11 @@ enum Miss {
     Unavailable(Unavailable),
 }
 
-/// Of the read's deadline, what the checks right before delivery keep for themselves.
-const REVALIDATION: std::time::Duration = std::time::Duration::from_millis(50);
+/// Of the read's deadline, what the checks right before delivery keep for themselves: 50 ms, or a
+/// fifth of a shorter deadline.
+fn revalidation(deadline: std::time::Duration) -> std::time::Duration {
+    std::time::Duration::from_millis(50).min(deadline / 5)
+}
 
 /// Requests a read of this process sent, until they are written to the quota.
 struct Spent {
@@ -96,7 +99,7 @@ impl Recall {
         let exhausted = attempts == 0 || questions == 0;
         // The requests stop early enough to leave the last checks their time.
         let cfg = ReadConfig {
-            deadline: left().saturating_sub(REVALIDATION),
+            deadline: left().saturating_sub(revalidation(cfg.deadline)),
             request_limit: match exhausted {
                 true => 0,
                 false => cfg.request_limit.min(attempts),

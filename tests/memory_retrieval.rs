@@ -1112,6 +1112,32 @@ async fn the_last_checks_keep_their_time_when_the_provider_takes_all_of_it() {
 }
 
 #[tokio::test]
+async fn a_short_deadline_still_leaves_the_requests_most_of_it() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &ws));
+    store
+        .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction"))
+        .unwrap();
+    store.ingest().unwrap();
+    // `--memory-read-deadline-ms` goes down to 1: the time kept for the last checks shrinks with it.
+    let setup = ReadSetup {
+        store: store.clone(),
+        classifier: passing(),
+        cfg: ReadConfig {
+            deadline: std::time::Duration::from_millis(40),
+            ..ReadConfig::default()
+        },
+    };
+    let recall = Recall::new(setup, root.path()).unwrap();
+    recall.read("warm up").await;
+    let read = recall.read("eviction").await.read.unwrap();
+    assert!(read.requests > 0, "{read:?}");
+    assert_eq!(read.memories.len(), 1, "{read:?}");
+}
+
+#[tokio::test]
 async fn hashes_and_generation_are_revalidated_right_before_delivery() {
     let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     common::write(root.path(), "src/a.rs", "fn a() {}\n");
