@@ -2164,7 +2164,7 @@ fn a_read() -> ripwire_broker::memory::retrieve::Read {
         memories: vec![Found {
             record,
             score: 0.71,
-            scores: [0.9, 0.5, 0.5, 0.5],
+            scores: Some([0.9, 0.5, 0.5, 0.5]),
             via: None,
         }],
         stop: StopReason::Sufficient,
@@ -2177,6 +2177,7 @@ fn a_read() -> ripwire_broker::memory::retrieve::Read {
         degraded: false,
         stale_omitted: 2,
         pending_writes: 1,
+        selection: ripwire_broker::memory::retrieve::Selection::Jev,
     }
 }
 
@@ -2474,6 +2475,56 @@ async fn plain_task(ws: &std::path::Path) -> Value {
             .await
             .unwrap(),
     )
+}
+
+#[tokio::test]
+async fn a_deterministic_read_asks_the_classifier_nothing_and_says_how_it_chose() {
+    use ripwire_broker::memory::retrieve::Selection;
+    let cfg = ReadConfig {
+        selection: Selection::Deterministic,
+        ..ReadConfig::default()
+    };
+    let classifier = Arc::new(Agreeable::default());
+    let (b, _ws, _st, _store) = remembering(classifier.clone(), cfg.clone()).await;
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    );
+    let memories = out["memories"].as_array().expect("a memory");
+    assert_eq!(memories.len(), 1, "{out:#}");
+    let m = &memories[0];
+    assert_eq!(m["basis"], "deterministic_rank");
+    assert!(m.get("scores").is_none(), "no score is made up: {m}");
+    let p = &out["provenance"]["memory"];
+    assert_eq!(p["stop_reason"], "deterministic");
+    assert_eq!(
+        (p["requests"].as_u64(), p["questions"].as_u64()),
+        (Some(0), Some(0))
+    );
+    assert_eq!(
+        classifier
+            .requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+
+    // A source that changed is left out, as with the classifier.
+    let (b, ws, _st, _store) = remembering(classifier.clone(), cfg).await;
+    common::write(ws.path(), "src/cache.rs", "fn get() { changed() }\n");
+    let out = to_json(
+        &b.context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap(),
+    );
+    assert!(out.get("memories").is_none(), "{out:#}");
+    assert_eq!(out["provenance"]["memory"]["stale_omitted"], 1);
+    assert_eq!(
+        classifier
+            .requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }
 
 #[tokio::test]

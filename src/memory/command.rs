@@ -128,6 +128,12 @@ fn status(store: &Store, as_json: bool) -> String {
         "nodes": state.nodes.len(),
         "tombstones": state.tombstones.len(),
         "pending": usage.pending,
+        // Enrichment jobs not finished yet: what the next authorized process will run.
+        "jobs_pending": state
+            .jobs
+            .values()
+            .filter(|j| matches!(j.state, super::queue::JobState::Pending | super::queue::JobState::Leased))
+            .count(),
         "spool_bytes": usage.spool_bytes,
         "snapshot_bytes": usage.snapshot_bytes,
         "attempts_24h": used.0,

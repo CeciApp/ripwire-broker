@@ -1088,7 +1088,7 @@ proptest! {
             kind: "edit_observation".into(), sources: vec![], observed_at_ms: 0,
             time_basis: "observation".into(), basis: "jev_scored", derived_from: vec![], stale: false,
             why_included: "w".into(),
-            scores: MemoryScores { relevance: 1.0, new_information: 1.0, relation_usefulness: 1.0, supports_current_evidence: 1.0, score: 1.0 },
+            scores: Some(MemoryScores { relevance: 1.0, new_information: 1.0, relation_usefulness: 1.0, supports_current_evidence: 1.0, score: 1.0 }),
         }).collect();
         let fit = add_memories(&mut env, items, &|_| false);
         prop_assert!(env.memories.len() <= 3);

@@ -1,7 +1,8 @@
 //! Runs every (task, arm, repeat) once: a fresh repository holding the task's base and its
 //! ancestors only, the agent in it with the arm's MCP configuration, the transcript saved, the
-//! copy scored and deleted. The source repository is only ever read, by `git fetch`; nothing is
-//! written to it.
+//! copy scored and deleted. The tasks of a sequence are one round: they run in order, each from
+//! its own base but in the same place and with the same memory store, which goes with the round.
+//! The source repository is only ever read, by `git fetch`; nothing is written to it.
 
 use super::arm::{Arm, Tools};
 use super::corpus::{Corpus, Task};
@@ -217,7 +218,28 @@ fn run_agent(
     Ok(AgentRun { events, timed_out })
 }
 
+/// The round's store as its server sees it (`memory status`): attempts and questions charged in
+/// the last 24 hours, and observations plus jobs not processed yet; `None` when it cannot be read.
+fn spent(cfg: &RunConfig, work: &Path, state: &Path) -> Option<(u64, u64, u64)> {
+    let out = Command::new(&cfg.tools.broker)
+        .args(["memory", "status", "--workspace"])
+        .arg(work)
+        .arg("--json")
+        .env("XDG_STATE_HOME", state)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some((
+        v["attempts_24h"].as_u64()?,
+        v["questions_24h"].as_u64()?,
+        v["pending"].as_u64()? + v["jobs_pending"].as_u64()?,
+    ))
+}
+
 fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) -> RunRecord {
+    let read = s.memory_read.unwrap_or_default();
+    let memory = |v: u64| arm.memory().then_some(v);
     RunRecord {
         task: task.id.clone(),
         repo: task.repo_name(),
@@ -243,10 +265,21 @@ fn record(task: &Task, arm: Arm, repeat: u32, s: &Summary, sc: &score::Score) ->
         first_correct_rank: sc.first_correct_rank,
         test_recall: sc.test_recall,
         correct: sc.correct,
+        history_incomplete: false,
+        agent: s.agent.clone(),
+        context_for_task_ms: (s.context_calls > 0).then_some(s.context_ms),
+        memory_retrieval_requests: memory(read.requests),
+        memory_retrieval_questions: memory(read.questions),
+        memories_delivered: memory(read.delivered),
+        memory_ingestion_attempts: None,
+        memory_ingestion_questions: None,
+        memory_jobs_left: None,
     }
 }
 
-fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
+/// One session in the round's place `dir`: the copy (`work`, made afresh at the task's base, in
+/// the same path for every session of a sequence) and the server's state (`state`).
+fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRecord {
     let failed = |why: String| RunRecord {
         task: task.id.clone(),
         repo: task.repo_name(),
@@ -256,11 +289,8 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
         invalid: Some(why),
         ..RunRecord::default()
     };
-    let dir = match scratch() {
-        Ok(d) => d,
-        Err(e) => return failed(e),
-    };
     let work = dir.join("work");
+    let _ = std::fs::remove_dir_all(&work);
     let id = run_id(task, arm, repeat);
     let env = environment(task, &id);
     let result = (|| {
@@ -288,8 +318,13 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
                 })
                 .collect();
         let config = dir.join("mcp.json");
-        std::fs::write(&config, arm.mcp_config(&cfg.tools, &work).to_string())
-            .map_err(|e| e.to_string())?;
+        let state = dir.join("state");
+        let before = arm.memory().then(|| spent(cfg, &work, &state)).flatten();
+        std::fs::write(
+            &config,
+            arm.mcp_config(&cfg.tools, &work, &state).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
         let argv: Vec<String> = cfg
             .agent
             .iter()
@@ -330,7 +365,15 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
             )
         });
         let sc = score::score(task, &s, &modified, correct);
-        Ok::<_, String>(record(task, arm, repeat, &s, &sc))
+        let mut r = record(task, arm, repeat, &s, &sc);
+        // Ingestion: what the store spent during the session, less what its reads sent.
+        if let (Some(b), Some(a)) = (before, before.and(spent(cfg, &work, &state))) {
+            let read = s.memory_read.unwrap_or_default();
+            r.memory_ingestion_attempts = Some(a.0.saturating_sub(b.0 + read.requests));
+            r.memory_ingestion_questions = Some(a.1.saturating_sub(b.1 + read.questions));
+            r.memory_jobs_left = Some(a.2);
+        }
+        Ok::<_, String>(r)
     })();
     // Whatever happened after the copy existed: a database left behind by a failed run is still
     // a database left behind.
@@ -343,20 +386,89 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32) -> RunRecord {
             None,
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
     result.unwrap_or_else(failed)
+}
+
+/// The corpus as rounds: each task alone, or the tasks of one sequence together, in corpus
+/// order (a sequence where its first task is).
+fn rounds(tasks: &[Task]) -> Vec<Vec<&Task>> {
+    let mut out: Vec<Vec<&Task>> = vec![];
+    for t in tasks {
+        let joins = t
+            .sequence
+            .as_ref()
+            .and_then(|s| out.iter_mut().find(|r| r[0].sequence.as_ref() == Some(s)));
+        match joins {
+            Some(round) => round.push(t),
+            None => out.push(vec![t]),
+        }
+    }
+    out
+}
+
+/// The first line `program --version` prints, or `unavailable`.
+fn version_of(program: &Path) -> String {
+    Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .map(|l| l.trim().to_string())
+        })
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| "unavailable".into())
+}
+
+/// What the runs were made with (PRD jev-mem §14): the executables, the classifier model the
+/// arms' servers pin, and the summarizer, which no arm configures. The agent's version is each
+/// run's own, from its transcript: running the agent's command outside a session is a run.
+fn versions(cfg: &RunConfig) -> serde_json::Value {
+    json!({
+        "ripwire_broker": version_of(&cfg.tools.broker),
+        "ripwire": version_of(&cfg.tools.ripwire),
+        "jev_model": crate::memory::runtime::DEFAULT_MODEL,
+        "summarizer": "none",
+    })
 }
 
 /// Runs what `results.jsonl` does not have yet; returns how many runs it made.
 pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> {
     cfg.corpus.validate().map_err(|e| e.join("\n"))?;
-    if cfg.arms.contains(&Arm::BrokerOnline) && std::env::var_os(ONLINE_KEY).is_none() {
+    let online: Vec<&str> = cfg
+        .arms
+        .iter()
+        .filter(|a| a.needs_credential())
+        .map(|a| a.name())
+        .collect();
+    if !online.is_empty() && std::env::var_os(ONLINE_KEY).is_none() {
         return Err(format!(
-            "arm broker-online needs {ONLINE_KEY} in the environment, and consent to send \
-             eligible source of every corpus repository to the provider (PRD §23.6)"
+            "arm(s) {} need {ONLINE_KEY} in the environment, and consent to send eligible \
+             source of every corpus repository to the provider (PRD §23.6)",
+            online.join(", ")
         ));
     }
     std::fs::create_dir_all(cfg.out.join("transcripts")).map_err(|e| e.to_string())?;
+    let versions = versions(cfg);
+    let recorded = cfg.out.join("versions.json");
+    // One set of binaries per results file: a resume with others would mix them unseen.
+    match std::fs::read_to_string(&recorded)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    {
+        Some(old) if old != versions => {
+            return Err(format!(
+                "{} was written by other binaries ({old}), not these ({versions}): use a new --out",
+                recorded.display()
+            ));
+        }
+        Some(_) => {}
+        None => std::fs::write(&recorded, versions.to_string()).map_err(|e| e.to_string())?,
+    }
     let done: std::collections::HashSet<_> =
         report::load(&cfg.out).iter().map(RunRecord::key).collect();
     let mut results = std::fs::OpenOptions::new()
@@ -364,21 +476,60 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
         .append(true)
         .open(cfg.out.join("results.jsonl"))
         .map_err(|e| e.to_string())?;
-    let mut made = 0;
-    for task in &cfg.corpus.tasks {
+    let rounds = rounds(&cfg.corpus.tasks);
+    let recorded = |task: &Task, arm: Arm, repeat: u32| {
+        done.contains(&(task.id.clone(), arm.name().to_string(), repeat))
+    };
+    // A round is recorded whole, at its end. One recorded in part (a session added to a
+    // sequence, an interrupted write) cannot be resumed: the rest would start without its history.
+    for round in &rounds {
         for repeat in 1..=cfg.repeats {
             for &arm in &cfg.arms {
-                if done.contains(&(task.id.clone(), arm.name().to_string(), repeat)) {
+                let (have, missing): (Vec<&&Task>, Vec<&&Task>) =
+                    round.iter().partition(|t| recorded(t, arm, repeat));
+                if !have.is_empty() && !missing.is_empty() {
+                    let ids = |ts: &[&&Task]| {
+                        ts.iter()
+                            .map(|t| t.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    return Err(format!(
+                        "sequence {} · {} · {repeat}: recorded for {} but not for {}; remove its \
+                         lines from results.jsonl to run it whole",
+                        round[0].sequence.as_deref().unwrap_or(&round[0].id),
+                        arm.name(),
+                        ids(&have),
+                        ids(&missing)
+                    ));
+                }
+            }
+        }
+    }
+    let mut made = 0;
+    for round in rounds {
+        for repeat in 1..=cfg.repeats {
+            for &arm in &cfg.arms {
+                if recorded(round[0], arm, repeat) {
                     continue;
                 }
-                log(&format!("{} · {} · {repeat}", task.id, arm.name()));
-                let r = one(cfg, task, arm, repeat);
-                if let Some(why) = &r.invalid {
-                    log(&format!("  invalid: {why}"));
+                let dir = scratch()?;
+                let mut records: Vec<RunRecord> = vec![];
+                for task in &round {
+                    log(&format!("{} · {} · {repeat}", task.id, arm.name()));
+                    let mut r = one(cfg, task, arm, repeat, &dir);
+                    if let Some(why) = &r.invalid {
+                        log(&format!("  invalid: {why}"));
+                    }
+                    r.history_incomplete = records.iter().any(|p| !p.valid);
+                    records.push(r);
                 }
-                let line = serde_json::to_string(&r).map_err(|e| e.to_string())?;
-                writeln!(results, "{line}").map_err(|e| e.to_string())?;
-                made += 1;
+                let _ = std::fs::remove_dir_all(&dir);
+                for r in records {
+                    let line = serde_json::to_string(&r).map_err(|e| e.to_string())?;
+                    writeln!(results, "{line}").map_err(|e| e.to_string())?;
+                    made += 1;
+                }
             }
         }
     }

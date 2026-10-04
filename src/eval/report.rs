@@ -35,6 +35,34 @@ pub struct RunRecord {
     pub first_correct_rank: Option<usize>,
     pub test_recall: f64,
     pub correct: Option<bool>,
+    /// An earlier session of its sequence was invalid: the memory this one started from is not
+    /// the history the corpus describes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_incomplete: bool,
+    /// The agent's version and model, from its session (PRD jev-mem §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// `context_for_task` latency as the agent waited for it, summed over the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_for_task_ms: Option<u64>,
+    /// Memory arms only (PRD jev-mem §14), never a zero for the others: what the session's reads
+    /// sent and delivered...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_retrieval_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_retrieval_questions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memories_delivered: Option<u64>,
+    /// ...and what the store's 24-hour quota grew by during the session besides them: the
+    /// worker's enrichment and consolidation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ingestion_attempts: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ingestion_questions: Option<u64>,
+    /// Observations and jobs the session left for the next process: its ingestion is paid by
+    /// the next session of the sequence, or by none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_jobs_left: Option<u64>,
 }
 
 impl RunRecord {
@@ -269,6 +297,115 @@ fn num(v: Option<f64>) -> String {
     v.map_or_else(|| "—".into(), |v| format!("{v:.3}"))
 }
 
+/// Memory's cost for one arm, averaged over its valid runs (PRD jev-mem §14): retrieval,
+/// ingestion and the agent's own latency apart. `None` where the arm has no such measure.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct MemoryCost {
+    pub arm: String,
+    pub valid: usize,
+    pub retrieval_requests: Option<f64>,
+    pub retrieval_questions: Option<f64>,
+    pub delivered: Option<f64>,
+    pub context_for_task_ms: Option<f64>,
+    pub ingestion_attempts: Option<f64>,
+    pub ingestion_questions: Option<f64>,
+    pub jobs_left: Option<f64>,
+    pub agent_ms: Option<f64>,
+}
+
+/// The memory arms, and arm A beside them for its wait on `context_for_task`. Empty without a
+/// memory arm.
+pub fn memory_cost(records: &[RunRecord]) -> Vec<MemoryCost> {
+    let arms: Vec<_> = super::arm::ALL
+        .into_iter()
+        .filter(|a| a.memory() || *a == super::arm::Arm::BrokerOnline)
+        .filter(|a| !valid(records, a.name()).is_empty())
+        .collect();
+    if !arms.iter().any(|a| a.memory()) {
+        return vec![];
+    }
+    arms.into_iter()
+        .map(|arm| {
+            let v = valid(records, arm.name());
+            let f = |g: fn(&RunRecord) -> Option<u64>| {
+                mean(v.iter().filter_map(|r| g(r)).map(|n| n as f64))
+            };
+            MemoryCost {
+                arm: arm.name().into(),
+                valid: v.len(),
+                retrieval_requests: f(|r| r.memory_retrieval_requests),
+                retrieval_questions: f(|r| r.memory_retrieval_questions),
+                delivered: f(|r| r.memories_delivered),
+                context_for_task_ms: f(|r| r.context_for_task_ms),
+                ingestion_attempts: f(|r| r.memory_ingestion_attempts),
+                ingestion_questions: f(|r| r.memory_ingestion_questions),
+                jobs_left: f(|r| r.memory_jobs_left),
+                agent_ms: f(|r| Some(r.duration_ms)),
+            }
+        })
+        .collect()
+}
+
+fn render_memory_cost(records: &[RunRecord]) -> String {
+    let rows = memory_cost(records);
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n## Custo da memória\n\nMédias por execução válida. Recuperação: o que as leituras de \
+         memória enviaram ao classificador e entregaram, e a espera do agente por \
+         `context_for_task` (estrutura e memória juntas; o braço A, sem memória, fica ao lado para \
+         comparar). Ingestão: o quanto a quota de 24 h do store da rodada cresceu na sessão além das \
+         leituras (enriquecimento e consolidação). O worker morre com a sessão: o que ela deixa (jobs \
+         pendentes ao fim) é pago pela sessão seguinte da sequência, ou por nenhuma, então a ingestão \
+         de cada sessão inclui a da anterior. Perguntas não viram dólares sem preço verificado (PRD \
+         jev-mem §8.3).\n\n\
+         | braço | válidas | leitura: requests | leitura: perguntas | memórias entregues | \
+         context_for_task (ms) | ingestão: tentativas | ingestão: perguntas | jobs pendentes ao fim \
+         | agente (ms) |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    for c in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            c.arm,
+            c.valid,
+            num(c.retrieval_requests),
+            num(c.retrieval_questions),
+            num(c.delivered),
+            num(c.context_for_task_ms),
+            num(c.ingestion_attempts),
+            num(c.ingestion_questions),
+            num(c.jobs_left),
+            num(c.agent_ms),
+        ));
+    }
+    out
+}
+
+/// What the runs were made with (PRD jev-mem §14): the run's `versions.json`, and the agent
+/// versions its sessions announced.
+pub fn render_versions(v: &serde_json::Value, records: &[RunRecord]) -> String {
+    let mut out = String::from("\n## Versões\n\n");
+    for (key, label) in [
+        ("ripwire_broker", "ripwire-broker"),
+        ("ripwire", "ripwire"),
+        ("jev_model", "modelo Jev"),
+        ("summarizer", "sumarizador"),
+    ] {
+        let value = v[key].as_str().unwrap_or("—");
+        out.push_str(&format!("- {label}: `{value}`\n"));
+    }
+    let agents: BTreeSet<&str> = records.iter().filter_map(|r| r.agent.as_deref()).collect();
+    let agents: Vec<String> = agents.iter().map(|a| format!("`{a}`")).collect();
+    let agents = match agents.is_empty() {
+        true => "não anunciado".to_string(),
+        false => agents.join(", "),
+    };
+    out.push_str(&format!("- agente: {agents}\n"));
+    out
+}
+
 /// The report in Markdown, in the PRD's language.
 pub fn render(records: &[RunRecord]) -> String {
     let mut out = String::from("# Avaliação A/B do ripwire-broker\n\n## Braços\n\n");
@@ -312,6 +449,7 @@ pub fn render(records: &[RunRecord]) -> String {
             b.verdict.label()
         ));
     }
+    out.push_str(&render_memory_cost(records));
     let invalid: Vec<&RunRecord> = records.iter().filter(|r| !r.valid).collect();
     if !invalid.is_empty() {
         out.push_str(&format!(

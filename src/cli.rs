@@ -20,7 +20,8 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                                 [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
                                 [--jev-lookahead-max N]]
                       [--memory [--memory-read-deadline-ms N] [--memory-read-request-limit N]
-                                [--memory-write-candidates N] [--memory-retention-days N] [--memory-max-nodes N]]
+                                [--memory-write-candidates N] [--memory-retention-days N] [--memory-max-nodes N]
+                                [--memory-selection jev|deterministic]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
@@ -43,6 +44,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
 Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
 --memory: implica --online; guarda observações do workspace localmente e envia as elegíveis ao Jev.
+--memory-selection deterministic: experimental, para avaliação; a mesma coleta, sem enriquecer nem perguntar ao Jev sobre memória.
 The credential comes only from RIPWIRE_BROKER_JEV_API_KEY in the server's environment.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +114,8 @@ pub struct MemoryArgs {
     pub write_candidates: usize,
     pub retention_days: u32,
     pub max_nodes: usize,
+    /// `--memory-selection`: the classifier (default) or, for evaluation, the local ranking.
+    pub selection: crate::memory::retrieve::Selection,
 }
 
 /// `--online` and its `--jev-*` companions (PRD §23.6, D-059). No credential here: it comes
@@ -428,6 +432,13 @@ impl Flags {
             write_candidates: within("--memory-write-candidates", 4, 0, 10)? as usize,
             retention_days: within("--memory-retention-days", 30, 1, 365)? as u32,
             max_nodes: within("--memory-max-nodes", 2000, 1, 2000)? as usize,
+            selection: match self.memory.get("--memory-selection").map(String::as_str) {
+                None | Some("jev") => crate::memory::retrieve::Selection::Jev,
+                Some("deterministic") => crate::memory::retrieve::Selection::Deterministic,
+                Some(_) => {
+                    return Err(usage("--memory-selection takes jev or deterministic"));
+                }
+            },
         }))
     }
 
@@ -476,6 +487,7 @@ const MEMORY: &[&str] = &[
     "--memory-write-candidates",
     "--memory-retention-days",
     "--memory-max-nodes",
+    "--memory-selection",
 ];
 
 /// `allowed` lists the switches and valued flags this command accepts.

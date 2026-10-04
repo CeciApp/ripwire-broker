@@ -166,19 +166,23 @@ fn arms_name_their_mcp_server_and_nothing_else() {
         ripwire: "/bin/rw".into(),
     };
     let ws = Path::new("/work");
-    assert_eq!(Arm::None.mcp_config(&tools, ws), json!({"mcpServers": {}}));
-    let rw = Arm::Ripwire.mcp_config(&tools, ws);
+    let st = Path::new("/state");
+    assert_eq!(
+        Arm::None.mcp_config(&tools, ws, st),
+        json!({"mcpServers": {}})
+    );
+    let rw = Arm::Ripwire.mcp_config(&tools, ws, st);
     assert_eq!(rw["mcpServers"]["ripwire"]["command"], "/bin/rw");
     assert_eq!(
         rw["mcpServers"]["ripwire"]["args"],
         json!(["/work", "--mcp"])
     );
-    let b = Arm::Broker.mcp_config(&tools, ws);
+    let b = Arm::Broker.mcp_config(&tools, ws, st);
     assert_eq!(
         b["mcpServers"]["ripwire-broker"]["args"],
         json!(["serve", "--workspace", "/work", "--ripwire", "/bin/rw"])
     );
-    let on = Arm::BrokerOnline.mcp_config(&tools, ws);
+    let on = Arm::BrokerOnline.mcp_config(&tools, ws, st);
     let args = on["mcpServers"]["ripwire-broker"]["args"]
         .as_array()
         .unwrap();
@@ -998,4 +1002,584 @@ fn an_agent_edit_to_a_file_setup_touched_still_counts() {
         r["file_precision"], 1.0,
         "setup's own edit is not the agent's: {r}"
     );
+}
+
+// --- the memory arms (PRD jev-mem §14; T5.1, D-141) ---
+
+#[test]
+fn the_memory_arms_parse_and_start_the_right_server() {
+    let tools = ripwire_broker::eval::arm::Tools {
+        broker: "/bin/rb".into(),
+        ripwire: "/bin/rw".into(),
+    };
+    let (ws, st) = (Path::new("/work"), Path::new("/state"));
+    assert_eq!(Arm::parse("broker-memory"), Some(Arm::BrokerMemory));
+    assert_eq!(
+        Arm::parse("broker-memory-deterministic"),
+        Some(Arm::BrokerMemoryDeterministic)
+    );
+    let server = |arm: Arm| arm.mcp_config(&tools, ws, st)["mcpServers"]["ripwire-broker"].clone();
+    let b = server(Arm::BrokerMemory);
+    assert_eq!(
+        b["args"],
+        json!([
+            "serve",
+            "--workspace",
+            "/work",
+            "--ripwire",
+            "/bin/rw",
+            "--memory"
+        ])
+    );
+    let c = server(Arm::BrokerMemoryDeterministic);
+    assert_eq!(
+        c["args"],
+        json!([
+            "serve",
+            "--workspace",
+            "/work",
+            "--ripwire",
+            "/bin/rw",
+            "--memory",
+            "--memory-selection",
+            "deterministic"
+        ])
+    );
+    for m in [&b, &c] {
+        assert_eq!(
+            m["env"],
+            json!({"XDG_STATE_HOME": "/state"}),
+            "its own store"
+        );
+    }
+    for arm in [Arm::Broker, Arm::BrokerOnline] {
+        assert!(server(arm).get("env").is_none(), "{}", arm.name());
+    }
+    for arm in ripwire_broker::eval::arm::ALL {
+        let online = matches!(
+            arm,
+            Arm::BrokerOnline | Arm::BrokerMemory | Arm::BrokerMemoryDeterministic
+        );
+        assert_eq!(arm.needs_credential(), online, "{}", arm.name());
+    }
+}
+
+#[test]
+fn contamination_is_detected_for_the_new_arms() {
+    let s = fixture();
+    for arm in [Arm::BrokerMemory, Arm::BrokerMemoryDeterministic] {
+        assert_eq!(arm.contamination(&s), None, "{}", arm.name());
+        let init = json!({"type": "system", "subtype": "init", "tools": ["Read"],
+                          "mcp_servers": [{"name": "ripwire-broker", "status": "failed"}]});
+        let result = json!({"type": "result", "is_error": false, "usage": {}});
+        let down = transcript::summarize(&[(0, init), (1, result)]);
+        assert!(arm.contamination(&down).unwrap().contains("not connected"));
+        let init = json!({"type": "system", "subtype": "init", "tools": ["Read"],
+                          "mcp_servers": [{"name": "ripwire-broker", "status": "connected"},
+                                          {"name": "ripwire", "status": "connected"}]});
+        let result = json!({"type": "result", "is_error": false, "usage": {}});
+        let foreign = transcript::summarize(&[(0, init), (1, result)]);
+        assert!(arm.contamination(&foreign).unwrap().contains("ripwire"));
+    }
+}
+
+/// Like `fake_agent`, and logs one line per run before editing: its directory, the store its
+/// server was given (`-` without one), and whether the copy already had the edit.
+fn logging_agent(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("logging-agent");
+    common::write_executable(
+        &path,
+        r##"#!/bin/sh
+prompt=$(cat)
+cfg=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--mcp-config" ]; then cfg="$2"; shift; fi
+  shift
+done
+state=$(sed -n 's/.*"XDG_STATE_HOME":"\([^"]*\)".*/\1/p' "$cfg")
+before=$(grep -c 'expired tokens' src/auth.py)
+echo "$(pwd -P) ${state:--} $before" >> "$LOG"
+# What the server would leave there.
+if [ -n "$state" ]; then mkdir -p "$state/ripwire-broker"; fi
+# A session that dies before its result.
+case "$prompt" in *BREAK*) echo '{"type":"system","subtype":"init","tools":[],"mcp_servers":[]}'; exit 0;; esac
+servers='[{"name":"ripwire-broker","status":"connected"}]'
+echo "{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"Read\",\"Edit\"],\"mcp_servers\":$servers}"
+echo '{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/auth.py"}}]}}'
+echo "# expired tokens are rejected" >> src/auth.py
+echo '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}'
+"##,
+    );
+    path
+}
+
+/// Runs `ripwire-eval run` over `tasks` with the logging agent; returns each run's log line
+/// (directory, store, edit already there) beside its record, in run order.
+fn logged_run(tasks: Value, arms: &str, repeats: &str) -> Vec<(Vec<String>, Value)> {
+    let work = tempfile::tempdir().unwrap();
+    let agent = logging_agent(work.path());
+    let (log, corpus, out) = (
+        work.path().join("log"),
+        work.path().join("corpus.json"),
+        work.path().join("out"),
+    );
+    std::fs::write(&corpus, json!({ "tasks": tasks }).to_string()).unwrap();
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+    let status = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .args([
+            "run",
+            "--corpus",
+            corpus.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--arms",
+            arms,
+            "--repeats",
+            repeats,
+            "--agent-cmd",
+            &agent_cmd,
+        ])
+        .env("LOG", &log)
+        // The memory arms imply online; the stand-in agent never uses it.
+        .env("RIPWIRE_BROKER_JEV_API_KEY", "synthetic-not-a-credential")
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    let lines: Vec<Vec<String>> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| l.split(' ').map(String::from).collect())
+        .collect();
+    let records: Vec<Value> = std::fs::read_to_string(out.join("results.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), records.len());
+    lines.into_iter().zip(records).collect()
+}
+
+fn auth_task(id: &str, repo: &Path, base: &str, sequence: Option<&str>) -> Value {
+    let mut t = json!({
+        "id": id, "repo": repo, "base": base,
+        "prompt": "make login reject expired tokens",
+        "reference": {"files": ["src/auth.py"]},
+    });
+    if let Some(s) = sequence {
+        t["sequence"] = json!(s);
+    }
+    t
+}
+
+#[test]
+fn each_round_gets_an_isolated_store() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let runs = logged_run(
+        json!([auth_task("t", repo.path(), &head, None)]),
+        "broker,broker-memory,broker-memory-deterministic",
+        "2",
+    );
+    assert_eq!(runs.len(), 6);
+    let mut stores = std::collections::BTreeSet::new();
+    for (line, r) in &runs {
+        let store = &line[1];
+        if r["arm"] == "broker" {
+            assert_eq!(store, "-", "no store for an arm without memory");
+            continue;
+        }
+        assert!(stores.insert(store.clone()), "a store of its own: {store}");
+        assert!(
+            !Path::new(store).exists(),
+            "removed with its round: {store}"
+        );
+        // The round's place holds the copy (`work`) and, beside it, the server's state.
+        assert!(
+            store.ends_with("/state") && line[0].ends_with("/work"),
+            "{line:?}"
+        );
+    }
+    assert_eq!(stores.len(), 4, "two memory arms, two repeats");
+}
+
+#[test]
+fn a_sequence_runs_in_order_in_one_place_and_shares_its_store() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let runs = logged_run(
+        json!([
+            auth_task("first", repo.path(), &head, Some("login")),
+            auth_task("alone", repo.path(), &head, None),
+            auth_task("second", repo.path(), &head, Some("login")),
+        ]),
+        "broker-memory,broker-memory-deterministic",
+        "1",
+    );
+    let order: Vec<(String, String)> = runs
+        .iter()
+        .map(|(_, r)| {
+            (
+                r["task"].as_str().unwrap().into(),
+                r["arm"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    let at = |task: &str, arm: &str| {
+        order
+            .iter()
+            .position(|(t, a)| t == task && a == arm)
+            .unwrap_or_else(|| panic!("{task} {arm} ran"))
+    };
+    for arm in ["broker-memory", "broker-memory-deterministic"] {
+        let (first, second) = (at("first", arm), at("second", arm));
+        assert_eq!(second, first + 1, "{arm}: in order, one after the other");
+        let (a, b) = (&runs[first].0, &runs[second].0);
+        assert_eq!(a[0], b[0], "{arm}: the same place, so the same workspace");
+        assert_eq!(a[1], b[1], "{arm}: the same store");
+        assert_eq!(
+            b[2], "0",
+            "{arm}: the second session starts from its own base"
+        );
+        let alone = &runs[at("alone", arm)].0;
+        assert_ne!(
+            alone[1], a[1],
+            "{arm}: a task outside the sequence has its own store"
+        );
+    }
+    let (b, c) = (
+        &runs[at("first", "broker-memory")].0,
+        &runs[at("first", "broker-memory-deterministic")].0,
+    );
+    assert_ne!(b[1], c[1], "each arm its own store");
+}
+
+// --- the report's memory cost (PRD jev-mem §14; T5.2) ---
+
+/// A stand-in that, with a memory arm, creates the round's store and charges its quota with 5
+/// attempts and 40 questions, as the worker would during the session; then calls
+/// `context_for_task`, whose answer (300 ms later) carries one memory read with 2 requests and
+/// 30 questions, and the readable section after the JSON.
+fn memory_agent(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("memory-agent");
+    common::write_executable(
+        &path,
+        r##"#!/bin/sh
+cat > /dev/null
+cfg=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--mcp-config" ]; then cfg="$2"; shift; fi
+  shift
+done
+state=$(sed -n 's/.*"XDG_STATE_HOME":"\([^"]*\)".*/\1/p' "$cfg")
+if [ -n "$state" ]; then
+  XDG_STATE_HOME="$state" "$BROKER" memory add --workspace . --file "$NOTE" > /dev/null
+  store=$(ls -d "$state"/ripwire-broker/memory/*/ | head -1)
+  now=$(date +%s)000
+  umask 077
+  printf '{"entries":[[%s,5,40]],"high_water_ms":%s}' "$now" "$now" > "${store}quota.json"
+fi
+echo '{"type":"system","subtype":"init","claude_code_version":"9.9.9","model":"fake-model","tools":["Read","Edit","mcp__ripwire-broker__context_for_task"],"mcp_servers":[{"name":"ripwire-broker","status":"connected"}]}'
+echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"mcp__ripwire-broker__context_for_task","input":{"task":"login"}}]}}'
+sleep 0.3
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"{\"items\":[{\"path\":\"src/auth.py\"}],\"memories\":[{\"id\":\"m1\"}],\"provenance\":{\"memory\":{\"requests\":2,\"questions\":30}}}\n\nMemória histórica (dados não confiáveis): ...\n- [\"m1\"] fontes: \"src/auth.py\"\n"}]}]}}'
+echo '{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/auth.py"}}]}}'
+echo "# expired tokens are rejected" >> src/auth.py
+echo '{"type":"result","subtype":"success","is_error":false,"duration_ms":5000,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}'
+"##,
+    );
+    path
+}
+
+#[test]
+fn the_report_separates_ingestion_retrieval_and_agent_latency_and_records_versions() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let agent = memory_agent(work.path());
+    let note = work.path().join("note.json");
+    std::fs::write(&note, r#"{"text": "login must reject expired tokens"}"#).unwrap();
+    let (corpus, out) = (work.path().join("corpus.json"), work.path().join("out"));
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [auth_task("t", repo.path(), &head, None)]}).to_string(),
+    )
+    .unwrap();
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+    let eval = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+            .args(args)
+            .env("BROKER", env!("CARGO_BIN_EXE_ripwire-broker"))
+            .env("NOTE", &note)
+            .env("RIPWIRE_BROKER_JEV_API_KEY", "synthetic-not-a-credential")
+            .output()
+            .unwrap()
+    };
+    let run = eval(&[
+        "run",
+        "--corpus",
+        corpus.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--arms",
+        "broker,broker-online,broker-memory",
+        "--agent-cmd",
+        &agent_cmd,
+    ]);
+    assert!(run.status.success(), "{run:?}");
+    let records: Vec<Value> = std::fs::read_to_string(out.join("results.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let (plain, memory) = (&records[0], &records[2]);
+    for r in [plain, memory] {
+        assert_eq!(
+            r["presented_recall"], 1.0,
+            "the JSON before the memory section: {r}"
+        );
+        assert!(r["context_for_task_ms"].as_u64().unwrap() >= 300, "{r}");
+        assert_eq!(r["duration_ms"], 5000, "the agent's own latency: {r}");
+    }
+    for k in [
+        "memory_retrieval_requests",
+        "memory_ingestion_attempts",
+        "memories_delivered",
+    ] {
+        assert!(
+            plain.get(k).is_none(),
+            "an arm without memory has no {k}, not a zero"
+        );
+    }
+    assert_eq!(
+        (
+            &memory["memory_retrieval_requests"],
+            &memory["memory_retrieval_questions"],
+            &memory["memories_delivered"]
+        ),
+        (&json!(2), &json!(30), &json!(1))
+    );
+    assert_eq!(
+        (
+            &memory["memory_ingestion_attempts"],
+            &memory["memory_ingestion_questions"]
+        ),
+        (&json!(3), &json!(10)),
+        "what the store spent, less what the reads did: {memory}"
+    );
+    // The note `memory add` left is a job the session's worker did not run: the next session's
+    // server will, and pay for it there.
+    assert_eq!(memory["memory_jobs_left"], 1, "{memory}");
+    assert!(plain.get("memory_jobs_left").is_none());
+
+    let versions: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("versions.json")).unwrap()).unwrap();
+    let broker = format!("ripwire-broker {}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(versions["ripwire_broker"], broker.as_str());
+    assert_eq!(versions["jev_model"], "jev-1.13.0");
+    assert_eq!(versions["summarizer"], "none");
+    assert!(versions["ripwire"].is_string(), "{versions}");
+    assert_eq!(
+        memory["agent"], "9.9.9 fake-model",
+        "as the session announced it"
+    );
+
+    let report = eval(&["report", "--out", out.to_str().unwrap()]);
+    let md = String::from_utf8_lossy(&report.stdout);
+    assert!(md.contains("## Custo da memória"), "{md}");
+    let row = md
+        .lines()
+        .find(|l| l.starts_with("| broker-memory |") && l.contains("3"))
+        .unwrap_or_else(|| panic!("a memory cost row: {md}"));
+    let cells: Vec<&str> = row
+        .split('|')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            "broker-memory",
+            "1",
+            "2.000",
+            "30.000",
+            "1.000",
+            cells[5],
+            "3.000",
+            "10.000",
+            "1.000",
+            "5000.000"
+        ],
+        "{row}"
+    );
+    assert!(
+        md.contains("jobs pendentes"),
+        "the caveat is in the report: {md}"
+    );
+    // Arm A beside them, for its wait on context_for_task; no memory column, never a zero.
+    let section = md.split("## Custo da memória").nth(1).unwrap();
+    let section = section.split("\n## ").next().unwrap();
+    let a = section
+        .lines()
+        .find(|l| l.starts_with("| broker-online |"))
+        .unwrap_or_else(|| panic!("arm A in the memory cost table: {md}"));
+    let a: Vec<&str> = a
+        .split('|')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    assert_eq!(a[2], "—", "{a:?}");
+    assert_ne!(a[5], "—", "its context_for_task wait: {a:?}");
+
+    let json = eval(&["report", "--out", out.to_str().unwrap(), "--json"]);
+    let json: Value = serde_json::from_slice(&json.stdout).unwrap();
+    let b = json["memory_cost"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["arm"] == "broker-memory")
+        .expect("arm B in the JSON report");
+    assert_eq!(b["ingestion_attempts"], 3.0, "{b}");
+    assert_eq!(
+        json["versions"]["ripwire_broker"],
+        versions["ripwire_broker"]
+    );
+    assert!(md.contains("## Versões") && md.contains(&broker), "{md}");
+    assert!(md.contains("- agente: `9.9.9 fake-model`"), "{md}");
+}
+
+/// `ripwire-eval run` of `tasks` with the logging agent, in `work` (its corpus, `out/` and
+/// `log` there), so that a second call resumes the first.
+fn run_in(work: &Path, tasks: Value, arms: &str, extra: &[&str]) -> std::process::Output {
+    let agent = logging_agent(work);
+    let corpus = work.join("corpus.json");
+    std::fs::write(&corpus, json!({ "tasks": tasks }).to_string()).unwrap();
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+    let mut args = vec![
+        "run".to_string(),
+        "--corpus".into(),
+        corpus.to_string_lossy().into(),
+        "--out".into(),
+        work.join("out").to_string_lossy().into(),
+        "--arms".into(),
+        arms.into(),
+        "--agent-cmd".into(),
+        agent_cmd,
+    ];
+    args.extend(extra.iter().map(|a| a.to_string()));
+    Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .args(&args)
+        .env("LOG", work.join("log"))
+        .env("RIPWIRE_BROKER_JEV_API_KEY", "synthetic-not-a-credential")
+        .output()
+        .unwrap()
+}
+
+fn logged(work: &Path) -> usize {
+    std::fs::read_to_string(work.join("log")).map_or(0, |l| l.lines().count())
+}
+
+#[test]
+fn a_sequence_partly_recorded_is_refused_not_resumed_in_part() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let two = json!([
+        auth_task("first", repo.path(), &head, Some("login")),
+        auth_task("second", repo.path(), &head, Some("login")),
+    ]);
+    assert!(
+        run_in(work.path(), two.clone(), "broker-memory", &[])
+            .status
+            .success()
+    );
+    assert_eq!(logged(work.path()), 2);
+    // Run again: recorded whole, nothing reruns.
+    assert!(
+        run_in(work.path(), two, "broker-memory", &[])
+            .status
+            .success()
+    );
+    assert_eq!(logged(work.path()), 2);
+
+    // A third session joins the sequence: its history would be missing, so the run stops.
+    let three = json!([
+        auth_task("first", repo.path(), &head, Some("login")),
+        auth_task("second", repo.path(), &head, Some("login")),
+        auth_task("third", repo.path(), &head, Some("login")),
+    ]);
+    let out = run_in(work.path(), three, "broker-memory", &[]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("login") && err.contains("third"), "{err}");
+    assert_eq!(logged(work.path()), 2, "nothing ran");
+}
+
+#[test]
+fn a_sequence_stays_in_one_repository() {
+    let (a, b) = (common::sample_repo(), common::sample_repo());
+    let head = |r: &tempfile::TempDir| git(r.path(), &["rev-parse", "HEAD"]);
+    let corpus: Corpus = serde_json::from_value(json!({"tasks": [
+        auth_task("one", a.path(), &head(&a), Some("s")),
+        auth_task("two", b.path(), &head(&b), Some("s")),
+        auth_task("three", a.path(), &head(&a), Some("")),
+    ]}))
+    .unwrap();
+    let errors = corpus.validate().unwrap_err().join("\n");
+    assert!(
+        errors.contains("two") && errors.contains("sequence s"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("three") && errors.contains("empty sequence"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn a_session_after_an_invalid_one_says_its_history_is_incomplete() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let mut first = auth_task("first", repo.path(), &head, Some("login"));
+    first["prompt"] = json!("BREAK before the result");
+    let runs = logged_run(
+        json!([
+            first,
+            auth_task("second", repo.path(), &head, Some("login"))
+        ]),
+        "broker-memory",
+        "1",
+    );
+    let (first, second) = (&runs[0].1, &runs[1].1);
+    assert_eq!(first["valid"], false, "{first}");
+    assert!(first.get("history_incomplete").is_none(), "{first}");
+    assert_eq!(second["valid"], true, "{second}");
+    assert_eq!(second["history_incomplete"], true, "{second}");
+}
+
+#[test]
+fn versions_that_change_between_runs_are_refused() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let tasks = json!([auth_task("t", repo.path(), &head, None)]);
+    assert!(
+        run_in(work.path(), tasks.clone(), "none", &[])
+            .status
+            .success()
+    );
+    let other = work.path().join("other-broker");
+    common::write_executable(&other, "#!/bin/sh\necho 'ripwire-broker 9.9.9'\n");
+    let out = run_in(
+        work.path(),
+        tasks,
+        "none",
+        &["--repeats", "2", "--broker", other.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("versions.json") && err.contains("9.9.9"),
+        "{err}"
+    );
+    assert_eq!(logged(work.path()), 1, "the second repeat did not run");
 }

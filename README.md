@@ -74,6 +74,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
 | `--memory-retention-days N` | `30` | 1–365 |
 | `--memory-max-nodes N` | `2000` | 1–2000 memories per workspace |
+| `--memory-selection jev\|deterministic` | `jev` | **Experimental, for evaluation** ([D-141](spec/changelog.md#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências)): `deterministic` keeps the same collection and store but enriches nothing and asks the classifier nothing about memory; a read delivers the local matches (task words and files) whose sources are unchanged, with `basis: deterministic_rank`, no `scores` and `stop_reason: deterministic`. Discovery is unchanged |
 
 ### How an MCP host passes configuration
 
@@ -572,13 +573,19 @@ cargo build --release
 ```
 
 - **Corpus:** JSON, `{"tasks": [{"id", "repo", "base", "fix", "prompt", "vocabulary_diverges", "reference":
-  {"files", "tests"}, "check", "setup", "teardown", "env"}]}`. `repo` is a local git repository (relative to
+  {"files", "tests"}, "check", "setup", "teardown", "env", "sequence"}]}`. `repo` is a local git repository (relative to
   the corpus file), `base` the commit the agent starts from, `fix` the reference commit, `reference.files` what
   it modifies, and `check` a shell command whose exit 0 means the task was solved. `setup` prepares the copy
   (dependencies, build caches) and is not counted as the agent's edit; `teardown` cleans up after it; `env`
   applies to all of them and to the agent. Commands and `env` values take `{repo}`, `{fix}` and `{run}`, a
   per-run id safe for a database name. Tasks taken from real commits get their reference for free, and their
   tests become hidden tests: `git -C {repo} show {fix}:test/x_test.exs > test/x_test.exs && mix test test/x_test.exs`.
+  Tasks with the same `sequence` are sessions of one history, for the memory arms: they run in corpus order,
+  each from its own `base`, in the same place and with the same memory store for a given arm and repeat; a
+  sequence is recorded, and resumed, as a whole (one recorded in part stops the run, with the lines to
+  remove), stays in one repository, and marks a session after an invalid one `history_incomplete`. Each
+  arm's history is its own earlier sessions: arms B and C differ in history as well as in selection, and a
+  memory whose source the agent edited is stale in the next session unless its base has the same bytes.
 - **Validation:** `validate` runs each task's check on a copy at the base, where it must fail, and on one at
   the fix, where it must pass. A check that passes at the base measures nothing. The output of every setup
   and check goes to `validate-logs/` next to the corpus; a run's check output goes next to its transcript.
@@ -589,16 +596,30 @@ cargo build --release
   today's date, or bind a fixed port that a second suite on the same machine already holds. Put a frozen clock
   (the day the change was written, not the merge date) and a port of its own in the task's `env`, when the
   suite offers them (D-121).
-- **Arms:** `none`, `ripwire` (ripwire's MCP directly), `broker`, `broker-online`. The online arm needs
-  `RIPWIRE_BROKER_JEV_API_KEY` and sends eligible source of the corpus repositories to the provider.
+- **Arms:** `none`, `ripwire` (ripwire's MCP directly), `broker`, `broker-online`, and for the memory
+  evaluation ([PRD](docs/jev-mem-prd.md#14-observabilidade-avaliação-e-critérios-de-aceitação)) `broker-memory`
+  (`serve --memory`, arm B) and `broker-memory-deterministic` (`--memory-selection deterministic`, arm C);
+  `broker-online` is arm A. Those three need `RIPWIRE_BROKER_JEV_API_KEY` and send eligible source of the
+  corpus repositories to the provider. A memory arm's server keeps its store in a directory of the round's
+  own (`XDG_STATE_HOME`), removed with the round, so no round sees another's memories or yours.
 - **Isolation:** each run gets a fresh repository holding the base and its ancestors only. The fix, a later
   commit, cannot leak through `git log`, and the source repository is never written to. The default agent is
   Claude Code headless with `--strict-mcp-config --setting-sources local`: neither your own settings, hooks
   and plugins nor the ones a repository commits load. A run whose session shows a hook that ran, an MCP
   server the arm did not declare, or a context tool (`graft`, `ripwire`) run from the shell outside its arm,
   is recorded as invalid and left out of the averages.
-- **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped), and
-  `transcripts/`, which holds the agent's full session, repository code included. Keep it local.
+- **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped),
+  `versions.json` (the broker's and ripwire's versions, the pinned classifier model, the summarizer; the
+  agent's version and model come from each session's transcript; a resume with other binaries is
+  refused), and `transcripts/`, which holds the
+  agent's full session, repository code included. Keep it local.
+- **Memory cost:** a memory arm's run records, apart, what its reads sent and delivered (from
+  `provenance.memory` in the answers), how long the agent waited for `context_for_task`, what the round's
+  store spent of its 24-hour quota during the session besides the reads (the worker's enrichment and
+  consolidation, read with `memory status`), the observations and jobs it left for the next session (the
+  worker dies with the session, so the next one pays for them), and the agent's own duration. Other arms
+  have none of these fields, never zeros; arm A sits beside B and C for its `context_for_task` wait. The report's "Custo da memória" table averages them; questions are not turned into
+  dollars without verified pricing.
 - **Bars:** each one reads `passa`, `falha` or `insuficiente`. They stay `insuficiente` below 30 tasks in 3
   repositories.
 - **Binaries and timeouts:** `--broker BIN` defaults to the `ripwire-broker` next to `ripwire-eval` (then

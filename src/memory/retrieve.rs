@@ -126,6 +126,15 @@ impl std::fmt::Debug for ReadSetup {
     }
 }
 
+/// How a read chooses (`--memory-selection`, D-141). `Deterministic` is the evaluation's
+/// control: the local anchors alone, no classifier, and an identity of its own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Selection {
+    #[default]
+    Jev,
+    Deterministic,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReadConfig {
     pub model: String,
@@ -138,6 +147,7 @@ pub struct ReadConfig {
     pub max_questions: usize,
     /// The MCP call's cancellation.
     pub cancel: Option<tokio_util::sync::CancellationToken>,
+    pub selection: Selection,
 }
 
 impl Default for ReadConfig {
@@ -149,6 +159,7 @@ impl Default for ReadConfig {
             attempt_timeout: Duration::from_millis(250),
             max_questions: 74,
             cancel: None,
+            selection: Selection::Jev,
         }
     }
 }
@@ -168,6 +179,8 @@ pub enum StopReason {
     Cancelled,
     ProviderError,
     BudgetOmitted,
+    /// `--memory-selection deterministic`: the local ranking chose, no classifier judged.
+    Deterministic,
 }
 
 /// A memory the read selected, with how it got there.
@@ -176,7 +189,8 @@ pub struct Found {
     pub record: Record,
     pub score: f64,
     /// The four scoring answers: relevance, new information, relation usefulness, support.
-    pub scores: [f64; 4],
+    /// `None` when no classifier scored it (`--memory-selection deterministic`).
+    pub scores: Option<[f64; 4]>,
     /// The edge that reached it; `None` for an anchor.
     pub via: Option<Edge>,
 }
@@ -200,6 +214,8 @@ pub struct Read {
     pub stale_omitted: usize,
     /// Observations in the spool, not incorporated yet: not awaited.
     pub pending_writes: usize,
+    /// How it chose: what its memories' `basis` says.
+    pub selection: Selection,
 }
 
 /// A candidate to score: the node and, after expansion, the edge that reached it.
@@ -303,7 +319,7 @@ impl Run<'_> {
                 out.push(Found {
                     record: c.record,
                     score,
-                    scores,
+                    scores: Some(scores),
                     via: c.via,
                 });
             }
@@ -440,6 +456,7 @@ async fn read_with(
         degraded: false,
         stale_omitted: 0,
         pending_writes: 0,
+        selection: cfg.selection,
     };
     let (ranked, q) = (state.clone(), query.to_string());
     let Some(anchors) = local
@@ -458,6 +475,21 @@ async fn read_with(
         out.stop = StopReason::Deadline;
         return finish(out, run);
     };
+    if cfg.selection == Selection::Deterministic {
+        // The evaluation's control: the fresh anchors in their local order, nothing asked.
+        out.stale_omitted = stale;
+        out.memories = anchors
+            .into_iter()
+            .map(|(record, rrf)| Found {
+                record,
+                score: rrf,
+                scores: None,
+                via: None,
+            })
+            .collect();
+        out.stop = StopReason::Deterministic;
+        return finish(out, run);
+    }
     out.stale_omitted += stale;
     if anchors.is_empty() {
         return out;
@@ -707,7 +739,10 @@ pub fn items(read: &Read) -> Vec<crate::model::MemoryItem> {
                 .collect(),
             observed_at_ms: f.record.observed_at_ms,
             time_basis: snake(json!(f.record.timestamp_role)),
-            basis: "jev_scored",
+            basis: match read.selection {
+                Selection::Jev => "jev_scored",
+                Selection::Deterministic => "deterministic_rank",
+            },
             derived_from: f
                 .record
                 .derived_from
@@ -722,13 +757,13 @@ pub fn items(read: &Read) -> Vec<crate::model::MemoryItem> {
                     snake(json!(e.graph))
                 ),
             },
-            scores: MemoryScores {
-                relevance: f.scores[0],
-                new_information: f.scores[1],
-                relation_usefulness: f.scores[2],
-                supports_current_evidence: f.scores[3],
+            scores: f.scores.map(|s| MemoryScores {
+                relevance: s[0],
+                new_information: s[1],
+                relation_usefulness: s[2],
+                supports_current_evidence: s[3],
                 score: f.score,
-            },
+            }),
         })
         .collect()
 }
