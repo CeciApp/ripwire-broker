@@ -1349,6 +1349,35 @@ async fn a_relations_failure_leaves_the_job_pending_and_is_not_counted() {
     );
 }
 
+#[tokio::test]
+async fn a_run_that_paid_for_typing_keeps_its_count_when_the_quota_runs_out() {
+    use ripwire_broker::memory::store::Limits;
+    // Room in the 24-hour quota for the typing request's four questions, not for the relations.
+    let dir = tempfile::tempdir().unwrap();
+    let limits = Limits {
+        questions_per_day: 4,
+        ..Limits::default()
+    };
+    let store = Store::with_limits(dir.path(), &"c".repeat(64), limits);
+    for r in [rec(1, "cache layer", &["e"]), rec(9, "cache layer", &["e"])] {
+        store.enqueue(&r).unwrap();
+    }
+    store.ingest().unwrap();
+    let store = Arc::new(store);
+    let l = store.lease_next(0).unwrap().unwrap();
+    store
+        .finish(l, ripwire_broker::memory::queue::Outcome::Done)
+        .unwrap();
+    let fake = Scripted::new(vec![None]);
+    worker(&store, fake.clone()).run_once(1_000).await.unwrap();
+    assert_eq!(fake.sent(), 1, "typing went out");
+    let job = &store.load().unwrap().jobs[&id(9)];
+    assert_eq!(
+        job.runs, 1,
+        "a run that sent something is a run: it is not given back"
+    );
+}
+
 #[test]
 fn commits_stay_inside_the_edge_and_snapshot_caps() {
     use ripwire_broker::memory::model::Edge;
