@@ -1035,3 +1035,79 @@ async fn a_drain_without_time_for_a_whole_round_does_not_start_one() {
     assert_eq!(calls(), 1);
     assert_eq!(store.load().unwrap().consolidation.decisions.len(), 3);
 }
+
+/// Answers like `inner`, and runs `during` while the first request is out.
+struct Meanwhile<F> {
+    inner: F,
+    during: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[async_trait]
+impl<F: MemoryClassifier> MemoryClassifier for Meanwhile<F> {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        if let Some(f) = self.during.lock().unwrap().take() {
+            f();
+        }
+        self.inner.decide(req).await
+    }
+}
+
+#[tokio::test]
+async fn what_is_forgotten_during_a_round_is_neither_summarized_nor_recorded() {
+    // `forget` of a parent, and `forget --all`, while the classifier is answering.
+    for all in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = stored(
+            dir.path(),
+            &[
+                rec(1, TWO[0], &["src/cache.rs"]),
+                rec(2, TWO[1], &["src/cache.rs"]),
+            ],
+        );
+        enrich(&store, 2, T0);
+        let path = dir.path().to_path_buf();
+        let fake = Meanwhile {
+            inner: Fake::new(gated("merge", 0.99, 0.0)),
+            during: Mutex::new(Some(Box::new(move || {
+                let other = Store::new(&path, &ws());
+                match all {
+                    true => other.forget_all(u64::MAX).map(|_| ()),
+                    false => other.forget(&id(1), u64::MAX).map(|_| ()),
+                }
+                .unwrap();
+            }))),
+        };
+        let summarizer = Arc::new(FakeSummarizer::replying(NOTE));
+        let cfg = Config::new(MODEL).with_summarizer(summarizer.clone());
+        let round = consolidate::round(&store, &fake, &cfg, T0 + DAY_MS)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summarizer.prompts(), Vec::<String>::new(), "all: {all}");
+        assert_eq!(round.decided, 0, "all: {all}");
+        let s = store.load().unwrap();
+        assert!(s.consolidation.decisions.is_empty());
+        assert!(notes(&store).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_forget_all_during_a_split_round_stops_the_requests_left() {
+    let records: Vec<Record> = (1..=5)
+        .map(|i| rec(i, &format!("{i}{}", "\"".repeat(1_990)), &["src/cache.rs"]))
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let store = stored(dir.path(), &records);
+    enrich(&store, 5, T0);
+    let path = dir.path().to_path_buf();
+    let fake = Meanwhile {
+        inner: Fake::new(separate),
+        during: Mutex::new(Some(Box::new(move || {
+            Store::new(&path, &ws()).forget_all(u64::MAX).unwrap();
+        }))),
+    };
+    consolidate::round(&store, &fake, &Config::new(MODEL), T0 + DAY_MS)
+        .await
+        .unwrap();
+    assert_eq!(fake.inner.requests(), 1, "nothing more went out");
+}

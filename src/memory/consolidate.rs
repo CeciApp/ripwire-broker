@@ -607,6 +607,10 @@ pub async fn round(
     let mut last_sent = None;
     let batches = wire::batches(&cfg.model, &json!({}), "pairs", groups).unwrap_or_default();
     for batch in batches {
+        // `forget --all` meanwhile: nothing more goes out.
+        if store.is_revoked() {
+            break;
+        }
         // Within a request, a pair is `pairs[local]`: ask again with that index.
         let order: Vec<usize> = batch.keys.iter().map(|(g, _)| *g).fold(vec![], |mut v, g| {
             if v.last() != Some(&g) {
@@ -655,7 +659,18 @@ pub async fn round(
         .filter_map(|(p, a)| decided(&state, p, a, &cfg.model))
         .collect();
     if let Some(summarizer) = &cfg.summarizer {
+        // Read again: a parent forgotten while the classifier answered is not summarized.
+        let fresh = store.load()?;
+        let intact =
+            |id: &str, hash: &str| fresh.nodes.get(id).is_some_and(|r| r.content_hash == hash);
         for d in decided.iter_mut().filter(|d| authorizes_note(&d.decision)) {
+            let p = &d.decision;
+            if store.is_revoked()
+                || !intact(&p.pair.first, &p.hashes.0)
+                || !intact(&p.pair.second, &p.hashes.1)
+            {
+                continue;
+            }
             derive(&state, &**summarizer, d, now_ms, &mut round).await;
         }
     }
