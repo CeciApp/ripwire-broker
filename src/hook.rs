@@ -688,6 +688,71 @@ async fn ask(
 
 /// The `hook` command: host event on stdin → output for the host, or `None` for silence.
 /// Starts ripwire for this one event, and loads and saves the session state around it.
+/// Fingerprints the working tree at `r` into `state`, counting a slow answer: over the gate but
+/// under the timeout (a Linux-sized tree) it is used and counted, and a second one in a row
+/// switches detection off, so one cold cache is forgiven (D-129).
+fn take_fingerprint(state: &mut SessionState, r: &std::path::Path) {
+    let started = std::time::Instant::now();
+    match crate::worktree::fingerprint(r) {
+        Ok(print) => {
+            state.slow_fingerprints = match started.elapsed() > SLOW_FINGERPRINT {
+                true => state.slow_fingerprints.saturating_add(1),
+                false => 0,
+            };
+            if state.slow_fingerprints >= SLOW_FINGERPRINTS_OFF {
+                state.worktree_off = true;
+            } else {
+                state.worktree = Some(print);
+            }
+        }
+        Err(why) => state.worktree_off = why.switches_off(),
+    }
+}
+
+/// The hook's flags as a policy, with the clock read here, at the process boundary, and never
+/// inside `handle`, so the tests stay free of real time (D-102).
+fn policy_of(args: &HookArgs) -> Policy {
+    let default = Policy::default();
+    Policy {
+        every_prompt: args.every_prompt,
+        gate: args.gate,
+        log_refs: args.log_refs,
+        edit_interval_ms: args.edit_interval_ms.unwrap_or(default.edit_interval_ms),
+        now_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64),
+        ..default
+    }
+}
+
+/// The version of `binary`, from the session's cache when the binary has not changed (D-105). A
+/// ripwire swapped mid-session keeps the old reading until the next session, which costs a stale
+/// string in `provenance` and a stale compatibility check; the alternative is a whole process per
+/// event. Only a binary that could be stamped is remembered: one that is not there yet must be
+/// read again next time, never cached as "unavailable".
+fn ripwire_version(binary: &std::path::Path, state: &mut SessionState) -> String {
+    let stamp = crate::upstream::binary_stamp(binary);
+    let known = match (&stamp, &state.ripwire) {
+        (Some((path, size, mtime)), Some(seen))
+            if (&seen.binary, seen.size, seen.mtime) == (path, *size, *mtime) =>
+        {
+            Some(seen.version.clone())
+        }
+        _ => None,
+    };
+    let version = known.unwrap_or_else(|| crate::upstream::ripwire_version(binary));
+    if let Some((binary, size, mtime)) = stamp {
+        state.ripwire = Some(CachedVersion {
+            binary,
+            size,
+            mtime,
+            version: version.clone(),
+        });
+    }
+    version
+}
+
 pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     let input: Value = serde_json::from_str(stdin).ok()?;
     input.as_object()?;
@@ -759,23 +824,7 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         let before = state.worktree.take();
         let was = (state.worktree_off, state.slow_fingerprints);
         if let (Some(r), false) = (root.as_deref(), state.worktree_off) {
-            let started = std::time::Instant::now();
-            match crate::worktree::fingerprint(r) {
-                Ok(print) => {
-                    // Over the gate but under the timeout (a Linux-sized tree): used, and counted;
-                    // a second one in a row switches off, so one cold cache is forgiven.
-                    state.slow_fingerprints = match started.elapsed() > SLOW_FINGERPRINT {
-                        true => state.slow_fingerprints.saturating_add(1),
-                        false => 0,
-                    };
-                    if state.slow_fingerprints >= SLOW_FINGERPRINTS_OFF {
-                        state.worktree_off = true;
-                    } else {
-                        state.worktree = Some(print);
-                    }
-                }
-                Err(why) => state.worktree_off = why.switches_off(),
-            }
+            take_fingerprint(&mut state, r);
         }
         if shell {
             let mut changed = match (&before, &state.worktree) {
@@ -797,20 +846,7 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
             state.shell_edits = changed;
         }
     }
-    let default = Policy::default();
-    let policy = Policy {
-        every_prompt: args.every_prompt,
-        gate: args.gate,
-        log_refs: args.log_refs,
-        edit_interval_ms: args.edit_interval_ms.unwrap_or(default.edit_interval_ms),
-        // The clock is read here, at the process boundary, and never inside `handle`, so the
-        // tests stay free of real time (D-102).
-        now_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_millis() as u64),
-        ..default
-    };
+    let policy = policy_of(args);
     // Decided before ripwire is touched: an event that asks nothing (a prompt past the first, an
     // opted-out session, an edit held back or outside the workspace) neither launches it nor
     // reads its version. Should the launch fail, the session goes back to how it was, as if the
@@ -830,33 +866,7 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
         }
         Err(_) => None,
     };
-    // The version of a binary that has not changed is the version we already read. A ripwire
-    // swapped mid-session keeps the old reading until the next session, which costs a stale
-    // string in `provenance` and a stale compatibility check; the alternative is a whole process
-    // per event (D-105).
-    let stamp = crate::upstream::binary_stamp(&args.upstream.ripwire);
-    let known = match (&stamp, &state.ripwire) {
-        (Some((path, size, mtime)), Some(seen))
-            if (&seen.binary, seen.size, seen.mtime) == (path, *size, *mtime) =>
-        {
-            Some(seen.version.clone())
-        }
-        _ => None,
-    };
-    let version = match known {
-        Some(v) => v,
-        None => crate::upstream::ripwire_version(&args.upstream.ripwire),
-    };
-    // Only a binary we could stamp is remembered: a `ripwire` that is not there yet must be read
-    // again next time, never cached as "unavailable".
-    if let Some((binary, size, mtime)) = stamp {
-        state.ripwire = Some(CachedVersion {
-            binary,
-            size,
-            mtime,
-            version: version.clone(),
-        });
-    }
+    let version = ripwire_version(&args.upstream.ripwire, &mut state);
     // `--memory` (PD-3): observations go to the workspace's spool, under the same state dir. A
     // hook never enriches or sends them; a revoked store refuses them.
     let memory = match (args.memory, &root) {
