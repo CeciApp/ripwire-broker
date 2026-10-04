@@ -1545,3 +1545,58 @@ async fn deterministic_memory_collects_and_ingests_but_never_enriches() {
     assert_eq!(fake.sent(), 0);
     assert_eq!(store.load().unwrap().enriched, 0);
 }
+
+/// A store the worker cannot use is said on stderr instead of the memory going quiet, and once,
+/// not on every tick (D-146). The real server, with a snapshot that no longer parses; nothing is
+/// sent, since deterministic selection only ingests and sweeps.
+#[cfg(feature = "online")]
+#[test]
+fn the_worker_says_once_on_stderr_when_it_cannot_use_the_store() {
+    use std::io::BufRead;
+    let (ws, xdg) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let ws_path = ws.path().canonicalize().unwrap();
+    let id = ripwire_broker::memory::identity::workspace_id(&ws_path).unwrap();
+    let store = Store::new(&xdg.path().join("ripwire-broker"), &id);
+    store.enqueue(&rec(1, "cache layer", &["e"])).unwrap();
+    store.ingest().unwrap();
+    store.enqueue(&rec(2, "queue layer", &["f"])).unwrap();
+    std::fs::write(store.dir().join("snapshot.json"), "{not json").unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+        .args(["--workspace", ws_path.to_str().unwrap()])
+        .args(["--ripwire", "/nonexistent/ripwire", "--memory"])
+        .args(["--memory-selection", "deterministic"])
+        .env("XDG_STATE_HOME", xdg.path())
+        .env("RIPWIRE_BROKER_JEV_API_KEY", "tok-unused")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let err = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+
+    // The worker ticks every 5 s: past the second tick, a repeat would be there.
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(6_500);
+    let mut lines = vec![];
+    while let Ok(line) = rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+    {
+        lines.push(line);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let worker: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("memory worker"))
+        .collect();
+    for stage in ["retention", "ingest"] {
+        let said = worker.iter().filter(|l| l.contains(stage)).count();
+        assert_eq!(said, 1, "{stage}: {lines:#?}");
+    }
+    assert!(worker.iter().all(|l| l.contains("Corrupt")), "{worker:#?}");
+}

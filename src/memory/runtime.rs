@@ -14,6 +14,7 @@ use crate::online::classifier::MemoryClassifier;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 
 /// `memory drain` stops after this long, or after [`DRAIN_JOBS`] jobs (PRD jev-mem §4).
@@ -116,27 +117,45 @@ impl Runtime {
 
     /// Runs the worker in the background until the runtime is dropped: incorporate the spool,
     /// run every ready job and a consolidation round that came due, then wait `tick`. With
-    /// `--memory-selection deterministic` only the spool and retention run: nothing is sent.
+    /// `--memory-selection deterministic` only the spool and retention run: nothing is sent. The
+    /// disk work (spool, retention) runs in the blocking pool, and a stage that starts failing is
+    /// said on stderr (D-146).
     pub fn start(&mut self, tick: Duration) {
         let (store, worker, cancel) =
             (self.store.clone(), self.worker.clone(), self.cancel.clone());
         let enrich = self.selection == Selection::Jev;
         self.task = Some(tokio::spawn(async move {
             let mut swept_at: Option<u64> = None;
+            let mut said = Said::default();
             loop {
                 let now = SystemClock.now_ms();
                 if swept_at.is_none_or(|at| now.saturating_sub(at) >= SWEEP_EVERY_MS) {
-                    let _ = store.sweep(now);
+                    let s = store.clone();
+                    said.note(
+                        "retention",
+                        tokio::task::spawn_blocking(move || s.sweep(now)).await,
+                    );
                     swept_at = Some(now);
                 }
-                let _ = store.ingest();
-                while enrich && let Ok(Some(_)) = worker.run_once(SystemClock.now_ms()).await {
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                }
+                let s = store.clone();
+                said.note(
+                    "ingest",
+                    tokio::task::spawn_blocking(move || s.ingest()).await,
+                );
                 if enrich {
-                    let _ = worker.consolidate(SystemClock.now_ms()).await;
+                    loop {
+                        let ran = worker.run_once(SystemClock.now_ms()).await;
+                        let done = !matches!(ran, Ok(Some(_)));
+                        said.note("enrichment", Ok(ran));
+                        if done {
+                            break;
+                        }
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                    }
+                    let round = worker.consolidate(SystemClock.now_ms()).await;
+                    said.note("consolidation", Ok(round));
                 }
                 tokio::select! {
                     _ = cancel.cancelled() => return,
@@ -144,6 +163,29 @@ impl Runtime {
                 }
             }
         }));
+    }
+}
+
+/// What each stage of the worker last said on stderr: a store that stays broken is said once,
+/// when the stage starts failing or fails differently, and a success clears it. A store held by
+/// another writer is not a failure.
+#[derive(Default)]
+struct Said(std::collections::HashMap<&'static str, String>);
+
+impl Said {
+    fn note<T>(&mut self, stage: &'static str, ran: Result<Result<T, Refusal>, JoinError>) {
+        let why = match ran {
+            Ok(Ok(_)) | Ok(Err(Refusal::Locked)) => {
+                self.0.remove(stage);
+                return;
+            }
+            Ok(Err(refusal)) => format!("{refusal:?}"),
+            Err(_) => "panicked".to_string(),
+        };
+        if self.0.get(stage) != Some(&why) {
+            eprintln!("ripwire-broker: memory worker: {stage}: {why}");
+            self.0.insert(stage, why);
+        }
     }
 }
 
