@@ -241,6 +241,8 @@ impl Scheduler {
         report.unfinished.sort_unstable();
         report.unfinished.dedup();
         report.stale.sort_unstable();
+        // The halves of a split share their job's id: a stale batch is one, however cut.
+        report.stale.dedup();
         report
     }
 
