@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-03, até o
-[D-142](spec/changelog.md#d-142--fase-5-do---memory-avaliação).
+[D-143](spec/changelog.md#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -32,8 +32,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 675 testes, 3 ignorados (opt-in)
-cargo test --all-targets --features online  # 691 testes, 6 ignorados
+cargo test --all-targets                    # 680 testes, 3 ignorados (opt-in)
+cargo test --all-targets --features online  # 696 testes, 6 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -70,7 +70,7 @@ cargo fmt --check
   `online*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-142, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-143, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.

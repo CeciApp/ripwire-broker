@@ -214,6 +214,9 @@ fn pair_questions(
 
 /// Classifier attempts per job, retries and splits included (PRD jev-mem §8.2).
 pub const MAX_ATTEMPTS: u32 = 4;
+/// The longest cooldown a 429 can impose on a job: a provider asking for more is asked again
+/// after this, and an absurd `Retry-After` never overflows a clock.
+pub const MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 /// The run's deadline; a 429 only waits inside it.
 pub const RUN_DEADLINE: std::time::Duration = std::time::Duration::from_millis(5_000);
 
@@ -289,7 +292,8 @@ pub(crate) async fn send(
                     .and_then(|v| {
                         crate::online::retry_after::parse(v, std::time::SystemTime::now())
                     })
-                    .unwrap_or(RUN_DEADLINE);
+                    .unwrap_or(RUN_DEADLINE)
+                    .min(MAX_COOLDOWN);
                 let fits = tokio::time::Instant::now() + wait <= budget.deadline;
                 if retried || budget.attempts_left == 0 || !fits {
                     return Err(Failure::Cooldown(wait.as_millis() as u64));
@@ -372,7 +376,7 @@ pub async fn enrich(
             store.finish(
                 lease,
                 Outcome::Defer {
-                    not_before_ms: now_ms + deferral(&failure),
+                    not_before_ms: now_ms.saturating_add(deferral(&failure)),
                 },
             )?;
             return Ok(Enriched {
@@ -400,7 +404,7 @@ pub async fn enrich(
             store.finish(
                 lease,
                 Outcome::Retry {
-                    not_before_ms: now_ms + wait,
+                    not_before_ms: now_ms.saturating_add(wait),
                 },
             )?;
             return Ok(Enriched {
@@ -475,14 +479,14 @@ pub async fn enrich(
                 auth_failed |= matches!(failure, Failure::Auth);
                 owed = Some(match failure {
                     Failure::Quota | Failure::Busy => Outcome::Defer {
-                        not_before_ms: now_ms + deferral(&failure),
+                        not_before_ms: now_ms.saturating_add(deferral(&failure)),
                     },
                     // A 429 that did not fit: no other batch goes before its cooldown.
                     Failure::Cooldown(ms) => Outcome::Retry {
-                        not_before_ms: now_ms + ms,
+                        not_before_ms: now_ms.saturating_add(ms),
                     },
                     Failure::Auth | Failure::GaveUp => Outcome::Retry {
-                        not_before_ms: now_ms + RETRY_AFTER_MS,
+                        not_before_ms: now_ms.saturating_add(RETRY_AFTER_MS),
                     },
                 });
             }

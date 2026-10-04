@@ -895,6 +895,30 @@ async fn a_429_waits_only_inside_the_budget() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_huge_retry_after_neither_crashes_the_worker_nor_pins_the_job() {
+    // The largest delay a header can carry, and ten years.
+    for retry_after in ["18446744073709551615", "315360000"] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+        let fake = Scripted::new(vec![Some(ClassifyError::RateLimited {
+            retry_after: Some(retry_after.into()),
+        })]);
+        let ran = worker(&store, fake.clone())
+            .run_once(1_000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ran.state, EnrichmentState::Failed, "{retry_after}");
+        let job = &store.load().unwrap().jobs[&id(1)];
+        assert_eq!(
+            job.not_before_ms,
+            1_000 + controller::MAX_COOLDOWN.as_millis() as u64,
+            "{retry_after}: asked again after the longest cooldown the worker keeps"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_5xx_is_retried_once_inside_the_four_attempts() {
     let dir = tempfile::tempdir().unwrap();

@@ -863,6 +863,15 @@ pub fn missing_evidence(verb: &'static str, why: &str) -> Entry {
     )
 }
 
+/// The same missing evidence after an edit, where there is no gate: that check is simply absent.
+pub fn unchecked(verb: &'static str, why: &str) -> Entry {
+    limitation(
+        verb,
+        "evidence_missing",
+        format!("{verb} gave no usable evidence ({why}); this answer lacks that check"),
+    )
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }

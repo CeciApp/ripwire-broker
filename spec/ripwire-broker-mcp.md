@@ -723,6 +723,10 @@ HTTP, na v1 ele não lê memória: o caminho fica pronto para quando houver cach
 - `edit_check` para cada símbolo informado, até limite configurável;
 - `impact` apenas quando necessário para esclarecer uma alteração de alto risco.
 
+Um símbolo que o Ripwire recusa nesses dois verbos (o agente o renomeou ou apagou) vira a
+limitação `evidence_missing` daquele verbo, e a resposta segue com o que já veio; só um upstream
+indisponível faz a ferramenta falhar ([D-143](changelog.md#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves)).
+
 #### Saída principal
 
 - contratos alterados;
