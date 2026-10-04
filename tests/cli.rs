@@ -4984,3 +4984,59 @@ fn a_hook_exits_zero_when_its_stdout_is_closed() {
 
     assert_eq!(status.code(), Some(0));
 }
+
+/// The first event of a new session prunes the sessions nobody touched for 30 days (D-147): their
+/// state, lock and status line projection were kept forever, and `hook-stats` parses them all.
+#[test]
+fn a_new_session_prunes_sessions_untouched_for_thirty_days() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let dir = state.path();
+    std::fs::create_dir_all(dir.join("statusline")).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+    let recent = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let put = |name: &str, at: std::time::SystemTime| {
+        let p = dir.join(name);
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    put("old.json", old);
+    put("old.lock", old);
+    put("statusline/old.json", old);
+    put("recent.json", recent);
+    let prompt = |session: &str| {
+        let input = serde_json::json!({"session_id": session, "cwd": ws.path(),
+            "hook_event_name": "UserPromptSubmit", "prompt": "#ripwire-off"});
+        let (code, _, err) = run(
+            &[
+                "hook",
+                "claude-code",
+                "user-prompt-submit",
+                "--workspace",
+                ws.path().to_str().unwrap(),
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--ripwire",
+                "/nonexistent/ripwire",
+            ],
+            &input.to_string(),
+        );
+        assert_eq!(code, 0, "{err}");
+    };
+
+    prompt("new");
+
+    for gone in ["old.json", "old.lock", "statusline/old.json"] {
+        assert!(!dir.join(gone).exists(), "{gone} kept");
+    }
+    assert!(dir.join("recent.json").exists(), "a recent session is kept");
+    let store = ripwire_broker::state::StateStore::new(dir.to_path_buf());
+    assert!(
+        store.load("new").opted_out,
+        "the new session itself is saved"
+    );
+}

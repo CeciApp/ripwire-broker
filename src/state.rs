@@ -86,6 +86,30 @@ impl StateStore {
             .collect()
     }
 
+    /// Whether `session_id` has a saved state.
+    pub fn has(&self, session_id: &str) -> bool {
+        self.path(session_id).exists()
+    }
+
+    /// Removes what the sessions last touched before `cutoff` left behind: their state, their lock
+    /// and their status line projection (D-147). Temporaries and anything else are left alone.
+    pub fn prune(&self, cutoff: std::time::SystemTime) {
+        for dir in [self.dir.clone(), self.dir.join("statusline")] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+                let stale = fs::symlink_metadata(&path)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at < cutoff);
+                let ours = path.extension().is_some_and(|x| x == "json" || x == "lock");
+                if stale && ours {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
     /// Forgets a session; missing files are fine.
     pub fn remove(&self, session_id: &str) {
         let _ = fs::remove_file(self.path(session_id));

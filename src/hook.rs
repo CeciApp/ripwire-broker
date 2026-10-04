@@ -25,6 +25,9 @@ fn capped(budget: u32) -> u32 {
     budget.min(((MAX_CONTEXT_CHARS - HEADER_CHARS) / 4) as u32)
 }
 
+/// A session whose files nobody touched for this long is pruned by the next new one.
+const SESSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
+
 pub const OPT_OUT: &str = "#ripwire-off";
 pub const OPT_IN: &str = "#ripwire-on";
 /// A hook has no `--memory-retention-days`: its observations keep the default (PRD jev-mem §4).
@@ -706,6 +709,10 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     // Held until this function returns: parallel hooks of the session wait their turn.
     // Without the lock (e.g. unwritable dir) the hook still runs; only turn-taking is lost.
     let _turn = store.lock(&session_id).ok();
+    // Once per session, the ones nobody touched for a while go (D-147).
+    if !store.has(&session_id) {
+        store.prune(std::time::SystemTime::now() - SESSION_RETENTION);
+    }
     let mut state = store.load(&session_id);
     let loaded_ripwire = state.ripwire.clone();
     if let Some(r) = &root {
