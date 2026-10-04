@@ -252,6 +252,7 @@ fn git_never_inherits_the_provider_key() {
         .env("PATH", path)
         .env("RIPWIRE_BROKER_JEV_API_KEY", "tok-git-leak")
         .env("RIPWIRE_BROKER_TEST_REPO", root_of(&dir))
+        .stdout(std::process::Stdio::null())
         .status()
         .unwrap();
 

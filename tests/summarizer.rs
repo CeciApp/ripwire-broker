@@ -203,6 +203,7 @@ fn the_model_never_inherits_the_provider_key() {
         ])
         .env("RIPWIRE_BROKER_JEV_API_KEY", "tok-model-leak")
         .env("RIPWIRE_BROKER_TEST_SPY", &llm)
+        .stdout(std::process::Stdio::null())
         .status()
         .unwrap();
 
