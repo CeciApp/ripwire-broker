@@ -2642,13 +2642,130 @@ async fn bookkeeping_writes_keep_the_snapshot_warm() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    // The quota is charged: the snapshot file is written again, no memory changed.
-    store.charge(1, 1, 1).unwrap();
+    // A job is taken: the snapshot file is written again, no memory changed.
+    let _lease = store
+        .lease_next(u64::MAX / 2)
+        .unwrap()
+        .expect("the edit's job");
     let env = ask().await.unwrap();
     assert!(
         warm(&env),
         "still warm after a write that changed no memory: {:?}",
         env.limitations
+    );
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[tokio::test]
+async fn reads_are_charged_to_the_24_hour_quota() {
+    let (b, _ws, _st, store) =
+        remembering(Arc::new(Agreeable::default()), ReadConfig::default()).await;
+    let env = b
+        .context_for_task(TaskRequest::new("how is the cache evicted?"))
+        .await
+        .unwrap();
+    let read = env.provenance.memory.unwrap();
+    assert!(read.requests > 0);
+    let spent = (read.requests as u32, read.questions as u32);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while store.ledger().unwrap().used(now_ms()) != spent {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "charged: {:?}, sent: {spent:?}",
+            store.ledger().unwrap().used(now_ms())
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_spent_quota_stops_reads_from_asking() {
+    let agreeable = Arc::new(Agreeable::default());
+    let (b, _ws, _st, store) = remembering(agreeable.clone(), ReadConfig::default()).await;
+    store.charge(now_ms(), 1_000, 0).unwrap();
+    let env = b
+        .context_for_task(TaskRequest::new("how is the cache evicted?"))
+        .await
+        .unwrap();
+    assert_eq!(
+        agreeable.requests.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let read = env.provenance.memory.as_ref().unwrap();
+    assert!(read.degraded, "no inference left: {read:?}");
+    assert!(env.memories.is_empty());
+    assert!(
+        env.limitations
+            .iter()
+            .any(|l| l.kind == "memory_incomplete" && l.detail.contains("quota")),
+        "{:?}",
+        env.limitations
+    );
+    assert!(!env.items.is_empty(), "the structural answer goes out");
+}
+
+#[tokio::test]
+async fn a_store_from_before_the_quota_file_keeps_the_quota_it_recorded() {
+    let agreeable = Arc::new(Agreeable::default());
+    let (b, _ws, _st, store) = remembering(agreeable.clone(), ReadConfig::default()).await;
+    let mut s = store.load().unwrap();
+    s.ledger.entries.push((now_ms(), 1_000, 0));
+    store.publish(&s).unwrap();
+    assert!(!store.dir().join("quota.json").exists());
+    let env = b
+        .context_for_task(TaskRequest::new("how is the cache evicted?"))
+        .await
+        .unwrap();
+    assert_eq!(
+        agreeable.requests.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(env.provenance.memory.unwrap().degraded);
+}
+
+#[tokio::test]
+async fn a_read_asks_no_more_questions_than_the_quota_has_left() {
+    let (b, _ws, _st, store) =
+        remembering(Arc::new(Agreeable::default()), ReadConfig::default()).await;
+    store.charge(now_ms(), 0, 19_990).unwrap();
+    let read = b
+        .context_for_task(TaskRequest::new("how is the cache evicted?"))
+        .await
+        .unwrap()
+        .provenance
+        .memory
+        .unwrap();
+    assert!(read.questions <= 10, "{read:?}");
+    assert_eq!(read.stop_reason, "question_limit");
+}
+
+#[tokio::test]
+async fn reads_in_a_row_count_what_the_ones_before_spent() {
+    let agreeable = Arc::new(Agreeable::default());
+    let (b, _ws, _st, store) = remembering(agreeable.clone(), ReadConfig::default()).await;
+    // Room for four requests: the first read takes three of them.
+    store.charge(now_ms(), 996, 0).unwrap();
+    // Another process holds the quota for now: what the first read spent is not written yet.
+    let quota = std::fs::File::open(store.dir().join("quota.lock")).unwrap();
+    quota.try_lock().unwrap();
+    let ask = || {
+        b.context_for_task(TaskRequest {
+            include_seen: true,
+            ..TaskRequest::new("how is the cache evicted?")
+        })
+    };
+    let first = ask().await.unwrap().provenance.memory.unwrap();
+    assert_eq!(first.requests, 3, "routing, scoring and stopping");
+    let second = ask().await.unwrap().provenance.memory.unwrap();
+    assert!(
+        second.requests <= 1,
+        "one request left, whatever the snapshot read before says: {second:?}"
     );
 }
 

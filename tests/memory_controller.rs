@@ -1233,9 +1233,9 @@ async fn questions_attempts_bytes_and_cache_are_counted_per_operation_without_co
     }
 
     // The 24-hour budget it used is on disk, for `memory status` and any other process.
-    let s = store.load().unwrap();
-    let (attempts, questions) = s
-        .ledger
+    let (attempts, questions) = store
+        .ledger()
+        .unwrap()
         .entries
         .iter()
         .fold((0, 0), |(a, q), e| (a + e.1, q + e.2));

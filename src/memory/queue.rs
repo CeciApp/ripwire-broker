@@ -98,6 +98,15 @@ impl Ledger {
 }
 
 impl Ledger {
+    /// Records what was already sent, whatever the caps: a request out is spent.
+    pub fn record(&mut self, now_ms: u64, attempts: u32, questions: u32) {
+        let now = now_ms.max(self.high_water_ms);
+        self.high_water_ms = now;
+        self.entries
+            .retain(|(at, _, _)| at.saturating_add(DAY_MS) > now);
+        self.entries.push((now, attempts, questions));
+    }
+
     /// Attempts and questions charged in the 24 hours before `now_ms` (or the latest time seen).
     pub fn used(&self, now_ms: u64) -> (u32, u32) {
         let now = now_ms.max(self.high_water_ms);
