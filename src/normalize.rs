@@ -65,6 +65,15 @@ fn symbol_item(
     }
 }
 
+/// An answer that could not be read: nothing was inferred from it.
+fn unparsed(verb: &'static str) -> Entry {
+    limitation(
+        verb,
+        "unparsed_upstream",
+        "ripwire answer could not be read; nothing was inferred from it",
+    )
+}
+
 pub(crate) fn limitation(
     verb: &'static str,
     kind: &'static str,
@@ -80,11 +89,7 @@ pub(crate) fn limitation(
 /// `<ctx>` bundles from `explore` and `from_trace`.
 pub fn ctx(verb: &'static str, payload: &str) -> Vec<Entry> {
     let Some(root) = markup::parse(payload) else {
-        return vec![limitation(
-            verb,
-            "unparsed_upstream",
-            "ripwire answer could not be read; nothing was inferred from it",
-        )];
+        return vec![unparsed(verb)];
     };
     let mut out = Vec::new();
     let frames: Vec<&Node> = root
@@ -282,15 +287,44 @@ fn ctx_limitations(verb: &'static str, root: &Node) -> Vec<Entry> {
     out
 }
 
-fn graph_limitations(verb: &'static str, v: &serde_json::Value) -> Vec<Entry> {
+/// What ripwire says its call graph lacks, from a JSON answer or a markup one.
+#[derive(Default)]
+struct GraphGaps {
+    counts_floor: bool,
+    ambiguous: u64,
+    unresolved: u64,
+    unindexed: u64,
+}
+
+impl GraphGaps {
+    fn of_json(v: &serde_json::Value) -> Self {
+        let k = "counts_floor";
+        Self {
+            counts_floor: v[k].as_bool().unwrap_or(false)
+                || v[k].as_u64() == Some(1)
+                || v[k] == "1",
+            ambiguous: v["graph_ambiguous"].as_u64().unwrap_or(0),
+            unresolved: v["graph_unresolved"].as_u64().unwrap_or(0),
+            unindexed: v["graph_unindexed"].as_u64().unwrap_or(0),
+        }
+    }
+
+    fn of_markup(root: &Node) -> Self {
+        Self {
+            counts_floor: root.flag("counts_floor"),
+            ambiguous: root.attr_u64("graph_ambiguous").unwrap_or(0),
+            unresolved: root.attr_u64("graph_unresolved").unwrap_or(0),
+            unindexed: root.attr_u64("graph_unindexed").unwrap_or(0),
+        }
+    }
+}
+
+fn graph_limitations(verb: &'static str, gaps: GraphGaps) -> Vec<Entry> {
     let mut out = Vec::new();
-    let truthy =
-        |k: &str| v[k].as_bool().unwrap_or(false) || v[k].as_u64() == Some(1) || v[k] == "1";
-    if truthy("counts_floor") {
+    if gaps.counts_floor {
         out.push(limitation(verb, "counts_floor", "caller/reach counts are lower bounds, not totals; zero means none found, not none exists"));
     }
-    let ambiguous =
-        v["graph_ambiguous"].as_u64().unwrap_or(0) + v["graph_unresolved"].as_u64().unwrap_or(0);
+    let ambiguous = gaps.ambiguous + gaps.unresolved;
     if ambiguous > 0 {
         out.push(limitation(
             verb,
@@ -298,11 +332,11 @@ fn graph_limitations(verb: &'static str, v: &serde_json::Value) -> Vec<Entry> {
             format!("{ambiguous} call edges are ambiguous or unresolved in the index"),
         ));
     }
-    if let Some(n) = v["graph_unindexed"].as_u64().filter(|n| *n > 0) {
+    if gaps.unindexed > 0 {
         out.push(limitation(
             verb,
             "unindexed_files",
-            format!("{n} files could not be indexed"),
+            format!("{} files could not be indexed", gaps.unindexed),
         ));
     }
     out
@@ -323,14 +357,7 @@ fn json_symbol(verb: &'static str, role: Role, s: &serde_json::Value, why: Strin
 pub fn find_symbol(payload: &str) -> (Vec<Entry>, Option<String>) {
     let verb = "find_symbol";
     let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
-        return (
-            vec![limitation(
-                verb,
-                "unparsed_upstream",
-                "ripwire answer could not be read; nothing was inferred from it",
-            )],
-            None,
-        );
+        return (vec![unparsed(verb)], None);
     };
     let mut out = Vec::new();
     if let Some(item) = json_symbol(
@@ -358,7 +385,7 @@ pub fn find_symbol(payload: &str) -> (Vec<Entry>, Option<String>) {
             "find_symbol paged its caller/callee lists; more rows exist",
         ));
     }
-    out.extend(graph_limitations(verb, &v));
+    out.extend(graph_limitations(verb, GraphGaps::of_json(&v)));
     (out, v["symbol"]["handle"].as_str().map(str::to_string))
 }
 
@@ -396,11 +423,7 @@ pub fn attach_body(entries: &mut [Entry], payload: &str) -> Vec<Entry> {
 pub fn impact(payload: &str) -> Vec<Entry> {
     let verb = "impact";
     let Some(root) = markup::parse(payload) else {
-        return vec![limitation(
-            verb,
-            "unparsed_upstream",
-            "ripwire answer could not be read; nothing was inferred from it",
-        )];
+        return vec![unparsed(verb)];
     };
     let of = root.attr("of").unwrap_or("the symbol");
     let mut out = Vec::new();
@@ -444,18 +467,8 @@ pub fn impact(payload: &str) -> Vec<Entry> {
             ),
         ));
     }
-    out.extend(markup_graph_limitations(verb, &root));
+    out.extend(graph_limitations(verb, GraphGaps::of_markup(&root)));
     out
-}
-
-fn markup_graph_limitations(verb: &'static str, root: &Node) -> Vec<Entry> {
-    let as_json = serde_json::json!({
-        "counts_floor": root.flag("counts_floor"),
-        "graph_ambiguous": root.attr_u64("graph_ambiguous").unwrap_or(0),
-        "graph_unresolved": root.attr_u64("graph_unresolved").unwrap_or(0),
-        "graph_unindexed": root.attr_u64("graph_unindexed").unwrap_or(0),
-    });
-    graph_limitations(verb, &as_json)
 }
 
 /// `memory_recall` plain text: a header, then `━━ path (relevance r) ━━ [...lines="a-b"]` blocks.
@@ -464,11 +477,10 @@ pub fn recall(payload: &str) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut blocks = payload.split("━━ ");
     let header = blocks.next().unwrap_or("");
-    let mut rest: Vec<&str> = blocks.collect();
+    let rest: Vec<&str> = blocks.collect();
     // Blocks come as pairs: "path  (relevance r) " then " [meta]\ncontent".
-    while rest.len() >= 2 {
-        let head = rest.remove(0);
-        let body = rest.remove(0);
+    let (pairs, left) = rest.as_chunks::<2>();
+    for &[head, body] in pairs {
         let path = head.split_whitespace().next().unwrap_or("").to_string();
         let (meta, content) = body.split_once('\n').unwrap_or((body, ""));
         let line = meta
@@ -501,7 +513,7 @@ pub fn recall(payload: &str) -> Vec<Entry> {
     }
     // A block head without its body: the answer was cut short. Never dropped in silence,
     // and never completed by guessing (RF-12).
-    let unread = rest.iter().filter(|b| !b.trim().is_empty()).count();
+    let unread = left.iter().filter(|b| !b.trim().is_empty()).count();
     if unread > 0 {
         out.push(limitation(
             verb,
@@ -580,11 +592,7 @@ fn json_tests(verb: &'static str, rows: &serde_json::Value) -> Vec<Entry> {
 pub fn situation(payload: &str) -> Vec<Entry> {
     let verb = "situational_awareness";
     let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
-        return vec![limitation(
-            verb,
-            "unparsed_upstream",
-            "ripwire answer could not be read; nothing was inferred from it",
-        )];
+        return vec![unparsed(verb)];
     };
     let mut out = Vec::new();
     for row in v["blast_radius"].as_array().into_iter().flatten() {
@@ -649,7 +657,7 @@ pub fn situation(payload: &str) -> Vec<Entry> {
             format!("{n} script test runners are not modelled by the call graph"),
         ));
     }
-    out.extend(graph_limitations(verb, &v));
+    out.extend(graph_limitations(verb, GraphGaps::of_json(&v)));
     out
 }
 
@@ -658,14 +666,7 @@ pub fn situation(payload: &str) -> Vec<Entry> {
 pub fn edit_check(payload: &str) -> (Vec<Entry>, bool) {
     let verb = "edit_check";
     let Some(root) = markup::parse(payload) else {
-        return (
-            vec![limitation(
-                verb,
-                "unparsed_upstream",
-                "ripwire answer could not be read; nothing was inferred from it",
-            )],
-            false,
-        );
+        return (vec![unparsed(verb)], false);
     };
     let sym = root.attr("sym").unwrap_or("?").to_string();
     let changed = root.attr("status") == Some("contract-change");
@@ -728,7 +729,7 @@ pub fn edit_check(payload: &str) -> (Vec<Entry>, bool) {
             symbol_item(verb, Role::Caller, path, line, name, why),
         ));
     }
-    out.extend(markup_graph_limitations(verb, &root));
+    out.extend(graph_limitations(verb, GraphGaps::of_markup(&root)));
     (out, changed)
 }
 
@@ -811,11 +812,7 @@ pub fn quality_delta(payload: &str) -> Option<QualityDelta> {
 pub fn affected(payload: &str) -> Vec<Entry> {
     let verb = "affected";
     let Some(root) = markup::parse(payload) else {
-        return vec![limitation(
-            verb,
-            "unparsed_upstream",
-            "ripwire answer could not be read; nothing was inferred from it",
-        )];
+        return vec![unparsed(verb)];
     };
     let mut out = test_rows(verb, &root);
     if let Some(n) = root.attr_u64("script_gates_unmodelled").filter(|n| *n > 0) {
@@ -825,35 +822,41 @@ pub fn affected(payload: &str) -> Vec<Entry> {
             format!("{n} script test runners are not modelled by the call graph"),
         ));
     }
-    out.extend(markup_graph_limitations(verb, &root));
+    out.extend(graph_limitations(verb, GraphGaps::of_markup(&root)));
     out
 }
 
 /// The router found no signal and explored with part of the budget (PRD 9.1, "caso incerto").
 pub fn route_uncertain(verb: &'static str, asked: u32, budget: u32) -> Entry {
-    Entry::Limitation(Limitation {
-        kind: "route_uncertain",
-        detail: format!(
+    inferred(
+        verb,
+        "route_uncertain",
+        format!(
             "no trace, symbol, change or docs signal: {verb} was asked for {asked} of {budget} tokens; \
              pass mode (orient, change, debug, review) or name a symbol for a fuller answer"
         ),
-        source: Source {
-            verb,
-            basis: crate::model::Basis::BrokerInference,
-        },
-    })
+    )
 }
 
 /// The task named `symbol`, but ripwire has no such symbol; the answer is an exploration.
 pub fn symbol_not_found(symbol: &str) -> Entry {
-    Entry::Limitation(Limitation {
-        kind: "symbol_not_found",
-        detail: format!(
+    inferred(
+        "find_symbol",
+        "symbol_not_found",
+        format!(
             "'{symbol}' was read as the task's symbol, but the repository has no such symbol; \
              this answer explores the task instead. Name an exact symbol in backticks for a symbol answer"
         ),
+    )
+}
+
+/// A limitation the broker concluded, not one ripwire reported.
+fn inferred(verb: &'static str, kind: &'static str, detail: String) -> Entry {
+    Entry::Limitation(Limitation {
+        kind,
+        detail,
         source: Source {
-            verb: "find_symbol",
+            verb,
             basis: crate::model::Basis::BrokerInference,
         },
     })
@@ -962,12 +965,12 @@ pub fn cap_items(entries: Vec<Entry>, max_bytes: usize) -> Vec<Entry> {
                 .as_mut()
                 .filter(|c| c.untrusted_repository_data.len() > max_bytes)
         {
-            let text = &c.untrusted_repository_data;
+            let text = &mut c.untrusted_repository_data;
             let mut end = max_bytes;
             while !text.is_char_boundary(end) {
                 end -= 1;
             }
-            c.untrusted_repository_data = text[..end].to_string();
+            text.truncate(end);
             cut.push(limitation(
                 item.source.verb,
                 "item_truncated",
