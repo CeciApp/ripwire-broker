@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[async_trait]
 pub trait Summarizer: Send + Sync + std::fmt::Debug {
@@ -31,6 +31,9 @@ pub struct CommandSummarizer {
     model_id: String,
     trusted_version: bool,
 }
+
+/// A note is at most 600 characters; a model's answer is read up to this, never whole.
+const MAX_ANSWER_BYTES: u64 = 1024 * 1024;
 
 /// How long `--summarizer-version-cmd` may take (`ollama show` against a stuck server hangs).
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -103,20 +106,41 @@ impl Summarizer for CommandSummarizer {
             .spawn()
             .map_err(|e| format!("{program}: {e}"))?;
         let mut stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+        // The prompt is written while the answer is read: a model that prints before it reads
+        // would otherwise fill its pipe while this side still writes, and both would wait.
         let run = async {
-            // A model that exits without reading its input is not an error by itself.
-            let _ = stdin.write_all(prompt.as_bytes()).await;
-            drop(stdin);
-            child.wait_with_output().await
+            let write = async {
+                // A model that exits without reading its input is not an error by itself.
+                let _ = stdin.write_all(prompt.as_bytes()).await;
+                drop(stdin);
+            };
+            let read = async {
+                let mut answer = Vec::new();
+                stdout
+                    .take(MAX_ANSWER_BYTES + 1)
+                    .read_to_end(&mut answer)
+                    .await
+                    .map(|_| answer)
+            };
+            let ((), answer) = tokio::join!(write, read);
+            let answer = answer?;
+            if answer.len() as u64 > MAX_ANSWER_BYTES {
+                // Dropping the child kills it (`kill_on_drop`).
+                return Ok(Err(format!(
+                    "answer too large (over {MAX_ANSWER_BYTES} bytes)"
+                )));
+            }
+            child.wait().await.map(|status| Ok((status, answer)))
         };
-        let out = tokio::time::timeout(self.hard_timeout, run)
+        let (status, answer) = tokio::time::timeout(self.hard_timeout, run)
             .await
             .map_err(|_| format!("timeout after {} ms", self.hard_timeout.as_millis()))?
-            .map_err(|e| format!("{program}: {e}"))?;
-        if !out.status.success() {
-            return Err(format!("{program} exited with {}", out.status));
+            .map_err(|e| format!("{program}: {e}"))??;
+        if !status.success() {
+            return Err(format!("{program} exited with {status}"));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(String::from_utf8_lossy(&answer).into_owned())
     }
 
     fn model_id(&self) -> String {
