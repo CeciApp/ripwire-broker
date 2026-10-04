@@ -998,3 +998,40 @@ async fn the_pairs_are_the_neighbours_an_enrichment_compared() {
     assert_eq!(pairs, expected);
     assert_eq!(consolidate::pending(&s, MODEL), expected);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_drain_without_time_for_a_whole_round_does_not_start_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &same_file(3)));
+    enrich(&store, 3, T0);
+    // A provider that takes four of the round's five seconds.
+    let slow = Arc::new(Slow {
+        inner: Fake::new(separate),
+        delay: Duration::from_secs(4),
+        fail: None,
+        calls: Default::default(),
+    });
+    let worker = Worker::new(
+        store.clone(),
+        slow.clone(),
+        controller::Config {
+            model: MODEL.into(),
+            candidates: 4,
+        },
+    );
+    let calls = || slow.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let at = At(T0 + DAY_MS);
+
+    // Three seconds left: a round could be paid for and cut before its commit, so none starts.
+    runtime::drain(&store, &worker, &at, 20, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(calls(), 0);
+
+    // With the whole round's time, it runs to its commit.
+    runtime::drain(&store, &worker, &at, 20, Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(calls(), 1);
+    assert_eq!(store.load().unwrap().consolidation.decisions.len(), 3);
+}
