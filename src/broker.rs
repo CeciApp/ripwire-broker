@@ -902,8 +902,14 @@ impl Broker {
         }
         if !changed.is_empty() {
             verbs.push("affected");
+            // It never decides the gate (D-013): what goes missing is a list of tests, not a
+            // conclusion.
             match self
-                .evidence("affected", json!({"files": changed.join(",")}))
+                .evidence_or(
+                    "affected",
+                    json!({"files": changed.join(",")}),
+                    normalize::unchecked,
+                )
                 .await?
             {
                 Ok(p) => entries.extend(normalize::affected(&p)),

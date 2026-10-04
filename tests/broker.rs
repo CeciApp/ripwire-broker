@@ -3230,3 +3230,35 @@ async fn an_empty_task_is_invalid_input() {
         assert!(fake.called().is_empty(), "{task:?}: ripwire was asked");
     }
 }
+
+/// A missing `affected` never decides the gate (D-013), so its limitation must not say the gate
+/// cannot conclude (D-148): only the tests it would have listed are missing.
+#[tokio::test]
+async fn a_missing_affected_never_says_the_gate_cannot_conclude() {
+    let (b, _fake, _ws) = broker(
+        FakeUpstream::new()
+            .answer("situational_awareness", "situational_awareness_files")
+            .answer("quality_delta", "quality_delta_clean")
+            .fail("affected", UpstreamError::Refused("no".into())),
+    )
+    .await;
+
+    let out = to_json(
+        &b.context_before_finish(FinishRequest::default())
+            .await
+            .unwrap(),
+    );
+
+    assert_ne!(
+        out["status"], "unknown",
+        "a missing affected never decides the gate"
+    );
+    let missing = out["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["source"]["verb"] == "affected")
+        .unwrap_or_else(|| panic!("{out:#}"));
+    let detail = missing["detail"].as_str().unwrap();
+    assert!(!detail.contains("cannot conclude"), "{detail}");
+}
