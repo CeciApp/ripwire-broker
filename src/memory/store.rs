@@ -868,7 +868,8 @@ impl Store {
                     state.nodes.insert(id.clone(), note);
                     added_notes.push(id.clone());
                 }
-                if let Some(key) = d.cache {
+                // Cached only when the note is there to be reused.
+                if let Some(key) = d.cache.filter(|_| state.nodes.contains_key(&id)) {
                     state.consolidation.notes.insert(key, id);
                 }
             }

@@ -1111,3 +1111,69 @@ async fn a_forget_all_during_a_split_round_stops_the_requests_left() {
         .unwrap();
     assert_eq!(fake.inner.requests(), 1, "nothing more went out");
 }
+
+#[tokio::test]
+async fn a_note_that_cannot_be_added_is_neither_pointed_at_nor_cached() {
+    use ripwire_broker::memory::store::Limits;
+    // No room for a third node.
+    let dir = tempfile::tempdir().unwrap();
+    let limits = Limits {
+        max_nodes: 2,
+        ..Limits::default()
+    };
+    let store = Store::with_limits(dir.path(), &ws(), limits);
+    for r in [
+        rec(1, TWO[0], &["src/cache.rs"]),
+        rec(2, TWO[1], &["src/cache.rs"]),
+    ] {
+        store.enqueue(&r).unwrap();
+    }
+    store.ingest().unwrap();
+    enrich(&store, 2, T0);
+    let summarizer = Arc::new(FakeSummarizer::replying(NOTE).versioned());
+    let cfg = Config::new(MODEL).with_summarizer(summarizer.clone());
+    consolidate::round(
+        &store,
+        &Fake::new(gated("merge", 0.99, 0.0)),
+        &cfg,
+        T0 + DAY_MS,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let s = store.load().unwrap();
+    assert_eq!(s.nodes.len(), 2);
+    assert_eq!(
+        s.consolidation.decisions.values().next().unwrap().note,
+        None
+    );
+    assert!(
+        s.consolidation.notes.is_empty(),
+        "no id of a note that is not there"
+    );
+
+    // A note forgotten by the user and written again: it stays out, and is not cached.
+    let summarizer = Arc::new(FakeSummarizer::replying(NOTE).versioned());
+    let (_dir, store) =
+        consolidated(TWO, gated("merge", 0.99, 0.0), Some(summarizer.clone())).await;
+    let note = notes(&store)[0].node_id.clone();
+    store.forget(&note, u64::MAX).unwrap();
+    let mut s = store.load().unwrap();
+    s.consolidation.pending_since_ms = Some(T0);
+    s.generation += 1;
+    store.publish(&s).unwrap();
+    let cfg = Config::new("jev-2.0.0").with_summarizer(summarizer.clone());
+    consolidate::round(
+        &store,
+        &Fake::new(gated("merge", 0.99, 0.0)),
+        &cfg,
+        T0 + 2 * DAY_MS,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let s = store.load().unwrap();
+    assert!(!s.nodes.contains_key(&note), "the tombstone holds");
+    assert!(s.consolidation.notes.values().all(|n| *n != note));
+    assert!(s.consolidation.decisions.values().all(|d| d.note.is_none()));
+}
