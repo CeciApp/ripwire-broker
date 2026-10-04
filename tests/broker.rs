@@ -972,6 +972,20 @@ async fn the_summary_names_the_focus_and_never_quotes_repository_text() {
 }
 
 #[tokio::test]
+async fn the_summary_counts_what_was_found_and_says_so() {
+    let (b, _fake, _ws) =
+        broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    let mut req = TaskRequest::new("how are the routes authenticated?");
+    req.budget_tokens = 400;
+    let out = to_json(&b.context_for_task(req).await.unwrap());
+    let summary = out["summary"].as_str().unwrap();
+    let shown = out["items"].as_array().unwrap().len();
+    assert!(shown < 7, "the budget cut some: {out:#}");
+    // The summary describes the analysis; `budget` says what was delivered.
+    assert!(summary.contains("found 7 items"), "{summary}");
+}
+
+#[tokio::test]
 async fn the_gate_summary_states_what_blocks_ready() {
     let (b, _fake, _ws) = broker(
         FakeUpstream::new()

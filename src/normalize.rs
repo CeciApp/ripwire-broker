@@ -933,9 +933,10 @@ pub fn summary(lead: &str, entries: &[Entry]) -> String {
         "limitation",
         "limitations",
     ));
+    // What the analysis found; `budget` says how much of it was delivered.
     match focus {
-        Some(f) => format!("{lead}: {f}; {}", parts.join(", ")),
-        None => format!("{lead}: {}", parts.join(", ")),
+        Some(f) => format!("{lead}: {f}; found {}", parts.join(", ")),
+        None => format!("{lead}: found {}", parts.join(", ")),
     }
 }
 

@@ -1256,6 +1256,8 @@ impl Broker {
     /// The envelope plus the full version of every item it includes (a session reference
     /// resolved to the item it points to): the evidence notes may use.
     fn envelope_full(&self, shape: Shape, entries: Vec<Entry>) -> (Envelope, Vec<Item>) {
+        // Counted once each: the summary describes what was found, not its repetitions.
+        let entries = crate::dedup::dedup(entries);
         let Shape {
             tool,
             intent,
