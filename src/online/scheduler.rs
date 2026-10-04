@@ -182,7 +182,8 @@ impl Scheduler {
                 && cooling.is_none()
                 && let Some(next) = again.pop_front()
             {
-                self.launch(next, &mut tasks, &mut in_flight, &mut report, &mut again);
+                self.launch(next, &mut tasks, &mut in_flight, &mut report, &mut again)
+                    .await;
                 if report.stop == Some(Stop::RequestLimit) {
                     admitting = false;
                     jobs.close();
@@ -217,7 +218,8 @@ impl Scheduler {
                     None => admitting = false,
                     Some(job) => {
                         let first = Attempt { job, number: 1, rate_limited: 0 };
-                        self.launch(first, &mut tasks, &mut in_flight, &mut report, &mut again);
+                        self.launch(first, &mut tasks, &mut in_flight, &mut report, &mut again)
+                            .await;
                         if report.stop == Some(Stop::RequestLimit) {
                             admitting = false;
                             jobs.close();
@@ -242,8 +244,9 @@ impl Scheduler {
         report
     }
 
-    /// Starts an attempt unless its source changed or the request limit is spent.
-    fn launch(
+    /// Starts an attempt unless its source changed or the request limit is spent. The freshness
+    /// check reads files, so it runs in the blocking pool; one that panics counts as changed.
+    async fn launch(
         &self,
         attempt: Attempt,
         tasks: &mut JoinSet<Done>,
@@ -251,8 +254,10 @@ impl Scheduler {
         report: &mut Report,
         again: &mut VecDeque<Attempt>,
     ) {
-        if let Some(fresh) = &attempt.job.fresh
-            && !(fresh.0)()
+        if let Some(fresh) = attempt.job.fresh.clone()
+            && !tokio::task::spawn_blocking(move || (fresh.0)())
+                .await
+                .unwrap_or(false)
         {
             report.stale.push(attempt.job.id);
             return;

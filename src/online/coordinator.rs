@@ -291,9 +291,26 @@ impl OnlineEngine {
         let mut left = self.config.request_limit;
         let deadline = tokio::time::Instant::now() + self.config.deadline;
         let mut files: Vec<(RankedPath, Arc<Snapshot>)> = vec![];
-        for rp in ranked.iter().take(self.config.max_candidates) {
-            match self.reader.snapshot(&rp.path) {
-                Ok(snap) => files.push((rp.clone(), Arc::new(snap))),
+        let picked: Vec<RankedPath> = ranked
+            .iter()
+            .take(self.config.max_candidates)
+            .cloned()
+            .collect();
+        let read = self
+            .on_disk(move |reader| {
+                picked
+                    .into_iter()
+                    .map(|rp| {
+                        let snap = reader.snapshot(&rp.path);
+                        (rp, snap)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+        for (rp, snap) in read {
+            match snap {
+                Ok(snap) => files.push((rp, Arc::new(snap))),
                 Err(why) => *disc.not_sent.entry(why.as_str()).or_default() += 1,
             }
         }
@@ -325,29 +342,42 @@ impl OnlineEngine {
                 None => String::new(),
             })
             .collect();
-        let known: std::collections::HashSet<String> =
+        let mut taken: std::collections::HashSet<String> =
             ranked.iter().map(|rp| rp.path.clone()).collect();
-        'dirs: for dir in dirs {
-            for path in self.reader.files_in(&dir) {
-                if files.len() - planner == self.config.lookahead_max {
-                    break 'dirs;
+        taken.extend(files.iter().map(|(rp, _)| rp.path.clone()));
+        let room = self.config.lookahead_max;
+        let siblings = self
+            .on_disk(move |reader| {
+                let mut found = vec![];
+                'dirs: for dir in dirs {
+                    for path in reader.files_in(&dir) {
+                        if found.len() == room {
+                            break 'dirs;
+                        }
+                        if !taken.insert(path.clone()) {
+                            continue;
+                        }
+                        // Ineligible siblings are policy, not candidates ripwire named: skipped
+                        // quietly.
+                        if let Ok(snap) = reader.snapshot(&path) {
+                            found.push((path, snap));
+                        }
+                    }
                 }
-                if known.contains(&path) || files.iter().any(|(rp, _)| rp.path == path) {
-                    continue;
-                }
-                // Ineligible siblings are policy, not candidates ripwire named: skipped quietly.
-                if let Ok(snap) = self.reader.snapshot(&path) {
-                    let rank = ranked.len() + files.len();
-                    let rp = RankedPath {
-                        path,
-                        rank,
-                        priority: crate::normalize::priority::PERIPHERAL,
-                        origin: super::PathOrigin::Lookahead,
-                        lines: vec![],
-                    };
-                    files.push((rp, Arc::new(snap)));
-                }
-            }
+                found
+            })
+            .await
+            .unwrap_or_default();
+        for (path, snap) in siblings {
+            let rank = ranked.len() + files.len();
+            let rp = RankedPath {
+                path,
+                rank,
+                priority: crate::normalize::priority::PERIPHERAL,
+                origin: super::PathOrigin::Lookahead,
+                lines: vec![],
+            };
+            files.push((rp, Arc::new(snap)));
         }
         if files.len() > planner {
             let extra = self
@@ -462,10 +492,11 @@ impl OnlineEngine {
         // Before the output: evidence about a version that no longer exists is dropped
         // (RF-ONLINE-10, CA-ONLINE-11). The file's structural facts stay untouched.
         let before = disc.files.len();
-        let fresh: Vec<bool> = files
-            .iter()
-            .map(|(_, snap)| self.reader.is_fresh(snap))
-            .collect();
+        let snaps: Vec<Arc<Snapshot>> = files.iter().map(|(_, snap)| snap.clone()).collect();
+        let fresh: Vec<bool> = self
+            .on_disk(move |reader| snaps.iter().map(|s| reader.is_fresh(s)).collect())
+            .await
+            .unwrap_or_default();
         let mut keep = fresh.iter();
         disc.files.retain(|_| *keep.next().unwrap_or(&false));
         disc.changed_files += before - disc.files.len();
@@ -483,6 +514,18 @@ impl OnlineEngine {
             totals.last_error = Some(category);
         }
         disc
+    }
+
+    /// `work` on the reader in the blocking pool: its walks, reads and hashes never hold the async
+    /// thread (D-146). `None` if it panicked.
+    async fn on_disk<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&WorkspaceReader) -> T + Send + 'static,
+    ) -> Option<T> {
+        let reader = self.reader.clone();
+        tokio::task::spawn_blocking(move || work(&reader))
+            .await
+            .ok()
     }
 
     /// Admission questions about the previews of `files`, with ids `f{first}..`.
