@@ -147,6 +147,8 @@ impl From<Unavailable> for Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     BeforePublish,
+    /// After the snapshot is renamed into place, before its generation is recorded.
+    MidPublish,
     AfterPublish,
     /// After the first spool entry is removed.
     MidRemoval,
@@ -280,16 +282,44 @@ impl Store {
     /// Writes the snapshot of `generation`, then the record of it: a reader that sees the new
     /// generation finds the new snapshot.
     fn write_snapshot(&self, generation: u64, bytes: &[u8]) -> Result<(), Unavailable> {
-        crate::state::write_private(&self.dir, &self.dir.join(SNAPSHOT), bytes)
-            .and_then(|()| {
-                crate::state::write_private(
-                    &self.dir,
-                    &self.dir.join(GENERATION),
-                    generation.to_string().as_bytes(),
-                )
-            })
-            .and_then(|()| fs::File::open(&self.dir)?.sync_all())
+        self.write_snapshot_until(generation, bytes, false)
             .map_err(|_| Unavailable::Io)
+    }
+
+    /// [`Store::write_snapshot`], stopping as a crash would between the snapshot and its
+    /// generation when `crash_mid` is set (a test of the store's crash safety).
+    fn write_snapshot_until(
+        &self,
+        generation: u64,
+        bytes: &[u8],
+        crash_mid: bool,
+    ) -> Result<(), Refusal> {
+        let path = self.dir.join(GENERATION);
+        let recorded = fs::read_to_string(&path)
+            .ok()
+            .and_then(|g| g.trim().parse::<u64>().ok());
+        let changes = recorded != Some(generation);
+        // The old record goes first: a crash before the new one is written leaves no record,
+        // and readers fall back to the file's own identity, never to the old generation, which
+        // would keep a warm copy (forgotten memories included) valid.
+        if changes && recorded.is_some() {
+            fs::remove_file(&path)
+                .and_then(|()| fs::File::open(&self.dir)?.sync_all())
+                .map_err(|_| Unavailable::Io)?;
+        }
+        crate::state::write_private(&self.dir, &self.dir.join(SNAPSHOT), bytes)
+            .map_err(|_| Unavailable::Io)?;
+        if crash_mid {
+            return Err(Refusal::Crashed);
+        }
+        if changes {
+            crate::state::write_private(&self.dir, &path, generation.to_string().as_bytes())
+                .map_err(|_| Unavailable::Io)?;
+        }
+        fs::File::open(&self.dir)
+            .and_then(|d| d.sync_all())
+            .map_err(|_| Unavailable::Io)?;
+        Ok(())
     }
 
     /// The exclusive writer, held until dropped. Never waits: a held store is [`Refusal::Locked`].
@@ -411,6 +441,14 @@ impl Store {
     }
 
     fn ingest_until(&self, crash: Option<Step>) -> Result<Ingested, Refusal> {
+        // The worker comes by every few seconds: with nothing in the spool (not even a temporary
+        // to clean up) there is nothing to lock, load or rewrite.
+        if self.is_revoked() {
+            return Err(Refusal::Revoked);
+        }
+        if self.spool_entries()?.is_empty() {
+            return Ok(Ingested::default());
+        }
         let _writer = self.writer()?;
         if self.is_revoked() {
             return Err(Refusal::Revoked);
@@ -483,7 +521,7 @@ impl Store {
             if bytes.len() as u64 > self.limits.snapshot_bytes {
                 return Err(Refusal::Full(Full::Snapshot));
             }
-            self.write_snapshot(state.generation, &bytes)?;
+            self.write_snapshot_until(state.generation, &bytes, crash == Some(Step::MidPublish))?;
         }
         if crash == Some(Step::AfterPublish) {
             return Err(Refusal::Crashed);

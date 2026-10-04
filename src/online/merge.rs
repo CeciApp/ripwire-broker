@@ -112,28 +112,55 @@ pub(crate) fn merge(
         })
         .collect();
 
+    // Which selected blocks keep their source under --jev-max-source-bytes: the most probable
+    // first, whatever file the planner named first, so the cap never trades a sure block for a
+    // doubtful one.
+    let structural_lines = |path: &str| -> Vec<u64> {
+        out.iter()
+            .filter_map(|e| match e {
+                Entry::Item(_, i) if i.path == path && i.source.basis == Basis::Ripwire => i.line,
+                _ => None,
+            })
+            .collect()
+    };
+    let mut candidates: Vec<(f64, usize, usize, usize)> = vec![];
+    for (fi, file) in disc.files.iter().enumerate() {
+        if file.decision != FileDecision::Admitted {
+            continue;
+        }
+        let lines = structural_lines(&file.path);
+        for (ui, u) in file.units.iter().enumerate() {
+            let linked = u.unit.symbol_line.is_some_and(|l| lines.contains(&l));
+            if !linked && select(u.scored.probability) == SourceDecision::Selected {
+                let p = u.scored.probability.unwrap_or_default();
+                candidates.push((p, fi, ui, u.text.len()));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut shown: std::collections::HashSet<(usize, usize)> = Default::default();
+    for (_, fi, ui, len) in candidates {
+        if max_source_bytes.is_none_or(|cap| rendered + len <= cap) {
+            rendered += len;
+            shown.insert((fi, ui));
+        }
+    }
+
     // Semantic-only items, ordered among themselves by probability before they join the
     // entries; ripwire's items keep their order, and the scores never mix (D-081, §23.4).
     let mut found: Vec<Entry> = vec![];
-    for file in disc
+    for (fi, file) in disc
         .files
         .iter()
-        .filter(|f| f.decision == FileDecision::Admitted)
+        .enumerate()
+        .filter(|(_, f)| f.decision == FileDecision::Admitted)
     {
-        let structural_lines: Vec<u64> = out
-            .iter()
-            .filter_map(|e| match e {
-                Entry::Item(_, i) if i.path == file.path && i.source.basis == Basis::Ripwire => {
-                    i.line
-                }
-                _ => None,
-            })
-            .collect();
+        let structural_lines = structural_lines(&file.path);
         let has_structural = out.iter().any(|e| {
             matches!(e, Entry::Item(_, i) if i.path == file.path && i.source.basis == Basis::Ripwire)
         });
         let mut added = false;
-        for u in &file.units {
+        for (ui, u) in file.units.iter().enumerate() {
             let linked = u
                 .unit
                 .symbol_line
@@ -146,9 +173,7 @@ pub(crate) fn merge(
             let (start, end) = (u.unit.start_line, u.unit.end_line);
             let beside = beside(file);
             let (prio, why, content) = match d {
-                SourceDecision::Selected
-                    if max_source_bytes.is_some_and(|cap| rendered + u.text.len() > cap) =>
-                {
+                SourceDecision::Selected if !shown.contains(&(fi, ui)) => {
                     capped += 1;
                     (
                         priority::BODY,
@@ -158,18 +183,15 @@ pub(crate) fn merge(
                         None,
                     )
                 }
-                SourceDecision::Selected => {
-                    rendered += u.text.len();
-                    (
-                        priority::BODY,
-                        format!(
-                            "classifier: lines {start}-{end} are evidence for the task (p={p:.2} > 0.50)"
-                        ),
-                        Some(Untrusted {
-                            untrusted_repository_data: u.text.clone(),
-                        }),
-                    )
-                }
+                SourceDecision::Selected => (
+                    priority::BODY,
+                    format!(
+                        "classifier: lines {start}-{end} are evidence for the task (p={p:.2} > 0.50)"
+                    ),
+                    Some(Untrusted {
+                        untrusted_repository_data: u.text.clone(),
+                    }),
+                ),
                 _ => (
                     priority::READING_LEAD,
                     format!(

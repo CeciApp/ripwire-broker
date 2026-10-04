@@ -934,3 +934,43 @@ fn the_worker_bookkeeping_waits_briefly_for_another_writer() {
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
     drop(held);
 }
+
+// --- audit of 2026-10-04 (D-143) ---
+
+#[test]
+fn a_crash_between_the_snapshot_and_its_generation_never_keeps_the_old_version() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"v".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    // What a warm reader keys its copy by.
+    let warm = store.snapshot_version();
+
+    store.enqueue(&record(2)).unwrap();
+    assert_eq!(
+        store.ingest_crashing_at(Step::MidPublish),
+        Err(Refusal::Crashed)
+    );
+    assert_eq!(store.load().unwrap().nodes.len(), 2, "the snapshot is new");
+    assert_ne!(
+        store.snapshot_version(),
+        warm,
+        "a reader keyed by the old version sees that the memories changed"
+    );
+}
+
+#[test]
+fn an_ingest_with_nothing_waiting_never_contends_for_the_writer() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::new(state.path(), &"w".repeat(64));
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    // `memory forget` (or another process) holds the writer; the worker's idle tick comes by.
+    let held = Store::new(state.path(), &"w".repeat(64)).writer().unwrap();
+    assert_eq!(
+        store.ingest(),
+        Ok(Default::default()),
+        "nothing waits in the spool: nothing to lock, load or rewrite"
+    );
+    drop(held);
+}

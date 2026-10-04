@@ -1884,6 +1884,70 @@ fn a_second_hook_event_does_not_ask_ripwire_for_its_version_again() {
 }
 
 #[test]
+fn a_hook_event_that_will_ask_nothing_starts_no_ripwire() {
+    let state = tempfile::tempdir().unwrap();
+    let ws = common::sample_repo();
+    let stub_dir = tempfile::tempdir().unwrap();
+    let counter = stub_dir.path().join("version-asks");
+    let ripwire = common::counting_ripwire(stub_dir.path(), &counter);
+    let launches = || {
+        std::fs::read_to_string(stub_dir.path().join("version-asks.launches"))
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    };
+    let fixture = |name: &str| {
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/hooks/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+        .replace("__WORKSPACE__", &ws.path().display().to_string())
+    };
+    let hook = |event: &str, extra: &[&str]| {
+        let mut args = vec![
+            "hook",
+            "claude-code",
+            event,
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--ripwire",
+            ripwire.to_str().unwrap(),
+        ];
+        args.extend(extra);
+        args.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+    };
+    let call = |args: Vec<String>, ev: &str| {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (code, _, err) = run(&args, ev);
+        assert_eq!(code, 0, "{err}");
+    };
+
+    // The first prompt of a session asks; the next ones (no --every-prompt) do not.
+    let prompt = fixture("claude_code_user_prompt_submit");
+    call(hook("user-prompt-submit", &[]), &prompt);
+    assert_eq!(launches(), 1);
+    call(hook("user-prompt-submit", &[]), &prompt);
+    call(hook("user-prompt-submit", &[]), &prompt);
+    assert_eq!(launches(), 1, "prompts after the first ask nothing");
+
+    // An edit inside the coalescing window is held for the next answer, not asked.
+    common::write(ws.path(), "src/auth.py", "changed\n");
+    let edit = fixture("claude_code_post_tool_use");
+    call(
+        hook("post-tool-use", &["--edit-interval-ms", "600000"]),
+        &edit,
+    );
+    let after_first_edit = launches();
+    call(
+        hook("post-tool-use", &["--edit-interval-ms", "600000"]),
+        &edit,
+    );
+    assert_eq!(launches(), after_first_edit, "a held edit asks nothing");
+}
+
+#[test]
 fn a_swapped_ripwire_is_read_again() {
     let state = tempfile::tempdir().unwrap();
     let ws = common::sample_repo();
@@ -1913,6 +1977,8 @@ fn a_swapped_ripwire_is_read_again() {
         ws.path().to_str().unwrap(),
         "--ripwire",
         ripwire.to_str().unwrap(),
+        // Each prompt asks, so each one needs ripwire's version.
+        "--every-prompt",
     ];
 
     run(&args, &ev);
@@ -2161,6 +2227,7 @@ fn a_launch_failure_is_published_as_an_error_and_the_hook_still_answers() {
 fn a_marker_is_honoured_even_when_ripwire_cannot_launch() {
     let ws = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
+    // Every prompt asks, so the resume below is one that needs ripwire.
     let args = [
         "hook",
         "claude-code",
@@ -2171,6 +2238,7 @@ fn a_marker_is_honoured_even_when_ripwire_cannot_launch() {
         state.path().to_str().unwrap(),
         "--ripwire",
         "/nonexistent/ripwire",
+        "--every-prompt",
     ];
     let snapshot = || {
         let Read::Valid(s) = bar_snapshot(state.path(), "s-1", ws.path()) else {
@@ -2203,8 +2271,8 @@ fn a_marker_is_honoured_even_when_ripwire_cannot_launch() {
     assert!(!s.opted_out, "the resume is saved");
     assert_eq!(s.last_analysis.unwrap().status, AnalysisStatus::Error);
     assert_eq!(
-        s.stats.events, 0,
-        "D4: counters unchanged by a launch failure"
+        s.stats.events, 2,
+        "D4: the two events that needed no ripwire count; the one whose launch failed does not"
     );
 }
 
@@ -4525,5 +4593,137 @@ fn memory_retry_brings_failed_jobs_back() {
     assert!(
         parse(&["memory", "retry", "--workspace", "/w", "--online"]).is_err(),
         "local only"
+    );
+}
+
+// --- audit of 2026-10-04 (D-143) ---
+
+#[test]
+fn an_empty_or_relative_directory_variable_never_puts_state_in_the_workspace() {
+    use std::io::Write as _;
+    let ws = common::sample_repo();
+    for value in ["", "relative/state"] {
+        let home = tempfile::tempdir().unwrap();
+        // A hook runs with the workspace as its directory.
+        let mut child = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+            .current_dir(ws.path())
+            .args([
+                "hook",
+                "claude-code",
+                "user-prompt-submit",
+                "--workspace",
+                ws.path().to_str().unwrap(),
+                "--ripwire",
+                "/nonexistent/ripwire",
+            ])
+            .env("XDG_STATE_HOME", value)
+            .env("HOME", home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(prompt_event(ws.path(), "s-1", "hello").as_bytes())
+            .unwrap();
+        child.wait().unwrap();
+        assert!(
+            !ws.path().join("ripwire-broker").exists() && !ws.path().join("relative").exists(),
+            "XDG_STATE_HOME={value:?}: nothing in the workspace"
+        );
+        assert!(
+            home.path().join(".local/state/ripwire-broker").exists(),
+            "XDG_STATE_HOME={value:?}: the default under HOME"
+        );
+
+        // The installer reads the user's settings, likewise: here, a bar of their own that ours
+        // would shadow, so nothing is written.
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/settings.json"),
+            r#"{"statusLine": {"type": "command", "command": "my-own-bar"}}"#,
+        )
+        .unwrap();
+        let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
+            .current_dir(ws.path())
+            .args([
+                "install",
+                "claude-code",
+                "--workspace",
+                ws.path().to_str().unwrap(),
+                "--statusline",
+                "--write",
+            ])
+            .env("CLAUDE_CONFIG_DIR", value)
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let project =
+            std::fs::read_to_string(ws.path().join(".claude/settings.json")).unwrap_or_default();
+        assert!(
+            !project.contains("statusLine"),
+            "CLAUDE_CONFIG_DIR={value:?}: the user's own bar was seen: {project}"
+        );
+    }
+}
+
+#[test]
+fn the_codex_snippet_is_valid_toml_for_any_workspace_path() {
+    // A decomposed name (as macOS keeps them), a quote and a backslash in the path.
+    let parent = tempfile::tempdir().unwrap();
+    let ws = parent.path().join("Ac\u{327}a\u{303}o \"x\\y\"");
+    std::fs::create_dir_all(&ws).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run(
+        &[
+            "install",
+            "codex",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--codex-home",
+            home.path().to_str().unwrap(),
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "{err}");
+    let start = out
+        .find("[mcp_servers.ripwire-broker]")
+        .expect("the snippet");
+    let snippet: String = out[start..]
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let check = Proc::new("python3")
+        .args([
+            "-c",
+            "import sys, tomllib, json; t = tomllib.loads(sys.stdin.read()); \
+             print(json.dumps(t['mcp_servers']['ripwire-broker']['args']))",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write as _;
+            c.stdin.take().unwrap().write_all(snippet.as_bytes())?;
+            c.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{snippet}\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let args: Vec<String> = serde_json::from_slice(&check.stdout).unwrap();
+    let canonical = ws.canonicalize().unwrap();
+    assert!(
+        args.iter()
+            .any(|a| std::path::Path::new(a) == canonical || std::path::Path::new(a) == ws),
+        "the path comes back as it is: {args:?}"
     );
 }

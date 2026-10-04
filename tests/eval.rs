@@ -211,8 +211,15 @@ fn a_run_is_scored_against_the_reference_patch() {
     assert_eq!(sc.file_precision, Some(0.5));
     assert_eq!(sc.presented_recall, Some(0.5));
     assert_eq!(sc.first_correct_rank, Some(2), "src/auth.py came second");
-    assert_eq!(sc.test_recall, 1.0);
+    assert_eq!(sc.test_recall, Some(1.0));
     assert_eq!(sc.correct, Some(true));
+    let mut no_tests = task.clone();
+    no_tests.reference.tests.clear();
+    assert_eq!(
+        score::score(&no_tests, &s, &modified, None).test_recall,
+        None,
+        "no reference tests: nothing to find, not a full score"
+    );
 
     let nothing = score::score(&task, &Summary::default(), &[], None);
     assert_eq!(nothing.file_recall, 0.0);
@@ -250,7 +257,7 @@ fn rec(n: usize, repos: usize, arm: Arm, tokens: u64, exploratory: u64) -> RunRe
         correct: Some(true),
         file_recall: 0.8,
         presented_recall: Some(0.7),
-        test_recall: 0.9,
+        test_recall: Some(0.9),
         ..RunRecord::default()
     }
 }
@@ -1686,4 +1693,129 @@ fn edits_the_agent_committed_still_count_and_any_file_name_matches() {
         (&json!(1.0), &json!(1.0)),
         "measured against the task's base, names exact: {record}"
     );
+}
+
+#[test]
+fn a_timeout_ends_the_agent_and_the_check_with_everything_they_started() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    // An agent whose child keeps its stdout open, and a check that leaves a process behind.
+    let agent = work.path().join("hanging-agent");
+    common::write_executable(
+        &agent,
+        r##"#!/bin/sh
+cat > /dev/null
+echo '{"type":"system","subtype":"init","tools":[],"mcp_servers":[]}'
+sleep 30
+"##,
+    );
+    let pidfile = work.path().join("check.pid");
+    let mut task = auth_task("t", repo.path(), &head, None);
+    task["check"] = json!(format!("sleep 30 & echo $! > {}; wait", pidfile.display()));
+    std::fs::write(
+        work.path().join("corpus.json"),
+        json!({ "tasks": [task] }).to_string(),
+    )
+    .unwrap();
+    // A process outside those groups, which no timeout may touch.
+    let mut witness = Command::new("sleep").arg("60").spawn().unwrap();
+    let started = std::time::Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .args([
+            "run",
+            "--corpus",
+            work.path().join("corpus.json").to_str().unwrap(),
+            "--out",
+            work.path().join("out").to_str().unwrap(),
+            "--arms",
+            "none",
+            "--timeout-s",
+            "1",
+            "--check-timeout-s",
+            "1",
+            "--agent-cmd",
+            agent.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the run ended at its timeouts, not when the children did: {:?}",
+        started.elapsed()
+    );
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    let alive = Command::new("kill")
+        .args(["-0", pid.trim()])
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "the check's process went with it");
+    assert!(
+        witness.try_wait().unwrap().is_none(),
+        "nothing outside the timed-out groups was killed"
+    );
+    witness.kill().unwrap();
+    witness.wait().unwrap();
+}
+
+#[test]
+fn the_agent_is_never_handed_the_source_repository_or_the_fix() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let task = |env: Value| {
+        let mut t = auth_task("t", repo.path(), &head, None);
+        t["env"] = env;
+        t
+    };
+    // `env` reaches the agent: with the source repository's path, `git log --all` there is the
+    // answer. Commands may name them; `env` may not.
+    for (var, value) in [("SRC", "{repo}"), ("ANSWER", "x{fix}y")] {
+        let corpus: Corpus =
+            serde_json::from_value(json!({"tasks": [task(json!({ var: value }))]})).unwrap();
+        let errors = corpus.validate().unwrap_err().join("\n");
+        assert!(errors.contains(var) && errors.contains("env"), "{errors}");
+    }
+    let run_only: Corpus =
+        serde_json::from_value(json!({"tasks": [task(json!({"DB": "db_{run}"}))]})).unwrap();
+    assert_eq!(run_only.validate(), Ok(()));
+}
+
+#[test]
+fn the_bars_compare_the_same_tasks_and_skip_what_has_no_reference_tests() {
+    // Thirty tasks where the broker saves 30% of the tokens (short of the 35% bar), and one more
+    // that only `none` ran validly, an expensive one: unpaired, it would carry the bar.
+    let mut records = corpus(30, 3, 700, 70);
+    records.push(rec(30, 3, Arm::None, 100_000, 100));
+    let mut lost = rec(30, 3, Arm::Broker, 10, 1);
+    lost.valid = false;
+    records.push(lost);
+    assert_eq!(
+        verdict(&records, "17.1"),
+        Verdict::Fail,
+        "compared over the tasks both arms ran validly"
+    );
+
+    // A task whose reference names no tests says nothing about finding tests.
+    let mut no_tests = rec(0, 1, Arm::Broker, 1, 1);
+    no_tests.test_recall = None;
+    let mut half = rec(1, 1, Arm::Broker, 1, 1);
+    half.test_recall = Some(0.5);
+    let stats = report::arm_stats(&[no_tests, half], "broker");
+    assert_eq!(stats.test_recall, Some(0.5));
+
+    // A broker run that presented nothing presented a recall of 0, in the table as in the bar;
+    // an arm without the broker has no such measure.
+    let mut nothing = rec(0, 1, Arm::Broker, 1, 1);
+    nothing.presented_recall = None;
+    let mut all = rec(1, 1, Arm::Broker, 1, 1);
+    all.presented_recall = Some(1.0);
+    assert_eq!(
+        report::arm_stats(&[nothing, all], "broker").presented_recall,
+        Some(0.5)
+    );
+    let mut plain = rec(0, 1, Arm::None, 1, 1);
+    plain.presented_recall = None;
+    assert_eq!(report::arm_stats(&[plain], "none").presented_recall, None);
 }

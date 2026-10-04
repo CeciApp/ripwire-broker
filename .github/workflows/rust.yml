@@ -45,6 +45,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Tests
+        # Shorter than the job's: a step that runs out ends with its log kept, where a job
+        # cancelled at its own limit keeps none, and the hung test could not be named.
+        timeout-minutes: 12
         run: cargo nextest run --locked
       # The property tests again, on their own, with far more cases than the default 256. They
       # are selected by target and not by a name prefix, because the repository names tests as
@@ -97,4 +100,7 @@ jobs:
       # The #[ignore] tests stay ignored: nextest does not run them without --run-ignored,
       # and the two in online_live.rs need RIPWIRE_BROKER_JEV_API_KEY, which no PR run has.
       - name: Tests
+        # Shorter than the job's: a step that runs out ends with its log kept, where a job
+        # cancelled at its own limit keeps none, and the hung test could not be named.
+        timeout-minutes: 12
         run: cargo nextest run --locked --features online

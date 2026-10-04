@@ -237,6 +237,12 @@ fn a_response_that_breaks_the_contract_is_rejected_whole() {
         parse_answers("jev-1.13.0", &ids(1), other),
         Err(InvalidResponse::WrongModel)
     );
+    // The same question answered twice: which answer counts is undecidable (audit, D-143).
+    let twice = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.1},"q0":{"type":"noul","noul":0.9}}}"#;
+    assert_eq!(
+        parse_answers("jev-1.13.0", &ids(1), twice),
+        Err(InvalidResponse::DuplicateQuestion)
+    );
 }
 
 // --- S4.9: strict thresholds (CA-ONLINE-06) ---

@@ -244,10 +244,29 @@ fn merge_statusline(mut settings: Value, command: &str) -> Value {
     settings
 }
 
+/// `text` as a TOML basic string. Rust's `{:?}` is not one: it writes `\u{327}` for a
+/// combining mark, which TOML refuses, and such marks are common in macOS paths.
+fn toml_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn user_settings() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
+    crate::state::env_dir("CLAUDE_CONFIG_DIR")
+        .or_else(|| crate::state::env_dir("HOME").map(|h| h.join(".claude")))
         .map(|d| d.join("settings.json"))
 }
 
@@ -454,7 +473,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
             let home = args
                 .codex_home
                 .clone()
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+                .or_else(|| crate::state::env_dir("HOME").map(|h| h.join(".codex")))
                 .ok_or("no HOME: pass --codex-home")?;
             let mut extra = String::new();
             if args.online {
@@ -469,10 +488,10 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 false => "]".into(),
             };
             let mut toml = format!(
-                "# Add to {}:\n[mcp_servers.ripwire-broker]\ncommand = {:?}\nargs = [\"--workspace\", {:?}{online}\n",
+                "# Add to {}:\n[mcp_servers.ripwire-broker]\ncommand = {}\nargs = [\"--workspace\", {}{online}\n",
                 home.join("config.toml").display(),
-                binary_text,
-                workspace_text
+                toml_string(&binary_text),
+                toml_string(&workspace_text)
             );
             if args.hooks {
                 toml.push_str("\n[features]\nhooks = true\n");

@@ -478,7 +478,9 @@ pub async fn enrich(
                 partial = true;
                 auth_failed |= matches!(failure, Failure::Auth);
                 owed = Some(match failure {
-                    Failure::Quota | Failure::Busy => Outcome::Defer {
+                    // Typing already went out and was paid for: this run counts, so it is a
+                    // retry, never a deferral that would give the run back (`MAX_RUNS`).
+                    Failure::Quota | Failure::Busy => Outcome::Retry {
                         not_before_ms: now_ms.saturating_add(deferral(&failure)),
                     },
                     // A 429 that did not fit: no other batch goes before its cooldown.

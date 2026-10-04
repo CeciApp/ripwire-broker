@@ -33,20 +33,25 @@ pub fn parse_answers(
     ids: &[String],
     body: &str,
 ) -> Result<Vec<Option<f64>>, InvalidResponse> {
-    let v: Value = serde_json::from_str(body).map_err(|_| InvalidResponse::Malformed)?;
-    let (Some(got), Some(answers)) = (v["model"].as_str(), v["answers"].as_object()) else {
-        return Err(InvalidResponse::Malformed);
-    };
-    if got != model {
+    // Read in order, as the memory path does, so that a question answered twice is seen
+    // instead of keeping whichever came last.
+    let body: Body = serde_json::from_str(body).map_err(|_| InvalidResponse::Malformed)?;
+    if body.model != model {
         return Err(InvalidResponse::WrongModel);
     }
-    if answers.keys().any(|k| !ids.contains(k)) {
-        return Err(InvalidResponse::UnknownQuestion);
+    let mut answers: std::collections::BTreeMap<&str, &Value> = Default::default();
+    for (id, v) in &body.answers.0 {
+        if !ids.contains(id) {
+            return Err(InvalidResponse::UnknownQuestion);
+        }
+        if answers.insert(id, v).is_some() {
+            return Err(InvalidResponse::DuplicateQuestion);
+        }
     }
     Ok(ids
         .iter()
         .map(|id| {
-            let a = answers.get(id)?;
+            let a = answers.get(id.as_str())?;
             if a["type"] != "noul" {
                 return None;
             }

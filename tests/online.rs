@@ -751,6 +751,44 @@ async fn the_rendered_source_cap_turns_selected_blocks_into_locations() {
     assert!(limitation_kinds(&out).contains(&"semantic_source_capped".to_string()));
 }
 
+#[tokio::test]
+async fn the_source_cap_goes_to_the_most_probable_blocks_first() {
+    // The planner names routes.py before the test file; the classifier is surer of the test.
+    let classifier = FakeClassifier::new().rule(|stage, item| match stage {
+        SemanticStage::FileAdmission => Some(0.9),
+        SemanticStage::SourceSelection => Some(if item.text.starts_with("def test_login") {
+            0.95
+        } else if item.text.starts_with("from src.auth") {
+            0.55
+        } else {
+            0.1
+        }),
+    });
+    // Room for one of the two blocks.
+    let s = online_with(workspace(), classifier, |o| o.max_source_bytes = Some(50)).await;
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+    let located = |path: &str| {
+        items(&out)
+            .iter()
+            .find(|i| i["kind"] == "semantic_location" && i["path"] == path)
+            .unwrap_or_else(|| panic!("{path}: {out:#}"))
+            .clone()
+    };
+    assert!(
+        located("tests/test_auth.py").get("content").is_some(),
+        "the surer block keeps its source"
+    );
+    assert!(
+        located("src/routes.py").get("content").is_none(),
+        "the less sure one gives way"
+    );
+}
+
 // --- S5.7–S5.9: one-level lookahead ---
 
 const BUDGET_PY: &str =

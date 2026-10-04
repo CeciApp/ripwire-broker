@@ -327,6 +327,59 @@ async fn a_documentation_question_recalls_docs() {
 }
 
 #[tokio::test]
+async fn words_inside_other_words_do_not_route_a_task() {
+    let fake = || {
+        FakeUpstream::new()
+            .answer("explore", "explore_export_auth")
+            .answer("find_symbol", "find_symbol_login")
+            .answer("memory_recall", "memory_recall_auth")
+            .answer("impact", "impact_login")
+            .answer("fetch_body", "fetch_body_login")
+    };
+    let cases = [
+        // "adr" inside "padrão", "decision" inside a type name: not documentation.
+        ("qual o padrão de retry em `login`?", "symbol"),
+        ("onde está `DecisionTree::split`?", "symbol"),
+        // "fix" inside "prefix", "change" inside "exchange", "alter" inside "alternative",
+        // "add" inside "address": not changes.
+        ("what does `strip_prefix` do?", "symbol"),
+        ("explain the exchange rate module", "orient"),
+        ("list the alternatives to the session cache", "orient"),
+        ("where is the address parser?", "orient"),
+        // A phrase is its words in order, not any one of them.
+        ("why the cache was slow in `login`", "symbol"),
+        // The words themselves, and their inflections, still route.
+        ("fix the expired token check in `login`", "change"),
+        ("the login check was renamed; update the callers", "change"),
+        ("adicionar validação em `login`", "change"),
+        ("read the ADR on authentication", "docs"),
+        ("por que foi tomada a decisão de usar JWT?", "docs"),
+    ];
+    for (task, intent) in cases {
+        let (b, _fake, _ws) = broker(fake()).await;
+        let out = to_json(&b.context_for_task(TaskRequest::new(task)).await.unwrap());
+        assert_eq!(out["intent"], intent, "{task}");
+    }
+}
+
+#[tokio::test]
+async fn two_symbols_with_the_same_body_are_both_kept() {
+    // Two different symbols whose bodies happen to be identical, in two files.
+    let pack = r#"<ctx schema="ripwire.pack-task/v1" task="t" route="subtoken+body" est_tokens="100" budget_tokens="2000"><sigs><d l="1" n="default" p="src/a.rs" r="1">fn default() -> Self</d><d l="1" n="default" p="src/b.rs" r="2">fn default() -> Self</d></sigs><bodies shown="2" total="2" capped="0"><b t="fn" l="1" p="src/a.rs" n="default"><![CDATA[fn default() -> Self { Self::new() }]]></b><b t="fn" l="1" p="src/b.rs" n="default"><![CDATA[fn default() -> Self { Self::new() }]]></b></bodies></ctx>"#;
+    let (b, _fake, _ws) = broker(FakeUpstream::new().answer_text("explore", pack)).await;
+    let out = to_json(
+        &b.context_for_task(orient("how are defaults built?"))
+            .await
+            .unwrap(),
+    );
+    let items = out["items"].as_array().unwrap();
+    let at = |path: &str| items.iter().filter(|i| i["path"] == path).count();
+    assert_eq!((at("src/a.rs"), at("src/b.rs")), (1, 1), "{out:#}");
+    let bodies = items.iter().filter(|i| i.get("content").is_some()).count();
+    assert_eq!(bodies, 1, "the body itself goes out once: {out:#}");
+}
+
+#[tokio::test]
 async fn an_explicit_mode_overrides_the_router() {
     let (b, fake, _ws) = broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
     let mut req = TaskRequest::new("how does `login` work?");
@@ -919,6 +972,20 @@ async fn the_summary_names_the_focus_and_never_quotes_repository_text() {
 }
 
 #[tokio::test]
+async fn the_summary_counts_what_was_found_and_says_so() {
+    let (b, _fake, _ws) =
+        broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+    let mut req = TaskRequest::new("how are the routes authenticated?");
+    req.budget_tokens = 400;
+    let out = to_json(&b.context_for_task(req).await.unwrap());
+    let summary = out["summary"].as_str().unwrap();
+    let shown = out["items"].as_array().unwrap().len();
+    assert!(shown < 7, "the budget cut some: {out:#}");
+    // The summary describes the analysis; `budget` says what was delivered.
+    assert!(summary.contains("found 7 items"), "{summary}");
+}
+
+#[tokio::test]
 async fn the_gate_summary_states_what_blocks_ready() {
     let (b, _fake, _ws) = broker(
         FakeUpstream::new()
@@ -937,6 +1004,16 @@ async fn the_gate_summary_states_what_blocks_ready() {
 
     assert!(summary.starts_with("attention_required"), "{summary}");
     assert!(summary.contains("4 quality regressions"), "{summary}");
+    let regressions = out["risks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "quality_regression")
+        .count();
+    assert_eq!(
+        regressions, 4,
+        "every regression the summary counts is delivered"
+    );
     assert!(summary.contains("1 missing co-change partner"), "{summary}");
 }
 

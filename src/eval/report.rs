@@ -33,7 +33,9 @@ pub struct RunRecord {
     pub file_precision: Option<f64>,
     pub presented_recall: Option<f64>,
     pub first_correct_rank: Option<usize>,
-    pub test_recall: f64,
+    /// `None` when the task's reference names no tests.
+    #[serde(default)]
+    pub test_recall: Option<f64>,
     pub correct: Option<bool>,
     /// An earlier session of its sequence was invalid: the memory this one started from is not
     /// the history the corpus describes.
@@ -169,9 +171,36 @@ pub fn arm_stats(records: &[RunRecord], arm: &str) -> ArmStats {
                 .map(|c| if c { 1.0 } else { 0.0 }),
         ),
         file_recall: f(|r| r.file_recall),
-        presented_recall: mean(v.iter().filter_map(|r| r.presented_recall)),
-        test_recall: f(|r| r.test_recall),
+        // A broker arm that presented nothing presented a recall of 0, as the bars count it;
+        // an arm without the broker has no such measure.
+        presented_recall: match broker_arm(arm) {
+            true => f(presented),
+            false => mean(v.iter().filter_map(|r| r.presented_recall)),
+        },
+        test_recall: mean(v.iter().filter_map(|r| r.test_recall)),
     }
+}
+
+fn broker_arm(arm: &str) -> bool {
+    super::arm::Arm::parse(arm).is_some_and(|a| a.server() == Some("ripwire-broker"))
+}
+
+/// The runs of arms `a` and `b` on the (task, repeat) pairs valid in both: a comparison is over
+/// the same tasks, or a task one arm failed to run would weigh on one side only.
+fn paired(records: &[RunRecord], a: &str, b: &str) -> Vec<RunRecord> {
+    let keys = |arm| {
+        valid(records, arm)
+            .into_iter()
+            .map(|r| (r.task.clone(), r.repo.clone(), r.repeat))
+            .collect::<BTreeSet<_>>()
+    };
+    let both: BTreeSet<_> = keys(a).intersection(&keys(b)).cloned().collect();
+    records
+        .iter()
+        .filter(|r| r.valid && (r.arm == a || r.arm == b))
+        .filter(|r| both.contains(&(r.task.clone(), r.repo.clone(), r.repeat)))
+        .cloned()
+        .collect()
 }
 
 /// Whether two arms were compared over a corpus big enough to mean anything.
@@ -204,19 +233,23 @@ fn judge(enough: bool, holds: Option<bool>) -> Verdict {
 }
 
 pub fn bars(records: &[RunRecord]) -> Vec<Bar> {
-    let none = arm_stats(records, "none");
-    let broker = arm_stats(records, "broker");
-    let online = arm_stats(records, "broker-online");
+    // Each comparison over the runs both of its arms have.
+    let offline = paired(records, "none", "broker");
+    let online_pair = paired(records, "broker", "broker-online");
+    let none = arm_stats(&offline, "none");
+    let broker = arm_stats(&offline, "broker");
+    let broker_on = arm_stats(&online_pair, "broker");
+    let online = arm_stats(&online_pair, "broker-online");
     let offline_ok = sufficient(records, "none", "broker");
     let online_ok = sufficient(records, "broker", "broker-online");
 
     let tokens = reduction(none.tokens, broker.tokens);
     let explore = reduction(none.exploratory, broker.exploratory);
-    let explore_online = reduction(broker.exploratory, online.exploratory);
+    let explore_online = reduction(broker_on.exploratory, online.exploratory);
 
     let divergent = |arm: &str| {
         mean(
-            valid(records, arm)
+            valid(&online_pair, arm)
                 .into_iter()
                 .filter(|r| r.vocabulary_diverges)
                 .map(presented),
@@ -272,9 +305,12 @@ pub fn bars(records: &[RunRecord]) -> Vec<Bar> {
         Bar {
             id: "23.15.1",
             claim: "online × offline: mantém ou melhora a taxa de conclusão correta",
-            baseline: broker.completion,
+            baseline: broker_on.completion,
             value: online.completion,
-            verdict: judge(online_ok, not_below(broker.completion, online.completion)),
+            verdict: judge(
+                online_ok,
+                not_below(broker_on.completion, online.completion),
+            ),
         },
         Bar {
             id: "23.15.2",
@@ -286,7 +322,7 @@ pub fn bars(records: &[RunRecord]) -> Vec<Bar> {
         Bar {
             id: "23.15.3",
             claim: "online × offline: ≥ 20% menos buscas e leituras",
-            baseline: broker.exploratory,
+            baseline: broker_on.exploratory,
             value: online.exploratory,
             verdict: judge(online_ok, at_least(explore_online, 0.20)),
         },
