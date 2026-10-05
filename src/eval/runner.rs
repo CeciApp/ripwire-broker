@@ -41,22 +41,7 @@ pub struct RunConfig {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
+    super::git(dir, args).map(drop)
 }
 
 /// A fresh directory under the system temp dir, unique within this process; removed by the
@@ -80,17 +65,12 @@ fn checkout_base(task: &Task, into: &Path) -> Result<(), String> {
 
 /// `rev` of the task's repository and its ancestors only, as `checkout_base` explains.
 fn checkout(task: &Task, rev: &str, into: &Path) -> Result<(), String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&task.repo)
-        .args(["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git rev-parse: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("{rev} is not a commit"));
-    }
-    let base = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let out = super::git(
+        &task.repo,
+        &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+    )
+    .map_err(|e| format!("{rev} is not a commit ({e})"))?;
+    let base = String::from_utf8_lossy(&out).trim().to_string();
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
     git(into, &["init", "--quiet"])?;
     git(

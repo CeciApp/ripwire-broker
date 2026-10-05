@@ -4,7 +4,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Corpus {
@@ -68,12 +67,7 @@ impl Task {
 }
 
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .is_ok_and(|o| o.status.success())
+    super::git(repo, args).is_ok()
 }
 
 impl Corpus {
