@@ -35,7 +35,7 @@ jobs:
           # Keeps GITHUB_TOKEN out of .git/config, where every later step could read it.
           persist-credentials: false
       # nextest does not run doctests; this crate has none, so nothing is lost.
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: nextest
       # Every cargo command takes --locked: Cargo.lock is committed, and without the flag CI
@@ -92,7 +92,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: nextest
       - name: Clippy
