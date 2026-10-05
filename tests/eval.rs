@@ -942,6 +942,53 @@ fn the_shell_guard_sees_through_assignments_wrappers_and_quotes() {
 }
 
 #[test]
+fn the_shell_guard_sees_through_option_values_keywords_and_exec_forms() {
+    let bash = |command: &str| {
+        let init = json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []});
+        let call = json!({"type": "assistant", "message": {"id": "b", "content": [
+            {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": command}}]}});
+        let result = json!({"type": "result", "is_error": false, "usage": {}});
+        transcript::summarize(&[(0, init), (1, call), (2, result)])
+    };
+    for hidden in [
+        "timeout 30 graft ask x",
+        "timeout -s KILL -k 5 30s graft ask x",
+        "nice -n 5 graft ask x",
+        "sudo -u me graft ask x",
+        "env -u HOME graft ask x",
+        "stdbuf -oL graft ask x",
+        "bash -lc 'graft ask x'",
+        "if graft ask x; then echo ok; fi",
+        "for f in a b; do graft ask $f; done",
+        "{ graft ask x; }",
+        "! graft ask x",
+        "while true; do ripwire .; done",
+        "echo login | xargs graft ask",
+        "xargs -n 1 graft ask < q.txt",
+        "find . -name '*.py' -exec graft ask {} \\;",
+        "find . -execdir ripwire . +",
+    ] {
+        assert!(
+            Arm::None.contamination(&bash(hidden)).is_some(),
+            "missed: {hidden}"
+        );
+    }
+    for innocent in [
+        "timeout 30 cargo test graft",
+        "find . -name graft",
+        "if [ -f graft ]; then echo graft; fi",
+        "bash -lc 'echo graft'",
+        "xargs grep -n graft < files.txt",
+    ] {
+        assert_eq!(
+            Arm::None.contamination(&bash(innocent)),
+            None,
+            "false alarm: {innocent}"
+        );
+    }
+}
+
+#[test]
 fn a_fix_that_is_not_a_commit_is_refused_before_anything_runs() {
     let repo = common::sample_repo();
     let head = git(repo.path(), &["rev-parse", "HEAD"]);
