@@ -1103,6 +1103,7 @@ dependencies = [
  "proptest",
  "reqwest",
  "rust-mcp-sdk",
+ "rustix",
  "secrecy",
  "serde",
  "serde_json",

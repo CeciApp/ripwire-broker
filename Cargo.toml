@@ -28,6 +28,10 @@ unicode-width = "0.2"
 # `O_NOFOLLOW` and `O_NONBLOCK` for the private files (D-127). Already in the graph through
 # tokio and sha2: no new crate, no unsafe.
 libc = "0.2"
+# `openat` for the workspace reader, one component at a time without following links (D-152):
+# std has no `openat`, and the crate forbids `unsafe`. Already in the graph through tempfile;
+# no network.
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 
 [features]
 # The remote classifier's HTTP client (PRD §23, D-059). Off by default: the default build

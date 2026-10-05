@@ -573,6 +573,68 @@ fn a_file_swapped_after_the_checks_is_never_read() {
     assert!(reads > 0, "the regular file was never read");
 }
 
+/// A directory on the way, swapped for a link to one outside the workspace after the checks, is
+/// never followed: each component is opened relative to the one before, without following links
+/// (D-152). Reading by the full path followed it within the deadline.
+#[test]
+fn a_directory_swapped_for_a_link_after_the_checks_is_never_followed() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    // The same deep tree inside and outside: once `src` passed its check as the real directory,
+    // the checks below it pass through the link too, which widens the window to all of them.
+    let deep = "b/c/d/e/f/g/h/i/j/k/l/m/a.py";
+    put(&root, &format!("src/{deep}"), b"inside = 1\n");
+    let outside = tempfile::tempdir().unwrap();
+    put(outside.path(), deep, b"outside = 1\n");
+    std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+    let reader = WorkspaceReader::new(&root).unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, root) = (stop.clone(), root.clone());
+        std::thread::spawn(move || {
+            // `src` and `link` swap names atomically, so `src` always exists. The real directory
+            // stays for a varying time, so that the checks, which walk the whole tree, sometimes
+            // pass on it right before the link comes.
+            let (src, link) = (root.join("src"), root.join("link"));
+            let swap = || {
+                use rustix::fs::{CWD, RenameFlags, renameat_with};
+                renameat_with(CWD, &src, CWD, &link, RenameFlags::EXCHANGE).unwrap();
+            };
+            let hold = |micros: u64| {
+                let until = std::time::Instant::now() + std::time::Duration::from_micros(micros);
+                while std::time::Instant::now() < until {}
+            };
+            for i in 0u64.. {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                hold(i * 37 % 100 * 20);
+                swap();
+                hold(100);
+                swap();
+            }
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (mut reads, mut wrong) = (0, 0);
+    while std::time::Instant::now() < deadline {
+        if let Ok(snap) = reader.snapshot(&format!("src/{deep}")) {
+            reads += 1;
+            wrong += usize::from(snap.preview() != "inside = 1\n");
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+
+    assert_eq!(
+        wrong, 0,
+        "{wrong} of {reads} reads followed the link out of the workspace"
+    );
+    assert!(reads > 0, "the real directory was never read");
+}
+
 #[test]
 fn a_snapshot_binds_preview_and_ranges_to_its_hash() {
     let ws = tempfile::tempdir().unwrap();

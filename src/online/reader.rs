@@ -210,7 +210,7 @@ impl WorkspaceReader {
                 return Err(Ineligible::Ignored);
             }
         }
-        let bytes = read_opened(&path)?;
+        let bytes = read_opened(&self.root, &parts)?;
         if bytes.len() > MAX_READ_BYTES {
             return Err(Ineligible::TooLarge);
         }
@@ -267,17 +267,32 @@ impl WorkspaceReader {
 /// The bytes of `path`, checked again on what was opened: the checks above looked at a name, and
 /// the name can be replaced before the read. Opened without following a link and without
 /// blocking on a FIFO; nothing but a regular file within [`MAX_READ_BYTES`] is read (D-146).
-fn read_opened(path: &Path) -> Result<Vec<u8>, Ineligible> {
+fn read_opened(root: &Path, parts: &[String]) -> Result<Vec<u8>, Ineligible> {
+    use rustix::fs::{CWD, Mode, OFlags, openat};
     use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| match e.raw_os_error() {
-            Some(libc::ELOOP) => Ineligible::Symlink,
-            _ => Ineligible::Unreadable,
-        })?;
+    // Each component is opened relative to the directory before it and never through a link
+    // (D-152): a directory on the way swapped for a link after the checks fails the open
+    // instead of leading out of the root.
+    let refused = |e: rustix::io::Errno| match e {
+        rustix::io::Errno::LOOP => Ineligible::Symlink,
+        _ => Ineligible::Unreadable,
+    };
+    let (name, dirs) = parts.split_last().ok_or(Ineligible::Outside)?;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut dir = openat(CWD, root, flags | OFlags::DIRECTORY, Mode::empty())
+        .map_err(|_| Ineligible::Unreadable)?;
+    for part in dirs {
+        dir = openat(
+            &dir,
+            part.as_str(),
+            flags | OFlags::DIRECTORY,
+            Mode::empty(),
+        )
+        .map_err(refused)?;
+    }
+    let file = std::fs::File::from(
+        openat(&dir, name.as_str(), flags | OFlags::NONBLOCK, Mode::empty()).map_err(refused)?,
+    );
     let meta = file.metadata().map_err(|_| Ineligible::Unreadable)?;
     if !meta.is_file() {
         return Err(Ineligible::NotRegular);
