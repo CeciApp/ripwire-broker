@@ -81,12 +81,20 @@ pub struct Criteria(pub Vec<(String, String)>);
 
 impl Serialize for Criteria {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut map = s.serialize_map(Some(self.0.len()))?;
-        for (option, criterion) in &self.0 {
-            map.serialize_entry(option, criterion)?;
-        }
-        map.end()
+        ordered_map(&self.0, s)
     }
+}
+
+/// `pairs` as a JSON object, keys in their given order (a `serde_json::Map` would sort them).
+fn ordered_map<V: Serialize, S: serde::Serializer>(
+    pairs: &[(String, V)],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    let mut map = s.serialize_map(Some(pairs.len()))?;
+    for (key, value) in pairs {
+        map.serialize_entry(key, value)?;
+    }
+    map.end()
 }
 
 /// A request about an arbitrary structured state, such as a memory and its candidates
@@ -120,11 +128,7 @@ pub struct Questions(pub Vec<(String, JevQuestion)>);
 
 impl Serialize for Questions {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut map = s.serialize_map(Some(self.0.len()))?;
-        for (id, q) in &self.0 {
-            map.serialize_entry(id, q)?;
-        }
-        map.end()
+        ordered_map(&self.0, s)
     }
 }
 
