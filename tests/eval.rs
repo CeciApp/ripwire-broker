@@ -528,7 +528,7 @@ fn an_arm_without_memory_never_asks_the_broker_for_memory_status() {
     let broker = work.path().join("fake-broker");
     common::write_executable(
         &broker,
-        &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", calls.display()),
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", calls.display()),
     );
     let corpus = work.path().join("corpus.json");
     std::fs::write(
@@ -561,6 +561,61 @@ fn an_arm_without_memory_never_asks_the_broker_for_memory_status() {
     assert_eq!(code, 0, "{err}");
     let asked = std::fs::read_to_string(&calls).unwrap_or_default();
     assert!(!asked.contains("memory"), "{asked}");
+}
+
+#[test]
+fn the_eval_command_line_refuses_what_it_would_ignore_or_misread() {
+    let work = tempfile::tempdir().unwrap();
+    let counter = work.path().join("runs");
+    let missing = work.path().join("missing");
+    let missing = missing.to_str().unwrap();
+
+    for help in [&["--help"][..], &["run", "-h"], &["help"]] {
+        let (code, out, err) = eval(help, &counter);
+        assert_eq!(code, 0, "{help:?}: {err}");
+        assert!(out.contains("usage: ripwire-eval"), "{help:?}: {out}");
+    }
+    for (args, says) in [
+        (
+            &["run", "--corpus", "c", "--out", "o", "--repeats", "0"][..],
+            "--repeats",
+        ),
+        (
+            &[
+                "run",
+                "--corpus",
+                "c",
+                "--out",
+                "o",
+                "--repeats",
+                "4294967297",
+            ],
+            "--repeats",
+        ),
+        (
+            &[
+                "run",
+                "--corpus",
+                "c",
+                "--out",
+                "o",
+                "--arms",
+                "none,broker,none",
+            ],
+            "none",
+        ),
+        (
+            &["run", "--corpus", "c", "--out", "o", "--out", "p"],
+            "--out",
+        ),
+        (&["check", "--corpus", "c", "--out", "o"], "--out"),
+        (&["validate", "--corpus", "c", "--json"], "--json"),
+        (&["report", "--out", missing], "no results"),
+    ] {
+        let (code, _, err) = eval(args, &counter);
+        assert_ne!(code, 0, "{args:?} accepted");
+        assert!(err.contains(says), "{args:?}: {err}");
+    }
 }
 
 #[test]

@@ -24,33 +24,58 @@ Each run costs whatever the agent spends: a real run of the corpus is paid.";
 
 struct Args {
     command: String,
+    /// Every flag given, `--json` with an empty value.
     flags: std::collections::HashMap<String, String>,
-    json: bool,
+    help: bool,
 }
 
 fn parse() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let command = it.next().ok_or_else(|| USAGE.to_string())?;
     let mut flags = std::collections::HashMap::new();
-    let mut json = false;
+    let mut help = matches!(command.as_str(), "help" | "-h" | "--help");
     while let Some(flag) = it.next() {
-        match flag.as_str() {
-            "--json" => json = true,
+        let value = match flag.as_str() {
+            "--json" => String::new(),
             "--corpus" | "--out" | "--arms" | "--repeats" | "--agent-cmd" | "--broker"
-            | "--ripwire" | "--timeout-s" | "--check-timeout-s" => {
-                let value = it
-                    .next()
-                    .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?;
-                flags.insert(flag, value);
+            | "--ripwire" | "--timeout-s" | "--check-timeout-s" => it
+                .next()
+                .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?,
+            "-h" | "--help" => {
+                help = true;
+                continue;
             }
-            "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
+        };
+        if flags.insert(flag.clone(), value).is_some() {
+            return Err(format!("{flag} given twice"));
         }
     }
     Ok(Args {
         command,
         flags,
-        json,
+        help,
+    })
+}
+
+/// The flags each command reads; any other is refused rather than ignored.
+fn takes(command: &str) -> Option<&'static [&'static str]> {
+    Some(match command {
+        "check" => &["--corpus"],
+        "validate" => &["--corpus", "--check-timeout-s"],
+        "run" => &[
+            "--corpus",
+            "--out",
+            "--arms",
+            "--repeats",
+            "--agent-cmd",
+            "--broker",
+            "--ripwire",
+            "--timeout-s",
+            "--check-timeout-s",
+        ],
+        "report" => &["--out", "--json"],
+        _ => return None,
     })
 }
 
@@ -88,6 +113,14 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let a = parse()?;
+    if a.help {
+        println!("{USAGE}");
+        return Ok(());
+    }
+    let takes = takes(&a.command).ok_or(USAGE)?;
+    if let Some(flag) = a.flags.keys().find(|f| !takes.contains(&f.as_str())) {
+        return Err(format!("{} does not take {flag}\n{USAGE}", a.command));
+    }
     match a.command.as_str() {
         "check" => {
             let corpus = Corpus::load(&required(&a, "--corpus")?)?;
@@ -138,6 +171,17 @@ fn run() -> Result<(), String> {
                 .split(',')
                 .map(|s| Arm::parse(s.trim()).ok_or_else(|| format!("unknown arm {s:?}")))
                 .collect::<Result<Vec<_>, _>>()?;
+            if let Some((i, arm)) = arms
+                .iter()
+                .enumerate()
+                .find(|(i, a)| arms[..*i].contains(a))
+            {
+                return Err(format!("arm {} given twice (at {})", arm.name(), i + 1));
+            }
+            let repeats = u32::try_from(number(&a, "--repeats", 1)?)
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or(format!("--repeats: between 1 and {}", u32::MAX))?;
             let agent = a
                 .flags
                 .get("--agent-cmd")
@@ -149,7 +193,7 @@ fn run() -> Result<(), String> {
                 corpus: Corpus::load(&required(&a, "--corpus")?)?,
                 out: required(&a, "--out")?,
                 arms,
-                repeats: number(&a, "--repeats", 1)? as u32,
+                repeats,
                 agent,
                 tools: Tools {
                     broker: a
@@ -173,11 +217,14 @@ fn run() -> Result<(), String> {
         }
         "report" => {
             let out_dir = required(&a, "--out")?;
+            if !out_dir.join("results.jsonl").is_file() {
+                return Err(format!("no results in {}", out_dir.display()));
+            }
             let records = report::load(&out_dir);
             let versions = std::fs::read_to_string(out_dir.join("versions.json"))
                 .ok()
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-            if a.json {
+            if a.flags.contains_key("--json") {
                 let arms: Vec<_> = ripwire_broker::eval::arm::ALL
                     .iter()
                     .map(|arm| report::arm_stats(&records, arm.name()))
