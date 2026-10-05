@@ -42,7 +42,7 @@ commands; `ripwire-broker --help` lists them all:
 | `memory forget --workspace DIR (--all \| --id ID)` | Forgets one memory and what derives from it, or everything (which also revokes collection) |
 | `memory add --workspace DIR --file PATH` | Adds an explicit note from a JSON file, `{"text": "...", "references": ["src/a.rs"]}` |
 | `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
-| `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker or the provider refuses the key |
+| `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker (also if the server takes it during the drain) or the provider refuses the key |
 | `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back; local |
 
 Every command that keeps state (`serve`, `hook`, `hook-log`, `hook-stats`, `doctor`, `statusline`,
@@ -398,7 +398,8 @@ readable section has not been checked in a real session yet
 
 **Forgetting:** forgetting a memory removes it, every note derived from it and its pending
 copies, in a new generation, and keeps its id from coming back for the retention period, even
-from an old pending copy. No backup with its text is kept. It cannot reach copies the operating
+from an old pending copy. No backup with its text is kept: forgetting and expiry also remove the
+memory's job lock and any temporary snapshot a crashed writer left. It cannot reach copies the operating
 system made (swap, snapshots, backups of the disk) nor anything already sent to the provider.
 Forgetting everything also revokes collection for the workspace: a `revoked` marker in the store
 wins over `--memory`, across restarts, until `ripwire-broker memory resume --workspace DIR`
