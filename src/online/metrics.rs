@@ -127,12 +127,13 @@ impl Classifier for Metered {
     }
 
     async fn classify(&self, req: &JevRequest) -> Result<Vec<Option<f64>>, ClassifyError> {
+        // Measured before the lock: serializing a request is the costly part.
+        let bytes = serde_json::to_vec(req).map_or(0, |b| b.len());
         {
             let mut wire = self.wire.lock().unwrap();
             wire.requests += 1;
             wire.questions += req.questions.0.len() as u64;
             wire.batch_items.add(req.state.items.len() as u64);
-            let bytes = serde_json::to_vec(req).map_or(0, |b| b.len());
             wire.request_bytes.add(bytes as u64);
         }
         self.in_flight.fetch_add(1, Relaxed);
