@@ -970,6 +970,33 @@ async fn a_refused_credential_stops_the_later_stages() {
     );
 }
 
+/// A planner path written `./src/auth.py` is the file the lookahead lists as `src/auth.py` (D-149):
+/// the lookahead compared raw paths and asked about the same file again as a sibling.
+#[tokio::test]
+async fn the_lookahead_never_asks_again_about_a_planner_file() {
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ripwire/explore_export_auth.txt"
+    ))
+    .unwrap()
+    .replace(r#"p="src/"#, r#"p="./src/"#);
+    let s = online_in(
+        with_siblings(),
+        FakeUpstream::new().answer_text("explore", &fixture),
+        budget_is_evidence(),
+    )
+    .await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let asked = s.classifier.asked(SemanticStage::FileAdmission);
+    let auth = asked.iter().filter(|p| p.as_str() == "src/auth.py").count();
+    assert_eq!(auth, 1, "{asked:?}");
+}
+
 #[tokio::test]
 async fn lookahead_admits_eligible_siblings_of_admitted_planner_paths() {
     let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;
