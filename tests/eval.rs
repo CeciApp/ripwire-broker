@@ -141,6 +141,21 @@ fn a_transcript_without_a_result_is_invalid_not_zero() {
 }
 
 #[test]
+fn a_session_the_api_cut_short_is_invalid_not_a_failed_task() {
+    // As Claude Code 2.x wrote it with its API unreachable (ECONNREFUSED), trimmed.
+    let init = json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []});
+    let result = json!({"type": "result", "subtype": "success", "is_error": true,
+        "terminal_reason": "api_error", "api_error_status": null, "num_turns": 1,
+        "result": "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)",
+        "usage": {"input_tokens": 0, "output_tokens": 0}});
+
+    let s = transcript::summarize(&[(0, init), (1, result)]);
+
+    let why = s.invalid.expect("the arm did not fail; the API did");
+    assert!(why.contains("ECONNREFUSED"), "{why}");
+}
+
+#[test]
 fn an_arm_contaminated_by_a_foreign_mcp_is_invalid() {
     let s = fixture();
     assert_eq!(Arm::Broker.contamination(&s), None);

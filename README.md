@@ -631,7 +631,8 @@ cargo build --release
   Claude Code headless with `--strict-mcp-config --setting-sources local`: neither your own settings, hooks
   and plugins nor the ones a repository commits load. A run whose session shows a hook that ran, an MCP
   server the arm did not declare, or a context tool (`graft`, `ripwire`) run from the shell outside its arm,
-  is recorded as invalid and left out of the averages.
+  is recorded as invalid and left out of the averages; so is a session its API cut short
+  (`terminal_reason: "api_error"`), which says nothing about the arm.
 - **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped),
   `versions.json` (the broker's and ripwire's versions, the pinned classifier model, the summarizer; the
   agent's version and model come from each session's transcript; a resume with other binaries is

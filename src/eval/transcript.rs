@@ -450,6 +450,9 @@ fn blocks<'a>(e: &'a Value, kind: &'a str) -> impl Iterator<Item = &'a Value> {
 pub fn summarize(events: &[(u64, Value)]) -> Summary {
     let mut s = Summary::default();
     let (mut saw_init, mut saw_result) = (false, false);
+    // Claude Code ends a session its API failed with `terminal_reason: "api_error"`: the run says
+    // nothing about the arm.
+    let mut api_error = None;
     let mut names: HashMap<String, (String, u64)> = HashMap::new();
     for (at, e) in events {
         match e["type"].as_str() {
@@ -482,12 +485,21 @@ pub fn summarize(events: &[(u64, Value)]) -> Summary {
             Some("result") => {
                 saw_result = true;
                 on_result(&mut s, e);
+                if e["terminal_reason"] == "api_error" {
+                    let said: String = e["result"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect();
+                    api_error = Some(format!("the agent's API failed: {said}"));
+                }
             }
             _ => {}
         }
     }
     s.invalid = match (saw_init, saw_result) {
-        (true, true) => None,
+        (true, true) => api_error,
         (false, _) => Some("no init event: the agent did not start a session".into()),
         (true, false) => Some("no result event: the agent did not finish".into()),
     };
