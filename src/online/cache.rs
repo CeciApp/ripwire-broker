@@ -5,7 +5,6 @@
 
 use super::{SemanticStage, prompt};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 
 /// The version of the eligibility and unit policy; part of every key.
@@ -61,13 +60,20 @@ pub struct Cached {
     pub stored_at: std::time::SystemTime,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SemanticCache {
-    entries: HashMap<Key, Cached>,
-    /// Insertion order, oldest first, so eviction is deterministic. `stored_at` cannot serve:
-    /// one batched answer inserts dozens of entries within the clock's resolution, and ties
-    /// would make which entry gives way depend on the platform.
-    order: VecDeque<Key>,
+    /// Oldest insertion first out. `stored_at` cannot order them: one batched answer inserts
+    /// dozens of entries within the clock's resolution, and ties would make which entry gives way
+    /// depend on the platform.
+    entries: crate::fifo::FifoMap<Key, Cached>,
+}
+
+impl Default for SemanticCache {
+    fn default() -> Self {
+        Self {
+            entries: crate::fifo::FifoMap::new(MAX_ENTRIES),
+        }
+    }
 }
 
 impl SemanticCache {
@@ -84,17 +90,7 @@ impl SemanticCache {
             request_digest,
             stored_at: std::time::SystemTime::now(),
         };
-        if self.entries.insert(key, cached).is_none() {
-            self.order.push_back(key);
-        }
-        while self.entries.len() > MAX_ENTRIES {
-            match self.order.pop_front() {
-                Some(oldest) => {
-                    self.entries.remove(&oldest);
-                }
-                None => break,
-            }
-        }
+        self.entries.insert(key, cached);
     }
 
     pub fn len(&self) -> usize {
@@ -102,7 +98,7 @@ impl SemanticCache {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.len() == 0
     }
 
     /// Hex keys and values, for inspection (CA-ONLINE-13).
