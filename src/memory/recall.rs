@@ -148,9 +148,9 @@ impl Recall {
     fn in_flight(&self) -> (u32, u32) {
         let mut spent = self.spent.lock().unwrap();
         spent.retain(|s| s.state.load(Ordering::Acquire) != WRITTEN);
-        spent
-            .iter()
-            .fold((0, 0), |(a, q), s| (a + s.attempts, q + s.questions))
+        spent.iter().fold((0u32, 0u32), |(a, q), s| {
+            (a.saturating_add(s.attempts), q.saturating_add(s.questions))
+        })
     }
 
     /// Attempts and questions the quota has left: what `ledger` records, and `in_flight`.
@@ -160,10 +160,10 @@ impl Recall {
         (
             limits
                 .attempts_per_day
-                .saturating_sub(attempts + in_flight.0) as usize,
+                .saturating_sub(attempts.saturating_add(in_flight.0)) as usize,
             limits
                 .questions_per_day
-                .saturating_sub(questions + in_flight.1) as usize,
+                .saturating_sub(questions.saturating_add(in_flight.1)) as usize,
         )
     }
 
@@ -176,8 +176,8 @@ impl Recall {
             let mut spent = self.spent.lock().unwrap();
             spent.retain(|s| match s.state.load(Ordering::Acquire) {
                 FAILED => {
-                    attempts += s.attempts;
-                    questions += s.questions;
+                    attempts = attempts.saturating_add(s.attempts);
+                    questions = questions.saturating_add(s.questions);
                     false
                 }
                 _ => true,

@@ -89,9 +89,10 @@ impl Ledger {
         self.high_water_ms = now;
         self.entries
             .retain(|(at, _, _)| at.saturating_add(DAY_MS) > now);
-        let used_attempts: u32 = self.entries.iter().map(|e| e.1).sum();
-        let used_questions: u32 = self.entries.iter().map(|e| e.2).sum();
-        if used_attempts + attempts > max_attempts || used_questions + questions > max_questions {
+        let (used_attempts, used_questions) = self.used(now);
+        if used_attempts.saturating_add(attempts) > max_attempts
+            || used_questions.saturating_add(questions) > max_questions
+        {
             return false;
         }
         self.entries.push((now, attempts, questions));
@@ -110,11 +111,15 @@ impl Ledger {
     }
 
     /// Attempts and questions charged in the 24 hours before `now_ms` (or the latest time seen).
+    /// The sums saturate: a corrupt or hand-edited file with huge counts never wraps into free
+    /// quota (D-151).
     pub fn used(&self, now_ms: u64) -> (u32, u32) {
         let now = now_ms.max(self.high_water_ms);
         self.entries
             .iter()
             .filter(|(at, _, _)| at.saturating_add(DAY_MS) > now)
-            .fold((0, 0), |(a, q), e| (a + e.1, q + e.2))
+            .fold((0u32, 0u32), |(a, q), e| {
+                (a.saturating_add(e.1), q.saturating_add(e.2))
+            })
     }
 }

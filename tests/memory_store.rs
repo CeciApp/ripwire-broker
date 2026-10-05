@@ -1102,3 +1102,18 @@ fn a_held_lease_survives_retention_and_a_stale_finish_settles_nothing() {
     let job = &store.load().unwrap().jobs[&record(1).node_id];
     assert_eq!(job.state, JobState::Pending, "the new job is untouched");
 }
+
+/// A quota file with huge counts (hand-edited or corrupt) never overflows into free quota
+/// (D-151): the sums were plain `u32` additions, a panic in debug and a wrap, freeing the quota,
+/// in release.
+#[test]
+fn huge_quota_counts_saturate_and_never_free_quota() {
+    use ripwire_broker::memory::queue::Ledger;
+    let mut ledger = Ledger {
+        entries: vec![(DAY, u32::MAX, u32::MAX), (DAY, 5, 5)],
+        high_water_ms: DAY,
+    };
+
+    assert_eq!(ledger.used(DAY), (u32::MAX, u32::MAX));
+    assert!(!ledger.charge(DAY, 1, 1, 1_000, 20_000), "nothing is left");
+}
