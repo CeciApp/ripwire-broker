@@ -998,8 +998,12 @@ fn a_finished_or_forgotten_job_leaves_no_lease_file() {
     store.finish(first, Outcome::Done).unwrap();
     let second = store.lease_next(DAY).unwrap().unwrap();
     let forgotten = second.node_id().to_string();
+    // Forgotten while its worker still runs: the lock is held, so the file waits (D-151)...
     store.forget(&forgotten, 2 * DAY).unwrap();
+    assert!(names().iter().any(|n| n.starts_with(&forgotten)));
     drop(second);
+    // ...and goes as an orphan once released.
+    store.sweep(DAY).unwrap();
 
     let left = names();
     assert!(!left.iter().any(|n| n.starts_with(&done)), "{left:?}");
@@ -1047,4 +1051,54 @@ fn a_tampered_node_id_is_refused_and_blocks_nothing() {
     assert_eq!(ingested.rejected, 1, "{ingested:?}");
     let lease = store.lease_next(DAY).unwrap();
     assert!(lease.is_some(), "the good jobs are still leased");
+}
+
+fn lease_file(store: &Store, n: u64) -> std::path::PathBuf {
+    store.dir().join("leases").join(format!("{n:064}.lock"))
+}
+
+/// A job that `lease_next` fails for being out of runs leaves no lease file (D-151; CodeRabbit on
+/// PR #63): only `finish` removed it.
+#[test]
+fn a_job_failed_for_its_runs_leaves_no_lease_file() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    for at in [DAY, 2 * DAY] {
+        let lease = store.lease_next(at).unwrap().unwrap();
+        store
+            .finish(
+                lease,
+                Outcome::Retry {
+                    not_before_ms: at + 1,
+                },
+            )
+            .unwrap();
+    }
+
+    assert!(store.lease_next(3 * DAY).unwrap().is_none(), "out of runs");
+
+    assert!(!lease_file(&store, 1).exists());
+}
+
+/// Retention never removes a lease file whose lock a live worker holds, and that worker's late
+/// `finish` never settles a job that came back under the same id (D-151; CodeRabbit on PR #63):
+/// the file went, the job was ingested again, a second lock was taken beside the first, and the
+/// first worker's `Done` marked the new job.
+#[test]
+fn a_held_lease_survives_retention_and_a_stale_finish_settles_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    let running = store.lease_next(DAY).unwrap().unwrap();
+
+    store.sweep(10 * DAY).unwrap();
+    assert!(
+        lease_file(&store, 1).exists(),
+        "its holder is still running"
+    );
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    store.finish(running, Outcome::Done).unwrap();
+
+    let job = &store.load().unwrap().jobs[&record(1).node_id];
+    assert_eq!(job.state, JobState::Pending, "the new job is untouched");
 }

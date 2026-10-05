@@ -593,6 +593,7 @@ impl Store {
         }
         state.tombstones.retain(|_, until| *until > now_ms);
         state.trusted_ms = now_ms;
+        self.remove_orphan_leases(&state);
         self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(Swept {
             removed: gone.len(),
@@ -661,11 +662,30 @@ impl Store {
         Ok(removed)
     }
 
-    /// Removes `node_id`'s lease file (D-150). Only for a job that cannot be leased again (done,
-    /// failed, or gone from the state), so no other process takes a fresh lock beside a holder.
+    /// Removes `node_id`'s lease file (D-150), for a job that cannot be leased again (done, failed,
+    /// or gone from the state). Only once its lock is taken here: a worker still running holds it,
+    /// and unlinking that file would let a job back under the same id take a second lock beside
+    /// it (D-151). A held one stays, and goes later as an orphan.
     fn drop_lease(&self, node_id: &str) {
         if let Ok(name) = spool_name(node_id) {
-            let _ = fs::remove_file(self.dir.join(LEASES).join(name.replace(".json", ".lock")));
+            remove_free_lease(&self.dir.join(LEASES).join(name.replace(".json", ".lock")));
+        }
+    }
+
+    /// Lease files of jobs no longer in `state` whose lock nobody holds: what [`Store::drop_lease`]
+    /// had to leave because a worker was still running.
+    fn remove_orphan_leases(&self, state: &State) {
+        let Ok(entries) = fs::read_dir(self.dir.join(LEASES)) else {
+            return;
+        };
+        for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if !state.jobs.contains_key(id) {
+                remove_free_lease(&path);
+            }
         }
     }
 
@@ -742,7 +762,7 @@ impl Store {
                 .truncate(false)
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(leases.join(name))
+                .open(leases.join(&name))
                 .map_err(|_| Unavailable::Io)?;
             // Held: a live process is running it. Free: pending, or its holder died.
             if lock.try_lock().is_err() {
@@ -751,6 +771,8 @@ impl Store {
             changed = true;
             if job.runs >= MAX_RUNS {
                 job.state = JobState::Failed;
+                // It cannot be leased again: its lease file goes while its lock is held here.
+                let _ = fs::remove_file(leases.join(&name));
                 continue;
             }
             job.runs += 1;
@@ -796,6 +818,11 @@ impl Store {
         let Some(job) = state.jobs.get_mut(&lease.node_id) else {
             return Ok(());
         };
+        // A lease from before the job left and came back under the same id settles nothing: only
+        // the run that holds the job now may (D-151).
+        if job.state != JobState::Leased || job.runs != lease.run {
+            return Ok(());
+        }
         // The cadence of PRD jev-mem §9 counts a node once, when its planned stages finish:
         // `Done` is terminal, so this happens once per job.
         let newly_counted = outcome == Outcome::Done;
@@ -813,8 +840,11 @@ impl Store {
             }
         };
         // A job that cannot run again keeps no lease file: removed while its lock is held.
-        if matches!(outcome, Outcome::Done | Outcome::Failed) {
-            self.drop_lease(&lease.node_id);
+        // Removed directly: the lock is this lease's own.
+        if matches!(outcome, Outcome::Done | Outcome::Failed)
+            && let Ok(name) = spool_name(&lease.node_id)
+        {
+            let _ = fs::remove_file(self.dir.join(LEASES).join(name.replace(".json", ".lock")));
         }
         state.enriched += u64::from(newly_counted);
         if newly_counted {
@@ -1203,6 +1233,20 @@ fn with_descendants(state: &State, mut ids: BTreeSet<String>) -> BTreeSet<String
             return ids;
         }
         ids.extend(more);
+    }
+}
+
+/// Removes the lease file at `path` if its lock can be taken, while holding it.
+fn remove_free_lease(path: &Path) {
+    let Ok(file) = fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    else {
+        return;
+    };
+    if file.try_lock().is_ok() {
+        let _ = fs::remove_file(path);
     }
 }
 
