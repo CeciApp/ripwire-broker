@@ -226,12 +226,28 @@ pub enum Version {
     },
 }
 
+/// A store is its directory and its limits: a copy is the same store.
+#[derive(Clone)]
 pub struct Store {
     dir: PathBuf,
     limits: Limits,
 }
 
 impl Store {
+    /// `work` on this store in the blocking pool. The store's locks wait with
+    /// `std::thread::sleep` for up to [`WRITER_WAIT`] and its writes sync files and directories,
+    /// so an async caller (the worker, which shares the server's runtime) runs them here (D-150).
+    pub async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Store) -> T + Send + 'static,
+    ) -> T {
+        let store = self.clone();
+        match tokio::task::spawn_blocking(move || work(&store)).await {
+            Ok(done) => done,
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        }
+    }
+
     pub fn new(state_dir: &Path, workspace_id: &str) -> Self {
         Self::with_limits(state_dir, workspace_id, Limits::default())
     }

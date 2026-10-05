@@ -263,7 +263,10 @@ pub(crate) async fn send(
         if left.is_zero() {
             return Err(Failure::GaveUp);
         }
-        match store.charge(now_ms, 1, questions as u32) {
+        let charged = store
+            .blocking(move |s| s.charge(now_ms, 1, questions as u32))
+            .await;
+        match charged {
             Ok(()) => {}
             Err(Refusal::Full(Full::Quota)) => {
                 metrics.quota_refusals += 1;
@@ -323,9 +326,11 @@ pub async fn enrich(
     cfg: &Config,
     now_ms: u64,
 ) -> Result<Enriched, Refusal> {
-    let state = store.load()?;
+    let state = store.blocking(|s| s.load()).await?;
     let Some(node) = state.nodes.get(lease.node_id()).cloned() else {
-        store.finish(lease, Outcome::Done)?;
+        store
+            .blocking(move |s| s.finish(lease, Outcome::Done))
+            .await?;
         return Ok(Enriched {
             state: EnrichmentState::Complete,
             requests: 0,
@@ -373,12 +378,10 @@ pub async fn enrich(
         }
         // Nothing was sent: the job waits, pending, and keeps its run (PRD jev-mem §8.2).
         Err(failure @ (Failure::Quota | Failure::Busy)) => {
-            store.finish(
-                lease,
-                Outcome::Defer {
-                    not_before_ms: now_ms.saturating_add(deferral(&failure)),
-                },
-            )?;
+            let outcome = Outcome::Defer {
+                not_before_ms: now_ms.saturating_add(deferral(&failure)),
+            };
+            store.blocking(move |s| s.finish(lease, outcome)).await?;
             return Ok(Enriched {
                 state: EnrichmentState::Pending,
                 requests: budget.sent,
@@ -393,20 +396,23 @@ pub async fn enrich(
                 Failure::Cooldown(ms) => (ms, false),
                 _ => (RETRY_AFTER_MS, false),
             };
-            store.commit_enrichment(
-                &node.node_id,
-                node.generation,
-                None,
-                EnrichmentState::Failed,
-                vec![],
-                &[],
-            )?;
-            store.finish(
-                lease,
-                Outcome::Retry {
-                    not_before_ms: now_ms.saturating_add(wait),
-                },
-            )?;
+            let (id, generation) = (node.node_id.clone(), node.generation);
+            let outcome = Outcome::Retry {
+                not_before_ms: now_ms.saturating_add(wait),
+            };
+            store
+                .blocking(move |s| {
+                    s.commit_enrichment(
+                        &id,
+                        generation,
+                        None,
+                        EnrichmentState::Failed,
+                        vec![],
+                        &[],
+                    )?;
+                    s.finish(lease, outcome)
+                })
+                .await?;
             return Ok(Enriched {
                 state: EnrichmentState::Failed,
                 requests: budget.sent,
@@ -506,15 +512,14 @@ pub async fn enrich(
     };
     metrics.jobs_done = u64::from(owed.is_none());
     let neighbours: Vec<String> = chosen.iter().map(|c| c.node_id.clone()).collect();
-    store.commit_enrichment(
-        &node.node_id,
-        node.generation,
-        Some(types),
-        outcome,
-        edges,
-        &neighbours,
-    )?;
-    store.finish(lease, owed.unwrap_or(Outcome::Done))?;
+    let (id, generation) = (node.node_id.clone(), node.generation);
+    let finished = owed.unwrap_or(Outcome::Done);
+    store
+        .blocking(move |s| {
+            s.commit_enrichment(&id, generation, Some(types), outcome, edges, &neighbours)?;
+            s.finish(lease, finished)
+        })
+        .await?;
     Ok(Enriched {
         state: outcome,
         requests: budget.sent,
@@ -560,10 +565,10 @@ impl Worker {
         if self.is_suspended() {
             return Ok(None);
         }
-        let Some(_slot) = self.store.remote_slot()? else {
+        let Some(_slot) = self.store.blocking(|s| s.remote_slot()).await? else {
             return Ok(None);
         };
-        let Some(lease) = self.store.lease_next(now_ms)? else {
+        let Some(lease) = self.store.blocking(move |s| s.lease_next(now_ms)).await? else {
             return Ok(None);
         };
         let ran = enrich(&self.store, &*self.classifier, lease, &self.cfg, now_ms).await?;
@@ -584,7 +589,7 @@ impl Worker {
         if self.is_suspended() {
             return Ok(None);
         }
-        let Some(_slot) = self.store.remote_slot()? else {
+        let Some(_slot) = self.store.blocking(|s| s.remote_slot()).await? else {
             return Ok(None);
         };
         let mut cfg = super::consolidate::Config::new(&self.cfg.model);
