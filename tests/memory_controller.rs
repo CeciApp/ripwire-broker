@@ -1754,3 +1754,65 @@ fn the_worker_waits_for_the_store_off_the_async_thread() {
         "the runtime stood still for the lock wait: {ticks} ticks"
     );
 }
+
+/// A classifier whose every answer panics: a poisoned lock inside a client, say.
+struct PanickingMemory;
+
+#[async_trait::async_trait]
+impl MemoryClassifier for PanickingMemory {
+    async fn decide(&self, _: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        panic!("the client's lock was poisoned")
+    }
+}
+
+/// A worker that panics says so, instead of memory quietly stopping for the life of the server
+/// (D-151): the task died and nobody looked at its handle.
+#[tokio::test]
+async fn a_worker_that_panics_says_so() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let args = serve(&["--workspace", ws.path().to_str().unwrap(), "--memory"]);
+    let mut rt = runtime::from_serve(&args, state.path(), Some(Arc::new(PanickingMemory)))
+        .unwrap()
+        .unwrap();
+    let store = Store::new(state.path(), rt.workspace_id());
+    store.enqueue(&rec(1, "cache layer", &["e"])).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let tx = std::sync::Mutex::new(tx);
+    rt.start_reporting(std::time::Duration::from_millis(20), move |line| {
+        let _ = tx.lock().unwrap().send(line.to_string());
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut said = vec![];
+    while !said.iter().any(|l: &String| l.contains("panicked")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nothing said: {said:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        said.extend(rx.try_iter());
+    }
+    drop(rt);
+}
+
+/// Stopping the server stops the worker without a word: an abort is not a panic (D-151).
+#[tokio::test]
+async fn a_stopped_worker_says_nothing() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let args = serve(&["--workspace", ws.path().to_str().unwrap(), "--memory"]);
+    let mut rt = runtime::from_serve(&args, state.path(), Some(Scripted::new(vec![])))
+        .unwrap()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let tx = std::sync::Mutex::new(tx);
+    rt.start_reporting(std::time::Duration::from_millis(20), move |line| {
+        let _ = tx.lock().unwrap().send(line.to_string());
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    drop(rt);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let said: Vec<String> = rx.try_iter().collect();
+    assert!(said.is_empty(), "{said:?}");
+}

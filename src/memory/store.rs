@@ -39,6 +39,8 @@ const REMOTE: &str = "remote.lock";
 /// How long the worker's bookkeeping waits for another writer.
 const WRITER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// Older than this, a spool temporary is a dead writer's.
+/// Room for the digits `ingest_seq` and `generation` gain in a stored record: two `u64`s.
+const STAMP_DIGITS: u64 = 2 * 20;
 const DEAD_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The caps of PRD jev-mem §6; injectable so a test can reach them.
@@ -368,9 +370,14 @@ impl Store {
     /// lost to a brief ingestion elsewhere: waits up to [`WRITER_WAIT`], then [`Refusal::Locked`].
     /// A hook never takes it.
     pub fn writer_waiting(&self) -> Result<fs::File, Refusal> {
+        self.lock_waiting(LOCK)
+    }
+
+    /// The lock `name`, waiting up to [`WRITER_WAIT`] for it, then [`Refusal::Locked`].
+    fn lock_waiting(&self, name: &str) -> Result<fs::File, Refusal> {
         let until = std::time::Instant::now() + WRITER_WAIT;
         loop {
-            match self.writer() {
+            match self.lock(name) {
                 Err(Refusal::Locked) if std::time::Instant::now() < until => {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
@@ -474,6 +481,7 @@ impl Store {
         let mut consumed = Vec::new();
         let mut size = on_disk(&state)?.len() as u64;
         self.remove_dead_temporaries()?;
+        let job_bytes = serde_json::to_vec(&Job::default()).map_or(0, |b| b.len() as u64);
         for path in self.spool_files()? {
             // One entry that cannot be read (a link, a directory) is dropped, never followed,
             // and never stops the others.
@@ -520,7 +528,13 @@ impl Store {
                 break;
             }
             // The key, its quotes, the colon and the comma around the record.
-            let grows = bytes.len() as u64 + record.node_id.len() as u64 + 4;
+            // The record as stored, its job entry and the digits of `ingest_seq` and
+            // `generation`: an estimate that leaves any of them out admits records the final
+            // check then refuses whole, on every tick (D-151).
+            let grows = bytes.len() as u64
+                + 2 * (record.node_id.len() as u64 + 4)
+                + job_bytes
+                + STAMP_DIGITS;
             if size + grows > self.limits.snapshot_bytes {
                 done.refused = Some(Full::Snapshot);
                 break;
@@ -593,6 +607,7 @@ impl Store {
         }
         state.tombstones.retain(|_, until| *until > now_ms);
         state.trusted_ms = now_ms;
+        self.remove_orphan_leases(&state);
         self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(Swept {
             removed: gone.len(),
@@ -661,11 +676,30 @@ impl Store {
         Ok(removed)
     }
 
-    /// Removes `node_id`'s lease file (D-150). Only for a job that cannot be leased again (done,
-    /// failed, or gone from the state), so no other process takes a fresh lock beside a holder.
+    /// Removes `node_id`'s lease file (D-150), for a job that cannot be leased again (done, failed,
+    /// or gone from the state). Only once its lock is taken here: a worker still running holds it,
+    /// and unlinking that file would let a job back under the same id take a second lock beside
+    /// it (D-151). A held one stays, and goes later as an orphan.
     fn drop_lease(&self, node_id: &str) {
         if let Ok(name) = spool_name(node_id) {
-            let _ = fs::remove_file(self.dir.join(LEASES).join(name.replace(".json", ".lock")));
+            remove_free_lease(&self.dir.join(LEASES).join(name.replace(".json", ".lock")));
+        }
+    }
+
+    /// Lease files of jobs no longer in `state` whose lock nobody holds: what [`Store::drop_lease`]
+    /// had to leave because a worker was still running.
+    fn remove_orphan_leases(&self, state: &State) {
+        let Ok(entries) = fs::read_dir(self.dir.join(LEASES)) else {
+            return;
+        };
+        for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if !state.jobs.contains_key(id) {
+                remove_free_lease(&path);
+            }
         }
     }
 
@@ -742,7 +776,7 @@ impl Store {
                 .truncate(false)
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(leases.join(name))
+                .open(leases.join(&name))
                 .map_err(|_| Unavailable::Io)?;
             // Held: a live process is running it. Free: pending, or its holder died.
             if lock.try_lock().is_err() {
@@ -751,6 +785,8 @@ impl Store {
             changed = true;
             if job.runs >= MAX_RUNS {
                 job.state = JobState::Failed;
+                // It cannot be leased again: its lease file goes while its lock is held here.
+                let _ = fs::remove_file(leases.join(&name));
                 continue;
             }
             job.runs += 1;
@@ -772,21 +808,11 @@ impl Store {
     /// The workspace's single remote slot, held until dropped; `None` while another worker,
     /// in this process or another, holds it.
     pub fn remote_slot(&self) -> Result<Option<fs::File>, Refusal> {
-        self.check_dir()?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.dir)
-            .map_err(|_| Unavailable::Io)?;
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(self.dir.join(REMOTE))
-            .map_err(|_| Unavailable::Io)?;
-        Ok(file.try_lock().is_ok().then_some(file))
+        match self.lock(REMOTE) {
+            Ok(file) => Ok(Some(file)),
+            Err(Refusal::Locked) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Ends a run. A retry with no run left fails the job.
@@ -796,6 +822,11 @@ impl Store {
         let Some(job) = state.jobs.get_mut(&lease.node_id) else {
             return Ok(());
         };
+        // A lease from before the job left and came back under the same id settles nothing: only
+        // the run that holds the job now may (D-151).
+        if job.state != JobState::Leased || job.runs != lease.run {
+            return Ok(());
+        }
         // The cadence of PRD jev-mem §9 counts a node once, when its planned stages finish:
         // `Done` is terminal, so this happens once per job.
         let newly_counted = outcome == Outcome::Done;
@@ -813,8 +844,11 @@ impl Store {
             }
         };
         // A job that cannot run again keeps no lease file: removed while its lock is held.
-        if matches!(outcome, Outcome::Done | Outcome::Failed) {
-            self.drop_lease(&lease.node_id);
+        // Removed directly: the lock is this lease's own.
+        if matches!(outcome, Outcome::Done | Outcome::Failed)
+            && let Ok(name) = spool_name(&lease.node_id)
+        {
+            let _ = fs::remove_file(self.dir.join(LEASES).join(name.replace(".json", ".lock")));
         }
         state.enriched += u64::from(newly_counted);
         if newly_counted {
@@ -829,18 +863,25 @@ impl Store {
         Ok(())
     }
 
-    /// `memory retry`: every failed job back to pending, with its runs. Returns how many.
+    /// `memory retry`: every failed job back to pending, with its runs, and every pending job set
+    /// aside by a wait made ready now. Returns how many.
     pub fn retry_all_failed(&self) -> Result<usize, Refusal> {
         let _writer = self.writer()?;
         let mut state = self.load()?;
         let mut n = 0;
-        for job in state
-            .jobs
-            .values_mut()
-            .filter(|j| j.state == JobState::Failed)
-        {
-            (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
-            n += 1;
+        for job in state.jobs.values_mut() {
+            match job.state {
+                JobState::Failed => {
+                    (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
+                    n += 1;
+                }
+                // Set aside by a wait (a long `Retry-After`): ready now, its runs kept (D-151).
+                JobState::Pending if job.not_before_ms > 0 => {
+                    job.not_before_ms = 0;
+                    n += 1;
+                }
+                _ => {}
+            }
         }
         if n > 0 {
             self.write_snapshot(state.generation, &on_disk(&state)?)?;
@@ -1061,15 +1102,7 @@ impl Store {
 
     /// `change` applied to the quota under its own lock, waiting up to [`WRITER_WAIT`] for it.
     fn quota<T>(&self, change: impl FnOnce(&mut Ledger) -> T) -> Result<T, Refusal> {
-        let until = std::time::Instant::now() + WRITER_WAIT;
-        let _lock = loop {
-            match self.lock(QUOTA_LOCK) {
-                Err(Refusal::Locked) if std::time::Instant::now() < until => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                other => break other?,
-            }
-        };
+        let _lock = self.lock_waiting(QUOTA_LOCK)?;
         let mut ledger = self.ledger()?;
         let out = change(&mut ledger);
         let bytes = serde_json::to_vec(&ledger).map_err(|_| Unavailable::Io)?;
@@ -1203,6 +1236,20 @@ fn with_descendants(state: &State, mut ids: BTreeSet<String>) -> BTreeSet<String
             return ids;
         }
         ids.extend(more);
+    }
+}
+
+/// Removes the lease file at `path` if its lock can be taken, while holding it.
+fn remove_free_lease(path: &Path) {
+    let Ok(file) = fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    else {
+        return;
+    };
+    if file.try_lock().is_ok() {
+        let _ = fs::remove_file(path);
     }
 }
 

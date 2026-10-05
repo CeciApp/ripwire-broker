@@ -998,8 +998,12 @@ fn a_finished_or_forgotten_job_leaves_no_lease_file() {
     store.finish(first, Outcome::Done).unwrap();
     let second = store.lease_next(DAY).unwrap().unwrap();
     let forgotten = second.node_id().to_string();
+    // Forgotten while its worker still runs: the lock is held, so the file waits (D-151)...
     store.forget(&forgotten, 2 * DAY).unwrap();
+    assert!(names().iter().any(|n| n.starts_with(&forgotten)));
     drop(second);
+    // ...and goes as an orphan once released.
+    store.sweep(DAY).unwrap();
 
     let left = names();
     assert!(!left.iter().any(|n| n.starts_with(&done)), "{left:?}");
@@ -1047,4 +1051,121 @@ fn a_tampered_node_id_is_refused_and_blocks_nothing() {
     assert_eq!(ingested.rejected, 1, "{ingested:?}");
     let lease = store.lease_next(DAY).unwrap();
     assert!(lease.is_some(), "the good jobs are still leased");
+}
+
+fn lease_file(store: &Store, n: u64) -> std::path::PathBuf {
+    store.dir().join("leases").join(format!("{n:064}.lock"))
+}
+
+/// A job that `lease_next` fails for being out of runs leaves no lease file (D-151; CodeRabbit on
+/// PR #63): only `finish` removed it.
+#[test]
+fn a_job_failed_for_its_runs_leaves_no_lease_file() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    for at in [DAY, 2 * DAY] {
+        let lease = store.lease_next(at).unwrap().unwrap();
+        store
+            .finish(
+                lease,
+                Outcome::Retry {
+                    not_before_ms: at + 1,
+                },
+            )
+            .unwrap();
+    }
+
+    assert!(store.lease_next(3 * DAY).unwrap().is_none(), "out of runs");
+
+    assert!(!lease_file(&store, 1).exists());
+}
+
+/// Retention never removes a lease file whose lock a live worker holds, and that worker's late
+/// `finish` never settles a job that came back under the same id (D-151; CodeRabbit on PR #63):
+/// the file went, the job was ingested again, a second lock was taken beside the first, and the
+/// first worker's `Done` marked the new job.
+#[test]
+fn a_held_lease_survives_retention_and_a_stale_finish_settles_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    let running = store.lease_next(DAY).unwrap().unwrap();
+
+    store.sweep(10 * DAY).unwrap();
+    assert!(
+        lease_file(&store, 1).exists(),
+        "its holder is still running"
+    );
+    store.enqueue(&record(1)).unwrap();
+    store.ingest().unwrap();
+    store.finish(running, Outcome::Done).unwrap();
+
+    let job = &store.load().unwrap().jobs[&record(1).node_id];
+    assert_eq!(job.state, JobState::Pending, "the new job is untouched");
+}
+
+/// A quota file with huge counts (hand-edited or corrupt) never overflows into free quota
+/// (D-151): the sums were plain `u32` additions, a panic in debug and a wrap, freeing the quota,
+/// in release.
+#[test]
+fn huge_quota_counts_saturate_and_never_free_quota() {
+    use ripwire_broker::memory::queue::Ledger;
+    let mut ledger = Ledger {
+        entries: vec![(DAY, u32::MAX, u32::MAX), (DAY, 5, 5)],
+        high_water_ms: DAY,
+    };
+
+    assert_eq!(ledger.used(DAY), (u32::MAX, u32::MAX));
+    assert!(!ledger.charge(DAY, 1, 1, 1_000, 20_000), "nothing is left");
+}
+
+/// `memory retry` also frees a job set aside by a long wait, keeping its runs (D-151): only
+/// failed jobs came back, and a job a long `Retry-After` put off stayed out of reach.
+#[test]
+fn retry_frees_a_job_set_aside_by_a_wait() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    let lease = store.lease_next(DAY).unwrap().unwrap();
+    store
+        .finish(
+            lease,
+            Outcome::Retry {
+                not_before_ms: 365 * DAY,
+            },
+        )
+        .unwrap();
+    assert!(store.lease_next(2 * DAY).unwrap().is_none(), "set aside");
+
+    let freed = store.retry_all_failed().unwrap();
+
+    assert_eq!(freed, 1);
+    let again = store.lease_next(2 * DAY).unwrap().expect("ready again");
+    assert_eq!(again.run(), 2, "its earlier run still counts");
+}
+
+/// Near the snapshot cap, ingest takes what fits instead of failing on every tick (D-151): its
+/// estimate left out each node's job entry, so it admitted records the final check then refused
+/// whole, with nothing consumed, again and again.
+#[test]
+fn near_the_cap_ingest_takes_what_fits() {
+    let records: Vec<Record> = (1..=5).map(record).collect();
+    // How large the snapshot of all five really is.
+    let full = tempfile::tempdir().unwrap();
+    let measured = stored(full.path(), &records);
+    let size = fs::metadata(measured.dir().join("snapshot.json"))
+        .unwrap()
+        .len();
+    let state = tempfile::tempdir().unwrap();
+    let limits = Limits {
+        snapshot_bytes: size - 1,
+        ..Limits::default()
+    };
+    let store = Store::with_limits(state.path(), &"r".repeat(64), limits);
+    for r in &records {
+        store.enqueue(r).unwrap();
+    }
+
+    let ingested = store.ingest().expect("not refused whole");
+
+    assert!(ingested.added >= 1 && ingested.added < 5, "{ingested:?}");
+    assert_eq!(ingested.refused, Some(Full::Snapshot));
 }

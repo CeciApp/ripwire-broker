@@ -41,22 +41,7 @@ pub struct RunConfig {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
+    super::git(dir, args).map(drop)
 }
 
 /// A fresh directory under the system temp dir, unique within this process; removed by the
@@ -80,17 +65,12 @@ fn checkout_base(task: &Task, into: &Path) -> Result<(), String> {
 
 /// `rev` of the task's repository and its ancestors only, as `checkout_base` explains.
 fn checkout(task: &Task, rev: &str, into: &Path) -> Result<(), String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&task.repo)
-        .args(["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git rev-parse: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("{rev} is not a commit"));
-    }
-    let base = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let out = super::git(
+        &task.repo,
+        &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+    )
+    .map_err(|e| format!("{rev} is not a commit ({e})"))?;
+    let base = String::from_utf8_lossy(&out).trim().to_string();
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
     git(into, &["init", "--quiet"])?;
     git(
@@ -129,17 +109,28 @@ fn run_id(task: &Task, arm: Arm, repeat: u32) -> String {
         .collect()
 }
 
-/// `{run}`, `{repo}` and `{fix}` in a task's command or environment value.
-fn expand(task: &Task, id: &str, text: &str) -> String {
-    text.replace("{run}", id)
-        .replace("{repo}", &task.repo.to_string_lossy())
-        .replace("{fix}", task.fix.as_deref().unwrap_or(""))
+/// `{run}`, `{repo}` and `{fix}` in a task's command or environment value, each value passed
+/// through `quote` (a command is shell; an environment value is not).
+fn expand(task: &Task, id: &str, text: &str, quote: fn(&str) -> String) -> String {
+    text.replace("{run}", &quote(id))
+        .replace("{repo}", &quote(&task.repo.to_string_lossy()))
+        .replace("{fix}", &quote(task.fix.as_deref().unwrap_or("")))
+}
+
+/// One shell word: as is when nothing in it is special, otherwise in single quotes.
+fn shell_word(text: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_./:@%+=,-".contains(c);
+    if !text.is_empty() && text.chars().all(plain) {
+        text.to_string()
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
 }
 
 fn environment(task: &Task, id: &str) -> Vec<(String, String)> {
     task.env
         .iter()
-        .map(|(k, v)| (k.clone(), expand(task, id, v)))
+        .map(|(k, v)| (k.clone(), expand(task, id, v, str::to_string)))
         .collect()
 }
 
@@ -152,7 +143,7 @@ fn shell(
     command: &str,
 ) -> Command {
     let mut c = Command::new("sh");
-    c.args(["-c", &expand(task, id, command)])
+    c.args(["-c", &expand(task, id, command, shell_word)])
         .current_dir(workdir)
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null());
@@ -183,9 +174,14 @@ fn run_agent(
         .stderr(err)
         .spawn()
         .map_err(|e| format!("{program}: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes());
-    }
+    // From a thread of its own: an agent that does not read a prompt larger than the pipe would
+    // otherwise hold the run before its timeout starts.
+    let writer = child.stdin.take().map(|mut stdin| {
+        let prompt = prompt.to_owned();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(prompt.as_bytes());
+        })
+    });
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (tx, rx) = mpsc::channel();
     let start = Instant::now();
@@ -219,6 +215,9 @@ fn run_agent(
     }
     let _ = child.wait();
     let _ = reader.join();
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
     Ok(AgentRun { events, timed_out })
 }
 
@@ -371,7 +370,7 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRe
         let sc = score::score(task, &s, &modified, correct);
         let mut r = record(task, arm, repeat, &s, &sc);
         // Ingestion: what the store spent during the session, less what its reads sent.
-        if let (Some(b), Some(a)) = (before, before.and(spent(cfg, &work, &state))) {
+        if let Some((b, a)) = before.and_then(|b| Some((b, spent(cfg, &work, &state)?))) {
             let read = s.memory_read.unwrap_or_default();
             r.memory_ingestion_attempts = Some(a.0.saturating_sub(b.0 + read.requests));
             r.memory_ingestion_questions = Some(a.1.saturating_sub(b.1 + read.questions));
@@ -525,7 +524,7 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
                     if let Some(why) = &r.invalid {
                         log(&format!("  invalid: {why}"));
                     }
-                    r.history_incomplete = records.iter().any(|p| !p.valid);
+                    r.history_incomplete = arm.memory() && records.iter().any(|p| !p.valid);
                     records.push(r);
                 }
                 let _ = std::fs::remove_dir_all(&dir);

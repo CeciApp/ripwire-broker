@@ -72,16 +72,9 @@ pub fn state(workdir: &Path, file: &str) -> Option<Vec<u8>> {
 /// plus new untracked ones, relative to the root. NUL-separated, so no name comes back quoted.
 pub fn modified_files(workdir: &Path, base: &str) -> Vec<String> {
     let names = |args: &[&str]| -> Vec<String> {
-        Command::new("git")
-            .arg("-C")
-            .arg(workdir)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                o.stdout
+        super::git(workdir, args)
+            .map(|stdout| {
+                stdout
                     .split(|b| *b == 0)
                     .filter(|n| !n.is_empty())
                     .map(|n| String::from_utf8_lossy(n).into_owned())

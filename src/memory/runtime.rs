@@ -34,7 +34,8 @@ pub struct Runtime {
     config: Config,
     publish: MemoryConfig,
     cancel: CancellationToken,
-    task: Option<tokio::task::JoinHandle<()>>,
+    /// The worker's task; a separate one watches it, to say if it panicked.
+    task: Option<tokio::task::AbortHandle>,
     /// `--memory-selection`: in `Deterministic` nothing is enriched or consolidated.
     selection: Selection,
 }
@@ -126,11 +127,13 @@ impl Runtime {
     }
 
     /// [`Runtime::start`], with what the worker says going to `say` instead of stderr.
-    pub fn start_reporting(&mut self, tick: Duration, say: impl Fn(&str) + Send + 'static) {
+    pub fn start_reporting(&mut self, tick: Duration, say: impl Fn(&str) + Send + Sync + 'static) {
         let (store, worker, cancel) =
             (self.store.clone(), self.worker.clone(), self.cancel.clone());
         let enrich = self.selection == Selection::Jev;
-        self.task = Some(tokio::spawn(async move {
+        let say: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(say);
+        let watch = say.clone();
+        let task = tokio::spawn(async move {
             let mut swept_at: Option<u64> = None;
             let mut said = Said::new(say);
             loop {
@@ -178,7 +181,18 @@ impl Runtime {
                     _ = tokio::time::sleep(tick) => {}
                 }
             }
-        }));
+        });
+        self.task = Some(task.abort_handle());
+        // A worker that panics is gone for the life of the server: said once, never silent
+        // (D-151). A task aborted by `Drop` is not a panic, and says nothing.
+        tokio::spawn(async move {
+            if task.await.is_err_and(|e| e.is_panic()) {
+                watch(
+                    "ripwire-broker: memory worker: stopped: it panicked; memory is collected but \
+                     not processed until the server restarts",
+                );
+            }
+        });
     }
 }
 
@@ -187,14 +201,14 @@ impl Runtime {
 /// writer is not a failure.
 struct Said {
     last: std::collections::HashMap<&'static str, String>,
-    say: Box<dyn Fn(&str) + Send>,
+    say: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 impl Said {
-    fn new(say: impl Fn(&str) + Send + 'static) -> Self {
+    fn new(say: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
         Self {
             last: Default::default(),
-            say: Box::new(say),
+            say,
         }
     }
 

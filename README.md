@@ -43,7 +43,7 @@ commands; `ripwire-broker --help` lists them all:
 | `memory add --workspace DIR --file PATH` | Adds an explicit note from a JSON file, `{"text": "...", "references": ["src/a.rs"]}` |
 | `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
 | `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker (also if the server takes it during the drain) or the provider refuses the key |
-| `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back; local |
+| `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back, and makes jobs a long `Retry-After` set aside ready now; local |
 
 Every command that keeps state (`serve`, `hook`, `hook-log`, `hook-stats`, `doctor`, `statusline`,
 `memory …`) also takes `--state-dir DIR` (for `serve`, where `--memory` keeps its store: give it the
@@ -595,18 +595,20 @@ cargo build --release
 ```
 
 - **Corpus:** JSON, `{"tasks": [{"id", "repo", "base", "fix", "prompt", "vocabulary_diverges", "reference":
-  {"files", "tests"}, "check", "setup", "teardown", "env", "sequence"}]}`. `repo` is a local git repository (relative to
+  {"files", "tests"}, "check", "setup", "teardown", "env", "sequence"}]}`. `id` names the run's files, so it takes letters, digits, `.`, `_` and `-`
+  only, and does not start with `.`. `repo` is a local git repository (relative to
   the corpus file), `base` the commit the agent starts from, `fix` the reference commit, `reference.files` what
   it modifies, and `check` a shell command whose exit 0 means the task was solved. `setup` prepares the copy
   (dependencies, build caches) and is not counted as the agent's edit; `teardown` cleans up after it; `env`
   applies to all of them and to the agent. Commands take `{repo}`, `{fix}` and `{run}`, a per-run id safe
-  for a database name; `env` values take `{run}` only, since the agent would see the others. Tasks taken from real commits get their reference for free, and their
+  for a database name, each already one shell word (quoted when the path needs it, so leave them unquoted);
+  `env` values take `{run}` only, since the agent would see the others. Tasks taken from real commits get their reference for free, and their
   tests become hidden tests: `git -C {repo} show {fix}:test/x_test.exs > test/x_test.exs && mix test test/x_test.exs`.
   Tasks with the same `sequence` are sessions of one history, for the memory arms: they run in corpus order,
   each from its own `base`, in the same place and with the same memory store for a given arm and repeat; a
   sequence is recorded, and resumed, as a whole (one recorded in part stops the run, with the lines to
-  remove), stays in one repository, and marks a session after an invalid one `history_incomplete`. Each
-  arm's history is its own earlier sessions: arms B and C differ in history as well as in selection, and a
+  remove), stays in one repository, and, in a memory arm, marks a session after an invalid one
+  `history_incomplete`, which the report lists and keeps out of the averages. Each arm's history is its own earlier sessions: arms B and C differ in history as well as in selection, and a
   memory whose source the agent edited is stale in the next session unless its base has the same bytes.
 - **Validation:** `validate` runs each task's check on a copy at the base, where it must fail, and on one at
   the fix, where it must pass. A check that passes at the base measures nothing. The output of every setup
@@ -629,7 +631,8 @@ cargo build --release
   Claude Code headless with `--strict-mcp-config --setting-sources local`: neither your own settings, hooks
   and plugins nor the ones a repository commits load. A run whose session shows a hook that ran, an MCP
   server the arm did not declare, or a context tool (`graft`, `ripwire`) run from the shell outside its arm,
-  is recorded as invalid and left out of the averages.
+  is recorded as invalid and left out of the averages; so is a session its API cut short
+  (`terminal_reason: "api_error"`), which says nothing about the arm.
 - **Output:** `results.jsonl` (counts and scores; an interrupted run resumes where it stopped),
   `versions.json` (the broker's and ripwire's versions, the pinned classifier model, the summarizer; the
   agent's version and model come from each session's transcript; a resume with other binaries is

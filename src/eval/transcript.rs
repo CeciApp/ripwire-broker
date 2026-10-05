@@ -8,7 +8,6 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Calls {
@@ -96,16 +95,6 @@ impl Summary {
     }
 }
 
-/// Reads a transcript the runner wrote. Lines that do not parse are skipped.
-pub fn read(path: &Path) -> Vec<(u64, Value)> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .map(|v| (v["at_ms"].as_u64().unwrap_or(0), v["event"].clone()))
-        .collect()
-}
-
 const SEARCH: &[&str] = &[
     "grep", "rg", "ag", "ack", "find", "fd", "ls", "tree", "locate",
 ];
@@ -189,15 +178,44 @@ fn is_assignment(word: &str) -> bool {
 
 /// Commands that run the next word as the program.
 const WRAPPERS: &[&str] = &[
-    "env", "command", "exec", "nohup", "time", "nice", "sudo", "builtin",
+    "env", "command", "exec", "nohup", "time", "nice", "sudo", "builtin", "timeout", "stdbuf",
+    "xargs",
 ];
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash"];
+/// Shell words that open a command without being its program.
+const KEYWORDS: &[&str] = &[
+    "if", "then", "else", "elif", "while", "until", "do", "{", "!",
+];
+
+/// A wrapper's options that take the next word as their value (`nice -n 5`).
+fn takes_value(wrapper: &str, option: &str) -> bool {
+    let options: &[&str] = match wrapper {
+        "env" => &["-u", "-C", "--unset", "--chdir"],
+        "nice" => &["-n", "--adjustment"],
+        "sudo" => &[
+            "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "--user", "--group",
+        ],
+        "timeout" => &["-s", "-k", "--signal", "--kill-after"],
+        "stdbuf" => &["-i", "-o", "-e"],
+        "xargs" => &["-n", "-I", "-L", "-P", "-s", "-d", "-E", "-a"],
+        "time" => &["-f", "-o"],
+        "exec" => &["-a"],
+        _ => &[],
+    };
+    options.contains(&option)
+}
+
+/// `-c`, alone or among other short flags (`bash -lc`).
+fn runs_script(word: &str) -> bool {
+    word.strip_prefix('-')
+        .is_some_and(|flags| !flags.starts_with('-') && flags.contains('c'))
+}
 
 /// The program one command runs, past assignments and wrappers, and into `sh -c '...'`.
 fn executables(words: &[String]) -> Vec<String> {
     let mut rest = words;
     while let Some((first, tail)) = rest.split_first() {
-        if is_assignment(first) {
+        if is_assignment(first) || KEYWORDS.contains(&first.as_str()) {
             rest = tail;
             continue;
         }
@@ -205,21 +223,36 @@ fn executables(words: &[String]) -> Vec<String> {
         if WRAPPERS.contains(&name) {
             rest = tail;
             while let Some((w, t)) = rest.split_first() {
-                if w.starts_with('-') || is_assignment(w) {
+                if takes_value(name, w) {
+                    rest = t.get(1..).unwrap_or_default();
+                } else if w.starts_with('-') || is_assignment(w) {
                     rest = t;
                 } else {
                     break;
                 }
+            }
+            // `timeout 30s cmd`: the duration comes before the program.
+            if name == "timeout" {
+                rest = rest.get(1..).unwrap_or_default();
             }
             continue;
         }
         if SHELLS.contains(&name)
             && let Some(script) = tail
                 .iter()
-                .position(|w| w == "-c")
+                .position(|w| runs_script(w))
                 .and_then(|p| tail.get(p + 1))
         {
             return programs(script);
+        }
+        // `find -exec cmd {} ;` runs cmd as well as searching.
+        if name == "find" {
+            let exec = ["-exec", "-execdir", "-ok", "-okdir"];
+            let mut found = vec![name.to_string()];
+            if let Some(p) = tail.iter().position(|w| exec.contains(&w.as_str())) {
+                found.extend(executables(&tail[p + 1..]));
+            }
+            return found;
         }
         // `git grep` and `git ls-files` search; other git subcommands do not.
         if name == "git" {
@@ -406,6 +439,9 @@ fn blocks<'a>(e: &'a Value, kind: &'a str) -> impl Iterator<Item = &'a Value> {
 pub fn summarize(events: &[(u64, Value)]) -> Summary {
     let mut s = Summary::default();
     let (mut saw_init, mut saw_result) = (false, false);
+    // Claude Code ends a session its API failed with `terminal_reason: "api_error"`: the run says
+    // nothing about the arm.
+    let mut api_error = None;
     let mut names: HashMap<String, (String, u64)> = HashMap::new();
     for (at, e) in events {
         match e["type"].as_str() {
@@ -438,12 +474,21 @@ pub fn summarize(events: &[(u64, Value)]) -> Summary {
             Some("result") => {
                 saw_result = true;
                 on_result(&mut s, e);
+                if e["terminal_reason"] == "api_error" {
+                    let said: String = e["result"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect();
+                    api_error = Some(format!("the agent's API failed: {said}"));
+                }
             }
             _ => {}
         }
     }
     s.invalid = match (saw_init, saw_result) {
-        (true, true) => None,
+        (true, true) => api_error,
         (false, _) => Some("no init event: the agent did not start a session".into()),
         (true, false) => Some("no result event: the agent did not finish".into()),
     };

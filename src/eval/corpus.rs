@@ -4,7 +4,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Corpus {
@@ -68,12 +67,7 @@ impl Task {
 }
 
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .is_ok_and(|o| o.status.success())
+    super::git(repo, args).is_ok()
 }
 
 impl Corpus {
@@ -128,6 +122,15 @@ impl Corpus {
                     }
                 }
                 None => {}
+            }
+            // The id names the run's files (transcript, logs): a `/` or a leading `.` would put
+            // them elsewhere.
+            let plain = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
+            if t.id.is_empty() || t.id.starts_with('.') || !t.id.chars().all(plain) {
+                errors.push(format!(
+                    "{}: id must be letters, digits, `.`, `_` or `-`, not starting with `.`",
+                    t.id
+                ));
             }
             if !ids.insert(&t.id) {
                 errors.push(format!("{}: duplicate id", t.id));

@@ -8,8 +8,6 @@ use super::model::{
 };
 use crate::online::reader::{Ineligible, WorkspaceReader};
 
-pub const RENDERER_VERSION: &str = "memory-observation/v1";
-
 /// Which analysis the broker observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {

@@ -7,7 +7,7 @@
     "quality_profile": "showcase",
     "viewBox": [
       1270,
-      650
+      630
     ],
     "views": [
       {
@@ -56,11 +56,22 @@
           "jev"
         ],
         "note": "Local-model notes and the --online classifier only add to context_for_task."
+      },
+      {
+        "id": "memory",
+        "label": "Memory (--memory)",
+        "focus": [
+          "broker",
+          "memstore",
+          "memworker",
+          "jev"
+        ],
+        "note": "The tools spool observations and recall from the store; a worker started by serve --memory enriches them through Jev."
       }
     ],
     "repository": {
       "url": "https://github.com/CeciApp/ripwire-broker",
-      "revision": "db84cf359187cac55f3a11c9ad14b270dd3a284c"
+      "revision": "dff7a9d7dcc2e9ef351cbb5dba9ce3d5f5af34aa"
     }
   },
   "components": [
@@ -71,7 +82,7 @@
       "sublabel": "Claude Code / Codex",
       "pos": [
         40,
-        330
+        300
       ],
       "size": [
         140,
@@ -85,7 +96,7 @@
       "sublabel": "3 tools + status",
       "pos": [
         250,
-        330
+        300
       ],
       "size": [
         140,
@@ -104,7 +115,7 @@
       "sublabel": "route · shape · budget",
       "pos": [
         460,
-        330
+        300
       ],
       "size": [
         140,
@@ -130,7 +141,7 @@
       "sublabel": "verb allowlist",
       "pos": [
         670,
-        330
+        300
       ],
       "size": [
         140,
@@ -155,7 +166,7 @@
       "sublabel": "child process",
       "pos": [
         880,
-        330
+        300
       ],
       "size": [
         140,
@@ -177,7 +188,7 @@
       "sublabel": "33 verbs",
       "pos": [
         1090,
-        330
+        300
       ],
       "size": [
         140,
@@ -191,7 +202,7 @@
       "sublabel": "one-shot commands",
       "pos": [
         460,
-        90
+        70
       ],
       "size": [
         140,
@@ -217,7 +228,7 @@
       "sublabel": "private files",
       "pos": [
         670,
-        90
+        70
       ],
       "size": [
         140,
@@ -242,8 +253,8 @@
       "label": "Local model CLI",
       "sublabel": "e.g. ollama",
       "pos": [
-        460,
-        480
+        250,
+        430
       ],
       "size": [
         140,
@@ -265,7 +276,7 @@
       "sublabel": "--online only",
       "pos": [
         670,
-        480
+        430
       ],
       "size": [
         140,
@@ -287,7 +298,7 @@
       "sublabel": "remote classifier",
       "pos": [
         880,
-        480
+        430
       ],
       "size": [
         140,
@@ -306,7 +317,7 @@
       "sublabel": "read-only command",
       "pos": [
         880,
-        90
+        70
       ],
       "size": [
         140,
@@ -328,11 +339,62 @@
       "sublabel": "status --porcelain",
       "pos": [
         670,
-        200
+        180
       ],
       "size": [
         140,
         64
+      ]
+    },
+    {
+      "id": "memstore",
+      "type": "database",
+      "label": "Memory store",
+      "sublabel": "per workspace",
+      "pos": [
+        460,
+        540
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/memory/store.rs"
+        },
+        {
+          "path": "src/memory/queue.rs"
+        },
+        {
+          "path": "src/memory/recall.rs",
+          "label": "recall"
+        }
+      ]
+    },
+    {
+      "id": "memworker",
+      "type": "backend",
+      "label": "Memory worker",
+      "sublabel": "serve --memory",
+      "pos": [
+        670,
+        540
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/memory/runtime.rs"
+        },
+        {
+          "path": "src/memory/controller.rs"
+        },
+        {
+          "path": "src/memory/consolidate.rs"
+        }
       ]
     }
   ],
@@ -387,7 +449,7 @@
       "toSide": "top",
       "labelAt": [
         530,
-        300
+        270
       ]
     },
     {
@@ -403,11 +465,7 @@
       "label": "notes",
       "variant": "dashed",
       "fromSide": "bottom",
-      "toSide": "top",
-      "labelAt": [
-        523,
-        437
-      ]
+      "toSide": "right"
     },
     {
       "id": "broker-to-online",
@@ -449,6 +507,36 @@
       "label": "shell edits?",
       "fromSide": "bottom",
       "toSide": "left"
+    },
+    {
+      "id": "broker-to-memstore",
+      "from": "broker",
+      "to": "memstore",
+      "label": "observe · recall",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        530,
+        412
+      ]
+    },
+    {
+      "id": "memworker-to-memstore",
+      "from": "memworker",
+      "to": "memstore",
+      "label": "enrich",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "memworker-to-jev",
+      "from": "memworker",
+      "to": "jev",
+      "label": "HTTPS",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "bottom"
     }
   ],
   "cards": [
@@ -467,7 +555,8 @@
       "items": [
         "router → ripwire verbs → normalize → dedup → budget",
         "Schema ripwire-broker.context/v1 with provenance",
-        "Tokens ≈ ceil(JSON bytes / 4)"
+        "Tokens ≈ ceil(JSON bytes / 4)",
+        "--memory: per-workspace store outside the repo"
       ]
     },
     {

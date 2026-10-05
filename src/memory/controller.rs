@@ -45,11 +45,9 @@ pub struct Enriched {
     pub metrics: Metrics,
 }
 
+/// The index's words of `text`, as a set.
 fn tokens(text: &str) -> BTreeSet<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(str::to_lowercase)
-        .collect()
+    super::index::tokens(text).into_iter().collect()
 }
 
 fn entity_ids(r: &Record) -> BTreeSet<&str> {

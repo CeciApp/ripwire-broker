@@ -141,6 +141,21 @@ fn a_transcript_without_a_result_is_invalid_not_zero() {
 }
 
 #[test]
+fn a_session_the_api_cut_short_is_invalid_not_a_failed_task() {
+    // As Claude Code 2.x wrote it with its API unreachable (ECONNREFUSED), trimmed.
+    let init = json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []});
+    let result = json!({"type": "result", "subtype": "success", "is_error": true,
+        "terminal_reason": "api_error", "api_error_status": null, "num_turns": 1,
+        "result": "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)",
+        "usage": {"input_tokens": 0, "output_tokens": 0}});
+
+    let s = transcript::summarize(&[(0, init), (1, result)]);
+
+    let why = s.invalid.expect("the arm did not fail; the API did");
+    assert!(why.contains("ECONNREFUSED"), "{why}");
+}
+
+#[test]
 fn an_arm_contaminated_by_a_foreign_mcp_is_invalid() {
     let s = fixture();
     assert_eq!(Arm::Broker.contamination(&s), None);
@@ -518,6 +533,107 @@ fn ripwire_eval_runs_every_arm_and_never_touches_the_source_repo() {
 }
 
 #[test]
+fn an_arm_without_memory_never_asks_the_broker_for_memory_status() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let agent = fake_agent(work.path());
+    let counter = work.path().join("runs");
+    let calls = work.path().join("broker-calls");
+    let broker = work.path().join("fake-broker");
+    common::write_executable(
+        &broker,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", calls.display()),
+    );
+    let corpus = work.path().join("corpus.json");
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [{"id": "t", "repo": repo.path(), "base": head, "prompt": "p",
+                          "reference": {"files": ["src/auth.py"]}, "check": "true"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let out = work.path().join("out");
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+
+    let (code, _, err) = eval(
+        &[
+            "run",
+            "--corpus",
+            corpus.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--arms",
+            "none,broker",
+            "--agent-cmd",
+            &agent_cmd,
+            "--broker",
+            broker.to_str().unwrap(),
+        ],
+        &counter,
+    );
+
+    assert_eq!(code, 0, "{err}");
+    let asked = std::fs::read_to_string(&calls).unwrap_or_default();
+    assert!(!asked.contains("memory"), "{asked}");
+}
+
+#[test]
+fn the_eval_command_line_refuses_what_it_would_ignore_or_misread() {
+    let work = tempfile::tempdir().unwrap();
+    let counter = work.path().join("runs");
+    let missing = work.path().join("missing");
+    let missing = missing.to_str().unwrap();
+
+    for help in [&["--help"][..], &["run", "-h"], &["help"]] {
+        let (code, out, err) = eval(help, &counter);
+        assert_eq!(code, 0, "{help:?}: {err}");
+        assert!(out.contains("usage: ripwire-eval"), "{help:?}: {out}");
+    }
+    for (args, says) in [
+        (
+            &["run", "--corpus", "c", "--out", "o", "--repeats", "0"][..],
+            "--repeats",
+        ),
+        (
+            &[
+                "run",
+                "--corpus",
+                "c",
+                "--out",
+                "o",
+                "--repeats",
+                "4294967297",
+            ],
+            "--repeats",
+        ),
+        (
+            &[
+                "run",
+                "--corpus",
+                "c",
+                "--out",
+                "o",
+                "--arms",
+                "none,broker,none",
+            ],
+            "none",
+        ),
+        (
+            &["run", "--corpus", "c", "--out", "o", "--out", "p"],
+            "--out",
+        ),
+        (&["check", "--corpus", "c", "--out", "o"], "--out"),
+        (&["validate", "--corpus", "c", "--json"], "--json"),
+        (&["report", "--out", missing], "no results"),
+    ] {
+        let (code, _, err) = eval(args, &counter);
+        assert_ne!(code, 0, "{args:?} accepted");
+        assert!(err.contains(says), "{args:?}: {err}");
+    }
+}
+
+#[test]
 fn a_contaminated_run_is_recorded_as_invalid() {
     let repo = common::sample_repo();
     let head = git(repo.path(), &["rev-parse", "HEAD"]);
@@ -865,6 +981,48 @@ fn validate_requires_the_check_to_fail_at_the_base_and_pass_at_the_fix() {
 }
 
 #[test]
+fn a_repository_path_with_spaces_and_quotes_reaches_the_check_as_one_word() {
+    let sample = common::sample_repo();
+    let outer = tempfile::tempdir().unwrap();
+    let repo = outer.path().join("it's a repo; true");
+    std::fs::rename(sample.path(), &repo).unwrap();
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("tests/test_expiry.txt"), "hidden test\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "the fix",
+        ],
+    );
+    let fix = git(&repo, &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let corpus = work.path().join("corpus.json");
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [{"id": "spaced", "repo": repo, "base": base, "fix": fix, "prompt": "p",
+                          "reference": {"files": ["src/auth.py"]},
+                          "check": "git -C {repo} show {fix}:tests/test_expiry.txt > /dev/null && test -f tests/test_expiry.txt"}]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let (code, out, err) = eval(
+        &["validate", "--corpus", corpus.to_str().unwrap()],
+        &work.path().join("unused"),
+    );
+
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("spaced: ok"), "{out}{err}");
+}
+
+#[test]
 fn a_context_tool_run_from_the_shell_is_contamination_too() {
     // A repository can ship another tool's index whose README says "run graft ask"; ripwire is on
     // the PATH too. Through Bash, no MCP listing shows either.
@@ -939,6 +1097,80 @@ fn the_shell_guard_sees_through_assignments_wrappers_and_quotes() {
             "false alarm: {innocent}"
         );
     }
+}
+
+#[test]
+fn the_shell_guard_sees_through_option_values_keywords_and_exec_forms() {
+    let bash = |command: &str| {
+        let init = json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []});
+        let call = json!({"type": "assistant", "message": {"id": "b", "content": [
+            {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": command}}]}});
+        let result = json!({"type": "result", "is_error": false, "usage": {}});
+        transcript::summarize(&[(0, init), (1, call), (2, result)])
+    };
+    for hidden in [
+        "timeout 30 graft ask x",
+        "timeout -s KILL -k 5 30s graft ask x",
+        "nice -n 5 graft ask x",
+        "sudo -u me graft ask x",
+        "env -u HOME graft ask x",
+        "stdbuf -oL graft ask x",
+        "bash -lc 'graft ask x'",
+        "if graft ask x; then echo ok; fi",
+        "for f in a b; do graft ask $f; done",
+        "{ graft ask x; }",
+        "! graft ask x",
+        "while true; do ripwire .; done",
+        "echo login | xargs graft ask",
+        "xargs -n 1 graft ask < q.txt",
+        "find . -name '*.py' -exec graft ask {} \\;",
+        "find . -execdir ripwire . +",
+    ] {
+        assert!(
+            Arm::None.contamination(&bash(hidden)).is_some(),
+            "missed: {hidden}"
+        );
+    }
+    for innocent in [
+        "timeout 30 cargo test graft",
+        "find . -name graft",
+        "if [ -f graft ]; then echo graft; fi",
+        "bash -lc 'echo graft'",
+        "xargs grep -n graft < files.txt",
+    ] {
+        assert_eq!(
+            Arm::None.contamination(&bash(innocent)),
+            None,
+            "false alarm: {innocent}"
+        );
+    }
+}
+
+#[test]
+fn a_task_id_that_is_not_a_plain_file_name_is_refused() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corpus.json");
+    let task = |id: &str| {
+        json!({"id": id, "repo": repo.path(), "base": head, "prompt": "p",
+               "reference": {"files": ["src/auth.py"]}})
+    };
+    std::fs::write(
+        &path,
+        json!({"tasks": [task("../escape"), task("a/b"), task(""), task(".hidden"),
+                         task("fine-1.2_x")]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let errors = Corpus::load(&path).unwrap().validate().unwrap_err();
+
+    let refused = |id: &str| errors.iter().any(|e| e.starts_with(&format!("{id}: id")));
+    for bad in ["../escape", "a/b", "", ".hidden"] {
+        assert!(refused(bad), "{bad} accepted: {errors:?}");
+    }
+    assert!(!refused("fine-1.2_x"), "{errors:?}");
 }
 
 #[test]
@@ -1564,6 +1796,40 @@ fn a_session_after_an_invalid_one_says_its_history_is_incomplete() {
 }
 
 #[test]
+fn only_a_memory_arm_carries_a_history() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let mut first = auth_task("first", repo.path(), &head, Some("login"));
+    first["prompt"] = json!("BREAK before the result");
+    let runs = logged_run(
+        json!([
+            first,
+            auth_task("second", repo.path(), &head, Some("login"))
+        ]),
+        "broker",
+        "1",
+    );
+    let second = &runs[1].1;
+    assert_eq!(second["valid"], true, "{second}");
+    assert!(second.get("history_incomplete").is_none(), "{second}");
+}
+
+#[test]
+fn a_session_with_an_incomplete_history_stays_out_of_the_averages() {
+    let whole = rec(0, 1, Arm::BrokerMemory, 100, 1);
+    let mut partial = rec(1, 1, Arm::BrokerMemory, 900, 1);
+    partial.history_incomplete = true;
+    let records = [whole, partial];
+
+    let stats = report::arm_stats(&records, Arm::BrokerMemory.name());
+    assert_eq!((stats.runs, stats.valid), (2, 1));
+    assert_eq!(stats.tokens, Some(100.0));
+    let md = report::render(&records);
+    assert!(md.contains("histórico incompleto"), "{md}");
+    assert!(md.contains("`t1`"), "{md}");
+}
+
+#[test]
 fn versions_that_change_between_runs_are_refused() {
     let repo = common::sample_repo();
     let head = git(repo.path(), &["rev-parse", "HEAD"]);
@@ -1758,6 +2024,48 @@ sleep 30
     );
     witness.kill().unwrap();
     witness.wait().unwrap();
+}
+
+#[test]
+fn an_agent_that_never_reads_a_long_prompt_still_times_out() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    // Larger than a pipe's buffer: writing it all blocks until the agent reads.
+    let agent = work.path().join("deaf-agent");
+    common::write_executable(&agent, "#!/bin/sh\nexec sleep 30\n");
+    let mut task = auth_task("t", repo.path(), &head, None);
+    task["prompt"] = json!("x".repeat(1 << 20));
+    std::fs::write(
+        work.path().join("corpus.json"),
+        json!({ "tasks": [task] }).to_string(),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .args([
+            "run",
+            "--corpus",
+            work.path().join("corpus.json").to_str().unwrap(),
+            "--out",
+            work.path().join("out").to_str().unwrap(),
+            "--arms",
+            "none",
+            "--timeout-s",
+            "1",
+            "--agent-cmd",
+            agent.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the prompt held the run past its timeout: {:?}",
+        started.elapsed()
+    );
+    let results = std::fs::read_to_string(work.path().join("out/results.jsonl")).unwrap();
+    assert!(results.contains("timed out"), "{results}");
 }
 
 #[test]
