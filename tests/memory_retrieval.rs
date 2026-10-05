@@ -1313,3 +1313,57 @@ async fn another_worktree_of_the_same_head_sees_nothing() {
     let got = recalled(&linked, &wt, passing(), "eviction").await;
     assert_eq!((got.stop, got.memories.len()), (StopReason::Empty, 0));
 }
+
+/// A read's spend that could not reach the quota file is written by a later read, never lost
+/// (D-150): the quota lock was busy for its whole wait, the entry stayed in memory forever, and
+/// other processes, or this one after a restart, never saw those requests.
+#[tokio::test]
+async fn a_spend_that_missed_the_quota_file_is_written_later() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &ws));
+    store
+        .enqueue(&observed(root.path(), &ws, "src/a.rs", "eviction"))
+        .unwrap();
+    store.ingest().unwrap();
+    let recall = recall(&store, root.path(), passing());
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    };
+    let used = || {
+        store
+            .quota_file()
+            .unwrap()
+            .map_or((0, 0), |l| l.used(now()))
+    };
+
+    // Someone else holds the quota for longer than a spend waits.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(store.dir().join("quota.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let first = recall.read("eviction").await.read.unwrap();
+    assert!(first.requests > 0);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(used(), (0, 0), "the first spend could not be written");
+    drop(lock);
+
+    let second = recall.read("eviction").await.read.unwrap();
+    let expected = (
+        (first.requests + second.requests) as u32,
+        (first.questions + second.questions) as u32,
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while used() != expected && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(used(), expected, "both reads are on the quota file");
+}
