@@ -974,3 +974,55 @@ fn an_ingest_with_nothing_waiting_never_contends_for_the_writer() {
     );
     drop(held);
 }
+
+/// A job's lease file goes with the job (D-150): every job ever leased left
+/// `leases/<id>.lock` behind, through `Done`, `forget` and retention, so the disk grew and a
+/// forgotten id stayed on it as a file name.
+#[test]
+fn a_finished_or_forgotten_job_leaves_no_lease_file() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 2);
+    let leases = store.dir().join("leases");
+    let names = || -> Vec<String> {
+        fs::read_dir(&leases)
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let first = store.lease_next(DAY).unwrap().unwrap();
+    let done = first.node_id().to_string();
+    store.finish(first, Outcome::Done).unwrap();
+    let second = store.lease_next(DAY).unwrap().unwrap();
+    let forgotten = second.node_id().to_string();
+    store.forget(&forgotten, 2 * DAY).unwrap();
+    drop(second);
+
+    let left = names();
+    assert!(!left.iter().any(|n| n.starts_with(&done)), "{left:?}");
+    assert!(!left.iter().any(|n| n.starts_with(&forgotten)), "{left:?}");
+}
+
+/// A temporary snapshot a dead writer left goes with `forget <id>` (D-150): it holds memory text,
+/// and only `forget --all` removed it.
+#[test]
+fn forget_removes_a_dead_writers_temporary_snapshot() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    let leftover = store.dir().join("snapshot.tmp99999-0");
+    fs::write(
+        &leftover,
+        b"{\"nodes\": \"the text the user asked to erase\"}",
+    )
+    .unwrap();
+    let generation = store.dir().join("generation.tmp99999-0");
+    fs::write(&generation, b"7").unwrap();
+
+    store.forget(&record(1).node_id, 2 * DAY).unwrap();
+
+    assert!(!leftover.exists(), "the temporary snapshot is gone");
+    assert!(!generation.exists(), "and so is the temporary generation");
+}

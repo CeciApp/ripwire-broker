@@ -556,7 +556,9 @@ impl Store {
         for id in &gone {
             state.nodes.remove(id);
             state.jobs.remove(id);
+            self.drop_lease(id);
         }
+        self.remove_dead_snapshot_temporaries();
         state.consolidation.drop_nodes(&gone);
         state
             .edges
@@ -586,7 +588,9 @@ impl Store {
             removed += usize::from(state.nodes.remove(id).is_some());
             state.jobs.remove(id);
             state.tombstones.insert(id.clone(), until_ms);
+            self.drop_lease(id);
         }
+        self.remove_dead_snapshot_temporaries();
         state.consolidation.drop_nodes(&gone);
         state
             .edges
@@ -615,15 +619,12 @@ impl Store {
         for path in self.spool_entries()? {
             let _ = fs::remove_file(path);
         }
-        if let Ok(entries) = fs::read_dir(&self.dir) {
-            for e in entries.filter_map(Result::ok) {
-                if e.file_name().to_string_lossy().starts_with("snapshot.tmp") {
-                    let _ = fs::remove_file(e.path());
-                }
-            }
-        }
+        self.remove_dead_snapshot_temporaries();
         let mut state = self.load()?;
         let removed = state.nodes.len();
+        for id in state.jobs.keys() {
+            self.drop_lease(id);
+        }
         state.jobs.clear();
         state.edges.clear();
         state.consolidation = Consolidation::default();
@@ -633,6 +634,37 @@ impl Store {
         state.generation += 1;
         self.write_snapshot(state.generation, &on_disk(&state)?)?;
         Ok(removed)
+    }
+
+    /// Removes `node_id`'s lease file (D-150). Only for a job that cannot be leased again (done,
+    /// failed, or gone from the state), so no other process takes a fresh lock beside a holder.
+    fn drop_lease(&self, node_id: &str) {
+        if let Ok(name) = spool_name(node_id) {
+            let _ = fs::remove_file(self.dir.join(LEASES).join(name.replace(".json", ".lock")));
+        }
+    }
+
+    /// The temporary snapshots and generations a writer that died left behind: they hold memory
+    /// text, and `forget` must not leave it on disk (D-150). Called under the writer lock, which
+    /// every writer of those two holds, so none of them belongs to a live writer. A temporary
+    /// quota is written under its own lock, so only an old one goes.
+    fn remove_dead_snapshot_temporaries(&self) {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        for e in entries.filter_map(Result::ok) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let ours = name.starts_with("snapshot.tmp") || name.starts_with("generation.tmp");
+            let old_quota = name.starts_with("quota.tmp")
+                && fs::symlink_metadata(e.path())
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|at| at.elapsed().ok())
+                    .is_some_and(|age| age > DEAD_TEMPORARY);
+            if ours || old_quota {
+                let _ = fs::remove_file(e.path());
+            }
+        }
     }
 
     /// Whether `forget --all` revoked collection; it stays so across restarts until resumed.
@@ -751,6 +783,10 @@ impl Store {
                 JobState::Pending
             }
         };
+        // A job that cannot run again keeps no lease file: removed while its lock is held.
+        if matches!(outcome, Outcome::Done | Outcome::Failed) {
+            self.drop_lease(&lease.node_id);
+        }
         state.enriched += u64::from(newly_counted);
         if newly_counted {
             // Its pairs wait from now; an older wait is kept.
