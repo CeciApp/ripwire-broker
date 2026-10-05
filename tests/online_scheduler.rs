@@ -978,3 +978,26 @@ async fn a_classifier_task_that_panics_frees_its_slot() {
     assert_eq!(report.unfinished, vec![1, 2], "neither got an answer");
     assert_ne!(report.stop, Some(Stop::Cancelled));
 }
+
+/// A batch is stale once, however many halves its split made (D-149): both halves carry the
+/// job's id, and `stale` listed it twice, so `stale_batches` counted two batches for one.
+#[tokio::test(start_paused = true)]
+async fn the_halves_of_a_stale_split_count_once() {
+    use ripwire_broker::online::scheduler::Freshness;
+    use std::sync::atomic::AtomicBool;
+    let changed = Arc::new(AtomicBool::new(false));
+    let flag = changed.clone();
+    let fake = Arc::new(
+        FakeClassifier::new()
+            .fail("j0", DOWN)
+            .on_call(move |_| flag.store(true, SeqCst)),
+    );
+    let mut j = batch(0, SemanticStage::FileAdmission, &[0, 1]);
+    let seen = changed.clone();
+    j.fresh = Some(Freshness(Arc::new(move || !seen.load(SeqCst))));
+
+    let r = run_jobs(fake.clone(), config(4, 1000), vec![j]).await;
+
+    assert_eq!(r.splits, 1, "the first failure split it");
+    assert_eq!(r.stale, vec![0]);
+}

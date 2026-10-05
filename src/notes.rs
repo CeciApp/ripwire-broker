@@ -5,7 +5,6 @@
 use crate::model::{Basis, Item, Limitation, Note, Source, Untrusted};
 use crate::summarizer::Summarizer;
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -200,43 +199,7 @@ pub fn omitted(n: usize) -> Limitation {
 
 /// A `String -> String` map with a ceiling: at `MAX_CACHED_NOTES` the oldest insertion gives
 /// way (D-097). Insertion order is kept explicitly so eviction is deterministic.
-#[derive(Debug, Default)]
-struct Bounded {
-    entries: HashMap<String, String>,
-    order: VecDeque<String>,
-}
-
-impl Bounded {
-    fn get(&self, key: &str) -> Option<&String> {
-        self.entries.get(key)
-    }
-
-    fn insert(&mut self, key: String, value: String) {
-        if self.entries.insert(key.clone(), value).is_none() {
-            self.order.push_back(key);
-        }
-        while self.entries.len() > MAX_CACHED_NOTES {
-            match self.order.pop_front() {
-                Some(oldest) => {
-                    self.entries.remove(&oldest);
-                }
-                None => break,
-            }
-        }
-    }
-
-    fn remove(&mut self, key: &str) -> Option<String> {
-        let gone = self.entries.remove(key);
-        if gone.is_some() {
-            self.order.retain(|k| k != key);
-        }
-        gone
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
+type Bounded = crate::fifo::FifoMap<String, String>;
 
 /// Counts for the status resource; never note text or prompts.
 #[derive(Debug, Default)]
@@ -286,8 +249,8 @@ impl NoteEngine {
         Self {
             summarizer,
             wait,
-            cache: Default::default(),
-            failed: Default::default(),
+            cache: Arc::new(Mutex::new(Bounded::new(MAX_CACHED_NOTES))),
+            failed: Arc::new(Mutex::new(Bounded::new(MAX_CACHED_NOTES))),
             running: Mutex::new(None),
             settled_signal: Default::default(),
             stats: Default::default(),

@@ -889,6 +889,114 @@ fn with_siblings() -> tempfile::TempDir {
     ws
 }
 
+/// A semantic-only file dropped because it changed during discovery is no gain (D-149): it was
+/// counted when admitted, before the freshness check removed it from the answer.
+#[tokio::test]
+async fn a_semantic_only_file_that_changed_is_not_counted_as_gain() {
+    let ws = with_siblings();
+    let root = ws.path().to_path_buf();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let classifier = budget_is_evidence().on_call(move |stage| {
+        if stage == SemanticStage::SourceSelection
+            && !done.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            common::write(&root, "src/budget.py", &BUDGET_PY.replace("fit", "fits"));
+        }
+    });
+    let s = online_in(ws, explore(), classifier).await;
+
+    let out = json(
+        &s.broker
+            .context_for_task(TaskRequest::new(TASK))
+            .await
+            .unwrap(),
+    );
+
+    assert!(
+        items(&out).iter().all(|i| i["path"] != "src/budget.py"),
+        "the changed file is dropped: {out:#}"
+    );
+    assert_eq!(
+        json(&s.broker.status().await)["online"]["semantic_only_candidates"],
+        0
+    );
+}
+
+/// The status's `last_error` is the latest failure, not the first in alphabetical order (D-149):
+/// a call that failed `invalid_response` and then `rejected` reported `invalid_response`.
+#[tokio::test]
+async fn the_last_error_is_the_latest_failure() {
+    use ripwire_broker::online::response::InvalidResponse;
+    let classifier = budget_is_evidence()
+        .fail_path_times(
+            "src/budget.py",
+            ClassifyError::Invalid(InvalidResponse::Malformed),
+            1,
+        )
+        .fail_stage(SemanticStage::SourceSelection, ClassifyError::Rejected(400));
+    let s = online_in(with_siblings(), explore(), classifier).await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let status = json(&s.broker.status().await);
+    assert_eq!(
+        status["online"]["last_error"], "rejected",
+        "{:#}",
+        status["online"]
+    );
+}
+
+/// A refused credential stops discovery, not just the stage that met it (D-149): after a 401 on
+/// the lookahead, the selection stage still sent its batches with the same key.
+#[tokio::test]
+async fn a_refused_credential_stops_the_later_stages() {
+    let classifier =
+        budget_is_evidence().fail_path_times("src/budget.py", ClassifyError::Auth(401), 1);
+    let s = online_in(with_siblings(), explore(), classifier).await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    assert!(
+        s.classifier
+            .asked(SemanticStage::SourceSelection)
+            .is_empty(),
+        "nothing more is sent with a refused key"
+    );
+}
+
+/// A planner path written `./src/auth.py` is the file the lookahead lists as `src/auth.py` (D-149):
+/// the lookahead compared raw paths and asked about the same file again as a sibling.
+#[tokio::test]
+async fn the_lookahead_never_asks_again_about_a_planner_file() {
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ripwire/explore_export_auth.txt"
+    ))
+    .unwrap()
+    .replace(r#"p="src/"#, r#"p="./src/"#);
+    let s = online_in(
+        with_siblings(),
+        FakeUpstream::new().answer_text("explore", &fixture),
+        budget_is_evidence(),
+    )
+    .await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let asked = s.classifier.asked(SemanticStage::FileAdmission);
+    let auth = asked.iter().filter(|p| p.as_str() == "src/auth.py").count();
+    assert_eq!(auth, 1, "{asked:?}");
+}
+
 #[tokio::test]
 async fn lookahead_admits_eligible_siblings_of_admitted_planner_paths() {
     let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;

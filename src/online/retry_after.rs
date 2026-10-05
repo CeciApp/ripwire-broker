@@ -12,7 +12,8 @@ const MONTHS: [&str; 12] = [
 pub fn parse(value: &str, now: SystemTime) -> Option<Duration> {
     let value = value.trim();
     if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
-        return value.parse().ok().map(Duration::from_secs);
+        // More digits than a `u64` holds is still a delay, the longest there is.
+        return Some(value.parse().map_or(Duration::MAX, Duration::from_secs));
     }
     let at = UNIX_EPOCH + Duration::from_secs(imf_fixdate(value)?);
     Some(at.duration_since(now).unwrap_or(Duration::ZERO))

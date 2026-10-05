@@ -1159,3 +1159,42 @@ fn a_decision_is_noul_choice_or_unknown_and_never_zero() {
         "an infinite number is not JSON"
     );
 }
+
+/// A delay too large for a `u64` is a very long wait, never "unreadable" (D-149): `None` made the
+/// scheduler retry after its 1 s default, where a long `Retry-After` must make it give up.
+#[test]
+fn a_delay_past_u64_is_the_longest_wait() {
+    let now = UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+
+    let wait = retry_after::parse("99999999999999999999", now);
+
+    assert_eq!(wait, Some(Duration::MAX));
+}
+
+/// More files that hold secrets by convention are never read for sending (D-149): Terraform's
+/// variables and state, `secrets.toml`, a kubeconfig, `.htpasswd`, git's stored credentials.
+#[test]
+fn common_secret_files_are_never_read_for_sending() {
+    let ws = tempfile::tempdir().unwrap();
+    let names = [
+        "prod.tfvars",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
+        "config/secrets.toml",
+        "kubeconfig",
+        ".htpasswd",
+        ".git-credentials",
+    ];
+    for name in names {
+        put(ws.path(), name, b"x = 1\n");
+    }
+    let reader = WorkspaceReader::new(ws.path()).unwrap();
+
+    for name in names {
+        assert_eq!(
+            reader.snapshot(name).map(|_| ()),
+            Err(Ineligible::SensitiveName),
+            "{name}"
+        );
+    }
+}

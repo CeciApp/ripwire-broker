@@ -104,7 +104,6 @@ pub struct FileEvidence {
     pub admission: Scored,
     pub decision: FileDecision,
     pub units: Vec<UnitEvidence>,
-    pub location_only: bool,
     /// Found by the lookahead beside a ripwire candidate, not by ripwire.
     pub lookahead: bool,
 }
@@ -121,6 +120,10 @@ pub struct Discovery {
     pub too_large: usize,
     /// Error categories of failed requests, and whether the request limit stopped it.
     pub failures: BTreeMap<&'static str, usize>,
+    /// The category of the latest failure, in the order they settled.
+    pub last_failure: Option<&'static str>,
+    /// The provider refused the credential: no later stage sends anything (D-149).
+    pub auth_refused: bool,
     pub unfinished: usize,
     pub limit_reached: bool,
     /// Batches never sent because a source changed after it was read.
@@ -330,55 +333,8 @@ impl OnlineEngine {
 
         // One-level lookahead (D-061): siblings of the admitted planner paths.
         let planner = files.len();
-        let dirs: std::collections::BTreeSet<String> = files
-            .iter()
-            .enumerate()
-            .filter(|(n, _)| {
-                let p = admitted.get(&format!("f{n}")).and_then(|s| s.probability);
-                file_decision(&[p]).0 == FileDecision::Admitted
-            })
-            .map(|(_, (rp, _))| match rp.path.rsplit_once('/') {
-                Some((dir, _)) => dir.to_string(),
-                None => String::new(),
-            })
-            .collect();
-        let mut taken: std::collections::HashSet<String> =
-            ranked.iter().map(|rp| rp.path.clone()).collect();
-        taken.extend(files.iter().map(|(rp, _)| rp.path.clone()));
-        let room = self.config.lookahead_max;
-        let siblings = self
-            .on_disk(move |reader| {
-                let mut found = vec![];
-                'dirs: for dir in dirs {
-                    for path in reader.files_in(&dir) {
-                        if found.len() == room {
-                            break 'dirs;
-                        }
-                        if !taken.insert(path.clone()) {
-                            continue;
-                        }
-                        // Ineligible siblings are policy, not candidates ripwire named: skipped
-                        // quietly.
-                        if let Ok(snap) = reader.snapshot(&path) {
-                            found.push((path, snap));
-                        }
-                    }
-                }
-                found
-            })
-            .await
-            .unwrap_or_default();
-        for (path, snap) in siblings {
-            let rank = ranked.len() + files.len();
-            let rp = RankedPath {
-                path,
-                rank,
-                priority: crate::normalize::priority::PERIPHERAL,
-                origin: super::PathOrigin::Lookahead,
-                lines: vec![],
-            };
-            files.push((rp, Arc::new(snap)));
-        }
+        let siblings = self.lookahead(ranked, &files, &admitted).await;
+        files.extend(siblings);
         if files.len() > planner {
             let extra = self
                 .ask(
@@ -408,16 +364,12 @@ impl OnlineEngine {
                 .unwrap_or_else(Scored::unknown);
             let (decision, _) = file_decision(&[scored.probability]);
             let lookahead = rp.origin == super::PathOrigin::Lookahead;
-            if lookahead && decision == FileDecision::Admitted {
-                disc.semantic_only += 1;
-            }
             disc.files.push(FileEvidence {
                 path: snap.path.clone(),
                 content_hash: snap.content_hash.clone(),
                 admission: scored,
                 decision,
                 units: vec![],
-                location_only: snap.location_only(),
                 lookahead,
             });
         }
@@ -489,8 +441,77 @@ impl OnlineEngine {
             batches: disc.requests - before,
         });
 
-        // Before the output: evidence about a version that no longer exists is dropped
-        // (RF-ONLINE-10, CA-ONLINE-11). The file's structural facts stay untouched.
+        self.drop_changed(&mut disc, &files).await;
+        self.record(&disc);
+        disc
+    }
+
+    /// Eligible files beside the admitted planner paths, at most `lookahead_max`, as candidates
+    /// ranked after every planner path (D-061). Ineligible siblings are policy, not candidates
+    /// ripwire named: skipped quietly.
+    async fn lookahead(
+        &self,
+        ranked: &[RankedPath],
+        files: &[(RankedPath, Arc<Snapshot>)],
+        admitted: &HashMap<String, Scored>,
+    ) -> Vec<(RankedPath, Arc<Snapshot>)> {
+        let dirs: std::collections::BTreeSet<String> = files
+            .iter()
+            .enumerate()
+            .filter(|(n, _)| {
+                let p = admitted.get(&format!("f{n}")).and_then(|s| s.probability);
+                file_decision(&[p]).0 == FileDecision::Admitted
+            })
+            .map(|(_, (rp, _))| match rp.path.rsplit_once('/') {
+                Some((dir, _)) => dir.to_string(),
+                None => String::new(),
+            })
+            .collect();
+        let mut taken: std::collections::HashSet<String> =
+            ranked.iter().map(|rp| rp.path.clone()).collect();
+        taken.extend(files.iter().map(|(rp, _)| rp.path.clone()));
+        let room = self.config.lookahead_max;
+        let siblings = self
+            .on_disk(move |reader| {
+                let mut found = vec![];
+                'dirs: for dir in dirs {
+                    for path in reader.files_in(&dir) {
+                        if found.len() == room {
+                            break 'dirs;
+                        }
+                        if !taken.insert(path.clone()) {
+                            continue;
+                        }
+                        if let Ok(snap) = reader.snapshot(&path) {
+                            found.push((path, snap));
+                        }
+                    }
+                }
+                found
+            })
+            .await
+            .unwrap_or_default();
+        let first = ranked.len() + files.len();
+        siblings
+            .into_iter()
+            .enumerate()
+            .map(|(k, (path, snap))| {
+                let rp = RankedPath {
+                    path,
+                    rank: first + k,
+                    priority: crate::normalize::priority::PERIPHERAL,
+                    origin: super::PathOrigin::Lookahead,
+                    lines: vec![],
+                };
+                (rp, Arc::new(snap))
+            })
+            .collect()
+    }
+
+    /// Before the output, evidence about a version that no longer exists is dropped
+    /// (RF-ONLINE-10, CA-ONLINE-11); the file's structural facts stay untouched. The gain beyond
+    /// ripwire is what remains: a sibling dropped as changed is none.
+    async fn drop_changed(&self, disc: &mut Discovery, files: &[(RankedPath, Arc<Snapshot>)]) {
         let before = disc.files.len();
         let snaps: Vec<Arc<Snapshot>> = files.iter().map(|(_, snap)| snap.clone()).collect();
         let fresh: Vec<bool> = self
@@ -500,7 +521,15 @@ impl OnlineEngine {
         let mut keep = fresh.iter();
         disc.files.retain(|_| *keep.next().unwrap_or(&false));
         disc.changed_files += before - disc.files.len();
+        disc.semantic_only = disc
+            .files
+            .iter()
+            .filter(|f| f.lookahead && f.decision == FileDecision::Admitted)
+            .count();
+    }
 
+    /// Adds one discovery to the process totals of the status (PRD §23.11).
+    fn record(&self, disc: &Discovery) {
         let mut totals = self.totals.lock().unwrap();
         totals.requests += disc.requests as u64;
         totals.cache_hits += disc.cache_hits as u64;
@@ -510,10 +539,9 @@ impl OnlineEngine {
         totals.retries += disc.retries as u64;
         totals.splits += disc.splits as u64;
         totals.rate_limited += disc.rate_limited as u64;
-        if let Some((category, _)) = disc.failures.iter().next() {
-            totals.last_error = Some(category);
+        if disc.last_failure.is_some() {
+            totals.last_error = disc.last_failure;
         }
-        disc
     }
 
     /// `work` on the reader in the blocking pool: its walks, reads and hashes never hold the async
@@ -598,6 +626,10 @@ impl OnlineEngine {
         }
         let (requests, too_large) = request::batches(self.model(), query, stage, send);
         disc.too_large += too_large.len();
+        if disc.auth_refused {
+            disc.unfinished += requests.len();
+            return out;
+        }
         if *left == 0 {
             disc.limit_reached = true;
             disc.unfinished += requests.len();
@@ -663,6 +695,7 @@ impl OnlineEngine {
         if report.stop == Some(super::scheduler::Stop::RequestLimit) {
             disc.limit_reached = true;
         }
+        disc.auth_refused |= report.stop == Some(super::scheduler::Stop::Auth);
         let mut cache = self.cache.lock().unwrap();
         for done in report.results {
             let req = &done.request;
@@ -684,7 +717,10 @@ impl OnlineEngine {
                         );
                     }
                 }
-                Err(e) => *disc.failures.entry(e.category()).or_default() += 1,
+                Err(e) => {
+                    *disc.failures.entry(e.category()).or_default() += 1;
+                    disc.last_failure = Some(e.category());
+                }
             }
         }
         out

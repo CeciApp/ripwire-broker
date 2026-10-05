@@ -18,6 +18,7 @@ mod dedup;
 pub mod doctor;
 /// The A/B instrument behind the `ripwire-eval` binary (D-116). Nothing in the broker calls it.
 pub mod eval;
+mod fifo;
 pub mod hook;
 pub mod install;
 pub mod local;
