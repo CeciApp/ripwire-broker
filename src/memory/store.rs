@@ -39,6 +39,8 @@ const REMOTE: &str = "remote.lock";
 /// How long the worker's bookkeeping waits for another writer.
 const WRITER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// Older than this, a spool temporary is a dead writer's.
+/// Room for the digits `ingest_seq` and `generation` gain in a stored record: two `u64`s.
+const STAMP_DIGITS: u64 = 2 * 20;
 const DEAD_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The caps of PRD jev-mem §6; injectable so a test can reach them.
@@ -474,6 +476,7 @@ impl Store {
         let mut consumed = Vec::new();
         let mut size = on_disk(&state)?.len() as u64;
         self.remove_dead_temporaries()?;
+        let job_bytes = serde_json::to_vec(&Job::default()).map_or(0, |b| b.len() as u64);
         for path in self.spool_files()? {
             // One entry that cannot be read (a link, a directory) is dropped, never followed,
             // and never stops the others.
@@ -520,7 +523,13 @@ impl Store {
                 break;
             }
             // The key, its quotes, the colon and the comma around the record.
-            let grows = bytes.len() as u64 + record.node_id.len() as u64 + 4;
+            // The record as stored, its job entry and the digits of `ingest_seq` and
+            // `generation`: an estimate that leaves any of them out admits records the final
+            // check then refuses whole, on every tick (D-151).
+            let grows = bytes.len() as u64
+                + 2 * (record.node_id.len() as u64 + 4)
+                + job_bytes
+                + STAMP_DIGITS;
             if size + grows > self.limits.snapshot_bytes {
                 done.refused = Some(Full::Snapshot);
                 break;

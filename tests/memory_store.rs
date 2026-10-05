@@ -1141,3 +1141,31 @@ fn retry_frees_a_job_set_aside_by_a_wait() {
     let again = store.lease_next(2 * DAY).unwrap().expect("ready again");
     assert_eq!(again.run(), 2, "its earlier run still counts");
 }
+
+/// Near the snapshot cap, ingest takes what fits instead of failing on every tick (D-151): its
+/// estimate left out each node's job entry, so it admitted records the final check then refused
+/// whole, with nothing consumed, again and again.
+#[test]
+fn near_the_cap_ingest_takes_what_fits() {
+    let records: Vec<Record> = (1..=5).map(record).collect();
+    // How large the snapshot of all five really is.
+    let full = tempfile::tempdir().unwrap();
+    let measured = stored(full.path(), &records);
+    let size = fs::metadata(measured.dir().join("snapshot.json"))
+        .unwrap()
+        .len();
+    let state = tempfile::tempdir().unwrap();
+    let limits = Limits {
+        snapshot_bytes: size - 1,
+        ..Limits::default()
+    };
+    let store = Store::with_limits(state.path(), &"r".repeat(64), limits);
+    for r in &records {
+        store.enqueue(r).unwrap();
+    }
+
+    let ingested = store.ingest().expect("not refused whole");
+
+    assert!(ingested.added >= 1 && ingested.added < 5, "{ingested:?}");
+    assert_eq!(ingested.refused, Some(Full::Snapshot));
+}
