@@ -1026,3 +1026,25 @@ fn forget_removes_a_dead_writers_temporary_snapshot() {
     assert!(!leftover.exists(), "the temporary snapshot is gone");
     assert!(!generation.exists(), "and so is the temporary generation");
 }
+
+/// One record whose id cannot name a spool file never blocks every other job (D-150): ingest
+/// took it from a tampered spool, and every `lease_next` then failed with `InvalidId`.
+#[test]
+fn a_tampered_node_id_is_refused_and_blocks_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    let mut bad = record(2);
+    bad.node_id = "../escape".into();
+    fs::write(
+        store.dir().join("spool").join(format!("{:064}.json", 2)),
+        serde_json::to_vec(&bad).unwrap(),
+    )
+    .unwrap();
+    store.enqueue(&record(3)).unwrap();
+
+    let ingested = store.ingest().unwrap();
+
+    assert_eq!(ingested.rejected, 1, "{ingested:?}");
+    let lease = store.lease_next(DAY).unwrap();
+    assert!(lease.is_some(), "the good jobs are still leased");
+}

@@ -496,6 +496,15 @@ impl Store {
                     continue;
                 }
             };
+            // The id names the spool file and later the lease: one that cannot, or that names
+            // another file, came from outside the store and is refused (D-150).
+            let names_this_file = spool_name(&record.node_id)
+                .is_ok_and(|name| path.file_name().is_some_and(|f| f == name.as_str()));
+            if !names_this_file {
+                done.rejected += 1;
+                consumed.push(path);
+                continue;
+            }
             if state.tombstones.contains_key(&record.node_id) {
                 done.forgotten += 1;
                 consumed.push(path);
@@ -722,7 +731,11 @@ impl Store {
             if !ready {
                 continue;
             }
-            let name = spool_name(id)?.replace(".json", ".lock");
+            // An id that cannot name a file (a state from before ingest checked it) is skipped:
+            // it must not stop every other job.
+            let Ok(name) = spool_name(id).map(|n| n.replace(".json", ".lock")) else {
+                continue;
+            };
             let lock = fs::OpenOptions::new()
                 .write(true)
                 .create(true)
