@@ -129,17 +129,28 @@ fn run_id(task: &Task, arm: Arm, repeat: u32) -> String {
         .collect()
 }
 
-/// `{run}`, `{repo}` and `{fix}` in a task's command or environment value.
-fn expand(task: &Task, id: &str, text: &str) -> String {
-    text.replace("{run}", id)
-        .replace("{repo}", &task.repo.to_string_lossy())
-        .replace("{fix}", task.fix.as_deref().unwrap_or(""))
+/// `{run}`, `{repo}` and `{fix}` in a task's command or environment value, each value passed
+/// through `quote` (a command is shell; an environment value is not).
+fn expand(task: &Task, id: &str, text: &str, quote: fn(&str) -> String) -> String {
+    text.replace("{run}", &quote(id))
+        .replace("{repo}", &quote(&task.repo.to_string_lossy()))
+        .replace("{fix}", &quote(task.fix.as_deref().unwrap_or("")))
+}
+
+/// One shell word: as is when nothing in it is special, otherwise in single quotes.
+fn shell_word(text: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_./:@%+=,-".contains(c);
+    if !text.is_empty() && text.chars().all(plain) {
+        text.to_string()
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
 }
 
 fn environment(task: &Task, id: &str) -> Vec<(String, String)> {
     task.env
         .iter()
-        .map(|(k, v)| (k.clone(), expand(task, id, v)))
+        .map(|(k, v)| (k.clone(), expand(task, id, v, str::to_string)))
         .collect()
 }
 
@@ -152,7 +163,7 @@ fn shell(
     command: &str,
 ) -> Command {
     let mut c = Command::new("sh");
-    c.args(["-c", &expand(task, id, command)])
+    c.args(["-c", &expand(task, id, command, shell_word)])
         .current_dir(workdir)
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null());

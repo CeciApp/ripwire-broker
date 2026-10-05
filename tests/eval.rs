@@ -865,6 +865,48 @@ fn validate_requires_the_check_to_fail_at_the_base_and_pass_at_the_fix() {
 }
 
 #[test]
+fn a_repository_path_with_spaces_and_quotes_reaches_the_check_as_one_word() {
+    let sample = common::sample_repo();
+    let outer = tempfile::tempdir().unwrap();
+    let repo = outer.path().join("it's a repo; true");
+    std::fs::rename(sample.path(), &repo).unwrap();
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("tests/test_expiry.txt"), "hidden test\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "the fix",
+        ],
+    );
+    let fix = git(&repo, &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let corpus = work.path().join("corpus.json");
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [{"id": "spaced", "repo": repo, "base": base, "fix": fix, "prompt": "p",
+                          "reference": {"files": ["src/auth.py"]},
+                          "check": "git -C {repo} show {fix}:tests/test_expiry.txt > /dev/null && test -f tests/test_expiry.txt"}]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let (code, out, err) = eval(
+        &["validate", "--corpus", corpus.to_str().unwrap()],
+        &work.path().join("unused"),
+    );
+
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("spaced: ok"), "{out}{err}");
+}
+
+#[test]
 fn a_context_tool_run_from_the_shell_is_contamination_too() {
     // A repository can ship another tool's index whose README says "run graft ask"; ripwire is on
     // the PATH too. Through Bash, no MCP listing shows either.

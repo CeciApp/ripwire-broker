@@ -600,7 +600,8 @@ cargo build --release
   it modifies, and `check` a shell command whose exit 0 means the task was solved. `setup` prepares the copy
   (dependencies, build caches) and is not counted as the agent's edit; `teardown` cleans up after it; `env`
   applies to all of them and to the agent. Commands take `{repo}`, `{fix}` and `{run}`, a per-run id safe
-  for a database name; `env` values take `{run}` only, since the agent would see the others. Tasks taken from real commits get their reference for free, and their
+  for a database name, each already one shell word (quoted when the path needs it, so leave them unquoted);
+  `env` values take `{run}` only, since the agent would see the others. Tasks taken from real commits get their reference for free, and their
   tests become hidden tests: `git -C {repo} show {fix}:test/x_test.exs > test/x_test.exs && mix test test/x_test.exs`.
   Tasks with the same `sequence` are sessions of one history, for the memory arms: they run in corpus order,
   each from its own `base`, in the same place and with the same memory store for a given arm and repeat; a
