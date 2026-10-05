@@ -43,7 +43,7 @@ commands; `ripwire-broker --help` lists them all:
 | `memory add --workspace DIR --file PATH` | Adds an explicit note from a JSON file, `{"text": "...", "references": ["src/a.rs"]}` |
 | `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
 | `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker (also if the server takes it during the drain) or the provider refuses the key |
-| `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back; local |
+| `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back, and makes jobs a long `Retry-After` set aside ready now; local |
 
 Every command that keeps state (`serve`, `hook`, `hook-log`, `hook-stats`, `doctor`, `statusline`,
 `memory …`) also takes `--state-dir DIR` (for `serve`, where `--memory` keeps its store: give it the

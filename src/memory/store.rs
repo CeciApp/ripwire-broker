@@ -859,18 +859,25 @@ impl Store {
         Ok(())
     }
 
-    /// `memory retry`: every failed job back to pending, with its runs. Returns how many.
+    /// `memory retry`: every failed job back to pending, with its runs, and every pending job set
+    /// aside by a wait made ready now. Returns how many.
     pub fn retry_all_failed(&self) -> Result<usize, Refusal> {
         let _writer = self.writer()?;
         let mut state = self.load()?;
         let mut n = 0;
-        for job in state
-            .jobs
-            .values_mut()
-            .filter(|j| j.state == JobState::Failed)
-        {
-            (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
-            n += 1;
+        for job in state.jobs.values_mut() {
+            match job.state {
+                JobState::Failed => {
+                    (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
+                    n += 1;
+                }
+                // Set aside by a wait (a long `Retry-After`): ready now, its runs kept (D-151).
+                JobState::Pending if job.not_before_ms > 0 => {
+                    job.not_before_ms = 0;
+                    n += 1;
+                }
+                _ => {}
+            }
         }
         if n > 0 {
             self.write_snapshot(state.generation, &on_disk(&state)?)?;

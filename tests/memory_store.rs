@@ -1117,3 +1117,27 @@ fn huge_quota_counts_saturate_and_never_free_quota() {
     assert_eq!(ledger.used(DAY), (u32::MAX, u32::MAX));
     assert!(!ledger.charge(DAY, 1, 1, 1_000, 20_000), "nothing is left");
 }
+
+/// `memory retry` also frees a job set aside by a long wait, keeping its runs (D-151): only
+/// failed jobs came back, and a job a long `Retry-After` put off stayed out of reach.
+#[test]
+fn retry_frees_a_job_set_aside_by_a_wait() {
+    let state = tempfile::tempdir().unwrap();
+    let store = queued(state.path(), 1);
+    let lease = store.lease_next(DAY).unwrap().unwrap();
+    store
+        .finish(
+            lease,
+            Outcome::Retry {
+                not_before_ms: 365 * DAY,
+            },
+        )
+        .unwrap();
+    assert!(store.lease_next(2 * DAY).unwrap().is_none(), "set aside");
+
+    let freed = store.retry_all_failed().unwrap();
+
+    assert_eq!(freed, 1);
+    let again = store.lease_next(2 * DAY).unwrap().expect("ready again");
+    assert_eq!(again.run(), 2, "its earlier run still counts");
+}
