@@ -1077,6 +1077,33 @@ fn the_shell_guard_sees_through_option_values_keywords_and_exec_forms() {
 }
 
 #[test]
+fn a_task_id_that_is_not_a_plain_file_name_is_refused() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corpus.json");
+    let task = |id: &str| {
+        json!({"id": id, "repo": repo.path(), "base": head, "prompt": "p",
+               "reference": {"files": ["src/auth.py"]}})
+    };
+    std::fs::write(
+        &path,
+        json!({"tasks": [task("../escape"), task("a/b"), task(""), task(".hidden"),
+                         task("fine-1.2_x")]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let errors = Corpus::load(&path).unwrap().validate().unwrap_err();
+
+    let refused = |id: &str| errors.iter().any(|e| e.starts_with(&format!("{id}: id")));
+    for bad in ["../escape", "a/b", "", ".hidden"] {
+        assert!(refused(bad), "{bad} accepted: {errors:?}");
+    }
+    assert!(!refused("fine-1.2_x"), "{errors:?}");
+}
+
+#[test]
 fn a_fix_that_is_not_a_commit_is_refused_before_anything_runs() {
     let repo = common::sample_repo();
     let head = git(repo.path(), &["rev-parse", "HEAD"]);

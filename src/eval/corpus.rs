@@ -129,6 +129,15 @@ impl Corpus {
                 }
                 None => {}
             }
+            // The id names the run's files (transcript, logs): a `/` or a leading `.` would put
+            // them elsewhere.
+            let plain = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
+            if t.id.is_empty() || t.id.starts_with('.') || !t.id.chars().all(plain) {
+                errors.push(format!(
+                    "{}: id must be letters, digits, `.`, `_` or `-`, not starting with `.`",
+                    t.id
+                ));
+            }
             if !ids.insert(&t.id) {
                 errors.push(format!("{}: duplicate id", t.id));
             }

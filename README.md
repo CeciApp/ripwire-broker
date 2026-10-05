@@ -595,7 +595,8 @@ cargo build --release
 ```
 
 - **Corpus:** JSON, `{"tasks": [{"id", "repo", "base", "fix", "prompt", "vocabulary_diverges", "reference":
-  {"files", "tests"}, "check", "setup", "teardown", "env", "sequence"}]}`. `repo` is a local git repository (relative to
+  {"files", "tests"}, "check", "setup", "teardown", "env", "sequence"}]}`. `id` names the run's files, so it takes letters, digits, `.`, `_` and `-`
+  only, and does not start with `.`. `repo` is a local git repository (relative to
   the corpus file), `base` the commit the agent starts from, `fix` the reference commit, `reference.files` what
   it modifies, and `check` a shell command whose exit 0 means the task was solved. `setup` prepares the copy
   (dependencies, build caches) and is not counted as the agent's edit; `teardown` cleans up after it; `env`
