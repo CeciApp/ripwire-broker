@@ -35,7 +35,10 @@ pub struct Settings {
 
 pub struct BrokerServer {
     settings: Settings,
-    broker: Mutex<Option<Arc<Broker>>>,
+    /// Set once, when ripwire first answers, and never replaced: read without any lock (D-148).
+    connected: std::sync::OnceLock<Arc<Broker>>,
+    /// Held while a connection is attempted, so concurrent calls make one attempt at a time.
+    connecting: Mutex<()>,
     last_connect_error: Mutex<Option<BrokerError>>,
     inflight: Arc<Inflight>,
 }
@@ -93,16 +96,15 @@ impl Inflight {
             .map(Value::Object)
             .unwrap_or(Value::Null);
         let key = call_key(&params.name, &arguments);
-        let id = {
-            let mut waiting = self.waiting.lock().unwrap();
-            let queue = waiting.get_mut(&key)?;
-            let id = queue.pop_front()?;
-            if queue.is_empty() {
-                // Keys hold task text: never keep one longer than its call (D-052).
-                waiting.remove(&key);
-            }
-            id
-        };
+        // The id moves from `waiting` to `running` under the `waiting` lock, which `cancel` takes
+        // first too: a cancellation never finds the call in neither (D-148).
+        let mut waiting = self.waiting.lock().unwrap();
+        let queue = waiting.get_mut(&key)?;
+        let id = queue.pop_front()?;
+        if queue.is_empty() {
+            // Keys hold task text: never keep one longer than its call (D-052).
+            waiting.remove(&key);
+        }
         let signal = Arc::new(Notify::new());
         if self.early.lock().unwrap().remove(&id) {
             signal.notify_one();
@@ -111,6 +113,7 @@ impl Inflight {
             .lock()
             .unwrap()
             .insert(id.clone(), signal.clone());
+        drop(waiting);
         Some((id, signal))
     }
 
@@ -119,13 +122,14 @@ impl Inflight {
     }
 
     fn cancel(&self, id: String) {
+        // `waiting` first, as in `start`: the call is in one of the two, never between them.
+        let waiting = self.waiting.lock().unwrap();
         if let Some(signal) = self.running.lock().unwrap().get(&id) {
             signal.notify_one();
             return;
         }
         // Keep an early cancel only for a call still waiting for its handler; a cancel for
         // a call that already finished (the usual race) is dropped, not stored forever.
-        let waiting = self.waiting.lock().unwrap();
         if waiting.values().any(|q| q.contains(&id)) {
             self.early.lock().unwrap().insert(id);
         }
@@ -137,6 +141,15 @@ impl Inflight {
             "tracked_calls": self.waiting.lock().unwrap().len() + self.running.lock().unwrap().len(),
             "early_cancels": self.early.lock().unwrap().len(),
         })
+    }
+}
+
+/// Removes a call from `Inflight::running` when dropped.
+struct Finish<'a>(&'a Inflight, String);
+
+impl Drop for Finish<'_> {
+    fn drop(&mut self) {
+        self.0.finish(&self.1);
     }
 }
 
@@ -153,7 +166,8 @@ impl BrokerServer {
     pub async fn start(settings: Settings) -> Self {
         let server = Self {
             settings,
-            broker: Mutex::new(None),
+            connected: std::sync::OnceLock::new(),
+            connecting: Mutex::new(()),
             last_connect_error: Mutex::new(None),
             inflight: Arc::default(),
         };
@@ -163,8 +177,12 @@ impl BrokerServer {
 
     /// The connected broker, connecting on demand while ripwire is unavailable (degraded mode).
     async fn broker(&self) -> Result<Arc<Broker>, BrokerError> {
-        let mut slot = self.broker.lock().await;
-        if let Some(b) = slot.as_ref() {
+        if let Some(b) = self.connected.get() {
+            return Ok(b.clone());
+        }
+        let _attempt = self.connecting.lock().await;
+        // Another call may have connected while this one waited.
+        if let Some(b) = self.connected.get() {
             return Ok(b.clone());
         }
         let connected = match RipwireUpstream::spawn(self.settings.upstream.clone()).await {
@@ -172,11 +190,7 @@ impl BrokerServer {
             Err(e) => Err(e.into()),
         };
         match connected {
-            Ok(b) => {
-                let b = Arc::new(b);
-                *slot = Some(b.clone());
-                Ok(b)
-            }
+            Ok(b) => Ok(self.connected.get_or_init(|| Arc::new(b)).clone()),
             Err(e) => {
                 *self.last_connect_error.lock().await = Some(e.clone());
                 Err(e)
@@ -190,12 +204,11 @@ impl BrokerServer {
     }
 
     async fn status_json(&self) -> Value {
-        // `broker()` holds this lock while it reconnects, up to the upstream timeout; the
-        // status never waits for that (RF-13, D-052).
-        let (connected, reconnecting) = match self.broker.try_lock() {
-            Ok(slot) => (slot.clone(), false),
-            Err(_) => (None, true),
-        };
+        // A connected broker is read without a lock. Otherwise `broker()` may be holding
+        // `connecting` while it reconnects, up to the upstream timeout; the status never waits
+        // for that (RF-13, D-052).
+        let connected = self.connected.get().cloned();
+        let reconnecting = connected.is_none() && self.connecting.try_lock().is_err();
         let mut status = match connected {
             Some(b) => serde_json::to_value(b.status().await).unwrap_or(Value::Null),
             None => {
@@ -205,7 +218,7 @@ impl BrokerServer {
                     "schema_version": SCHEMA_VERSION,
                     "offline": self.settings.broker.online.is_none(),
                     "telemetry": "none",
-                    "workspace": if self.settings.broker.redact_workspace { "<redacted>".to_string() } else { self.settings.broker.workspace.display().to_string() },
+                    "workspace": crate::broker::shown_workspace(&self.settings.broker.workspace, self.settings.broker.redact_workspace),
                     "upstream": {
                         "ripwire_version": self.settings.broker.ripwire_version,
                         "available": false,
@@ -471,6 +484,9 @@ impl ServerHandler for BrokerServer {
         let Some((id, cancelled)) = self.inflight.start(&params) else {
             return Ok(tool_result(self.dispatch(&params).await).into());
         };
+        // The call leaves `running` however this ends: answered, cancelled, dropped by the SDK
+        // or unwound by a panic (D-148).
+        let _finish = Finish(&self.inflight, id);
         // Dropping `dispatch` on cancellation stops the rest of its upstream work; the
         // broker records the call as `cancelled` (RF-14).
         let result = tokio::select! {
@@ -480,7 +496,6 @@ impl ServerHandler for BrokerServer {
                 message: "cancelled by the client".into(),
             }),
         };
-        self.inflight.finish(&id);
         Ok(tool_result(result).into())
     }
 

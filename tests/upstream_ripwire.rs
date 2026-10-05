@@ -204,3 +204,40 @@ async fn a_ripwire_over_its_memory_limit_is_killed_and_restarted() {
         "no hang"
     );
 }
+
+/// A tool result marked `isError` is ripwire saying no, not a payload (D-148): its text was parsed
+/// as if it were the answer.
+#[tokio::test]
+async fn a_tool_result_marked_as_an_error_is_a_refusal() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let fake = bin.path().join("erring-ripwire");
+    common::write_executable(
+        &fake,
+        r#"#!/usr/bin/env python3
+import json, sys
+if "--version" in sys.argv:
+    print("ripwire 0.6.4"); sys.exit(0)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    if msg.get("method") == "initialize":
+        result = {"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {}},
+                  "serverInfo": {"name": "fake", "version": "0"}}
+    elif msg.get("method") == "tools/list":
+        result = {"tools": [{"name": "explore", "inputSchema": {"type": "object"}}]}
+    else:
+        result = {"content": [{"type": "text", "text": "no such route"}], "isError": True}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"#,
+    );
+    let mut config = UpstreamConfig::new(ws.path());
+    config.binary = fake;
+    let up = RipwireUpstream::spawn(config).await.unwrap();
+
+    let answer = up.call("explore", json!({"task": "t"})).await;
+
+    assert_eq!(answer, Err(UpstreamError::Refused("no such route".into())));
+}

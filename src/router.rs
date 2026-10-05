@@ -153,12 +153,7 @@ const REVIEW_WORDS: &[&str] = &[
 
 /// Whether some entry of `words` names a word of `task`, by the rule of [`CHANGE_WORDS`]:
 /// never a match inside another word.
-fn has_any(task: &str, words: &[&str]) -> bool {
-    let lower = task.to_lowercase();
-    let tokens: Vec<&str> = lower
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
+fn has_any(tokens: &[&str], words: &[&str]) -> bool {
     let part = |entry: &str, token: &str| match entry.strip_suffix('$') {
         Some(word) => token == word,
         None => token.starts_with(entry),
@@ -171,10 +166,8 @@ fn has_any(task: &str, words: &[&str]) -> bool {
     })
 }
 
-fn has_word(task: &str, words: &[&str]) -> bool {
-    task.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|t| words.contains(&t))
+fn has_word(tokens: &[&str], words: &[&str]) -> bool {
+    tokens.iter().any(|t| words.contains(t))
 }
 
 pub fn classify(task: &str) -> Route {
@@ -184,19 +177,24 @@ pub fn classify(task: &str) -> Route {
             symbol: None,
         };
     }
-    if has_word(task, REVIEW_WORDS) {
+    let lower = task.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if has_word(&tokens, REVIEW_WORDS) {
         return Route {
             intent: Intent::Review,
             symbol: None,
         };
     }
-    if has_any(task, DOC_WORDS) && !has_any(task, CHANGE_WORDS) {
+    let change = has_any(&tokens, CHANGE_WORDS);
+    if !change && has_any(&tokens, DOC_WORDS) {
         return Route {
             intent: Intent::Docs,
             symbol: None,
         };
     }
-    let change = has_any(task, CHANGE_WORDS);
     let symbol = named_symbol(task);
     let intent = match (change, symbol.is_some()) {
         (true, _) => Intent::Change,
@@ -209,9 +207,8 @@ pub fn classify(task: &str) -> Route {
 /// Applies an explicit mode; `auto` classifies. Change keeps the named symbol, if any.
 pub fn route(task: &str, mode: crate::broker::Mode) -> Route {
     use crate::broker::Mode;
-    let auto = classify(task);
     match mode {
-        Mode::Auto => auto,
+        Mode::Auto => classify(task),
         Mode::Orient => Route {
             intent: Intent::Orient,
             symbol: None,
@@ -226,7 +223,7 @@ pub fn route(task: &str, mode: crate::broker::Mode) -> Route {
         },
         Mode::Change => Route {
             intent: Intent::Change,
-            symbol: auto.symbol,
+            symbol: classify(task).symbol,
         },
     }
 }

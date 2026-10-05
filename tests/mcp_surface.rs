@@ -519,6 +519,60 @@ fn the_status_answers_while_a_reconnect_hangs() {
     assert_eq!(status["upstream"]["reconnecting"], true, "{status}");
 }
 
+/// A connected broker is never reported as down (D-148). The status read the broker's slot with
+/// `try_lock`, which also fails during the brief lock every tool call takes, and then said
+/// `available: false, reconnecting: true`. Many calls interleaved with many status reads.
+#[test]
+fn a_connected_broker_is_never_reported_down_during_calls() {
+    let ws = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let ripwire = common::slow_ripwire(bin.path());
+    let mut broker = Raw::start(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--ripwire",
+        ripwire.to_str().unwrap(),
+    ]);
+    let rounds = 300;
+    for n in 0..rounds {
+        broker.request(
+            2 * n + 10,
+            "tools/call",
+            json!({"name": "context_for_task", "arguments": {"task": format!("task {n}"), "mode": "orient"}}),
+        );
+        broker.request(
+            2 * n + 11,
+            "resources/read",
+            json!({"uri": "ripwire-broker://status"}),
+        );
+    }
+
+    // Answers come in any order: keep them all by id.
+    let mut answers = std::collections::HashMap::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while answers.len() < 2 * rounds as usize {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let v = broker
+            .lines
+            .recv_timeout(left)
+            .expect("every request answers");
+        answers.insert(v["id"].as_i64().unwrap_or(-1), v);
+    }
+    let mut down = 0;
+    for n in 0..rounds {
+        let text = answers[&(2 * n + 11)]["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap();
+        let status: Value = serde_json::from_str(text).unwrap();
+        down += usize::from(status["upstream"]["available"] != true);
+    }
+
+    assert_eq!(
+        down, 0,
+        "{down} of {rounds} reads called a connected broker down"
+    );
+}
+
 // --- D-052 #9: the cancellation registry keeps nothing once calls are over ---
 
 #[test]

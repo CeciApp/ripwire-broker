@@ -555,6 +555,34 @@ async fn an_unknown_symbol_after_an_edit_is_a_limitation_not_a_failed_call() {
     }
 }
 
+/// Symbols past the checks one call makes are named, never dropped in silence (D-148): only the
+/// first five are checked, and the answer said nothing about the rest.
+#[tokio::test]
+async fn symbols_past_the_checks_of_one_call_are_named() {
+    let (b, fake, ws) = broker(edit_fake()).await;
+    common::write(ws.path(), "src/auth.py", "changed");
+    let symbols: Vec<String> = (1..=7).map(|n| format!("s{n}")).collect();
+    let req = EditRequest {
+        files: vec!["src/auth.py".into()],
+        symbols,
+        ..EditRequest::default()
+    };
+
+    let out = to_json(&b.context_after_edit(req).await.unwrap());
+
+    let checks = fake.called().iter().filter(|v| *v == "edit_check").count();
+    assert_eq!(checks, 5, "the bound holds");
+    let cut = out["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "symbols_truncated")
+        .unwrap_or_else(|| panic!("the skipped symbols are named: {out:#}"));
+    let detail = cut["detail"].as_str().unwrap();
+    assert!(detail.contains("s6") && detail.contains("s7"), "{detail}");
+    assert!(!detail.contains("s5"), "{detail}");
+}
+
 #[tokio::test]
 async fn after_an_edit_the_broken_contract_and_its_callers_are_reported() {
     let (b, fake, ws) = broker(edit_fake()).await;
@@ -1015,6 +1043,38 @@ async fn the_gate_summary_states_what_blocks_ready() {
         "every regression the summary counts is delivered"
     );
     assert!(summary.contains("1 missing co-change partner"), "{summary}");
+}
+
+/// A cut is declared only about content the answer carries (D-148): `item_truncated` was written
+/// before the session and the budget decided, so a body sent again as a short reference, or left
+/// out, still came with "content of X cut".
+#[tokio::test]
+async fn a_cut_is_declared_only_for_content_that_is_shown() {
+    let body = format!("def giant():\n{}", "    x = 1\n".repeat(2000));
+    let payload = format!(
+        r#"<ctx schema="ripwire.pack-task/v1"><sigs><d l="1" n="giant" p="src/giant.py" r="1">def giant():</d></sigs><bodies shown="1" total="1"><b t="fn" l="1" p="src/giant.py" n="giant"><![CDATA[{body}]]></b></bodies></ctx>"#
+    );
+    let (b, _fake, _ws) =
+        incremental_broker(FakeUpstream::new().answer_text("explore", &payload)).await;
+    let ask = || {
+        let mut req = TaskRequest::new("how does the giant thing work?");
+        req.budget_tokens = 50_000;
+        req
+    };
+    let first = to_json(&b.context_for_task(ask()).await.unwrap());
+    assert!(limitation_kinds(&first).contains(&"item_truncated".to_string()));
+
+    let again = to_json(&b.context_for_task(ask()).await.unwrap());
+
+    assert!(
+        again["items"][0].get("content").is_none_or(|c| c.is_null()),
+        "sent again as a reference: {again:#}"
+    );
+    assert!(
+        !limitation_kinds(&again).contains(&"item_truncated".to_string()),
+        "{:#}",
+        again["limitations"]
+    );
 }
 
 #[tokio::test]
@@ -3151,4 +3211,54 @@ async fn notes_and_memory_together_stay_inside_the_budget() {
         assert_eq!(env.budget.estimated_tokens, actual, "{budget}");
         assert!(env.provenance.memory.is_some());
     }
+}
+
+/// An empty task is invalid input, refused before ripwire is asked (D-148). The schema says
+/// `minLength: 1` but nothing enforced it, and ripwire's refusal became `upstream_refused`.
+#[tokio::test]
+async fn an_empty_task_is_invalid_input() {
+    for task in ["", "   \n"] {
+        let (b, fake, _ws) =
+            broker(FakeUpstream::new().answer("explore", "explore_export_auth")).await;
+
+        let err = b
+            .context_for_task(TaskRequest::new(task))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.error, "invalid_input", "{task:?}: {err:?}");
+        assert!(fake.called().is_empty(), "{task:?}: ripwire was asked");
+    }
+}
+
+/// A missing `affected` never decides the gate (D-013), so its limitation must not say the gate
+/// cannot conclude (D-148): only the tests it would have listed are missing.
+#[tokio::test]
+async fn a_missing_affected_never_says_the_gate_cannot_conclude() {
+    let (b, _fake, _ws) = broker(
+        FakeUpstream::new()
+            .answer("situational_awareness", "situational_awareness_files")
+            .answer("quality_delta", "quality_delta_clean")
+            .fail("affected", UpstreamError::Refused("no".into())),
+    )
+    .await;
+
+    let out = to_json(
+        &b.context_before_finish(FinishRequest::default())
+            .await
+            .unwrap(),
+    );
+
+    assert_ne!(
+        out["status"], "unknown",
+        "a missing affected never decides the gate"
+    );
+    let missing = out["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["source"]["verb"] == "affected")
+        .unwrap_or_else(|| panic!("{out:#}"));
+    let detail = missing["detail"].as_str().unwrap();
+    assert!(!detail.contains("cannot conclude"), "{detail}");
 }

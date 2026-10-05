@@ -58,22 +58,29 @@ struct Unfinished<'a> {
     finished: bool,
 }
 
+impl Unfinished<'_> {
+    /// The call's record after `took`, its spans and stages taken.
+    fn record(&self, outcome: &'static str, took: std::time::Duration) -> RequestRecord {
+        RequestRecord {
+            request_id: self.id,
+            tool: self.tool,
+            outcome,
+            total_us: took.as_micros() as u64,
+            upstream: std::mem::take(&mut *self.spans.lock().unwrap()),
+            stages: std::mem::take(&mut *self.stages.lock().unwrap()),
+        }
+    }
+}
+
 impl Drop for Unfinished<'_> {
     fn drop(&mut self) {
         if self.finished {
             return;
         }
-        let took = self.started.elapsed();
+        let record = self.record("cancelled", self.started.elapsed());
         let mut metrics = self.broker.metrics.lock().unwrap();
         metrics.cancelled(self.tool);
-        metrics.request(RequestRecord {
-            request_id: self.id,
-            tool: self.tool,
-            outcome: "cancelled",
-            total_us: took.as_micros() as u64,
-            upstream: std::mem::take(&mut *self.spans.lock().unwrap()),
-            stages: std::mem::take(&mut *self.stages.lock().unwrap()),
-        });
+        metrics.request(record);
     }
 }
 
@@ -221,13 +228,8 @@ impl std::fmt::Display for BrokerError {
 
 impl From<UpstreamError> for BrokerError {
     fn from(e: UpstreamError) -> Self {
-        let error = match e {
-            UpstreamError::Refused(_) => "upstream_refused",
-            UpstreamError::Timeout => "upstream_timeout",
-            UpstreamError::Unavailable(_) => "upstream_unavailable",
-        };
         Self {
-            error,
+            error: e.kind(),
             message: e.to_string(),
         }
     }
@@ -491,11 +493,7 @@ impl Broker {
             broker_version: env!("CARGO_PKG_VERSION"),
             schema_version: SCHEMA_VERSION,
             mcp_protocol: rust_mcp_sdk::schema::ProtocolVersion::latest().to_string(),
-            workspace: if self.redact_workspace {
-                "<redacted>".into()
-            } else {
-                self.workspace.root().display().to_string()
-            },
+            workspace: shown_workspace(self.workspace.root(), self.redact_workspace),
             offline: self.online.is_none(),
             telemetry: "none",
             upstream: UpstreamStatus {
@@ -512,15 +510,7 @@ impl Broker {
             }),
             summarizer: match &self.notes {
                 Some(engine) => engine.status(),
-                None => SummarizerStatus {
-                    enabled: false,
-                    program: None,
-                    generated: 0,
-                    cache_hits: 0,
-                    pending: 0,
-                    failures: 0,
-                    cached_notes: 0,
-                },
+                None => SummarizerStatus::default(),
             },
             online: self.online.as_ref().map(|engine| {
                 let (config, totals) = (engine.config(), engine.totals());
@@ -548,8 +538,6 @@ impl Broker {
         }
     }
 
-    /// `path` (absolute, or relative to the root) as workspace-relative, or `None` if it
-    /// resolves outside (CA-08).
     /// Every entry of the semantic cache as stored (CA-ONLINE-13): hex digest keys and
     /// validated probabilities only. Empty without `--online`.
     pub fn inspect_semantic_cache(&self) -> Vec<String> {
@@ -566,6 +554,8 @@ impl Broker {
         }
     }
 
+    /// `path` (absolute, or relative to the root) as workspace-relative, or `None` if it
+    /// resolves outside (CA-08).
     pub fn in_workspace(&self, path: &str) -> Option<String> {
         self.workspace.relative(path).ok()
     }
@@ -627,28 +617,18 @@ impl Broker {
             stages: stages.clone(),
             finished: false,
         };
-        let ctx = RequestCtx {
-            id,
-            spans: spans.clone(),
-            stages: stages.clone(),
-        };
+        let ctx = RequestCtx { id, spans, stages };
         let result = REQUEST.scope(ctx, inner).await;
         guard.finished = true;
-        let spans = std::mem::take(&mut *spans.lock().unwrap());
         let took = started.elapsed();
+        let outcome = match &result {
+            Ok(env) => env.status.as_str(),
+            Err(e) => e.error,
+        };
+        let record = guard.record(outcome, took);
         let mut metrics = self.metrics.lock().unwrap();
         metrics.tool(tool, took, &result);
-        metrics.request(RequestRecord {
-            request_id: id,
-            tool,
-            outcome: match &result {
-                Ok(env) => env.status.as_str(),
-                Err(e) => e.error,
-            },
-            total_us: took.as_micros() as u64,
-            upstream: spans,
-            stages: std::mem::take(&mut *stages.lock().unwrap()),
-        });
+        metrics.request(record);
         result
     }
 
@@ -710,6 +690,19 @@ impl Broker {
         if !symbols.is_empty() {
             push_once(&mut verbs, "edit_check");
         }
+        // The rest is named, never dropped in silence (D-148).
+        if let Some(rest) = req.symbols.get(symbols.len()..).filter(|r| !r.is_empty()) {
+            entries.push(normalize::limitation(
+                "edit_check",
+                "symbols_truncated",
+                format!(
+                    "checked the first {} of {} symbols; call again with the rest: {}",
+                    symbols.len(),
+                    req.symbols.len(),
+                    rest.join(", ")
+                ),
+            ));
+        }
         // A symbol ripwire refuses (the agent renamed or deleted it) is missing evidence, not a
         // failed call: the situation already fetched still answers. Only an unavailable
         // upstream fails the tool.
@@ -752,9 +745,7 @@ impl Broker {
                 Err(missing) => entries.push(missing),
             }
         }
-        let attention = entries
-            .iter()
-            .any(|e| matches!(e, Entry::Risk(_, r) if GATE_RISKS.contains(&r.kind)));
+        let attention = has_gate_risk(&entries);
         let status = if attention {
             Status::AttentionRequired
         } else {
@@ -795,7 +786,7 @@ impl Broker {
         let outcome = match &result {
             Ok(_) => "ok",
             Err(e) => {
-                let kind = BrokerError::from(e.clone()).error;
+                let kind = e.kind();
                 *self.last_error.lock().unwrap() = Some(kind);
                 kind
             }
@@ -889,8 +880,14 @@ impl Broker {
         }
         if !changed.is_empty() {
             verbs.push("affected");
+            // It never decides the gate (D-013): what goes missing is a list of tests, not a
+            // conclusion.
             match self
-                .evidence("affected", json!({"files": changed.join(",")}))
+                .evidence_or(
+                    "affected",
+                    json!({"files": changed.join(",")}),
+                    normalize::unchecked,
+                )
                 .await?
             {
                 Ok(p) => entries.extend(normalize::affected(&p)),
@@ -904,16 +901,8 @@ impl Broker {
                 }
             }
         }
-        let open_obligation = entries
-            .iter()
-            .any(|e| matches!(e, Entry::Risk(_, r) if GATE_RISKS.contains(&r.kind)));
-        let status = if regressions > 0 || (req.strict && minor > 0) || open_obligation {
-            Status::AttentionRequired
-        } else if unknown {
-            Status::Unknown
-        } else {
-            Status::Ready
-        };
+        let open_obligation = has_gate_risk(&entries);
+        let status = gate_status(regressions, minor, req.strict, open_obligation, unknown);
         let env = self.envelope(
             Shape {
                 tool: "context_before_finish",
@@ -941,6 +930,13 @@ impl Broker {
     /// §10). Memory only adds to the answer: it never fails it and never changes its status.
     async fn context_for_task_inner(&self, req: TaskRequest) -> Result<Envelope, BrokerError> {
         check_budget_at(req.budget_tokens, self.min_task_budget())?;
+        // The schema's `minLength: 1`, enforced: ripwire's refusal would read as `upstream_refused`.
+        if req.task.trim().is_empty() {
+            return Err(BrokerError {
+                error: "invalid_input",
+                message: "task is empty".into(),
+            });
+        }
         let recall = async {
             match &self.recall {
                 Some(r) => Some(r.read(&req.task).await),
@@ -1090,11 +1086,7 @@ impl Broker {
         };
         let provider = engine.config().provider.clone();
         if !verbs.contains(&"explore") {
-            let route = serde_json::to_value(intent)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default();
-            entries.push(online_merge::skipped(&route));
+            entries.push(online_merge::skipped(intent.as_str()));
             return (
                 entries,
                 Some(online_merge::provenance(&provider, engine.model(), None)),
@@ -1268,16 +1260,7 @@ impl Broker {
             suppress_seen,
             online,
         } = shape;
-        let lead = match intent {
-            Some(i) => serde_json::to_value(i)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default(),
-            None => serde_json::to_value(status)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default(),
-        };
+        let lead = intent.map_or(status.as_str(), Intent::as_str).to_string();
         let mut env = Envelope {
             schema_version: SCHEMA_VERSION,
             tool,
@@ -1309,21 +1292,12 @@ impl Broker {
                 already_delivered: 0,
             },
         };
-        let entries = normalize::cap_items(entries, self.max_item_tokens as usize * 4);
-        // With a summarizer, `add_notes` runs after this and always writes at least the record
-        // that notes did not fit. Holding that room back here is what keeps it from evicting an
-        // item whose body `attach_notes` has already sent to the local model (D-103).
-        let reserve = match self.notes.is_some() {
-            true => budget::notes_reserve(),
-            false => 0,
-        };
-        // The same for what a memory read writes after the entries are fitted.
-        let reserve = match self.recall.is_some() {
-            true => reserve + budget::memory_reserve(),
-            false => reserve,
-        };
+        let cap = self.max_item_tokens as usize * 4;
+        let entries = normalize::cap_items(entries, cap);
+        let reserve = self.reserve();
         if !self.incremental {
             budget::fill(&mut env, entries, reserve);
+            drop_unshown_cuts(&mut env, cap);
             let included = env.items.clone();
             return (env, included);
         }
@@ -1334,53 +1308,131 @@ impl Broker {
                 _ => None,
             })
             .collect();
-        let memory = self.session.lock().unwrap();
-        let mut entries = entries;
-        if suppress_seen {
-            let before = entries.len();
-            entries = entries
-                .into_iter()
-                .filter_map(|e| match e {
-                    Entry::Item(p, i) if memory.has(&session::item_fingerprint(&i)) => {
-                        Some(Entry::Item(p, session::reference(&i)))
-                    }
-                    Entry::Test(_, t) if memory.has(&session::test_fingerprint(&t)) => None,
-                    Entry::Risk(_, r)
-                        if !GATE_RISKS.contains(&r.kind)
-                            && memory.has(&session::risk_fingerprint(&r)) =>
-                    {
-                        None
-                    }
-                    other => Some(other),
-                })
-                .collect();
-            env.budget.already_delivered = before - entries.len();
-            let references = entries
-                .iter()
-                .filter(
-                    |e| matches!(e, Entry::Item(_, i) if i.why_included == session::SEEN_REFERENCE),
-                )
-                .count();
-            self.metrics.lock().unwrap().session_hits +=
-                (env.budget.already_delivered + references) as u64;
-        }
-        drop(memory);
+        let entries = match suppress_seen {
+            true => self.suppress_seen(&mut env, entries),
+            false => entries,
+        };
         budget::fill(&mut env, entries, reserve);
-        let included = env
-            .items
-            .iter()
-            .map(|i| {
-                originals
-                    .iter()
-                    .find(|o| {
-                        i.why_included == session::SEEN_REFERENCE
-                            && (&o.path, o.line, &o.symbol) == (&i.path, i.line, &i.symbol)
-                    })
-                    .unwrap_or(i)
-                    .clone()
+        drop_unshown_cuts(&mut env, cap);
+        let included = included(&env.items, &originals);
+        (env, included)
+    }
+
+    /// Room held back from the entries for what is written after them. With a summarizer,
+    /// `add_notes` always writes at least the record that notes did not fit; holding that room
+    /// back is what keeps it from evicting an item whose body `attach_notes` has already sent to
+    /// the local model (D-103). The same for what a memory read writes.
+    fn reserve(&self) -> u32 {
+        let notes = match self.notes.is_some() {
+            true => budget::notes_reserve(),
+            false => 0,
+        };
+        let memory = match self.recall.is_some() {
+            true => budget::memory_reserve(),
+            false => 0,
+        };
+        notes + memory
+    }
+
+    /// What this session already received becomes a short reference (an item) or goes (a test, a
+    /// risk that is not gate evidence); counted in `already_delivered` and in the session hits.
+    fn suppress_seen(&self, env: &mut Envelope, entries: Vec<Entry>) -> Vec<Entry> {
+        let memory = self.session.lock().unwrap();
+        let before = entries.len();
+        let entries: Vec<Entry> = entries
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Item(p, i) if memory.has(&session::item_fingerprint(&i)) => {
+                    Some(Entry::Item(p, session::reference(&i)))
+                }
+                Entry::Test(_, t) if memory.has(&session::test_fingerprint(&t)) => None,
+                Entry::Risk(_, r)
+                    if !GATE_RISKS.contains(&r.kind)
+                        && memory.has(&session::risk_fingerprint(&r)) =>
+                {
+                    None
+                }
+                other => Some(other),
             })
             .collect();
-        (env, included)
+        drop(memory);
+        env.budget.already_delivered = before - entries.len();
+        let references = entries
+            .iter()
+            .filter(|e| matches!(e, Entry::Item(_, i) if i.why_included == session::SEEN_REFERENCE))
+            .count();
+        self.metrics.lock().unwrap().session_hits +=
+            (env.budget.already_delivered + references) as u64;
+        entries
+    }
+}
+
+/// The workspace as the status shows it: the path, or `<redacted>` with `--redact-workspace`.
+pub fn shown_workspace(root: &std::path::Path, redact: bool) -> String {
+    match redact {
+        true => "<redacted>".into(),
+        false => root.display().to_string(),
+    }
+}
+
+/// The items as included, each short reference resolved back to the full item it stands for, so
+/// what is remembered is what the item was.
+fn included(items: &[Item], originals: &[Item]) -> Vec<Item> {
+    items
+        .iter()
+        .map(|i| {
+            originals
+                .iter()
+                .find(|o| {
+                    i.why_included == session::SEEN_REFERENCE
+                        && (&o.path, o.line, &o.symbol) == (&i.path, i.line, &i.symbol)
+                })
+                .unwrap_or(i)
+                .clone()
+        })
+        .collect()
+}
+
+/// The finish gate: attention for a quality regression (or, `strict`, a minor finding) or an open
+/// obligation; otherwise unknown when evidence is missing, else ready (CA-05, D-013).
+fn gate_status(
+    regressions: usize,
+    minor: usize,
+    strict: bool,
+    open: bool,
+    unknown: bool,
+) -> Status {
+    if regressions > 0 || (strict && minor > 0) || open {
+        Status::AttentionRequired
+    } else if unknown {
+        Status::Unknown
+    } else {
+        Status::Ready
+    }
+}
+
+/// Whether `entries` hold a risk that decides a gate's status.
+fn has_gate_risk(entries: &[Entry]) -> bool {
+    entries
+        .iter()
+        .any(|e| matches!(e, Entry::Risk(_, r) if GATE_RISKS.contains(&r.kind)))
+}
+
+/// Keeps an `item_truncated` limitation only for an item the answer still shows with content: the
+/// cut is made before the session and the budget decide, and a body sent as a short reference or
+/// left out has no cut to declare (D-148).
+fn drop_unshown_cuts(env: &mut Envelope, cap: usize) {
+    let shown: Vec<String> = env
+        .items
+        .iter()
+        .filter(|i| i.content.is_some())
+        .map(|i| normalize::cut_detail(i, cap))
+        .collect();
+    let before = env.limitations.len();
+    env.limitations
+        .retain(|l| l.kind != "item_truncated" || shown.contains(&l.detail));
+    if env.limitations.len() != before {
+        env.budget.estimated_tokens = budget::estimate_tokens(env);
     }
 }
 

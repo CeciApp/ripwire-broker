@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-04 19:40 | Achados baixos do núcleo MCP, em TDD: símbolos além do limite nomeados, corte declarado só sobre conteúdo mostrado, tarefa vazia recusada, status que não acusa queda com o broker conectado, `isError` do upstream como recusa, `affected` ausente sem dizer que o gate não conclui, cancelamento atômico e registro de chamadas com guarda de drop; a poda de sessões respeita o lock (CodeRabbit no PR #58); simplificações do `broker`, do `normalize` e do roteador | [D-148](#d-148--achados-baixos-do-núcleo-mcp) |
 | 2026-10-04 18:30 | Achados baixos da CLI, dos hooks, do instalador e do estado, em TDD: EPIPE no hook, relógio para trás, `--help` dentro da tarefa, números truncados, `serve --state-dir`, prazo do comando de versão, poda de sessões de 30 dias, hooks do instalador por programa, estado lido sem seguir link nem travar em FIFO, summarizer que escreve e lê junto com teto de 1 MiB, watcher que confere o início do processo, uma versão por `doctor`; código morto e simplificações da área | [D-147](#d-147--achados-baixos-da-cli-dos-hooks-e-do-estado) |
 | 2026-10-04 14:00 | Revisão de 2026-10-04: os cinco achados de maior impacto em produção corrigidos em TDD — leitura e hash do online no pool bloqueante, snapshot lido pelo arquivo verificado (TOCTOU), chave do provedor fora dos processos filhos, prazo de 5 s no `ripwire --version` e erros do worker de memória ditos uma vez no stderr | [D-146](#d-146--revisão-de-2026-10-04-os-cinco-de-maior-impacto) |
 | 2026-10-04 11:04 | Documentação sincronizada com o código depois da auditoria: status do `--memory` no PRD jev-mem, no README e no PRD principal; os seis braços do eval; o resumo com "found"; os tetos de `Retry-After`; o mapa de arquivos e a evidência do plano; a ordem do índice do changelog; o handoff | [D-145](#d-145--documentação-sincronizada-com-o-código-depois-da-auditoria) |
@@ -6485,4 +6486,77 @@ mesmo tempo, os limiares de tempo real ainda cedem. Na mesma tarde, o
 carga média 9; não falhou nas sete execuções seguintes.
 
 **Testes:** 702 → 717 no build padrão, 719 → 735 com `online` (gates locais verdes).
+
+## D-148 — Achados baixos do núcleo MCP
+
+**Data:** 2026-10-04 19:40.
+
+**Contexto:** a segunda área dos grupos 3 e 4 (D-147): `broker`, `mcp`, `upstream`, `normalize`,
+`budget` e o roteador. Um commit por achado, teste vermelho visto falhar, mutações derrubadas.
+
+**Corrigidos:**
+
+- **Símbolos além do limite:** `context_after_edit` verifica no máximo cinco símbolos e descartava o
+  resto em silêncio. Agora a limitação `symbols_truncated` os nomeia.
+- **Corte declarado sobre conteúdo não mostrado:** `item_truncated` era escrito antes de a sessão e
+  o orçamento decidirem. Um corpo depois enviado como referência curta, ou deixado de fora, ainda
+  vinha com "content of X cut" e ocupava orçamento. Agora a limitação só fica para um item mostrado
+  com conteúdo.
+- **Tarefa vazia:** o schema diz `minLength: 1`, mas nada o aplicava; o ripwire recusava e a resposta
+  virava `upstream_refused`. Agora é `invalid_input`, sem chamada.
+- **Status que acusava queda com o broker conectado:** o status lia o broker com `try_lock`, e toda
+  chamada de ferramenta toma o mesmo lock. Com chamadas em voo, 297 de 300 leituras diziam
+  `available: false, reconnecting: true`. O broker conectado foi para um `OnceLock`, lido sem lock;
+  um mutex à parte só serializa as tentativas de conexão.
+- **`isError` do upstream:** um `CallToolResult` marcado `isError` era lido como resposta. Agora é
+  `UpstreamError::Refused`. O ripwire 0.6.4 usa erros JSON-RPC, então o defeito era latente.
+- **`affected` ausente:** a limitação dizia que o gate não podia concluir, mas o `affected` nunca
+  decide o gate (D-013). Agora diz que falta essa verificação.
+- **Cancelamento entre `waiting` e `running`** (sem teste vermelho): o id saía de um mapa e entrava
+  no outro com o lock solto no meio, e um cancelamento nessa janela se perdia. Agora a passagem é
+  feita sob o lock de `waiting`, que o `cancel` também toma primeiro. A janela é de microssegundos,
+  e pela costura pública não há teste determinístico (D-094).
+- **Registro de chamadas em voo** (grupo 3; sem teste vermelho): uma chamada descartada pelo SDK ou
+  desfeita por pânico deixava sua entrada em `running`. Uma guarda de drop agora a remove em todo
+  caminho.
+- **Poda de sessões e lock** (comentário do CodeRabbit no PR #58): uma sessão retomada depois de 30
+  dias segura o lock enquanto carrega o estado. Uma sessão nova que podasse nesse instante apagava o
+  estado antes, e a retomada perdia o seu. Agora a poda só apaga o estado e o lock de uma sessão
+  enquanto segura esse lock, e pula a sessão cujo lock está seguro. Um lock órfão antigo também sai.
+
+**Simplificações:**
+
+- **`normalize`:**
+  - `unparsed(verb)` no lugar de seis cópias;
+  - `inferred()` para `route_uncertain` e `symbol_not_found`;
+  - `GraphGaps` no lugar de um `serde_json::Value` montado só para ser lido de volta;
+  - `recall` sem `remove(0)` quadrático;
+  - `cap_items` corta no lugar em vez de copiar.
+- **`broker`:**
+  - `Intent::as_str`, `UpstreamError::kind`, `has_gate_risk`, `SummarizerStatus::default()` e
+    `shown_workspace` (a regra de redação estava em dois lugares);
+  - um construtor só para o registro de uma requisição;
+  - o `envelope_full` dividido em `reserve`, `suppress_seen` e `included`;
+  - o status do gate em `gate_status`.
+- **Roteador:** a tarefa é minúscula e dividida uma vez (eram até quatro), e só se classifica nos
+  modos `auto` e `change`.
+- **Documentação:** o comentário de `in_workspace` voltou ao lugar; `Role::{Test, Config, Risk}`
+  dizem que são reservados no schema v1 (PRD §10.1).
+
+**Não feitos, com o motivo:**
+
+- **`unwrap` de mutex dentro de `Drop` (B11):** sem fonte de pânico nas seções críticas, é defesa em
+  profundidade sem defeito demonstrado, a escolha que o mantenedor já recusou no D-094.
+- **Reservas que ocupariam todo o orçamento (B8):** nos pisos reais sobram itens (cerca de 174
+  tokens com `--memory`, 67 só com o summarizer), e o envelope já diz `truncated` com `next_step`.
+- **`add_notes` despejando itens na ordem errada (B9):** inalcançável. A reserva de notas (D-103) é
+  medida pela forma mais larga do que `add_notes` escreve, então ele sempre cabe ao tirar notas.
+- **`max_edit_checks` e `max_item_tokens` nunca configurados:** são campos do `BrokerConfig`, e o
+  PRD os descreve como limites configuráveis.
+- **API pública usada só por testes:** com a convenção de testar por costuras públicas (D-094), o
+  que os testes exercitam é público.
+- **`"implement"` repetido no roteador:** já tinha saído na reescrita do D-144.
+- **`call()`:** é o ponto único de conversão de erro, usado por todos os verbos.
+
+**Testes:** 717 → 724 no build padrão, 735 → 742 com `online`. Nos gates locais, três testes de tempo real do `shell_edits` falharam no build `online` com o `syspolicyd` do macOS a 95% de CPU (ele verifica cada executável novo que os testes criam); passaram em duas repetições.
 
