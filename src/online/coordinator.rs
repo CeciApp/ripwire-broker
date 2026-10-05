@@ -123,6 +123,8 @@ pub struct Discovery {
     pub failures: BTreeMap<&'static str, usize>,
     /// The category of the latest failure, in the order they settled.
     pub last_failure: Option<&'static str>,
+    /// The provider refused the credential: no later stage sends anything (D-149).
+    pub auth_refused: bool,
     pub unfinished: usize,
     pub limit_reached: bool,
     /// Batches never sent because a source changed after it was read.
@@ -603,6 +605,10 @@ impl OnlineEngine {
         }
         let (requests, too_large) = request::batches(self.model(), query, stage, send);
         disc.too_large += too_large.len();
+        if disc.auth_refused {
+            disc.unfinished += requests.len();
+            return out;
+        }
         if *left == 0 {
             disc.limit_reached = true;
             disc.unfinished += requests.len();
@@ -668,6 +674,7 @@ impl OnlineEngine {
         if report.stop == Some(super::scheduler::Stop::RequestLimit) {
             disc.limit_reached = true;
         }
+        disc.auth_refused |= report.stop == Some(super::scheduler::Stop::Auth);
         let mut cache = self.cache.lock().unwrap();
         for done in report.results {
             let req = &done.request;

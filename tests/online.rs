@@ -949,6 +949,27 @@ async fn the_last_error_is_the_latest_failure() {
     );
 }
 
+/// A refused credential stops discovery, not just the stage that met it (D-149): after a 401 on
+/// the lookahead, the selection stage still sent its batches with the same key.
+#[tokio::test]
+async fn a_refused_credential_stops_the_later_stages() {
+    let classifier =
+        budget_is_evidence().fail_path_times("src/budget.py", ClassifyError::Auth(401), 1);
+    let s = online_in(with_siblings(), explore(), classifier).await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    assert!(
+        s.classifier
+            .asked(SemanticStage::SourceSelection)
+            .is_empty(),
+        "nothing more is sent with a refused key"
+    );
+}
+
 #[tokio::test]
 async fn lookahead_admits_eligible_siblings_of_admitted_planner_paths() {
     let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;
