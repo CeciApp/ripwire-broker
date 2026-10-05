@@ -104,7 +104,6 @@ pub struct FileEvidence {
     pub admission: Scored,
     pub decision: FileDecision,
     pub units: Vec<UnitEvidence>,
-    pub location_only: bool,
     /// Found by the lookahead beside a ripwire candidate, not by ripwire.
     pub lookahead: bool,
 }
@@ -418,7 +417,6 @@ impl OnlineEngine {
                 admission: scored,
                 decision,
                 units: vec![],
-                location_only: snap.location_only(),
                 lookahead,
             });
         }
