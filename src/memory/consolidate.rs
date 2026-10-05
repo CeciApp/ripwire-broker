@@ -590,7 +590,7 @@ pub async fn round(
     cfg: &Config,
     now_ms: u64,
 ) -> Result<Option<Round>, Refusal> {
-    let state = store.load()?;
+    let state = store.blocking(|s| s.load()).await?;
     if !due(&state, now_ms) {
         return Ok(None);
     }
@@ -627,7 +627,7 @@ pub async fn round(
     let batches = wire::batches(&cfg.model, &json!({}), "pairs", groups).unwrap_or_default();
     for batch in batches {
         // `forget --all` meanwhile: nothing more goes out.
-        if store.is_revoked() {
+        if store.blocking(|s| s.is_revoked()).await {
             break;
         }
         // Within a request, a pair is `pairs[local]`: ask again with that index.
@@ -679,12 +679,12 @@ pub async fn round(
         .collect();
     if let Some(summarizer) = &cfg.summarizer {
         // Read again: a parent forgotten while the classifier answered is not summarized.
-        let fresh = store.load()?;
+        let fresh = store.blocking(|s| s.load()).await?;
         let intact =
             |id: &str, hash: &str| fresh.nodes.get(id).is_some_and(|r| r.content_hash == hash);
         for d in decided.iter_mut().filter(|d| authorizes_note(&d.decision)) {
             let p = &d.decision;
-            if store.is_revoked()
+            if store.blocking(|s| s.is_revoked()).await
                 || !intact(&p.pair.first, &p.hashes.0)
                 || !intact(&p.pair.second, &p.hashes.1)
             {
@@ -695,6 +695,9 @@ pub async fn round(
     }
     // The cursor moves past the pairs that were asked, whatever the answers were.
     let cursor = last_sent.map(|g| asked[g].key());
-    round.decided = store.commit_round(state.enriched, cursor, decided, &cfg.model, now_ms)?;
+    let (enriched, model) = (state.enriched, cfg.model.clone());
+    round.decided = store
+        .blocking(move |s| s.commit_round(enriched, cursor, decided, &model, now_ms))
+        .await?;
     Ok(Some(round))
 }

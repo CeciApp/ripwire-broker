@@ -494,8 +494,9 @@ async fn read_with(
     if anchors.is_empty() {
         return out;
     }
-    // There is no decision cache yet: with no request allowed, nothing can be validated.
-    if cfg.request_limit == 0 {
+    // There is no decision cache yet: with no request allowed, nothing can be validated. One is
+    // not enough either: routing would spend it, and scoring would find the limit (D-150).
+    if cfg.request_limit < 2 {
         out.degraded = true;
         out.stop = StopReason::RequestLimit;
         return out;

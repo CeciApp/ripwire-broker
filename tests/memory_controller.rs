@@ -1675,3 +1675,82 @@ fn serve_reads_the_spool_of_the_state_dir_it_is_given() {
         "the server never incorporated the spool under --state-dir"
     );
 }
+
+/// A clock that, the first time it is read, takes the workspace's remote slot, as a `serve`
+/// starting right after a drain's first check would.
+struct SlotTaker {
+    store: Arc<Store>,
+    held: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+impl ripwire_broker::memory::time::Clock for SlotTaker {
+    fn now_ms(&self) -> u64 {
+        let mut held = self.held.lock().unwrap();
+        if held.is_none() {
+            *held = Some(self.store.remote_slot().unwrap().expect("free at first"));
+        }
+        ripwire_broker::memory::time::SystemClock.now_ms()
+    }
+}
+
+/// A drain whose slot was taken after its first check says busy, not empty, while jobs remain
+/// (D-150): it only probed the slot, released it at once, and read the worker's "nothing" as an
+/// empty queue.
+#[tokio::test]
+async fn a_drain_that_loses_the_slot_says_busy_not_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let records: Vec<Record> = (1..=3).map(|n| rec(n, &format!("note {n}"), &[])).collect();
+    let store = Arc::new(stored(dir.path(), &records));
+    let w = Worker::new(store.clone(), Scripted::new(vec![]), config(0));
+    let clock = SlotTaker {
+        store: store.clone(),
+        held: std::sync::Mutex::new(None),
+    };
+
+    let drained = runtime::drain(&store, &w, &clock, 20, runtime::DRAIN_DEADLINE)
+        .await
+        .unwrap();
+
+    assert_eq!((drained.jobs, drained.stop), (0, DrainStop::Busy));
+}
+
+/// The worker never holds the async thread while the store waits for a lock (D-150): those
+/// waits sleep for up to 2 s, and the worker shares the server's runtime. A task beside it keeps
+/// running while it waits on a writer held elsewhere.
+#[test]
+fn the_worker_waits_for_the_store_off_the_async_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
+    let w = Worker::new(store.clone(), Scripted::new(vec![]), config(0));
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .open(store.dir().join("lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let ticks = runtime.block_on(async {
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker = tokio::spawn({
+            let ticks = ticks.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+        let _ = w.run_once(1_000).await;
+        ticker.abort();
+        ticks.load(std::sync::atomic::Ordering::Relaxed)
+    });
+    drop(held);
+
+    assert!(
+        ticks >= 50,
+        "the runtime stood still for the lock wait: {ticks} ticks"
+    );
+}

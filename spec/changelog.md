@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-04 22:15 | Achados baixos da memória, primeira parte, em TDD: gasto de leitura que não chegou à quota gravado pela leitura seguinte, leitura com uma requisição sem gastá-la, arquivos de lease e temporários de escritor morto apagados com o job e o nó, `memory drain` que perde o slot diz ocupado, worker esperando o store no pool bloqueante (grupo 3), id adulterado recusado sem bloquear os outros jobs | [D-150](#d-150--achados-baixos-da-memória-primeira-parte) |
 | 2026-10-04 21:25 | Achados baixos do modo online, em TDD: metades de um lote obsoleto contadas uma vez, `Retry-After` além de `u64` como espera máxima, ganho além do ripwire sem os arquivos descartados, `last_error` como a falha mais recente, credencial recusada que para a descoberta inteira, mais arquivos de segredo fora do envio; métricas `jev_*` com `--memory` documentadas; um mapa FIFO limitado para os dois caches, o `discover` em etapas | [D-149](#d-149--achados-baixos-do-modo-online) |
 | 2026-10-04 19:40 | Achados baixos do núcleo MCP, em TDD: símbolos além do limite nomeados, corte declarado só sobre conteúdo mostrado, tarefa vazia recusada, status que não acusa queda com o broker conectado, `isError` do upstream como recusa, `affected` ausente sem dizer que o gate não conclui, cancelamento atômico e registro de chamadas com guarda de drop; a poda de sessões respeita o lock (CodeRabbit no PR #58); simplificações do `broker`, do `normalize` e do roteador | [D-148](#d-148--achados-baixos-do-núcleo-mcp) |
 | 2026-10-04 18:30 | Achados baixos da CLI, dos hooks, do instalador e do estado, em TDD: EPIPE no hook, relógio para trás, `--help` dentro da tarefa, números truncados, `serve --state-dir`, prazo do comando de versão, poda de sessões de 30 dias, hooks do instalador por programa, estado lido sem seguir link nem travar em FIFO, summarizer que escreve e lê junto com teto de 1 MiB, watcher que confere o início do processo, uma versão por `doctor`; código morto e simplificações da área | [D-147](#d-147--achados-baixos-da-cli-dos-hooks-e-do-estado) |
@@ -6624,4 +6625,71 @@ vermelho visto falhar, mutações derrubadas.
   estética ou micro-otimização sem medição.
 
 **Testes:** 724 → 731 no build padrão, 742 → 749 com `online` (gates locais verdes).
+
+## D-150 — Achados baixos da memória, primeira parte
+
+**Data:** 2026-10-04 22:15.
+
+**Contexto:** a quarta área dos grupos 3 e 4 (D-147): `src/memory/`. O mantenedor pediu o handoff
+atualizado e os PRs abertos mesclados no meio do trabalho, e esta parte fecha com sete achados; os
+restantes da memória e a área do eval seguem em outro registro. Um commit por achado, teste vermelho
+visto falhar, mutações derrubadas.
+
+**Corrigidos:**
+
+- **Gasto de leitura que não chegou à quota:** quando o lock da quota ficava ocupado durante toda a
+  espera, ou a gravação falhava, a entrada ficava em memória pela vida do processo. Este processo
+  seguia descontando, mas os outros, e ele mesmo depois de reiniciar, não viam o gasto, e o teto de
+  24 horas compartilhado era subcontado. Agora o gasto que falhou é marcado como tal, e a próxima
+  leitura o soma à sua própria gravação.
+- **Leitura com uma requisição:** uma leitura precisa de duas para entregar algo (roteamento e
+  pontuação). Com uma, gastava o roteamento e parava no limite sem nada para mostrar. Isso
+  acontecia com `--memory-read-request-limit 1`, com um `--jev-request-limit` pequeno ou com uma quota
+  que deixa uma tentativa. Agora não pergunta nada e diz que está degradada, como com zero. O teste
+  antigo `request_limit` fixava o defeito (1 requisição, 0 memórias) e passou a medir a parada no
+  limite de 2.
+- **Arquivos de lease:** `leases/<id>.lock` ficava para sempre, depois de `Done`, `forget`,
+  retenção e `forget --all`. O disco crescia, e um id esquecido continuava como nome de arquivo.
+  Agora sai quando o job não pode mais ser tomado: terminado, falho ou fora do estado.
+- **Temporários de escritor morto:** um snapshot ou uma geração temporária deixada por um escritor
+  que morreu guarda texto de memória, e só o `forget --all` apagava os de snapshot. `forget <id>` e a
+  retenção também os apagam agora, sob o lock de escrita que todo escritor desses arquivos segura. O
+  temporário da quota, gravado sob outro lock, só sai se for antigo.
+- **`memory drain` que perde o slot:** o drain conferia o slot remoto com um temporário que o
+  soltava na hora. Se o `serve` o tomasse entre jobs, o worker dizia "nada", e o drain respondia
+  `Empty` com jobs pendentes. Agora um "nada" confere o slot de novo, e um slot seguro por outro
+  processo é `Busy`. O teste usa o relógio que o drain recebe para tomar o slot depois da sonda.
+- **Worker esperando o store na thread assíncrona** (grupo 3): os locks do store esperam com
+  `std::thread::sleep` por até 2 s, e as gravações sincronizam arquivos e diretórios. O worker as
+  fazia na thread que divide com o servidor (tomar, terminar e gravar um job, cobrar a quota,
+  carregar e gravar uma rodada de consolidação). No teste vermelho, um timer de 10 ms não avançou
+  nenhuma vez em 2 s. O `Store` é um diretório e seus limites, então virou `Clone`, e
+  `Store::blocking` roda cada chamada numa cópia no pool bloqueante, sem mudar assinaturas públicas.
+  A conferência de revogação antes de cada nota derivada continua por nota.
+- **Id adulterado:** `Record::parse` não confere o `node_id`, e um spool adulterado podia pôr um id
+  como `../escape` nos jobs. Todo `lease_next` passava a falhar com `InvalidId`, e o enriquecimento
+  parava. Agora o ingest recusa um registro cujo id não nomeia o próprio arquivo de spool, e o
+  `lease_next` pula um id inválido de um estado antigo.
+
+**Também nesta sessão:**
+
+- **PRs mesclados:** o #60 (dependabot) e o #61 (o prompt da revisão de Rust, o prompt de CI/CD
+  revalidado e o plano de CI/CD do mantenedor).
+- **Branches apagados:** os locais e remotos criados há mais de 10 horas. Os quatro que não eram
+  ancestrais do `master` tinham PRs mesclados por squash (#28, #29, #45 e #46).
+- **Teste intermitente no CI:** `bookkeeping_writes_keep_the_snapshot_warm` falhou uma vez no job
+  `online` do #60, com `memory_incomplete` por prazo. O teste dá 100 ms à leitura e passou na
+  reexecução.
+
+**Seguem para o próximo registro:**
+
+- **Memória:**
+  - o ingest preso perto do teto do snapshot;
+  - o `memory retry` que não alcança jobs pendentes com `not_before`;
+  - as somas da quota que estouram num `quota.json` corrompido;
+  - o pânico do worker fora do pool bloqueante;
+  - o código morto e as simplificações da área.
+- **Eval:** a área inteira.
+
+**Testes:** 731 → 738 no build padrão, 749 → 756 com `online` (gates locais verdes).
 

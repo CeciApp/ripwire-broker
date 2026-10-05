@@ -305,6 +305,14 @@ pub async fn drain(
                 });
             }
             Ok(Ok(Some(_))) => jobs += 1,
+            // "Nothing" is also what a worker says when another process took the slot after the
+            // check above: that is a busy drain, not an empty queue (D-150).
+            Ok(Ok(None)) if store.remote_slot()?.is_none() => {
+                return Ok(Drained {
+                    jobs,
+                    stop: DrainStop::Busy,
+                });
+            }
             Ok(Ok(None)) => {
                 let stop = idle(worker, clock, until).await?;
                 return Ok(Drained { jobs, stop });

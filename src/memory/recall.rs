@@ -8,7 +8,8 @@ use super::store::{State, Unavailable, Version};
 use super::time::{Clock, SystemClock};
 use crate::model::{Basis, Limitation, Source};
 use crate::online::reader::WorkspaceReader;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 type Loaded = Option<Result<Arc<State>, Unavailable>>;
@@ -44,9 +45,14 @@ fn revalidation(deadline: std::time::Duration) -> std::time::Duration {
 struct Spent {
     attempts: u32,
     questions: u32,
-    /// Set once they are written to the store's quota.
-    written: Arc<OnceLock<()>>,
+    /// [`WRITING`], then [`WRITTEN`] or [`FAILED`].
+    state: Arc<AtomicU8>,
 }
+
+const WRITING: u8 = 0;
+const WRITTEN: u8 = 1;
+/// The quota could not be written (its lock stayed busy, an I/O error): the next charge carries it.
+const FAILED: u8 = 2;
 
 pub struct Recall {
     setup: ReadSetup,
@@ -141,7 +147,7 @@ impl Recall {
     /// What reads of this process sent and the store's quota does not have yet.
     fn in_flight(&self) -> (u32, u32) {
         let mut spent = self.spent.lock().unwrap();
-        spent.retain(|s| s.written.get().is_none());
+        spent.retain(|s| s.state.load(Ordering::Acquire) != WRITTEN);
         spent
             .iter()
             .fold((0, 0), |(a, q), s| (a + s.attempts, q + s.questions))
@@ -161,23 +167,37 @@ impl Recall {
         )
     }
 
-    /// Charges what `read` sent to the quota, off the answer's path.
+    /// Charges what `read` sent to the quota, off the answer's path, with what earlier reads
+    /// could not write: a busy lock or an I/O error delays a spend, never loses it (D-150).
     fn charge(&self, now_ms: u64, read: &Read) {
-        if read.requests == 0 {
-            return;
+        let (mut attempts, mut questions) = (read.requests as u32, read.questions as u32);
+        let state = Arc::new(AtomicU8::new(WRITING));
+        {
+            let mut spent = self.spent.lock().unwrap();
+            spent.retain(|s| match s.state.load(Ordering::Acquire) {
+                FAILED => {
+                    attempts += s.attempts;
+                    questions += s.questions;
+                    false
+                }
+                _ => true,
+            });
+            if attempts == 0 && questions == 0 {
+                return;
+            }
+            spent.push(Spent {
+                attempts,
+                questions,
+                state: state.clone(),
+            });
         }
-        let (attempts, questions) = (read.requests as u32, read.questions as u32);
-        let written = Arc::new(OnceLock::new());
-        self.spent.lock().unwrap().push(Spent {
-            attempts,
-            questions,
-            written: written.clone(),
-        });
         let store = self.setup.store.clone();
         tokio::task::spawn_blocking(move || {
-            if store.spend(now_ms, attempts, questions).is_ok() {
-                let _ = written.set(());
-            }
+            let done = match store.spend(now_ms, attempts, questions) {
+                Ok(()) => WRITTEN,
+                Err(_) => FAILED,
+            };
+            state.store(done, Ordering::Release);
         });
     }
 
