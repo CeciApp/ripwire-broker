@@ -1,446 +1,284 @@
 # Testes de propriedade e CI/CD — ripwire-broker
 
-> Este prompt foi escrito originalmente **sem acesso ao `src/`** e marcava suas lacunas como
-> `inferred`, `UNKNOWN` e `SPECULATING`. Todas foram preenchidas pela leitura do código. Os fatos
-> abaixo foram verificados contra a árvore — as constantes por `grep`, e cada caminho dito
-> "alcançável" por uma sonda que compila `use`/referência de fora do crate. Não são inferências
-> do `Cargo.toml`.
+Revalidado em **2026-10-04** contra o workspace local, branch `fix/lows-online`,
+HEAD `dc56f0a`, incluindo os arquivos presentes no diretório de trabalho. Não é uma
+verificação do `master` remoto. O arquivo `/Users/aquental/Downloads/ci-cd.md` foi
+usado como referência secundária; os contratos abaixo vêm dos fontes e da configuração.
 
-## Regra
+## Escopo e retificações
 
-Escreva testes de propriedade **contra as assinaturas e os invariantes desta página**. Não
-invente módulos, tipos, nomes de ferramenta ou regras de PRD que não estejam aqui. Se precisar
-de algo que não está descrito, diga qual arquivo/símbolo falta em vez de supor.
+Esta especificação orienta a manutenção dos testes de propriedade (PBT) e do CI.
+O plano incremental está em [ci-cd-plan.md](../plan/ci-cd-plan.md).
+A proposta histórica [proposta-pbt-e-ci-cd.md](../plan/proposta-pbt-e-ci-cd.md)
+registra as sete fatias já entregues em D-107–D-113; não devem ser reimplementadas.
 
-## Contexto
+Na versão anterior, os três marcadores de incerteza apareciam na introdução histórica,
+e a seção de visibilidade repetia o marcador de desconhecimento. Não havia uma lista
+restante de pendências etiquetadas: havia afirmações desatualizadas tratadas como fatos.
+Esta revisão substitui essas afirmações por evidência e distingue comportamento existente,
+requisito futuro e verificação externa.
 
-- **Crate:** `ripwire-broker` 0.1.0, `edition = "2024"`, MIT. Pacote único, sem workspace.
-- **Toolchain:** **fixada em `rust-toolchain.toml` (canal `1.98.1`, com `clippy` e `rustfmt`).**
-  Não é preciso propor MSRV — ele já existe e o CI deve usá-lo.
-- **Alvos de build (confirmados via `cargo metadata`):**
-  - `lib` → `src/lib.rs` (nome do crate: `ripwire_broker`)
-  - `bin` → `src/main.rs` (nome: `ripwire-broker`)
-  - `example` → `examples/jev_record.rs` (imprime o corpus `prompts/v1`, uma requisição JSON por
-    linha, para gravação ao vivo sem crate de rede no build) e `examples/spike.rs` (medições de
-    tamanho e latência)
-  - 12 alvos de teste de integração em `tests/` (listados adiante)
-- **Dependências (autoritativas, do `Cargo.toml`):**
-  `rust-mcp-sdk = "=2.0.0"` (`default-features = false`; features `server`, `client`, `macros`,
-  `stdio`), `async-trait` 0.1, `serde` 1 + derive, `serde_json` 1, `sha2` 0.10, `ignore` 0.4,
-  `tokio-util` 0.7, `tokio` 1 (`rt-multi-thread`, `macros`, `time`, `sync`, `process`, `io-util`).
-  Opcionais atrás da feature `online`: `secrecy` 0.10, `reqwest` 0.12 (`rustls-tls`, `http2`,
-  `default-features = false`).
-- **Features:** `default = []` (**tem de continuar sem pilha de rede — CA-10**);
-  `online = ["dep:secrecy", "dep:reqwest"]`.
-- **Dev-dependencies hoje:** `tokio` (`test-util`), `tempfile` 3. **Sem `proptest`.**
-- **Runtime:** tokio, assíncrono.
-- **Host de CI:** GitHub Actions (`.github/workflows/rust.yml`).
+| Afirmação anterior | Retificação e evidência |
+| --- | --- |
+| `markup` e `budget` privados; sem `proptest` | Ambos são `pub mod` em `src/lib.rs`; `proptest = "1.11.0"` está em `Cargo.toml`. |
+| Toolchain fixada equivale a MSRV declarado | `rust-toolchain.toml` fixa `1.98.1`; não há `package.rust-version`. Não há MSRV declarado. |
+| Um binário, 12 alvos de integração | `cargo metadata --offline --locked --no-deps` identifica dois binários e 23 alvos de integração. |
+| CI mínimo; faltam deny, Dependabot e lints | Esses controles já existem, descritos adiante. |
+| Nenhuma propriedade implementada | Há propriedades em `props`, `props_fs`, `broker` e `online_scheduler`, inclusive para memória. |
+| `pub mod` implica teste inline | Exportar módulo não cria teste inline. Não foram encontrados `#[cfg(test)]` ou `mod tests` em `src/`. |
+| Propriedades absolutas de lotes, segredo e hashes | Os contratos abaixo corrigem a ordem dos lotes, a exceção de tamanho, o marcador de redação e o alcance dos testes de hash. |
+| Proteção de branch ausente e revisão obrigatória por implementar | D-107 registra checks `default`/`online` com `strict` e decisão de não exigir aprovação humana. Estado remoto exige consulta própria. |
 
-## O que o sistema faz
+## Configuração atual
 
-Servidor MCP local que reduz a superfície do [Ripwire](https://github.com/redhat-et/ripwire)
-(33 verbos) a **três ferramentas** com orçamento de tokens, deduplicação, procedência e
-limitações preservadas. Local, offline e somente-leitura por padrão.
+Fontes: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `src/lib.rs`, `src/main.rs`
+e `src/bin/ripwire-eval.rs`.
 
-```text
-agente ⇄ stdio ⇄ ripwire-broker ⇄ stdio ⇄ ripwire <workspace> --mcp
-```
+- Pacote único `ripwire-broker` 0.1.0, edition 2024, MIT; sem seção de workspace.
+- Toolchain `1.98.1`, componentes `clippy` e `rustfmt`. Usar essa configuração no CI;
+  não inventar nem anunciar um MSRV com base nela.
+- Biblioteca `ripwire_broker`; binários `ripwire-broker` (default-run) e `ripwire-eval`;
+  exemplos `jev_record` e `spike`. Os alvos são descobertos pelo Cargo.
+- Única feature explícita: `online = ["dep:secrecy", "dep:reqwest"]`.
+  Não existe uma linha `default = []`; sem seleção de features, `online` fica desligada.
+- Dependências diretas: `futures-util` 0.3 (`std`, sem defaults), `rust-mcp-sdk = "=2.0.0"`
+  (`server`, `client`, `macros`, `stdio`, sem defaults), `async-trait` 0.1,
+  `serde` 1 (`derive`), `serde_json` 1, `sha2` 0.10, `ignore` 0.4, `tokio-util` 0.7,
+  `tokio` 1 (`rt-multi-thread`, `macros`, `time`, `sync`, `process`, `io-util`),
+  `unicode-width` 0.2 e `libc` 0.2. Opcionais: `secrecy` 0.10 e `reqwest` 0.12
+  (`rustls-tls`, `http2`, sem defaults).
+- Dev-dependencies: `tokio` com `test-util`, `h2` 0.4, `tempfile` 3 e `proptest` 1.11.0.
+  Esses números são requisitos do manifesto; as versões resolvidas são as do lockfile.
+- `libc` é dependência direta usada para flags de abertura de arquivos; seu comentário
+  sobre não introduzir crate nova refere-se ao grafo transitivo preexistente.
+- `#![forbid(unsafe_code)]` já existe na biblioteca e no binário principal;
+  `#![deny(clippy::print_stdout, clippy::dbg_macro)]` já existe na biblioteca.
+  Esses atributos não se propagam automaticamente ao crate root de `ripwire-eval`.
 
-- **Ferramentas publicadas:** `context_for_task`, `context_after_edit`, `context_before_finish`.
-  Um recurso: `ripwire-broker://status` (só dados operacionais — contagens, durações e
-  categorias de erro; nunca prompt, código ou caminho).
-- **Envelope:** `schema_version = "ripwire-broker.context/v1"` (`src/model.rs`), com `items`,
-  `tests`, `risks`, `limitations`, `notes`, `provenance` e `budget`. Todo texto de repositório
-  vive em `content.untrusted_repository_data` — é dado, nunca instrução.
-- **Fluxo de uma chamada:** `mcp` (fachada do SDK) → `broker` (núcleo) → `router` (intenção
-  determinística) → `upstream` (cliente MCP do processo ripwire) → `normalize` (payload → entradas)
-  → `dedup` → `budget` (corte por orçamento) → envelope.
-- **Subsistemas opcionais:** `notes` (modelo local por subprocesso, para notas arquiteturais) e
-  `online` (classificador semântico remoto, só com `--online`).
-- **Comandos de um disparo além do `serve`:** `hook`, `hook-log`, `prompt`, `doctor`, `install`,
-  e os internos `__supervise` / `__watch` (limite de memória do ripwire).
+## Produto e fronteiras
 
-## Visibilidade dos módulos — a restrição que decide o plano
+Servidor MCP por stdio: agente → broker → processo `ripwire <workspace> --mcp`.
+`src/mcp.rs` publica `context_for_task`, `context_after_edit`, `context_before_finish`
+e o recurso operacional `ripwire-broker://status`. O envelope usa
+`model::SCHEMA_VERSION = "ripwire-broker.context/v1"` e contém itens, testes, riscos,
+limitações, notas, memórias, procedência e orçamento. Conteúdo de fonte é dado não confiável.
 
-Isto era `UNKNOWN` no prompt original e é o fato mais importante para o trabalho: **os módulos
-com as funções puras mais atraentes para PBT são privados** e não são alcançáveis de `tests/`.
+O núcleo em `src/broker.rs` usa roteamento, upstream, normalização, deduplicação e orçamento.
+O adaptador semântico online enriquece `context_for_task`; memória acrescenta coleta,
+persistência, recuperação e processamento em segundo plano quando habilitada.
+Em `serve`, `--memory` implica `--online`; **em `hook`, `--memory` apenas publica localmente**.
+O build default não liga o cliente HTTP (CA-10); isso não é uma sandbox de rede para
+subprocessos nem uma proibição de download de dependências durante o CI.
 
-| Módulo | Visibilidade | Consequência para PBT |
+`src/cli.rs` reconhece `serve`, `hook`, `hook-log`, `hook-stats`, `prompt`, `doctor`,
+`install`, `statusline`, `memory`, além de `__supervise` e `__watch` internos.
+`ripwire-eval` oferece `check`, `validate`, `run`, `report`; execuções reais de agentes
+não fazem parte do CI de propriedades.
+
+## Visibilidade e decisão de testes
+
+A fonte de autoridade é `src/lib.rs`, complementada por `src/online/mod.rs`.
+
+| Superfície | Situação e decisão |
+| --- | --- |
+| `markup`, `budget` | Públicos, documentados como internos sem promessa de estabilidade. Usar as funções acessíveis já existentes. |
+| `bounded`, `fifo`, `dedup`, `normalize`, `router` | Privados. Manter privados e testar comportamento por `Broker` + `FakeUpstream`. |
+| Demais módulos declarados em `src/lib.rs` | `pub mod`, incluindo memória, eval, statusline, estado, sessão, workspace e worktree; visibilidade do símbolo também deve ser conferida. |
+| `online::coordinator` | Privado; `OnlineConfig`, `OnlineEngine`, `OnlineTotals` reexportados. |
+| `online::merge` | `pub(crate)`. |
+| `online::credential`, `online::jev` | Públicos apenas com `cfg(feature = "online")`; módulos puros online compilam no default. |
+| Fingerprints e `reference` de `session`, `SessionMemory::{has,remember}` | `pub(crate)`; testar pela sessão/broker. |
+| `Snapshot.text` | Campo privado; construir snapshot real em tempdir e acessar por métodos públicos. |
+
+`budget::fill` é declarado `pub`, mas seu argumento usa `normalize::Entry`, cujo módulo
+é privado. Portanto P0.11 continua pela costura pública. `estimate_tokens` e `add_memories`
+são utilizáveis diretamente. Não é necessário promover mais módulos ou criar testes inline.
+
+## Constantes e limites confirmados
+
+| Fonte | Valores |
+| --- | --- |
+| `src/broker.rs` | `MIN_BUDGET_TOKENS = 256`, `MIN_ONLINE_BUDGET_TOKENS = 512`, `MAX_BUDGET_TOKENS = 100_000`; padrões 2500/1500/1800 para task/after-edit/before-finish; `max_item_tokens = 800`. |
+| `src/broker.rs` | `MIN_RIPWIRE_VERSION = (0,6,4)`; versão ilegível passa em `check_version`. |
+| `src/broker.rs` | `GATE_RISKS = ["cochange_missing", "contract_change"]`: exceção à supressão de sessão, não promessa de caber em qualquer orçamento. |
+| `src/online/decision.rs` | Admissão estrita `p > 0.25`; seleção estrita `p > 0.50`; `(0.25,0.50]` vira pista de leitura. |
+| `src/online/request.rs` | 128 perguntas, 38.000 bytes de JSON, até 8 unidades em seleção; 14 KiB de texto por lote com exceção de unidade única descrita em P0.4. |
+| `src/online/reader.rs` | Preview 16 KiB, lookahead 4 KiB, chunk 3 KiB, unidade 24 KiB, location-only acima de 1 MiB, leitura máxima 8 MiB. |
+| `src/markup.rs` | `MAX_DEPTH = 64`. |
+| `src/notes.rs` | `PROMPT_VERSION = "notes/v1"`, grupos 3, `MAX_EVIDENCE_CHARS = 2000`, nota 600 caracteres, cache 500 entradas. |
+| `src/online/cache.rs`, `src/online/prompt.rs` | `POLICY_VERSION = "policy/v1"`, prompt `VERSION = "v1"`, cache 4000 entradas. |
+| `src/session.rs`, `src/metrics.rs` | Histórico de fingerprints 5000; requisições recentes 32. |
+| `src/budget.rs` | Memória: até 3 itens, 600 tokens, 20% do orçamento solicitado e somente o espaço restante. |
+
+A allowlist `REQUIRED_VERBS` contém `explore`, `from_trace`, `find_symbol`, `fetch_body`,
+`impact`, `memory_recall`, `situational_awareness`, `edit_check`, `affected`, `quality_delta`.
+Não inclui escrita nem `quality_baseline`.
+
+`budget::estimate_tokens` serializa JSON compacto e usa `s.len().div_ceil(4)` em bytes;
+falha de serialização retorna `u32::MAX`. Não é contagem de tokens de um modelo.
+`MAX_EVIDENCE_CHARS` é o nome da constante: `notes::evidence` compara `String::len()`
+em bytes e permite a primeira linha mesmo acima do limiar. Não usar esse nome como
+prova de um teto absoluto de caracteres.
+
+## Contratos P0 e cobertura existente
+
+Preservar os identificadores históricos. Priorizar os controles P0.7, P0.5, P0.12,
+P0.1, P0.2 e P0.13; estender testes existentes somente onde falta uma asserção.
+
+| Item | Contrato revalidado | Evidência de teste existente |
 | --- | --- | --- |
-| `workspace`, `session`, `notes`, `model`, `metrics`, `state`, `cli`, `broker`, `mcp`, `upstream`, `online`, `summarizer`, `supervise`, `doctor`, `install`, `local`, `hook` | `pub mod` | alcançável de `tests/` |
-| **`normalize`, `router`, `markup`, `budget`, `dedup`** | **`mod` (privado)** | **não alcançável de `tests/`** |
-| `online::coordinator` | `mod` privado (reexporta `OnlineConfig`, `OnlineEngine`, `OnlineTotals`) | só pelos tipos reexportados |
-| `online::merge` | `pub(crate)` | não alcançável |
-| `online::credential`, `online::jev` | `pub mod` com `#[cfg(feature = "online")]` | só no build `online` |
-| `session::{item,test,risk,note}_fingerprint`, `session::reference`, `SessionMemory::{has,remember}` | `pub(crate)` | não alcançável |
-| `Snapshot.text` | campo privado | `units()` exige um `Snapshot` real, via `WorkspaceReader::snapshot` num tempdir |
-
-**Decida e declare explicitamente** qual caminho tomar para os privados, porque a escolha tem
-custo em cada direção:
-
-1. promover a `pub` (ou `pub(crate)` + reexport) o que o PBT precisa — muda a superfície pública;
-2. testar através das costuras públicas (`Broker` com um `FakeUpstream`) — propriedade mais fraca
-   e mais lenta, mas sem mexer na API;
-3. `#[cfg(test)] mod tests` dentro de `src/` — **o repositório não tem nenhum, por convenção
-   deliberada**, e um teto no `Inflight` já foi revertido justamente para preservá-la
-   (`D-093` → `D-094`). Não escolha esta sem dizer que está quebrando a convenção.
-
-**`markup::parse` é o caso mais urgente e é privado.** Ele lê a saída XML-ish do ripwire, ou seja,
-entrada de fora do processo, e tinha **dois panics** por fatiamento fora de limite e em fronteira
-de caractere (`D-091`). É o alvo número um de `proptest` sobre `&str` arbitrário, e hoje só é
-alcançável indiretamente, alimentando um payload por um `FakeUpstream`.
-
-## Invariantes reais, com as constantes do código
-
-Números do código, não do PRD. Use-os nas propriedades.
-
-**Orçamento e envelope** (`src/broker.rs`, `src/budget.rs`)
-- `MIN_BUDGET_TOKENS = 256`; `MIN_ONLINE_BUDGET_TOKENS = 512` (piso do `context_for_task` num
-  processo com `--online`, D-072).
-- Estimativa de tokens = `len(JSON) / 4`, arredondando para cima.
-- `max_item_tokens` padrão 800 (teto por item, `× 4` em bytes).
-- Padrões: `context_for_task` 2500, `context_after_edit` 1500, `context_before_finish` 1800.
-- `GATE_RISKS = ["cochange_missing", "contract_change"]` — nunca suprimidos, mesmo em sessão
-  incremental (CA-05).
-- `MIN_RIPWIRE_VERSION = (0, 6, 4)`; uma versão ilegível **passa**.
-- `REQUIRED_VERBS`: 10 verbos somente-leitura, que são também a allowlist.
-  Os verbos de escrita e `quality_baseline` são deliberadamente ausentes.
-
-**Limiares do classificador** (`src/online/decision.rs`) — **estritos**
-- `ADMISSION = 0.25` (admite com `p > 0.25`), `SELECTION = 0.50` (seleciona com `p > 0.50`).
-- Igual ao limiar **não** passa. `None` é `Unknown`, **nunca** zero e nunca `false`.
-- `file_decision`: um arquivo em fragmentos fica com a maior nota conhecida, e só é rejeitado se
-  **todos** os fragmentos foram avaliados.
-
-**Limites de requisição** (`src/online/request.rs`)
-- `MAX_QUESTIONS = 128`, `MAX_REQUEST_BYTES = 38_000`,
-  `MAX_EVIDENCE_UNITS = 8`, `EVIDENCE_BATCH_BYTES = 14 KiB`.
-
-**Leitura do workspace** (`src/online/reader.rs`)
-- `PREVIEW_BYTES = 16 KiB`, `LOOKAHEAD_PREVIEW_BYTES = 4 KiB`, `CHUNK_BYTES = 3 KiB`,
-  `MAX_UNIT_BYTES = 24 KiB`, `LOCATION_ONLY_BYTES = 1 MiB`, `MAX_READ_BYTES = 8 MiB`.
-- Motivos de inelegibilidade (enum `Ineligible`, 12 variantes): `outside`, `sensitive_name`,
-  `hidden`, `dependency_or_build`, `symlink`, `not_regular`, `unreadable`, `ignored`, `too_large`,
-  `binary`, `not_utf8`, `private_key`.
-
-**Notas** (`src/notes.rs`)
-- `PROMPT_VERSION = "notes/v1"`, `MAX_GROUPS = 3`, `MAX_EVIDENCE_CHARS = 2000`,
-  `MAX_NOTE_CHARS = 600`.
-
-**Versões que entram em chave de cache**
-- `online::prompt::VERSION = "v1"`, `online::cache::POLICY_VERSION = "policy/v1"`.
-
-**Métricas** (`src/metrics.rs`): `RECENT_REQUESTS = 32`.
-
-## Superfície P0 — confirmada, com assinaturas
-
-Não é mais especulação. Cada item traz onde está e o que provar.
-
-**P0.1 — O guarda do workspace nunca deixa escapar da raiz** *(alcançável)*
-`ripwire_broker::workspace::Workspace::{relative, check_symbol}` (`src/workspace.rs`).
-`relative(&self, path: &str) -> Result<String, String>` resolve `.`/`..` lexicalmente, recusa
-absolutos de fora e symlinks que saem da raiz, e trata caminhos inexistentes pelo ancestral
-existente mais próximo. Propriedade: para **qualquer** string, ou é `Err`, ou o `Ok(rel)`
-concatenado à raiz permanece dentro da raiz canônica. `check_symbol` aplica a mesma regra à parte
-de arquivo de um seed `@ARQUIVO:LINHA`.
-*Oráculo:* comparar com `Path::canonicalize` quando o caminho existe.
-
-**P0.2 — Política de elegibilidade e o crate `ignore`** *(alcançável, precisa de tempdir)*
-`ripwire_broker::online::reader::WorkspaceReader::{snapshot, files_in, is_fresh}`.
-`snapshot` checa cada componente do caminho: nome sensível, oculto, diretório de
-dependência/build, symlink (em **todo** componente), regular, tamanho, ignorado, binário, UTF-8 e
-marcador de chave privada. Propriedades: nenhum arquivo inelegível é lido; um arquivo ignorado por
-`.gitignore`/`.ignore` nunca vira `Snapshot`; `is_fresh` é falso após qualquer mudança de bytes.
-*Atenção:* o `.ignore` da raiz do repositório reabre `graft/` para busca — não confunda com
-política do broker.
-
-**P0.3 — Unidades de evidência cobrem o texto e respeitam os limites** *(alcançável via tempdir)*
-`ripwire_broker::online::reader::units(&Snapshot, &[u64]) -> Vec<Unit>`.
-Propriedades: as faixas de bytes são **contíguas, não se sobrepõem e cobrem todo o texto** (exceto
-`location_only`, que não gera unidade); cada unidade é alinhada a linha; nenhuma passa de
-`MAX_UNIT_BYTES`; `start_line`/`end_line` são 1-based inclusivos e consistentes com os bytes; uma
-linha maior que `MAX_UNIT_BYTES` é cortada em fronteira de caractere; uma unidade começa em cada
-linha de símbolo informada.
-
-**P0.4 — Lotes de requisição respeitam todos os limites e preservam a ordem** *(alcançável, puro)*
-`ripwire_broker::online::request::{build, request_bytes, batches}`.
-Propriedades: para qualquer `Vec<StateItem>`, todo lote tem `≤ MAX_QUESTIONS` perguntas e
-`≤ MAX_REQUEST_BYTES` de JSON; num lote de `source_selection`, `≤ MAX_EVIDENCE_UNITS` unidades e
-`≤ EVIDENCE_BATCH_BYTES` de texto; a **concatenação dos lotes mais os `too_large` é exatamente a
-entrada, na ordem**; `request_bytes` é **igual** ao `len` do JSON de `build` (já existe teste de
-exemplo — a versão de propriedade é a que vale).
-
-**P0.5 — Validação de resposta do classificador** *(alcançável, puro)*
-`ripwire_broker::online::response::parse_answers(model, ids, body) -> Result<Vec<Option<f64>>, InvalidResponse>`.
-Propriedades sobre bytes/JSON arbitrários: nunca entra em panic; probabilidade ausente, não-finita
-ou fora de `[0,1]` vira `None` — **nunca é truncada para dentro da faixa nem lida como `false`**;
-modelo diferente do pinado → `WrongModel`; id não perguntado → `UnknownQuestion`, invalidando a
-resposta **inteira**; o vetor de saída tem o mesmo tamanho e ordem de `ids`.
-
-**P0.6 — Limiares estritos** *(alcançável, puro)*
-`ripwire_broker::online::decision::{admit, select, file_decision}`. Propriedades: monotonicidade em
-`p`; igualdade ao limiar não passa; `None` nunca se torna `0.0`; `file_decision` devolve `Unknown`,
-não `Rejected`, se algum fragmento não foi avaliado.
-
-**P0.7 — Redação e limite de texto remoto** *(alcançável, puro)*
-`ripwire_broker::online::redact::remote_text(text, secret, max) -> String`.
-Propriedades: saída só com ASCII imprimível e espaço; `len ≤ max`; **nunca contém o segredo**,
-para qualquer `text` e qualquer `secret` não vazio; o fatiamento nunca quebra fronteira de
-caractere.
-
-**P0.8 — Chaves de cache mudam se e somente se a decisão muda** *(alcançável, puro)*
-`ripwire_broker::online::cache::key(&KeyParts)` e `ripwire_broker::notes::key(model_id, scope, evidence)`.
-Ambas usam sha2 com prefixo de comprimento por parte. Propriedades: mudar **qualquer** parte muda a
-chave; partes diferentes não colidem por concatenação (o prefixo de comprimento existe para isso —
-prove com pares como `("ab","c")` vs `("a","bc")`); a chave é estável entre execuções.
-
-**P0.9 — Saneamento de nota** *(alcançável, puro)*
-`ripwire_broker::notes::sanitize(&str) -> String`. Propriedades: sem caracteres de controle exceto
-`\n`; sem sequências de escape de terminal (CSI e OSC); **contagem de caracteres** `≤ MAX_NOTE_CHARS`
-(não bytes); idempotente; nunca entra em panic com UTF-8 arbitrário.
-`ripwire_broker::notes::scope(path)` e `groups(&[Item])`: no máximo `MAX_GROUPS` grupos, na ordem do
-primeiro item.
-
-**P0.10 — O parser da linha de comando é puro e total** *(alcançável)*
-`ripwire_broker::cli::parse(Vec<String>) -> Result<Command, String>`. O módulo declara "parsing é
-puro; nada aqui toca o disco". Propriedades: nunca entra em panic com `argv` arbitrário; toda
-mensagem de erro contém o `USAGE`; ida-e-volta dos argumentos de `serve`; flags `--jev-*` sem
-`--online` são erro; `--online` fora do `serve` é erro.
-
-**P0.11 — Invariantes do orçamento** *(só pela costura pública)*
-`budget` é privado; exercite por `Broker::context_for_task` com `FakeUpstream`.
-Propriedades: `budget.shown + budget.omitted` é igual ao total de entradas não-limitação;
-`estimated_tokens ≤ requested_tokens`, **a menos que** só restem limitações (que nunca são
-cortadas); `truncated` é verdadeiro se e somente se `omitted > 0`; `next_step` existe se e somente
-se `truncated`; limitações nunca são descartadas.
-
-**P0.12 — O leitor tolerante nunca entra em panic** *(hoje só indireto — ver acima)*
-`markup::parse(&str) -> Option<Node>`. Propriedade: para **qualquer** `&str`, devolve `Some`/`None`
-sem panic e sem laço infinito. Historicamente falso (`D-091`). Exige decidir a visibilidade.
-
-## Superfície P1
-
-**P1.1 — Retry-After** `ripwire_broker::online::retry_after::parse(value, now)`: nunca entra em
-panic; só segundos e IMF-fixdate são aceitos; data no passado dá `Duration::ZERO`; datas inválidas
-(`31 Feb`, hora 24) dão `None`.
-
-**P1.2 — Ordenação dos candidatos** `ripwire_broker::online::ranked_paths(...)`: documentos são
-excluídos; a ordem é `(melhor prioridade, ordem do ripwire)`; caminhos são distintos; `lines`
-ordenadas e sem repetição.
-
-**P1.3 — Escalonador** `ripwire_broker::online::scheduler::Scheduler` com um `FakeClassifier`
-(já existe em `tests/common/classifier.rs`): nunca mais de `max_in_flight` em voo; `request_limit`
-nunca é excedido contando tentativas; ids sobrevivem a respostas fora de ordem; nunca há deadlock
-ao dividir um lote.
-
-**P1.4 — Isolamento da feature** Mais compilação que PBT: o build `default` não pode referenciar
-`reqwest`/`secrecy`. **Já existe** o teste `the_build_has_no_network_stack` em
-`tests/mcp_surface.rs`. Não duplique — no máximo estenda.
-
-## Rejeitar por padrão
-
-- Conformidade de protocolo do `rust-mcp-sdk` (não reimplementamos JSON-RPC).
-- Sessão MCP stdio ao vivo como PBT (lenta, e testa o SDK).
-- Comportamento de `reqwest`, TLS, DNS. **Nenhum teste de propriedade toca a rede.**
-- Internos de `serde`, `sha2`, `ignore`.
-- "não entra em panic" como **única** asserção — aceitável apenas em P0.12 e P0.5, onde a
-  totalidade *é* a propriedade, e ainda assim acompanhada de asserções de forma.
-- Reproduzir o corpus congelado de prompts como PBT: `prompts_v1_are_frozen_for_*`,
-  `the_live_recording_still_matches_prompts_v1` e `the_recorded_live_answers_parse_in_question_order`
-  (em `tests/online_units.rs`) são testes-golden **de propósito**. Mudar o texto tem de quebrá-los.
-
-## Cobertura atual — o PBT precisa somar, não repetir
-
-`cargo test --all-targets`: **234 passam, 2 ignorados.** Com `--features online`: **247 passam,
-4 ignorados.** Nenhum teste inline em `src/`.
-
-| Alvo | default | `--features online` | Costura |
-| --- | --- | --- | --- |
-| `tests/broker.rs` | 52 | 52 | núcleo `Broker` com payloads gravados |
-| `tests/cli.rs` | 37 | 37 | linha de comando; `parse` puro e execuções e2e do binário |
-| `tests/hooks.rs` | 17 | 17 | eventos de host → broker → saída |
-| `tests/mcp_surface.rs` | 11 | 13 | o binário como servidor MCP por stdio |
-| `tests/notes.rs` | 19 | 19 | notas com um `FakeSummarizer` |
-| `tests/online.rs` | 42 (+1 ign.) | 42 (+1 ign.) | adaptador online ponta a ponta, sem rede |
-| `tests/online_units.rs` | 24 | 24 | partes puras do online |
-| `tests/online_scheduler.rs` | 18 | 18 | escalonador com classificador falso |
-| `tests/online_protocol.rs` | — | 11 | protocolo HTTP em loopback |
-| `tests/online_live.rs` | — | 0 (+2 ign.) | provider real |
-| `tests/summarizer.rs` | 5 (+1 ign.) | 5 (+1 ign.) | modelo local por subprocesso |
-| `tests/upstream_ripwire.rs` | 9 | 9 | processo ripwire real |
-
-**Ignorados, e como habilitar** (não os ligue no CI de PR):
-- `tests/online_live.rs` (2) — `#[ignore]`, exigem `RIPWIRE_BROKER_JEV_API_KEY` e a feature
-  `online`: `cargo test --features online --test online_live -- --ignored`.
-- `tests/summarizer.rs` (1) — exige `RIPWIRE_BROKER_TEST_MODEL` (modelo local real).
-- `tests/online.rs::overhead_of_batching_and_merge` (1) — medição, roda com
-  `--release ... -- --ignored --nocapture`.
-
-**Auxiliares já disponíveis em `tests/common/`** — reaproveite em vez de recriar:
-`FakeUpstream` (ripwire roteirizado, com fixtures gravadas, sequências, travas e falhas),
-`FakeClassifier` + `Counters`, `FakeSummarizer` (com trava, sem tempo real),
-`sample_repo()`, `slow_ripwire()`, `flaky_ripwire()`, `write_executable()`, `fixture()`,
-`jev_corpus::requests()`.
-
-`write_executable()` existe por um motivo que importa no CI: no Linux, escrever um script
-enquanto outra thread faz `fork` faz o filho herdar o descritor e o `exec` falhar com
-**ETXTBSY**. Isso já derrubou uma execução de CI (`D-088`). Se você gerar executáveis num teste de
-propriedade, use esse auxiliar.
-
-## Segurança — o que aqui é propriedade de segurança, não higiene
-
-Este crate tem um modelo de ameaça explícito: ele lê texto de repositório e saída de processo
-alheio, e promete não vazar conteúdo nem executar o que lê. Quatro dos P0 **são controles de
-segurança**, e devem ser tratados como tal ao priorizar:
-
-- **P0.1 e P0.2 fuzzam uma fronteira de segurança.** O guarda de workspace (RF-02, CA-08) e a
-  política de elegibilidade são o que impede path traversal e o envio de arquivo sensível. Uma
-  propriedade que falha ali é vulnerabilidade, não bug de formatação.
-- **P0.12 e P0.5 são disponibilidade.** O broker é um servidor de vida longa lendo stdout do
-  ripwire e resposta de classificador. Panic em chamada de ferramenta é negação de serviço a
-  partir de entrada de fora do processo — e `markup::parse` já teve dois (`D-091`). "Não entra em
-  panic" aqui é a propriedade, não uma asserção fraca.
-- **P0.7 é confidencialidade.** `redact::remote_text` é a última barreira antes de texto remoto
-  chegar a status, log ou agente. A propriedade "nunca contém o segredo, para qualquer entrada"
-  é o controle.
-
-**P0.13 — Texto de repositório não pode fechar o bloco que o embrulha** *(alcançável, novo)*
-`ripwire_broker::local::{CONTEXT_OPEN, CONTEXT_CLOSE}` são `pub`, e `model::Envelope` tem todos os
-campos `pub`, então dá para gerar envelopes arbitrários com `proptest`. O comando `prompt` embrulha
-o envelope em `<ripwire-broker-context untrusted="true">…</ripwire-broker-context>` e escapa `<`/`>`
-como `<`/`>` justamente para que conteúdo de repositório não possa fechar o bloco antes
-da hora (injeção de prompt, D-052). Propriedade: para **qualquer** envelope, incluindo um cujo
-`untrusted_repository_data` contenha literalmente `</ripwire-broker-context>`, a serialização
-escapada não contém `CONTEXT_OPEN` nem `CONTEXT_CLOSE`. Existe um teste de exemplo para um payload
-hostil em `tests/cli.rs`; a versão de propriedade é a que fecha a classe.
-
-### O próprio suíte de testes precisa ser seguro
-
-Propriedades que geram caminhos estão fuzzando um guarda de traversal. Se o guarda tiver um
-defeito, um teste descuidado escreve ou apaga fora do lugar.
-
-- **Raiz sempre em `tempfile::TempDir`.** Nunca a raiz do repositório, nunca `$HOME`, nunca um
-  caminho vindo de variável de ambiente.
-- **Nenhuma escrita ou remoção com caminho gerado** fora do tempdir. Em particular, nada de
-  `fs::remove_dir_all` com entrada de `proptest`.
-- **Nunca execute conteúdo gerado.** `write_executable()` existe para os fixtures do suíte; não o
-  alimente com bytes gerados.
-- **Limite os tamanhos gerados.** `MAX_READ_BYTES` é 8 MiB e `LOCATION_ONLY_BYTES` é 1 MiB.
-  Estratégia sem teto estoura a memória do runner. Gere arquivos pequenos (na ordem de dezenas de
-  KiB) e cubra os limiares de tamanho com poucos casos dirigidos, não com `proptest`.
-- **`.proptest-regressions/` é entrada versionada.** O prompt manda versioná-la, e isso está certo
-  — mas revise cada arquivo antes de commitar. Vale a mesma regra do corpus do Jev: sintético,
-  sem caminho real e sem nada com cara de credencial.
-- **Nenhuma propriedade toca a rede.** Não habilite a feature `online` no job de propriedades: a
-  superfície pura de `online::*` compila no build default e não precisa dela.
-
-### Fixtures e corpus gravados
-
-`tests/fixtures/` tem 21 arquivos, incluindo `jev/live_v1.json`, uma gravação real do provider. Ela
-já se limita a "digests, status, shape and probabilities", a partir de um corpus **sintético**
-(`tests/common/jev_corpus.rs`, texto inventado, nunca lido de um workspace). Hoje nenhuma fixture
-contém string com cara de credencial — verificado. Mantenha assim, e prenda isso no CI: uma
-gravação futura que caia direto do provider é o caminho mais provável de um segredo ou de código
-real entrar no repositório.
-
-## Forma exigida do CI
-
-O workflow atual (`.github/workflows/rust.yml`) é mínimo: um job `build` em `ubuntu-latest` com
-quatro passos — `cargo build`, `cargo test`, e os mesmos dois com `--features online`. **Sem
-`fmt`, sem `clippy`, sem `nextest`, sem cache, sem `audit`/`deny` — e sem nenhum dos
-endurecimentos abaixo.** Preencher essas lacunas faz parte da entrega.
-
-### Jobs
-
-- **PR, só features default:** `cargo fmt --all --check`, `cargo clippy --all-targets -D warnings`,
-  `nextest` (unitários + propriedade). O build default **tem de continuar sem rede** (CA-10).
-- **Job separado:** `--features online` (clippy + nextest). **Não pode ser o único job.**
-- Usar a toolchain de `rust-toolchain.toml` (1.98.1); não escolher outra no workflow.
-- Filtro do `nextest` para que os testes de propriedade sejam visíveis e executáveis
-  separadamente dos testes de exemplo.
-- Adicionar `proptest` como dev-dependency; **versionar `.proptest-regressions/`**; documentar
-  `PROPTEST_CASES`. Fixá-lo baixo nas propriedades com tempdir (P0.2, P0.3), que fazem E/S por caso.
-
-### Endurecimento do workflow — tudo ausente hoje, conferido
-
-- **`permissions:` no topo, mínimo.** O workflow não declara nenhuma, então herda o padrão do
-  repositório/organização, que pode ser `write-all`. Declare `contents: read` no nível do workflow
-  e eleve por job só onde for preciso.
-- **Fixe as actions por SHA completo.** Hoje é `actions/checkout@v4`, uma tag mutável. Vale para
-  toda action de terceiro que você adicionar (nextest, cache).
-- **`persist-credentials: false` no checkout**, para o `GITHUB_TOKEN` não ficar no `.git/config`
-  disponível aos passos seguintes.
-- **`--locked` em todo comando cargo.** O `Cargo.lock` é versionado e o workflow não o respeita,
-  então hoje o CI pode resolver versões diferentes das testadas localmente. É reprodutibilidade e
-  cadeia de suprimentos ao mesmo tempo.
-- **`timeout-minutes` por job.** O suíte inicia subprocessos, tem um ripwire falso que dorme 30 s,
-  supervisores de memória e processos vigia. Job sem timeout pendura o runner.
-- **`concurrency` com `cancel-in-progress`**, por ref, para push sucessivo não empilhar execução.
-- **Nunca `pull_request_target`.** O gatilho hoje é `pull_request`, que é o correto: PR de fork não
-  recebe segredo. Não troque para expor segredo a fork.
-
-### Cadeia de suprimentos
-
-- **`cargo-deny` com `deny.toml` versionado** (não existe hoje), cobrindo as quatro seções:
-  `advisories`, `licenses` (o crate é MIT — declare a allowlist), `bans` (duplicata, crate yanked) e
-  `sources` (só crates.io). **Agendado no `main`, não bloqueando PR** — deriva da advisory-db não é
-  falha do autor do PR.
-- **Dependabot** (`.github/dependabot.yml` não existe) para `cargo` e `github-actions`. Declare a
-  política do pin: `rust-mcp-sdk = "=2.0.0"` é exato de propósito e **só sobe por decisão
-  registrada no changelog**, nunca por bump automático.
-- **Cache com escopo.** Se usar cache de build, separe a chave por conjunto de features e não
-  restaure no `main` um cache gravado por branch de PR — é o caminho clássico de envenenamento.
-
-### Segredos
-
-- **Nunca exportar `RIPWIRE_BROKER_JEV_API_KEY` no CI de PR.** Os testes que a usam são `#[ignore]`
-  e devem continuar assim; os dois de `online_live.rs` só rodam com `--ignored`.
-- Se algum dia rodarem no CI: só no `main`, com ambiente protegido, nunca em PR de fork.
-- Nada de `set -x` nem `--nocapture` em passo que possa ver a chave. O código já reduz o texto
-  remoto a categoria e status e redige a chave do `Retry-After` (`redact::remote_text`); o CI não
-  pode desfazer isso imprimindo o ambiente.
-- **Acrescente `.env` e `.envrc` ao `.gitignore`.** O produto trata `*.env` como nome sensível
-  (`SENSITIVE_EXTENSIONS`, D-089), mas o repositório não os ignora, então um arquivo local criado
-  por engano é commitável.
-
-### Controles que este repositório permite de graça
-
-Verificados contra a árvore agora; todos passam limpos hoje, então adotá-los não custa trabalho:
-
-- **`#![forbid(unsafe_code)]`** em `src/lib.rs` e `src/main.rs`. O crate não tem **nenhum** `unsafe`.
-- **`#![deny(clippy::print_stdout, clippy::dbg_macro)]` em `src/lib.rs`.** Em `serve`, o stdout
-  carrega o protocolo MCP: um `println!` perdido na biblioteca corrompe a sessão. Hoje só existe
-  `eprintln!` fora do `main.rs` (em `supervise.rs`), e como `main.rs` é outro crate root, os
-  `println!` legítimos dos comandos de um disparo não são afetados. `cargo clippy --all-targets
-  --features online` passa com os dois lints ligados.
-- **CA-10 verificável por máquina.** `cargo tree -e normal` no build default não traz
-  `reqwest`, `secrecy`, `rustls` nem `hyper`; com `--features online` traz. Um passo que falhe se
-  aparecerem no default transforma o CA-10 em porta de CI, complementando o teste
-  `the_build_has_no_network_stack` que já existe.
-- **Guarda de fixture sintética.** Um passo que falhe se `tests/fixtures/` ganhar string com cara de
-  credencial (`Bearer `, `api_key`, `authorization`, `sk-…`). Hoje não há nenhuma.
-
-### Proteção de branch (fora do workflow, mas parte da entrega)
-
-- Exigir os dois jobs como status checks obrigatórios no `master`.
-- Exigir revisão antes do merge. O histórico recente do repositório tem PR mesclado sem revisão;
-  se a intenção é manter assim, registre a decisão em vez de deixar implícito.
-
-### Opcional, diga que é opcional se propuser
-
-SBOM (`cargo-auditable` ou `cargo-cyclonedx`) e política de egresso no runner
-(`step-security/harden-runner`). O segundo tem apelo real aqui, porque o build default promete não
-ter pilha de rede — mas não o entregue como obrigatório.
-
-## Entregáveis
-
-1. A decisão de visibilidade para `markup`/`normalize`/`router`/`budget`/`dedup`, com o custo
-   assumido, antes de qualquer código.
-2. Tabela P0/P1 priorizada, referenciando os itens desta página (não uma tabela nova especulativa),
-   com os quatro controles de segurança (P0.1, P0.2, P0.5, P0.7, P0.12, P0.13) no topo.
-3. Os testes de propriedade, usando os auxiliares de `tests/common/` e respeitando as regras de
-   segurança do próprio suíte (raiz em tempdir, tamanhos limitados, nada executado).
-4. O workflow de CI, preenchendo as lacunas listadas acima, incluindo o endurecimento.
-5. `deny.toml` e `.github/dependabot.yml`, que não existem.
-6. Os lints gratuitos (`forbid(unsafe_code)`, `deny(clippy::print_stdout)`) e o passo de CA-10.
-7. A entrada correspondente em `spec/changelog.md`, seguindo a convenção `D-NNN` do repositório.
+| P0.1 — workspace | `Workspace::relative(&str) -> Result<String,String>` normaliza lexicalmente, confere ancestral existente e recusa escape da raiz; `check_symbol` aplica isso a seeds `@arquivo:linha`. Oráculo com canonicalização em árvore estável, sem alegar segurança contra toda corrida do filesystem. | `tests/props_fs.rs`: `a_path_the_guard_accepts_always_stays_inside_the_root` e `a_line_seed_obeys_the_same_rule_as_a_path`; testes de workspace também em `tests/broker.rs`. |
+| P0.2 — elegibilidade | `snapshot` retorna apenas conteúdo elegível; `files_in` lista nomes e não substitui esse filtro. Um arquivo vazio é elegível. `is_fresh` exige elegibilidade atual e hash igual. | `tests/props_fs.rs`: `asking_for_an_arbitrary_path_never_reads_a_refused_file`, `a_changed_byte_makes_a_snapshot_stale`, tabela de política e teste de listagem. |
+| P0.3 — unidades | `units(&Snapshot, &[u64]) -> Vec<Unit>` cobre texto contiguamente e em fronteiras UTF-8, com teto 24 KiB. Linhas longas podem ser divididas no meio; alinhamento de linha não é absoluto. Texto vazio e location-only não geram unidades; linhas de símbolo existentes orientam cortes. | `units_cover_the_text_exactly_once_and_within_the_cap` em `tests/props_fs.rs`. |
+| P0.4 — lotes | `batches` respeita 128 perguntas e 38.000 bytes; seleção respeita 8 unidades. Uma unidade sozinha pode exceder 14 KiB de texto, mas nunca o teto JSON. Itens enviados e `too_large` são subsequências da entrada; juntos preservam seu multiconjunto. Concatenar as duas saídas não recupera necessariamente a ordem global. `request_bytes` equivale ao tamanho JSON de `build`. | `every_batch_is_within_every_limit_and_nothing_is_lost`, `request_bytes_is_exactly_the_json_length` em `tests/props.rs`. |
+| P0.5 — respostas | `parse_answers(&str, &[String], &str)` retorna `Result<Vec<Option<f64>>, InvalidResponse>`. Modelo divergente, ID desconhecido e ID repetido invalidam a resposta inteira. JSON malformado retorna erro; valor ausente, tipo incompatível ou probabilidade inválida num JSON aceito vira `None`. Ordem é a dos IDs solicitados. | Família `parse_answers` e testes de probabilidades/IDs em `tests/props.rs`; exemplos em `tests/online_units.rs`. |
+| P0.6 — limiares | Igualdade ao limiar não passa; `None` permanece desconhecido. `file_decision` usa o maior valor conhecido: fragmento admitido basta para admitir mesmo havendo lacuna; lacuna impede apenas rejeição definitiva. Monotonicidade deve usar probabilidades válidas. | Propriedades de limiares e fragmentos em `tests/props.rs`. |
+| P0.7 — redação | `remote_text(&str, Option<&str>, usize) -> String` filtra ASCII imprimível/espaço, substitui a forma imprimível não vazia do segredo por `[redacted]`, aplica trim e corta por bytes. A promessa literal de nunca conter qualquer segredo não vale se o próprio segredo for substring do marcador, como `redacted`. Distinguir substituição de credencial de coincidência com marcador fixo. | `remote_text_*` e `a_tighter_cap_only_ever_removes` em `tests/props.rs`; ampliar domínio/oráculo conforme plano. |
+| P0.8 — hashes | `online::cache::key(&KeyParts)` e `notes::key(model_id, scope, evidence)` são determinísticos e usam SHA-256 com prefixos de comprimento. Testar partes, versões e concatenações ambíguas; não prometer prova de ausência de colisões nem que a chave muda somente se a decisão semântica mudar. | Testes de estabilidade e alteração de partes em `tests/props.rs`. |
+| P0.9 — notas | `notes::sanitize(&str)` remove controles salvo newline, elimina escapes CSI/OSC, limita a 600 caracteres e é idempotente. `groups` mantém no máximo três grupos na ordem de primeira ocorrência. | Propriedades de sanitize em `tests/props.rs`, exemplos de notas em `tests/notes.rs`. |
+| P0.10 — CLI | `cli::parse(Vec<String>) -> Result<Command,String>` é puro; erros incluem `USAGE`. Em serve, `--jev-*` exige online explícito ou implícito por memória. `--online` também é válido em `install` e obrigatório em `memory drain`; não proibir genericamente fora de serve. | Propriedades em `tests/props.rs`, casos dos comandos e memória em `tests/cli.rs`. |
+| P0.11 — orçamento | `shown` conta itens+testes+riscos; `shown+omitted` usa candidatos após normalização/dedup e filtragem aplicável, não o payload bruto. `truncated == (omitted > 0)` e `next_step` acompanha truncamento. Limitações são preservadas; se esqueleto e limitações excederem o teto, o envelope pode excedê-lo sem entradas mostradas. Reservas de notas/memória impedem assumir encaixe máximo. | `the_budget_bookkeeping_stays_consistent_at_any_budget` em `tests/broker.rs`; testes de notas/memória e propriedade de `add_memories` em `tests/props.rs`. |
+| P0.12 — markup | `markup::parse(&str) -> Option<Node>` deve terminar sem panic e respeitar profundidade limitada; há casos de round-trip e aninhamento acima do teto. | `markup_parse_is_total_and_bounded` e testes adjacentes em `tests/props.rs`. |
+| P0.13 — bloco de contexto | `local::wrap(task, &Envelope)` escapa `<`/`>` no JSON como `\u003c`/`\u003e`. Texto dentro do envelope não fecha o bloco. O argumento `task` fica fora do bloco e não é escapado por essa função; a propriedade não é sobre tarefas arbitrárias contendo delimitadores. | `repository_text_can_never_close_its_own_block` em `tests/props.rs`. |
+
+P0.2 tem 12 motivos em `Ineligible`: `Outside`, `SensitiveName`, `Hidden`,
+`DependencyOrBuild`, `Symlink`, `NotRegular`, `Unreadable`, `Ignored`, `TooLarge`,
+`Binary`, `NotUtf8`, `PrivateKey`. Nome sensível é verificado no componente final;
+ocultos e symlinks são conferidos nos componentes percorridos. Binário, UTF-8 e
+marcadores de chave são avaliados **depois da leitura**; a garantia é não retornar
+snapshot inelegível, não que nenhum byte inelegível seja lido. O descritor aberto é
+revalidado com `O_NOFOLLOW`/`O_NONBLOCK`, tipo regular e limite de bytes.
+
+## P1 e memória
+
+- **P1.1:** `online::retry_after::parse(value, now)` aceita segundos decimais ou a
+  forma de data implementada em `imf_fixdate`; data passada resulta em zero.
+  Inteiro decimal acima de `u64` resulta em `Duration::MAX`. O parser valida campos
+  numéricos, mas só confere comprimento e vírgula do dia da semana; não alegar validação
+  estrita de toda a gramática HTTP. Propriedades em `props`, regressões em `online_units`.
+- **P1.2:** `online::ranked_paths` exclui itens `Role::Doc`, deduplica caminhos,
+  ordena por melhor prioridade e primeira posição entre itens não documentais;
+  linhas são distintas e ordenadas. Propriedade em `tests/props.rs`.
+- **P1.3:** `Scheduler` com `FakeClassifier` verifica concorrência, limites de tentativas,
+  associação de respostas, cancelamento, cooldown e divisão de lote. Já há propriedade
+  `the_scheduler_keeps_its_limits_and_never_mixes_up_an_answer` em `tests/online_scheduler.rs`.
+- **P1.4:** isolamento de features já tem `the_build_has_no_network_stack` em
+  `tests/mcp_surface.rs` e passo CA-10 no CI; não duplicar.
+- **Memória:** `props` já cobre identidade, sequência de ingestão, probabilidades,
+  direções causais, ranking, divisão de expansões e orçamento. `props_fs` cobre admissão
+  de caminhos, replay idempotente e exclusão monotônica entre gerações. Há ainda seis
+  alvos `memory_*`. Preservar essa cobertura ao ajustar filtros e persistência.
+
+## Inventário e execução dos testes
+
+Os 23 alvos de integração são `broker`, `cli`, `eval`, `hooks`, `mcp_surface`,
+`memory_consolidation`, `memory_controller`, `memory_identity`, `memory_policy`,
+`memory_retrieval`, `memory_store`, `notes`, `online`, `online_live`, `online_protocol`,
+`online_scheduler`, `online_units`, `props`, `props_fs`, `statusline`, `summarizer`,
+`upstream_ripwire`, `worktree`. Alvo descoberto não significa testes ativos em toda feature.
+
+| Local das propriedades | Casos configurados | Persistência atual |
+| --- | --- | --- |
+| `tests/props.rs` | `Config::default()`, respeitando `PROPTEST_CASES`; CI repete com 4096 | `tests/props.proptest-regressions`, versionado |
+| `tests/props_fs.rs` | 48, fixados no helper | `None` |
+| `tests/broker.rs` — P0.11 | 32 | `None` |
+| `tests/online_scheduler.rs` — P1.3 | 40 | `None` |
+
+Logo `binary(props)` não seleciona toda propriedade do projeto. Os dois jobs executam
+os quatro alvos na suíte completa; os passos adicionais destacam apenas `props` e `props_fs`.
+
+Há oito atributos `#[ignore]` nos fontes de testes: três testes de provider em
+`online_live`, dois em `summarizer` (modelo real e helper de isolamento de ambiente),
+um helper em `worktree` e medições em `online` e `cli`. Helpers ignorados podem ser
+iniciados explicitamente por outro teste; não tratar todos como chamadas ao provider.
+Não usar `--ignored`/`--run-ignored` indiscriminadamente no CI de PR.
+
+Reutilizar `tests/common/`: `FakeUpstream`, `FakeClassifier`, `Counters`,
+`FakeSummarizer`, fixtures, auxiliares de workspace/processo e corpus Jev sintético.
+Propriedades não chamam provider nem executam conteúdo gerado. Protocolo HTTP de
+`tests/online_protocol.rs` usa loopback; é diferente de acesso ao provider real.
+
+## CI e cadeia de suprimentos já implementados
+
+`.github/workflows/rust.yml` dispara em push e PR destinados a `master`:
+
+- `contents: read`, concurrency por workflow/ref, cancelamento de execução anterior;
+- jobs estáveis `default` e `online` em `ubuntu-latest`, timeout de 20 minutos,
+  passos de suíte com 12 minutos;
+- checkout e install-action fixados por SHA completo; checkout com
+  `persist-credentials: false`; instalação de nextest;
+- default: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`,
+  `cargo nextest run --locked`, propriedades puras com 4096 casos e filesystem à parte;
+- online: clippy e nextest com `--locked --features online`;
+- CA-10 por `cargo tree --locked -e normal` e regex `reqwest|secrecy|rustls|hyper`;
+  guarda de fixtures por regex `Bearer |api_key|authorization|sk-[A-Za-z0-9]{10}`;
+- sem cache de build e sem gatilho `pull_request_target`. `cargo fmt` não recebe
+  `--locked`; a exigência aplica-se aos comandos que resolvem dependências e o suportam.
+
+A regex de fixtures detecta alguns padrões de credenciais; não prova que todo conteúdo
+é sintético nem substitui revisão do corpus. Os testes de grafo CA-10 também incluem
+`h2` e `axum`, além dos nomes do passo shell. As propriedades são executadas novamente
+no build online pela suíte completa, sem que isso autorize rede externa.
+
+`.github/workflows/supply-chain.yml` executa `cargo deny --all-features check`:
+cron `17 6 * * 1`, acionamento manual e push em `master` quando mudam `deny.toml`,
+`Cargo.lock`, `Cargo.toml` ou o workflow. Não roda em PR. O job público é `cargo-deny`,
+com 15 minutos, permissões mínimas e actions por SHA. A ferramenta cargo-deny não tem
+versão fixada, por decisão explícita no arquivo. Cron atua na branch padrão configurada
+no GitHub; o filtro local de push aponta para `master`.
+
+`deny.toml` já cobre advisories sem exceções, oito licenças permitidas, versões duplicadas
+como aviso, curingas negados e fontes limitadas a crates.io. Comentários com contagens
+históricas de pacotes não são inventário atual nem atestado de auditoria limpa hoje.
+Dependabot cobre Cargo e GitHub Actions semanalmente e ignora `rust-mcp-sdk` e
+`sha2 >= 0.11`. O pin exato do SDK só muda por decisão registrada. `.gitignore` já
+ignora `.env` e `.envrc`.
+
+D-107 em `spec/changelog.md` registra checks obrigatórios `default`/`online` com `strict`
+e dispensa de revisão humana obrigatória no modelo de manutenção então adotado.
+Preservar os nomes; conferir a configuração remota em etapa operacional própria.
+Não converter ausência de consulta remota em afirmação de proteção ausente.
+
+Não há workflow de release, upload de binários ou deploy nesta árvore. O escopo atual
+é integração contínua e cadeia de suprimentos; CD de distribuição requer proposta
+separada com destinos, plataformas e política de release definidos.
+
+## Trabalho restante e critérios de aceitação
+
+1. Persistir seeds de `props_fs`, P0.11 e P1.3 com caminhos explícitos, mantendo
+   os tetos 48/32/40. O arquivo de `props` já existente permanece versionado.
+2. Tornar o contrato de P0.7 testável sem falsa promessa sobre substrings do marcador;
+   acrescentar casos dirigidos de segredo curto, Unicode, marcador e truncamento.
+3. Tornar visíveis os quatro locais de PBT nos comandos/documentação do CI, mantendo
+   4096 casos restritos ao alvo puro. Evitar repetir toda suíte apenas para exibir nomes.
+4. Fazer os passos CA-10 e fixtures falharem também se a inspeção falhar. Hoje usam
+   comandos em condição `if` e podem tratar erro de ferramenta como ausência de match.
+   Distinguir sucesso sem ocorrência, ocorrência proibida e falha operacional.
+5. Verificar remotamente os checks obrigatórios antes de qualquer alteração futura
+   nos nomes dos jobs; conservar a decisão de revisão humana registrada em D-107.
+6. Após a implementação futura, rodar fmt, clippy e suíte nas duas configurações;
+   verificar replay de seeds, CA-10 e guardas; registrar resultados, falhas e decisões
+   no changelog sem reutilizar números históricos como se fossem novos.
+
+Cache, SBOM e harden-runner continuam opcionais. Cache foi deliberadamente dispensado
+em D-107; só reconsiderar após medir benefício e definir isolamento entre PR e branch
+protegida. Não são bloqueadores desta proposta.
+
+Raízes de filesystem sempre em tempdir; caminhos gerados são consultas, nunca destinos
+arbitrários de escrita/remoção. Conteúdo gerado não vira executável. Limitar volume por
+caso e cobrir arquivos grandes com casos dirigidos. Seeds e fixtures devem ser sintéticos,
+sem credenciais, caminhos privados ou código de workspace real.
+Não exportar a chave Jev no CI de PR. Não reimplementar SDK, TLS/DNS ou golden tests como PBT.
+
+## Verificação desta revisão documental
+
+Foram lidos manifesto, toolchain, fontes relevantes, testes, workflows, configuração de
+supply chain e decisões históricas. `cargo metadata --offline --locked --no-deps` confirmou
+os alvos e ausência de MSRV declarado. `cargo tree --offline --locked -e normal` não
+contém `reqwest`, `secrecy`, `rustls`, `hyper` ou `h2`; o mesmo comando com `--features online`
+contém essas dependências. A inspeção com a regex do CI não encontrou correspondência
+em `tests/fixtures/`.
+
+A execução focal de propriedades e seus resultados estão registrados no plano.
+Esta revisão não executou toda a suíte, clippy, nextest, cargo-deny com base de advisories
+atualizada nem consultou a proteção remota. Não afirma aprovação desses controles.
