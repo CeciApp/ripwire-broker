@@ -4821,7 +4821,7 @@ fn memory_retry_brings_failed_jobs_back() {
 
     let (code, out, err) = memory_cmd(ws.path(), st.path(), &["retry"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("1 failed job"), "{out}");
+    assert!(out.contains("1 failed or waiting job"), "{out}");
     assert_eq!(store.load().unwrap().jobs["a1"].state, JobState::Pending);
     assert!(
         parse(&["memory", "retry", "--workspace", "/w", "--online"]).is_err(),
