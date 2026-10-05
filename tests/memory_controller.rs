@@ -1675,3 +1675,41 @@ fn serve_reads_the_spool_of_the_state_dir_it_is_given() {
         "the server never incorporated the spool under --state-dir"
     );
 }
+
+/// A clock that, the first time it is read, takes the workspace's remote slot, as a `serve`
+/// starting right after a drain's first check would.
+struct SlotTaker {
+    store: Arc<Store>,
+    held: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+impl ripwire_broker::memory::time::Clock for SlotTaker {
+    fn now_ms(&self) -> u64 {
+        let mut held = self.held.lock().unwrap();
+        if held.is_none() {
+            *held = Some(self.store.remote_slot().unwrap().expect("free at first"));
+        }
+        ripwire_broker::memory::time::SystemClock.now_ms()
+    }
+}
+
+/// A drain whose slot was taken after its first check says busy, not empty, while jobs remain
+/// (D-150): it only probed the slot, released it at once, and read the worker's "nothing" as an
+/// empty queue.
+#[tokio::test]
+async fn a_drain_that_loses_the_slot_says_busy_not_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let records: Vec<Record> = (1..=3).map(|n| rec(n, &format!("note {n}"), &[])).collect();
+    let store = Arc::new(stored(dir.path(), &records));
+    let w = Worker::new(store.clone(), Scripted::new(vec![]), config(0));
+    let clock = SlotTaker {
+        store: store.clone(),
+        held: std::sync::Mutex::new(None),
+    };
+
+    let drained = runtime::drain(&store, &w, &clock, 20, runtime::DRAIN_DEADLINE)
+        .await
+        .unwrap();
+
+    assert_eq!((drained.jobs, drained.stop), (0, DrainStop::Busy));
+}
