@@ -370,9 +370,14 @@ impl Store {
     /// lost to a brief ingestion elsewhere: waits up to [`WRITER_WAIT`], then [`Refusal::Locked`].
     /// A hook never takes it.
     pub fn writer_waiting(&self) -> Result<fs::File, Refusal> {
+        self.lock_waiting(LOCK)
+    }
+
+    /// The lock `name`, waiting up to [`WRITER_WAIT`] for it, then [`Refusal::Locked`].
+    fn lock_waiting(&self, name: &str) -> Result<fs::File, Refusal> {
         let until = std::time::Instant::now() + WRITER_WAIT;
         loop {
-            match self.writer() {
+            match self.lock(name) {
                 Err(Refusal::Locked) if std::time::Instant::now() < until => {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
@@ -803,21 +808,11 @@ impl Store {
     /// The workspace's single remote slot, held until dropped; `None` while another worker,
     /// in this process or another, holds it.
     pub fn remote_slot(&self) -> Result<Option<fs::File>, Refusal> {
-        self.check_dir()?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.dir)
-            .map_err(|_| Unavailable::Io)?;
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(self.dir.join(REMOTE))
-            .map_err(|_| Unavailable::Io)?;
-        Ok(file.try_lock().is_ok().then_some(file))
+        match self.lock(REMOTE) {
+            Ok(file) => Ok(Some(file)),
+            Err(Refusal::Locked) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Ends a run. A retry with no run left fails the job.
@@ -1107,15 +1102,7 @@ impl Store {
 
     /// `change` applied to the quota under its own lock, waiting up to [`WRITER_WAIT`] for it.
     fn quota<T>(&self, change: impl FnOnce(&mut Ledger) -> T) -> Result<T, Refusal> {
-        let until = std::time::Instant::now() + WRITER_WAIT;
-        let _lock = loop {
-            match self.lock(QUOTA_LOCK) {
-                Err(Refusal::Locked) if std::time::Instant::now() < until => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                other => break other?,
-            }
-        };
+        let _lock = self.lock_waiting(QUOTA_LOCK)?;
         let mut ledger = self.ledger()?;
         let out = change(&mut ledger);
         let bytes = serde_json::to_vec(&ledger).map_err(|_| Unavailable::Io)?;
