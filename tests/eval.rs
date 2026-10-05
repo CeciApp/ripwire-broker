@@ -1781,6 +1781,40 @@ fn a_session_after_an_invalid_one_says_its_history_is_incomplete() {
 }
 
 #[test]
+fn only_a_memory_arm_carries_a_history() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let mut first = auth_task("first", repo.path(), &head, Some("login"));
+    first["prompt"] = json!("BREAK before the result");
+    let runs = logged_run(
+        json!([
+            first,
+            auth_task("second", repo.path(), &head, Some("login"))
+        ]),
+        "broker",
+        "1",
+    );
+    let second = &runs[1].1;
+    assert_eq!(second["valid"], true, "{second}");
+    assert!(second.get("history_incomplete").is_none(), "{second}");
+}
+
+#[test]
+fn a_session_with_an_incomplete_history_stays_out_of_the_averages() {
+    let whole = rec(0, 1, Arm::BrokerMemory, 100, 1);
+    let mut partial = rec(1, 1, Arm::BrokerMemory, 900, 1);
+    partial.history_incomplete = true;
+    let records = [whole, partial];
+
+    let stats = report::arm_stats(&records, Arm::BrokerMemory.name());
+    assert_eq!((stats.runs, stats.valid), (2, 1));
+    assert_eq!(stats.tokens, Some(100.0));
+    let md = report::render(&records);
+    assert!(md.contains("histórico incompleto"), "{md}");
+    assert!(md.contains("`t1`"), "{md}");
+}
+
+#[test]
 fn versions_that_change_between_runs_are_refused() {
     let repo = common::sample_repo();
     let head = git(repo.path(), &["rev-parse", "HEAD"]);

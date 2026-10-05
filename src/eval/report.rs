@@ -143,8 +143,17 @@ fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
     (n > 0).then(|| sum / n as f64)
 }
 
+/// A run that counts in the averages: valid, and for a memory arm, started from the history the
+/// corpus describes.
+fn counts(r: &RunRecord) -> bool {
+    r.valid && !r.history_incomplete
+}
+
 fn valid<'a>(records: &'a [RunRecord], arm: &str) -> Vec<&'a RunRecord> {
-    records.iter().filter(|r| r.arm == arm && r.valid).collect()
+    records
+        .iter()
+        .filter(|r| r.arm == arm && counts(r))
+        .collect()
 }
 
 /// For a broker arm, presenting nothing is a recall of zero, not a missing value.
@@ -197,7 +206,7 @@ fn paired(records: &[RunRecord], a: &str, b: &str) -> Vec<RunRecord> {
     let both: BTreeSet<_> = keys(a).intersection(&keys(b)).cloned().collect();
     records
         .iter()
-        .filter(|r| r.valid && (r.arm == a || r.arm == b))
+        .filter(|r| counts(r) && (r.arm == a || r.arm == b))
         .filter(|r| both.contains(&(r.task.clone(), r.repo.clone(), r.repeat)))
         .cloned()
         .collect()
@@ -499,6 +508,23 @@ pub fn render(records: &[RunRecord]) -> String {
                 r.arm,
                 r.repeat,
                 r.invalid.as_deref().unwrap_or("?")
+            ));
+        }
+    }
+    let partial: Vec<&RunRecord> = records
+        .iter()
+        .filter(|r| r.valid && r.history_incomplete)
+        .collect();
+    if !partial.is_empty() {
+        out.push_str(&format!(
+            "\n## Sessões com histórico incompleto ({}), fora das médias\n\n\
+             Uma sessão anterior da sequência foi inválida: a memória de partida não é a do corpus.\n\n",
+            partial.len()
+        ));
+        for r in partial {
+            out.push_str(&format!(
+                "- `{}` · {} · repetição {}\n",
+                r.task, r.arm, r.repeat
             ));
         }
     }

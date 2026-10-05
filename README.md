@@ -607,8 +607,8 @@ cargo build --release
   Tasks with the same `sequence` are sessions of one history, for the memory arms: they run in corpus order,
   each from its own `base`, in the same place and with the same memory store for a given arm and repeat; a
   sequence is recorded, and resumed, as a whole (one recorded in part stops the run, with the lines to
-  remove), stays in one repository, and marks a session after an invalid one `history_incomplete`. Each
-  arm's history is its own earlier sessions: arms B and C differ in history as well as in selection, and a
+  remove), stays in one repository, and, in a memory arm, marks a session after an invalid one
+  `history_incomplete`, which the report lists and keeps out of the averages. Each arm's history is its own earlier sessions: arms B and C differ in history as well as in selection, and a
   memory whose source the agent edited is stale in the next session unless its base has the same bytes.
 - **Validation:** `validate` runs each task's check on a copy at the base, where it must fail, and on one at
   the fix, where it must pass. A check that passes at the base measures nothing. The output of every setup

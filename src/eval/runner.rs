@@ -536,7 +536,7 @@ pub fn run(cfg: &RunConfig, log: &mut dyn FnMut(&str)) -> Result<usize, String> 
                     if let Some(why) = &r.invalid {
                         log(&format!("  invalid: {why}"));
                     }
-                    r.history_incomplete = records.iter().any(|p| !p.valid);
+                    r.history_incomplete = arm.memory() && records.iter().any(|p| !p.valid);
                     records.push(r);
                 }
                 let _ = std::fs::remove_dir_all(&dir);
