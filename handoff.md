@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
-Estado em 2026-10-04, até o
-[D-150](spec/changelog.md#d-150--achados-baixos-da-memória-primeira-parte).
+Estado em 2026-10-05, até o
+[D-151](spec/changelog.md#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -28,7 +28,8 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | achados baixos, área da CLI e dos hooks (D-147) | corrigidos em TDD, com o código morto e as simplificações da área; as outras áreas seguem |
 | achados baixos, núcleo MCP (D-148) | corrigidos em TDD, com as simplificações da área; seguem online, memória e eval |
 | achados baixos, modo online (D-149) | corrigidos em TDD, com as simplificações da área; o `openat` do leitor espera decisão |
-| achados baixos, memória, primeira parte (D-150) | sete corrigidos em TDD, entre eles o worker esperando o store no pool bloqueante (grupo 3); seguem quatro bugs baixos da memória, o código morto e as simplificações dela, e a área do eval |
+| achados baixos, memória, primeira parte (D-150) | sete corrigidos em TDD, entre eles o worker esperando o store no pool bloqueante (grupo 3) |
+| achados baixos, memória (segunda parte) e eval (D-151) | corrigidos em TDD, com o pânico do worker, o `is_error` de infraestrutura e o prompt que segurava o timeout (grupo 3); o `connected` conferido num init real |
 | revisão de 2026-10-04 (D-146) | os cinco achados de maior impacto em produção corrigidos em TDD (leitura do online fora da thread assíncrona, TOCTOU do leitor, chave fora dos processos filhos, prazo no `ripwire --version`, erros do worker de memória no stderr); os demais ficam na lista abaixo |
 | `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 5 feitas (D-136 a D-142): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory`, `memory drain --online`, a leitura em `context_for_task` (`memories[]`, `provenance.memory`, seção legível no texto MCP), a consolidação (cadência de 20 enriquecimentos ou 24 h, decisões e ligações por par, nota derivada pelo `--summarizer-cmd` só com o gate de 0,85) e o instrumento da avaliação (`--memory-selection deterministic`, braços `broker-memory` e `broker-memory-deterministic`, sequências no corpus, custo da memória no relatório). A T2.0 (Choice no modelo pinado) rodou com a chave real. Pendente: a T3.11, validar num Claude Code e num Codex reais que os hosts usam as memórias; os hooks não as trazem na v1 (não fazem HTTP e não há cache de decisões). Pendente também a T5.3, a rodada da avaliação (≥ 30 tarefas em sequências, fora do repositório; o plano lista o que o instrumento ainda não faz). Fase 6 (fechamento) não começada; **experimental** |
 
@@ -76,7 +77,7 @@ cargo fmt --check
   `notes`, `summarizer`, `worktree`, `upstream_ripwire`, `online*`, `memory_*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-150, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-151, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -131,30 +132,22 @@ Os instrumentos estão prontos; as medições, não.
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.
-- **Auditoria de 2026-10-04, o que ficou (D-143, D-144):**
-  - os achados baixos da CLI, dos hooks e do estado (D-147), do núcleo MCP (D-148), do modo
-    online (D-149) e parte dos da memória (D-150) foram corrigidos. Ficam, na memória: o ingest
-    preso perto do teto do snapshot, o `memory retry` que não alcança jobs pendentes com
-    `not_before`, as somas da quota que estouram num `quota.json` corrompido e o pânico do worker
-    fora do pool bloqueante; no eval: `{repo}`/`{fix}` sem aspas nos comandos, ids de tarefa não
-    validados, a guarda de ferramentas de contexto contornável (`timeout`, `nice`, `bash -lc`), o
-    `spent` avaliado sempre, a CLI do `ripwire-eval` e o `history_incomplete` nunca lido;
-  - código que nunca executa (`admission::RENDERER_VERSION`, `transcript::read`,
-    `Role::{Config, Test, Risk}`, que são reservados no schema v1, entre outros), cerca de 25 itens de API pública usados só por
-    testes, e as simplificações listadas no D-143.
-- **Revisão de 2026-10-04, o que ficou (D-146; o D-147 fechou o estado da sessão, o summarizer e o
-  `__watch`, o D-148 o registro de chamadas e o D-150 as gravações do worker na thread
-  assíncrona):** o pânico do worker de memória fora do pool bloqueante segue sem ser observado;
-  `unwrap` de mutex dentro de `Drop` (`broker.rs`, mantido pelo D-094, ver D-148); o diretório
-  intermediário trocado por link no leitor do online, que pede `openat` (D-149, decisão do
-  mantenedor); no eval, `is_error` sem distinguir falha
-  de infraestrutura (falta um transcript real de erro de API) e o `run_agent` que escreve o prompt
-  antes de ler.
+- **Auditoria de 2026-10-04, o que ficou (D-143, D-144):** os achados baixos de todas as áreas
+  foram corrigidos (D-147 a D-151). Ficam:
+  - código que nunca executa: `Role::{Config, Test, Risk}`, que são reservados no schema v1, entre
+    outros;
+  - cerca de 25 itens de API pública usados só por testes;
+  - as simplificações maiores listadas no D-143 (`read_with`, `commit_*`, batches de controller e
+    consolidate, `admit`/`admit_note`).
+- **Revisão de 2026-10-04, o que ficou (D-146; D-147 a D-151 fecharam o resto):**
+  - `unwrap` de mutex dentro de `Drop` (`broker.rs`, mantido pelo D-094, ver D-148);
+  - o diretório intermediário trocado por link no leitor do online, que pede `openat` pela crate
+    `rustix` ou por `unsafe` (D-149, decisão do mantenedor).
 - **Memória, registrado nas Fases 2 a 5 (D-138 a D-142):** o cache de decisões (sem ele os hooks
   não entregam memória e `--memory-read-request-limit 0` não serve nada), as notas derivadas fora
   dos 5 s da rodada, a cadência fora do `memory status`, e os demais itens dos D-140 e D-142.
 - **Diagrama:** `spec/diagrams/` não se atualiza sozinho. Quem mudar a topologia edita o JSON e roda
-  `deliver` do archify de novo (D-115, D-132). O archify é um skill, em `~/.agents/skills/archify/`,
+  `deliver` do archify de novo (D-115, D-132, D-151). O archify é um skill, em `~/.agents/skills/archify/`,
   não um comando no `PATH`.
 
 ## Armadilhas já pisadas

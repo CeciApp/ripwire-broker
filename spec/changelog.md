@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
 | 2026-10-04 22:15 | Achados baixos da memória, primeira parte, em TDD: gasto de leitura que não chegou à quota gravado pela leitura seguinte, leitura com uma requisição sem gastá-la, arquivos de lease e temporários de escritor morto apagados com o job e o nó, `memory drain` que perde o slot diz ocupado, worker esperando o store no pool bloqueante (grupo 3), id adulterado recusado sem bloquear os outros jobs | [D-150](#d-150--achados-baixos-da-memória-primeira-parte) |
 | 2026-10-04 21:25 | Achados baixos do modo online, em TDD: metades de um lote obsoleto contadas uma vez, `Retry-After` além de `u64` como espera máxima, ganho além do ripwire sem os arquivos descartados, `last_error` como a falha mais recente, credencial recusada que para a descoberta inteira, mais arquivos de segredo fora do envio; métricas `jev_*` com `--memory` documentadas; um mapa FIFO limitado para os dois caches, o `discover` em etapas | [D-149](#d-149--achados-baixos-do-modo-online) |
 | 2026-10-04 19:40 | Achados baixos do núcleo MCP, em TDD: símbolos além do limite nomeados, corte declarado só sobre conteúdo mostrado, tarefa vazia recusada, status que não acusa queda com o broker conectado, `isError` do upstream como recusa, `affected` ausente sem dizer que o gate não conclui, cancelamento atômico e registro de chamadas com guarda de drop; a poda de sessões respeita o lock (CodeRabbit no PR #58); simplificações do `broker`, do `normalize` e do roteador | [D-148](#d-148--achados-baixos-do-núcleo-mcp) |
@@ -6693,3 +6694,102 @@ visto falhar, mutações derrubadas.
 
 **Testes:** 731 → 738 no build padrão, 749 → 756 com `online` (gates locais verdes).
 
+## D-151 — Achados baixos da memória, segunda parte, e do eval
+
+**Data:** 2026-10-05 00:30.
+
+**Contexto:** a quarta e a quinta áreas dos grupos 3 e 4 (D-147): o que o D-150 deixou da memória e
+o eval inteiro. Um commit por achado, teste vermelho visto falhar, mutações derrubadas. Os
+achados do eval E7 e E9 dependiam de um transcript real. Os dois foram gravados com o Claude Code
+2.1.289 apontado para uma porta fechada (`ANTHROPIC_BASE_URL=http://127.0.0.1:9`), sem requisição
+para fora e sem custo.
+
+**Corrigidos, memória:**
+
+- **Lease de job vivo apagado** (CodeRabbit no #63): a retenção e o `forget` apagavam o arquivo de
+  lease mesmo com um worker vivo segurando o lock. Um job reingerido com o mesmo id tomava um segundo
+  lock, e o `Done` do primeiro worker marcava o job novo. Agora:
+  - o arquivo só sai depois de tomado o seu lock;
+  - um lease seguro fica, e a retenção o remove depois como órfão;
+  - o `finish` ignora um lease cujo run ou estado não bate mais com o job.
+
+  O `lease_next` também apaga o lease de um job que esgota as execuções.
+- **Somas da quota:** eram somas `u32` simples. Um `quota.json` editado à mão ou corrompido entrava
+  em pânico em debug e dava a volta em release, o que libera a quota. Todas saturam agora.
+- **`memory retry` e jobs adiados:** um job que o `Retry-After` de um 429 adiou (por até uma hora)
+  ficava pendente com `not_before`, fora do alcance do comando. Agora fica pronto na hora, com as
+  execuções que já tinha, e a mensagem conta "failed or waiting".
+- **Ingest perto do teto do snapshot:** a estimativa de crescimento deixava de fora a entrada do job
+  e os dígitos de `ingest_seq` e `generation`. Perto do teto, o lote passava pela estimativa e era
+  recusado inteiro pela conferência final, a cada tick. Agora entra o que cabe.
+- **Pânico do worker** (grupo 3): o worker só era abortado no drop. Um pânico fora do pool bloqueante
+  encerrava a memória pela vida do servidor sem aviso. Uma task de vigia agora diz uma vez que o
+  worker parou; parar o servidor não é pânico e não diz nada.
+- **Simplificações:**
+  - um laço só de espera por lock (`lock_waiting`);
+  - o slot remoto via `lock`;
+  - `admission::RENDERER_VERSION` removido;
+  - as palavras do controller vêm de `index::tokens`.
+
+**Corrigidos, eval:**
+
+- **E1, guarda de shell contornável:** `timeout 30 graft`, `nice -n 5 graft`, `sudo -u x graft`,
+  `env -u V graft`, `stdbuf`, `bash -lc '…'`, `if`/`do`/`{`/`!` antes do comando, `xargs graft` e
+  `find -exec graft` escapavam da checagem de contaminação. A guarda agora:
+  - pula o valor das opções de cada wrapper e a duração do `timeout`;
+  - acha `-c` entre flags curtas;
+  - ignora palavras-chave;
+  - segue `-exec`/`-execdir`/`-ok` (o `find` continua contado como busca).
+- **E2, `{repo}`/`{fix}` sem aspas:** um caminho com espaço, aspa ou `;` virava várias palavras no
+  `sh -c`, ou rodava parte do caminho como comando. Os valores entram como uma palavra só, entre
+  aspas simples quando precisam; os simples ficam iguais.
+- **E3, `spent` avaliado sempre:** `before.and(spent(..))` rodava `memory status` depois de cada
+  sessão de braço sem memória. Agora é `and_then`.
+- **E4, id de tarefa como nome de arquivo:** `../x` ou `a/b` gravavam transcript e logs fora do
+  diretório de saída. O `check` agora aceita só letras, dígitos, `.`, `_` e `-`, sem `.` no início.
+- **E5, CLI do `ripwire-eval`:** o comando agora recusa:
+  - `--repeats 0` (que não rodava nada) e `--repeats 4294967297` (que virava 1 por `as u32`);
+  - braço ou flag repetidos;
+  - flag que o comando não lê;
+  - `report` sem `results.jsonl`.
+
+  O `--help` agora sai 0, com o uso no stdout.
+- **E6, `history_incomplete` nunca lido:** o relatório agora lista essas sessões à parte e as deixa
+  fora das médias. Só braços com memória recebem a marca, porque só eles carregam histórico.
+- **E7, `is_error` sem distinguir infraestrutura** (grupo 3): com a API inacessível, o Claude Code
+  encerra a sessão com `is_error: true`, `subtype: "success"` e `terminal_reason: "api_error"`. A
+  sessão contava como falha do braço; agora é inválida e diz o erro.
+- **E8, prompt escrito antes de ler** (grupo 3): o prompt era escrito inteiro antes de o relógio do
+  timeout começar. Um agente que não lia um prompt maior que o pipe segurava a execução até sair:
+  30 s num timeout de 1 s no teste vermelho. Agora o prompt vai de uma thread própria.
+- **Código morto e simplificação:**
+  - `transcript::read` removido;
+  - os quatro jeitos de chamar git no eval viraram `eval::git`, que também fecha o stdin que a
+    checagem do corpus deixava aberto.
+
+**Também nesta sessão:**
+
+- **Diagrama** (`spec/diagrams/`, último no D-132): ganhou a memória, com o store por workspace,
+  o worker do `serve --memory` e o seu HTTPS para o Jev, e uma visão guiada "Memory". O layout foi
+  compactado para caber em 1440×900. `deliver` e `visual-check` do archify passaram em 1440×900,
+  1600×1000, 1920×1080 e 2048×1320, e a captura foi conferida a olho.
+- **Imagens do OrbStack:** as três baixadas para diagnosticar o CI do #55 foram apagadas; o
+  `postgres`, que não era desta sessão, ficou.
+
+**Fechado sem mudança:**
+
+- **E9, o status `connected`:** o init real do Claude Code 2.1.289 com o broker na
+  `--mcp-config` traz `{"name": "ripwire-broker", "status": "connected", "source": "dynamic"}` em
+  três de três sessões. É o valor que a checagem exige.
+- **Mutante equivalente:** trocar `counts` por `valid` no filtro de `paired` sobrevive, porque a
+  interseção de chaves já vem de `counts`.
+
+**Segue pendente:**
+
+- o diretório intermediário trocado por link no leitor do online, que pede `openat` (crate `rustix`
+  ou `unsafe`): decisão do mantenedor;
+- `unwrap` de mutex em `Drop` (D-094);
+- os itens de API pública usados só por testes;
+- as refatorações maiores do D-143 (`read_with`, `commit_*`, batches, `admit`/`admit_note`).
+
+**Testes:** 738 → 754 no build padrão, 756 → 772 com `online` (gates locais verdes).
