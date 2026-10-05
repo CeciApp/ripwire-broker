@@ -194,9 +194,14 @@ fn run_agent(
         .stderr(err)
         .spawn()
         .map_err(|e| format!("{program}: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes());
-    }
+    // From a thread of its own: an agent that does not read a prompt larger than the pipe would
+    // otherwise hold the run before its timeout starts.
+    let writer = child.stdin.take().map(|mut stdin| {
+        let prompt = prompt.to_owned();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(prompt.as_bytes());
+        })
+    });
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (tx, rx) = mpsc::channel();
     let start = Instant::now();
@@ -230,6 +235,9 @@ fn run_agent(
     }
     let _ = child.wait();
     let _ = reader.join();
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
     Ok(AgentRun { events, timed_out })
 }
 

@@ -2027,6 +2027,48 @@ sleep 30
 }
 
 #[test]
+fn an_agent_that_never_reads_a_long_prompt_still_times_out() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    // Larger than a pipe's buffer: writing it all blocks until the agent reads.
+    let agent = work.path().join("deaf-agent");
+    common::write_executable(&agent, "#!/bin/sh\nexec sleep 30\n");
+    let mut task = auth_task("t", repo.path(), &head, None);
+    task["prompt"] = json!("x".repeat(1 << 20));
+    std::fs::write(
+        work.path().join("corpus.json"),
+        json!({ "tasks": [task] }).to_string(),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
+        .args([
+            "run",
+            "--corpus",
+            work.path().join("corpus.json").to_str().unwrap(),
+            "--out",
+            work.path().join("out").to_str().unwrap(),
+            "--arms",
+            "none",
+            "--timeout-s",
+            "1",
+            "--agent-cmd",
+            agent.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the prompt held the run past its timeout: {:?}",
+        started.elapsed()
+    );
+    let results = std::fs::read_to_string(work.path().join("out/results.jsonl")).unwrap();
+    assert!(results.contains("timed out"), "{results}");
+}
+
+#[test]
 fn the_agent_is_never_handed_the_source_repository_or_the_fix() {
     let repo = common::sample_repo();
     let head = git(repo.path(), &["rev-parse", "HEAD"]);
