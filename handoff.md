@@ -39,8 +39,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 694 testes, 3 ignorados (opt-in)
-cargo test --all-targets --features online  # 710 testes, 6 ignorados
+cargo test --all-targets                    # 754 testes, 5 ignorados (opt-in)
+cargo test --all-targets --features online  # 772 testes, 8 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
