@@ -8,7 +8,6 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Calls {
@@ -94,16 +93,6 @@ impl Summary {
     pub fn valid(&self) -> bool {
         self.invalid.is_none()
     }
-}
-
-/// Reads a transcript the runner wrote. Lines that do not parse are skipped.
-pub fn read(path: &Path) -> Vec<(u64, Value)> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .map(|v| (v["at_ms"].as_u64().unwrap_or(0), v["event"].clone()))
-        .collect()
 }
 
 const SEARCH: &[&str] = &[
