@@ -631,16 +631,15 @@ async fn deadline() {
 
 #[tokio::test]
 async fn request_limit() {
+    // Two requests route and score; the read stops at the limit instead of asking a third. With
+    // one, it never asks at all (`a_single_request_is_not_spent_on_a_read_that_cannot_deliver`).
     let r = stopping(|_| p(0.5));
     let cfg = ReadConfig {
-        request_limit: 1,
+        request_limit: 2,
         ..Default::default()
     };
     let got = stop_of(&one(), &r, cfg).await;
-    assert_eq!(
-        (got.stop, got.requests, got.memories.len()),
-        (StopReason::RequestLimit, 1, 0)
-    );
+    assert_eq!((got.stop, got.requests), (StopReason::RequestLimit, 2));
 }
 
 #[tokio::test]
@@ -839,6 +838,23 @@ async fn request_limit_zero_serves_only_cache_and_says_degraded() {
         r.seen.lock().unwrap().is_empty(),
         "no cache yet, and nothing sent"
     );
+}
+
+/// One request cannot both route and score, so it is never spent (D-150): the read paid for the
+/// routing and stopped at the limit before it could deliver anything.
+#[tokio::test]
+async fn a_single_request_is_not_spent_on_a_read_that_cannot_deliver() {
+    let r = reader(&[], 0.0, |_, _| p(0.9));
+    let cfg = ReadConfig {
+        request_limit: 1,
+        ..Default::default()
+    };
+
+    let got = retrieve::read(&one(), "eviction", &r, &cfg).await;
+
+    assert!(got.degraded);
+    assert_eq!((got.stop, got.requests), (StopReason::RequestLimit, 0));
+    assert!(r.seen.lock().unwrap().is_empty(), "nothing sent");
 }
 
 #[test]
