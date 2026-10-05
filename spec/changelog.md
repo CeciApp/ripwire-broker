@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-04 21:25 | Achados baixos do modo online, em TDD: metades de um lote obsoleto contadas uma vez, `Retry-After` além de `u64` como espera máxima, ganho além do ripwire sem os arquivos descartados, `last_error` como a falha mais recente, credencial recusada que para a descoberta inteira, mais arquivos de segredo fora do envio; métricas `jev_*` com `--memory` documentadas; um mapa FIFO limitado para os dois caches, o `discover` em etapas | [D-149](#d-149--achados-baixos-do-modo-online) |
 | 2026-10-04 19:40 | Achados baixos do núcleo MCP, em TDD: símbolos além do limite nomeados, corte declarado só sobre conteúdo mostrado, tarefa vazia recusada, status que não acusa queda com o broker conectado, `isError` do upstream como recusa, `affected` ausente sem dizer que o gate não conclui, cancelamento atômico e registro de chamadas com guarda de drop; a poda de sessões respeita o lock (CodeRabbit no PR #58); simplificações do `broker`, do `normalize` e do roteador | [D-148](#d-148--achados-baixos-do-núcleo-mcp) |
 | 2026-10-04 18:30 | Achados baixos da CLI, dos hooks, do instalador e do estado, em TDD: EPIPE no hook, relógio para trás, `--help` dentro da tarefa, números truncados, `serve --state-dir`, prazo do comando de versão, poda de sessões de 30 dias, hooks do instalador por programa, estado lido sem seguir link nem travar em FIFO, summarizer que escreve e lê junto com teto de 1 MiB, watcher que confere o início do processo, uma versão por `doctor`; código morto e simplificações da área | [D-147](#d-147--achados-baixos-da-cli-dos-hooks-e-do-estado) |
 | 2026-10-04 14:00 | Revisão de 2026-10-04: os cinco achados de maior impacto em produção corrigidos em TDD — leitura e hash do online no pool bloqueante, snapshot lido pelo arquivo verificado (TOCTOU), chave do provedor fora dos processos filhos, prazo de 5 s no `ripwire --version` e erros do worker de memória ditos uma vez no stderr | [D-146](#d-146--revisão-de-2026-10-04-os-cinco-de-maior-impacto) |
@@ -6559,4 +6560,68 @@ carga média 9; não falhou nas sete execuções seguintes.
 - **`call()`:** é o ponto único de conversão de erro, usado por todos os verbos.
 
 **Testes:** 717 → 724 no build padrão, 735 → 742 com `online`. Nos gates locais, três testes de tempo real do `shell_edits` falharam no build `online` com o `syspolicyd` do macOS a 95% de CPU (ele verifica cada executável novo que os testes criam); passaram em duas repetições.
+
+## D-149 — Achados baixos do modo online
+
+**Data:** 2026-10-04 21:25.
+
+**Contexto:** a terceira área dos grupos 3 e 4 (D-147): `src/online/`. Um commit por achado, teste
+vermelho visto falhar, mutações derrubadas.
+
+**Corrigidos:**
+
+- **Lote obsoleto contado duas vezes:** as duas metades de um lote dividido têm o id do job, e
+  `stale` não era deduplicado. Um lote somava 2 em `stale_batches`.
+- **`Retry-After` além de `u64`:** dígitos demais davam `None`, e o scheduler esperava o 1 s padrão
+  em vez de desistir. Agora é `Duration::MAX`; o worker da memória já limita a espera antes de
+  somá-la a um instante.
+- **Ganho além do ripwire:** `semantic_only` era contado na admissão, antes de a conferência de
+  frescura tirar os arquivos que mudaram. Agora conta o que sobra.
+- **`last_error`:** era a primeira chave de um `BTreeMap`, a ordem alfabética. Uma chamada que
+  falhou `invalid_response` e depois `rejected` dizia `invalid_response`. Agora é a falha mais
+  recente. Como o `last_error` do upstream, fica até outra falha o substituir.
+- **Credencial recusada:** o scheduler parava num 401/403, mas o `discover` não sabia disso, e um
+  estágio seguinte montava outro scheduler e mandava os lotes com a mesma chave. Agora a
+  descoberta lembra a recusa, e nenhum estágio seguinte envia nada.
+- **Arquivos de segredo:** a lista ganhou as variáveis e o estado do Terraform (`*.tfvars`,
+  `*.tfstate`, `*.tfstate.backup`), `secrets.toml`, `kubeconfig`, `.htpasswd` e `.git-credentials`.
+
+**Documentado em vez de corrigido:**
+
+- **Métricas `jev_*` com `--memory`:** descoberta e memória dividem um teto de pedidos em voo, e o
+  `Metered` da descoberta envolve o cliente compartilhado. Assim, `jev_latency_ms` e
+  `jev_in_flight` incluem a espera, e um pedido cancelado na fila já conta em `jev_requests_total`.
+- Medir depois da espera exigiria mudar o trait `Classifier` ou desmontar o cliente compartilhado
+  que dois testes fixam (um teto só para os dois), o que é desproporcional para uma métrica.
+- O PRD §23.11 agora diz o que os números significam.
+
+**Não reproduzido:**
+
+- **Caminho do planner com `./`:** o auditor, que o marcou como incerto, suspeitava que o lookahead,
+  comparando caminhos crus, perguntaria de novo pelo mesmo arquivo. Os caminhos chegam normalizados
+  ao planner, e o caso ficou como teste de regressão.
+
+**Código morto e simplificações:**
+
+- **Removido:** `FileEvidence.location_only`, escrito e nunca lido.
+- **Unificado:**
+  - um `ordered_map` para os mapas JSON ordenados do pedido;
+  - um `fifo::FifoMap<K, V>` para o cache de notas e o cache semântico, com o despejo e os tetos
+    inalterados.
+- **Movido:** o tamanho do pedido passa a ser medido antes do lock das métricas.
+- **Dividido:** o `discover` (cerca de 200 linhas) em `lookahead`, `drop_changed` e `record`.
+
+**Não feitos, com o motivo:**
+
+- **Diretório intermediário trocado por link (grupo 3):** fechar a corrida pede `openat`, que a
+  biblioteca padrão não expõe. Os caminhos são o crate `rustix` ou `unsafe`, que o crate proíbe.
+  Fica para o mantenedor decidir.
+- **Regra de vários fragmentos de `file_decision`:** é uma regra especificada e testada, ainda que
+  a produção só passe um fragmento.
+- **`SemanticCache::is_empty`:** o clippy exige esse método ao lado de um `len()` público.
+- **API pública usada só por testes:** é a convenção das costuras públicas (D-094).
+- **Tabela de limitações do `merge`, varreduras lineares e cópias do texto das unidades:** são
+  estética ou micro-otimização sem medição.
+
+**Testes:** 724 → 731 no build padrão, 742 → 749 com `online` (gates locais verdes).
 
