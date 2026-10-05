@@ -1170,3 +1170,31 @@ fn a_delay_past_u64_is_the_longest_wait() {
 
     assert_eq!(wait, Some(Duration::MAX));
 }
+
+/// More files that hold secrets by convention are never read for sending (D-149): Terraform's
+/// variables and state, `secrets.toml`, a kubeconfig, `.htpasswd`, git's stored credentials.
+#[test]
+fn common_secret_files_are_never_read_for_sending() {
+    let ws = tempfile::tempdir().unwrap();
+    let names = [
+        "prod.tfvars",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
+        "config/secrets.toml",
+        "kubeconfig",
+        ".htpasswd",
+        ".git-credentials",
+    ];
+    for name in names {
+        put(ws.path(), name, b"x = 1\n");
+    }
+    let reader = WorkspaceReader::new(ws.path()).unwrap();
+
+    for name in names {
+        assert_eq!(
+            reader.snapshot(name).map(|_| ()),
+            Err(Ineligible::SensitiveName),
+            "{name}"
+        );
+    }
+}

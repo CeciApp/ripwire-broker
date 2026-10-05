@@ -91,17 +91,23 @@ const SENSITIVE_NAMES: &[&str] = &[
     "secrets.json",
     "secrets.yaml",
     "secrets.yml",
+    "secrets.toml",
+    "kubeconfig",
+    ".htpasswd",
+    ".git-credentials",
 ];
 
 /// `env` covers environment files without the leading dot, such as `prod.env` (D-089).
 const SENSITIVE_EXTENSIONS: &[&str] = &[
-    "pem", "key", "p12", "pfx", "jks", "keystore", "kdbx", "gpg", "env",
+    "pem", "key", "p12", "pfx", "jks", "keystore", "kdbx", "gpg", "env", "tfvars", "tfstate",
 ];
 
 fn sensitive_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     SENSITIVE_NAMES.contains(&lower.as_str())
         || lower.starts_with(".env.")
+        // Terraform keeps the state's previous version beside it.
+        || lower.ends_with(".tfstate.backup")
         || Path::new(&lower)
             .extension()
             .and_then(OsStr::to_str)
