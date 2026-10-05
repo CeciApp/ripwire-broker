@@ -121,6 +121,8 @@ pub struct Discovery {
     pub too_large: usize,
     /// Error categories of failed requests, and whether the request limit stopped it.
     pub failures: BTreeMap<&'static str, usize>,
+    /// The category of the latest failure, in the order they settled.
+    pub last_failure: Option<&'static str>,
     pub unfinished: usize,
     pub limit_reached: bool,
     /// Batches never sent because a source changed after it was read.
@@ -513,8 +515,8 @@ impl OnlineEngine {
         totals.retries += disc.retries as u64;
         totals.splits += disc.splits as u64;
         totals.rate_limited += disc.rate_limited as u64;
-        if let Some((category, _)) = disc.failures.iter().next() {
-            totals.last_error = Some(category);
+        if disc.last_failure.is_some() {
+            totals.last_error = disc.last_failure;
         }
         disc
     }
@@ -687,7 +689,10 @@ impl OnlineEngine {
                         );
                     }
                 }
-                Err(e) => *disc.failures.entry(e.category()).or_default() += 1,
+                Err(e) => {
+                    *disc.failures.entry(e.category()).or_default() += 1;
+                    disc.last_failure = Some(e.category());
+                }
             }
         }
         out

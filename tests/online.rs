@@ -922,6 +922,33 @@ async fn a_semantic_only_file_that_changed_is_not_counted_as_gain() {
     );
 }
 
+/// The status's `last_error` is the latest failure, not the first in alphabetical order (D-149):
+/// a call that failed `invalid_response` and then `rejected` reported `invalid_response`.
+#[tokio::test]
+async fn the_last_error_is_the_latest_failure() {
+    use ripwire_broker::online::response::InvalidResponse;
+    let classifier = budget_is_evidence()
+        .fail_path_times(
+            "src/budget.py",
+            ClassifyError::Invalid(InvalidResponse::Malformed),
+            1,
+        )
+        .fail_stage(SemanticStage::SourceSelection, ClassifyError::Rejected(400));
+    let s = online_in(with_siblings(), explore(), classifier).await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    let status = json(&s.broker.status().await);
+    assert_eq!(
+        status["online"]["last_error"], "rejected",
+        "{:#}",
+        status["online"]
+    );
+}
+
 #[tokio::test]
 async fn lookahead_admits_eligible_siblings_of_admitted_planner_paths() {
     let s = online_in(with_siblings(), explore(), budget_is_evidence()).await;
