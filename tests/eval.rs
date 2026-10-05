@@ -518,6 +518,52 @@ fn ripwire_eval_runs_every_arm_and_never_touches_the_source_repo() {
 }
 
 #[test]
+fn an_arm_without_memory_never_asks_the_broker_for_memory_status() {
+    let repo = common::sample_repo();
+    let head = git(repo.path(), &["rev-parse", "HEAD"]);
+    let work = tempfile::tempdir().unwrap();
+    let agent = fake_agent(work.path());
+    let counter = work.path().join("runs");
+    let calls = work.path().join("broker-calls");
+    let broker = work.path().join("fake-broker");
+    common::write_executable(
+        &broker,
+        &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", calls.display()),
+    );
+    let corpus = work.path().join("corpus.json");
+    std::fs::write(
+        &corpus,
+        json!({"tasks": [{"id": "t", "repo": repo.path(), "base": head, "prompt": "p",
+                          "reference": {"files": ["src/auth.py"]}, "check": "true"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let out = work.path().join("out");
+    let agent_cmd = format!("{} --mcp-config {{mcp_config}}", agent.display());
+
+    let (code, _, err) = eval(
+        &[
+            "run",
+            "--corpus",
+            corpus.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--arms",
+            "none,broker",
+            "--agent-cmd",
+            &agent_cmd,
+            "--broker",
+            broker.to_str().unwrap(),
+        ],
+        &counter,
+    );
+
+    assert_eq!(code, 0, "{err}");
+    let asked = std::fs::read_to_string(&calls).unwrap_or_default();
+    assert!(!asked.contains("memory"), "{asked}");
+}
+
+#[test]
 fn a_contaminated_run_is_recorded_as_invalid() {
     let repo = common::sample_repo();
     let head = git(repo.path(), &["rev-parse", "HEAD"]);

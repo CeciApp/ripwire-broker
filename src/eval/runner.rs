@@ -382,7 +382,7 @@ fn one(cfg: &RunConfig, task: &Task, arm: Arm, repeat: u32, dir: &Path) -> RunRe
         let sc = score::score(task, &s, &modified, correct);
         let mut r = record(task, arm, repeat, &s, &sc);
         // Ingestion: what the store spent during the session, less what its reads sent.
-        if let (Some(b), Some(a)) = (before, before.and(spent(cfg, &work, &state))) {
+        if let Some((b, a)) = before.and_then(|b| Some((b, spent(cfg, &work, &state)?))) {
             let read = s.memory_read.unwrap_or_default();
             r.memory_ingestion_attempts = Some(a.0.saturating_sub(b.0 + read.requests));
             r.memory_ingestion_questions = Some(a.1.saturating_sub(b.1 + read.questions));
