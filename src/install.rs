@@ -15,12 +15,24 @@ pub struct Change {
 }
 
 pub struct Plan {
+    /// Shown before anything else: a better way than this plan, when there is one.
+    pub lead: Option<String>,
     pub changes: Vec<Change>,
     /// Text for the user to apply by hand (the Codex TOML).
     pub notes: Vec<String>,
 }
 
-fn events(host: Host) -> [(&'static str, &'static str, Option<&'static str>); 3] {
+/// The Claude Code plugin does what `install claude-code` does, with the options as consent
+/// dialogs. Printed as plain text: `<claude-code-hint>` is for official marketplaces only.
+const PLUGIN_LEAD: &str =
+    "Claude Code: the plugin installs the server, the hooks and the skill in one step:
+  claude plugin marketplace add aquental/ripwire-broker
+  claude plugin install ripwire-broker@aquental
+What follows is the per-workspace alternative; use one or the other, not both.";
+
+/// The hook events `install` writes for `host`: (host event, `hook` argument, tool matcher).
+/// The plugin's `hooks/hooks.json` mirrors the Claude Code ones (tests/plugin.rs).
+pub fn events(host: Host) -> [(&'static str, &'static str, Option<&'static str>); 3] {
     let edits = match host {
         Host::ClaudeCode => "Edit|Write|MultiEdit|NotebookEdit|Bash",
         Host::Codex => "apply_patch|Edit|Write",
@@ -314,24 +326,24 @@ fn change(path: PathBuf, edit: impl FnOnce(Value) -> Value) -> Result<Change, St
 /// The variable the server reads its credential from (PRD §23.6).
 use crate::online::KEY_VAR;
 
-/// Shown with every `--online` install (PRD §23.6: mandatory in the documentation of the flag).
-const CONSENT: &str =
-    "--online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
-Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
-The key is never written here: export RIPWIRE_BROKER_JEV_API_KEY in the environment the host
-starts from. The binary must be built with `--features online`; check it with
-`ripwire-broker doctor --workspace DIR --jev-probe`.";
+/// What `--online` sends to Jev (PRD §23.6: mandatory in the documentation of the flag). Shown
+/// with every `--online` install, and the `description` of the plugin's `online` option.
+pub const ONLINE_CONSENT: &str =
+    "O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
+Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.";
 
-/// Shown with every `--memory` install: both effects, local persistence and history sent
-/// (PRD jev-mem §4).
-const MEMORY_CONSENT: &str =
-    "--memory: implica --online. Além do que o modo online envia, guarda localmente observações
+/// What `--memory` keeps and sends, both effects (PRD jev-mem §4). Shown with every `--memory`
+/// install, and the `description` of the plugin's `memory` option.
+pub const MEMORY_CONSENT: &str =
+    "Além do que o modo online envia, guarda localmente observações
 deste workspace entre sessões (no state dir, fora do repositório)
 e envia as elegíveis ao provider Jev para classificá-las e relacioná-las. Os hooks só gravam localmente; nunca fazem HTTP.
-Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
-The key is never written here: export RIPWIRE_BROKER_JEV_API_KEY in the environment the host
-starts from. The binary must be built with `--features online`. To erase and stop collecting:
-`ripwire-broker memory forget --workspace DIR --all`.";
+Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.";
+
+/// Where the key comes from with `install`; the plugin has its own option for it.
+const KEY_NOTE: &str =
+    "The key is never written here: export RIPWIRE_BROKER_JEV_API_KEY in the environment the host
+starts from. The binary must be built with `--features online`";
 
 pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
     // Both host configs are text (JSON, TOML). A path they cannot carry is refused for what
@@ -347,6 +359,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
     // directory whose name is not UTF-8.
     let workspace_text = utf8(&workspace, "the workspace")?;
     let mut plan = Plan {
+        lead: matches!(args.host, Host::ClaudeCode).then(|| PLUGIN_LEAD.to_string()),
         changes: vec![],
         notes: vec![],
     };
@@ -509,9 +522,13 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
         }
     }
     if args.memory {
-        plan.notes.push(MEMORY_CONSENT.into());
+        plan.notes.push(format!(
+            "--memory: implica --online. {MEMORY_CONSENT}\n{KEY_NOTE}. To erase and stop collecting:\n`ripwire-broker memory forget --workspace DIR --all`."
+        ));
     } else if args.online {
-        plan.notes.push(CONSENT.into());
+        plan.notes.push(format!(
+            "--online: {ONLINE_CONSENT}\n{KEY_NOTE}; check it with\n`ripwire-broker doctor --workspace DIR --jev-probe`."
+        ));
     }
     Ok(plan)
 }

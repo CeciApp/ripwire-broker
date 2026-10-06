@@ -5251,3 +5251,34 @@ fn pruning_skips_a_session_whose_lock_is_held() {
         "the held session kept its state"
     );
 }
+
+#[test]
+fn install_claude_code_mentions_the_plugin_commands_first() {
+    let ws = tempfile::tempdir().unwrap();
+    let dir = ws.path().to_str().unwrap();
+    let (code, out, err) = run(&["install", "claude-code", "--workspace", dir], "");
+    assert_eq!(code, 0, "{err}");
+    // A plain note, not <claude-code-hint>: that tag is for official marketplaces only.
+    let first: Vec<&str> = out.lines().take_while(|l| !l.is_empty()).collect();
+    let lead = first.join("\n");
+    assert!(
+        lead.contains("claude plugin marketplace add aquental/ripwire-broker")
+            && lead.contains("claude plugin install ripwire-broker@aquental"),
+        "{out}"
+    );
+    assert!(!out.contains("<claude-code-hint"));
+    let codex_home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run(
+        &[
+            "install",
+            "codex",
+            "--workspace",
+            dir,
+            "--codex-home",
+            codex_home.path().to_str().unwrap(),
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("claude plugin"), "{out}");
+}

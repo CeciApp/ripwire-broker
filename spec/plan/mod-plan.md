@@ -1,6 +1,7 @@
 # ripwire-broker como plugin e mod do Claude Code — Plano de implementação
 
-**Data:** 2026-10-06 · **Status:** aprovado em 2026-10-06 19:00 ([D-157](../changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code));
+**Data:** 2026-10-06 · **Status:** Etapa 1 em andamento, arquivos e testes feitos
+([D-158](../changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes)); aprovado em 2026-10-06 19:00 ([D-157](../changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code));
 as sete decisões do §2.4 tomadas, todas na opção recomendada; os quatro achados da revisão
 adversarial (§2.3) incorporados; nada implementado.
 **Spec:** [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md) (PRD principal; §21 hooks, §24 barra
@@ -72,6 +73,7 @@ cargo clippy --all-targets --locked --features online -- -D warnings
 cargo test --all-targets --locked
 cargo test --all-targets --locked --features online
 claude plugin validate --strict integrations/claude-code          # a partir da T1.1
+claude plugin validate --strict .                                 # a partir da T3.1
 claude plugin test integrations/claude-code                       # a partir da T4.2
 ```
 
@@ -259,7 +261,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   **Verde:** D-157 no changelog com as escolhas DM-1 a DM-7 e a linha no índice; este plano ganha
   `Status: aprovado` e as escolhas marcadas.
   **Docs:** changelog; este plano.
-- [ ] **T0.2 · doc · Conferir as páginas da Anthropic na data da implementação.**
+- [x] **T0.2 · doc · Conferir as páginas da Anthropic na data da implementação.**
   **Vermelho:** a coluna "Data lida" da tabela abaixo está vazia.
   **Verde:** reler manifest-reference, components, hooks (forma exec) e, antes da Fase 4, mods/reference
   e mods/test; anotar a data e qualquer divergência com o §2.1 neste plano antes de codar.
@@ -267,14 +269,14 @@ estar atualizado. Os seis passos do §1 valem para todas.
 
   | Página | Data lida | Divergência |
   |---|---|---|
-  | manifest-reference, components, hooks, publish | | |
+  | manifest-reference, components, hooks, publish (e marketplace-reference, cli-reference) | 2026-10-06 | (1) `title` **e** `description` são obrigatórios em toda opção do `userConfig`, e uma chave desconhecida dentro de uma opção impede o plugin de carregar (T1.3). (2) `CLAUDE_PLUGIN_OPTION_<KEY>` (chave em maiúsculas) chega a hooks nas **duas** formas, não só na exec; `${user_config.KEY}` substitui em toda a config do servidor MCP e também no `command` exec, nunca em comando shell (§2.1 itens 7 e 9, mais largos do que diziam). (3) O `sensitive` vai ao "secure credential store" da plataforma; a página não diz "keychain". (4) `CLAUDE_PROJECT_DIR` no ambiente do servidor stdio: `hooks` diz que é exportado, `manifest-reference` não o lista; o resolvedor usa `${CLAUDE_PROJECT_DIR:-$PWD}` e a T1.6 decide. (5) O manifesto é opcional e `claude plugin validate --strict` passa num diretório sem ele (validou só os componentes, 2.1.285): o vermelho da T1.1 é só o teste Rust. (6) `version` só no `plugin.json`: com ela também na entrada do marketplace, o `validate` avisa (T3.1). (7) Validar diretório com `marketplace.json` **e** `plugin.json` juntos pede 2.1.289; aqui são diretórios distintos. Cópias brutas das páginas no scratchpad da sessão. |
   | mods/overview, create, events, api, test, reference | | |
 
 ### Etapa 1 — Plugin clássico
 
 #### Fase 1 — O plugin carrega com `--plugin-dir`
 
-- [ ] **T1.1 · Manifesto.**
+- [x] **T1.1 · Manifesto.**
   **Vermelho:** `tests/plugin.rs::the_manifest_names_the_plugin_and_passes_the_anthropic_name_rules`:
   lê `integrations/claude-code/.claude-plugin/plugin.json`; `name == "ripwire-broker"`; tem `version`,
   `description`, `author.name`, `homepage` (parseável como URL), `repository`, `license`, `keywords`;
@@ -282,7 +284,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   basta. Falha com "arquivo não existe". Depois do verde, `claude plugin validate --strict` passa.
   **Verde:** o arquivo. `userConfig` entra na T1.3.
   **Docs:** —.
-- [ ] **T1.2 · O resolvedor `scripts/broker`.** Um `sh` que acha o binário e monta o argv.
+- [x] **T1.2 · O resolvedor `scripts/broker`.** Um `sh` que acha o binário e monta o argv.
   **Vermelho:** `tests/plugin.rs::the_resolver_picks_the_binary_in_order_and_maps_options_to_flags`:
   roda o script com um binário falso (que grava o argv recebido, como `common::slow_ripwire`) e
   confere, nesta ordem de preferência: `CLAUDE_PLUGIN_OPTION_BINARY` (opção `binary`), depois
@@ -304,9 +306,12 @@ estar atualizado. Os seis passos do §1 valem para todas.
   `RIPWIRE_BROKER_MOD_ACTIVE=1` faz `hook …` sair com 0 sem executar nada (DM-5, usado na Fase 4);
   faltando binário, sai com 0 em `hook` (um hook que falha não pode travar a sessão) e com 1 em `serve`,
   dizendo no stderr como instalar. Falha com "No such file".
-  **Verde:** o script, `chmod +x` (o git guarda o modo).
+  **Verde:** o script, `chmod +x` (o git guarda o modo). Feito: a opção chega como
+  `RIPWIRE_BROKER_PLUGIN_<KEY>` (do `env` do `.mcp.json`) ou `CLAUDE_PLUGIN_OPTION_<KEY>` (dos hooks),
+  a primeira vencendo; as variáveis da chave do Jev saem do ambiente antes do `exec`; o
+  `scripts/checksums.txt` nasce aqui só com `v0.1.0`, e a T2.2 acrescenta os hashes.
   **Docs:** —.
-- [ ] **T1.3 · `userConfig`: consentimento e opções.**
+- [x] **T1.3 · `userConfig`: consentimento e opções.**
   **Vermelho:** `tests/plugin.rs::user_config_declares_consent_options_with_the_install_texts`: as opções
   `online` (boolean, default false, `description` igual a `install::ONLINE_CONSENT`), `memory` (boolean,
   default false, description igual a `install::MEMORY_CONSENT`), `jev_api_key` (string, `sensitive:
@@ -315,8 +320,12 @@ estar atualizado. Os seis passos do §1 valem para todas.
   juntos são a feature "Incremental context" do README, §2.3), `every_prompt` (boolean, false), `gate`
   (boolean, false), `binary` (`file`, opcional). Chaves só com letras, dígitos e `_`.
   **Verde:** o bloco no manifesto; os dois textos passam a `pub` em `install.rs` se ainda não forem.
+  Feito (decisão do mantenedor, 2026-10-06): `ONLINE_CONSENT` e `MEMORY_CONSENT` guardam só a parte
+  comum, o que é enviado ao Jev; a nota do `install` os compõe com o prefixo da flag e com
+  `KEY_NOTE` (de onde vem a chave), e sai byte a byte igual à de antes. Toda opção tem `title`, que a
+  referência exige (T0.2).
   **Docs:** —.
-- [ ] **T1.4 · Hooks clássicos em forma exec.**
+- [x] **T1.4 · Hooks clássicos em forma exec.**
   **Vermelho:** `tests/plugin.rs::hooks_json_mirrors_the_install_events_in_exec_form`: `hooks/hooks.json`
   tem o envelope `"hooks"`; os mesmos três eventos e matchers que `install::events(Host::ClaudeCode)`
   escreve hoje (`UserPromptSubmit`, `PostToolUse` com `Edit|Write|MultiEdit|NotebookEdit|Bash`, `Stop`);
@@ -325,7 +334,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   `--memory` (vem da opção pelo resolvedor). `integrations/claude-code/settings.json` deixa de existir.
   **Verde:** o arquivo; remover o antigo; `install.rs` não muda.
   **Docs:** README (seção "Agent integration": o exemplo manual aponta para `hooks/hooks.json`).
-- [ ] **T1.5 · O servidor MCP do plugin.**
+- [x] **T1.5 · O servidor MCP do plugin.**
   **Vermelho:** `tests/plugin.rs::mcp_json_runs_the_resolver_and_passes_options_through_env`: `.mcp.json`
   na raiz do plugin, servidor `broker` (DM-3), `command` é o resolvedor, `args` começam por `serve`,
   `env` tem `RIPWIRE_BROKER_PLUGIN_JEV_API_KEY: "${user_config.jev_api_key}"` (**não**
@@ -333,7 +342,11 @@ estar atualizado. Os seis passos do §1 valem para todas.
   `RIPWIRE_BROKER_PLUGIN_ONLINE: "${user_config.online}"`, `…_MEMORY`, `…_INCREMENTAL`; nenhum
   `${user_config.*}` em `command`.
   `integrations/claude-code/mcp.json` deixa de existir.
-  **Verde:** o arquivo.
+  **Verde:** o arquivo. Feito com `args: ["serve"]` só: o workspace sai do resolvedor
+  (`${CLAUDE_PROJECT_DIR:-$PWD}`), já que as páginas discordam sobre `CLAUDE_PROJECT_DIR` no ambiente
+  do servidor (T0.2) e um `${CLAUDE_PROJECT_DIR}` não resolvido nos `args` viraria um caminho literal;
+  a T1.6 confere. `env` leva também `RIPWIRE_BROKER_PLUGIN_BINARY`, para a opção `binary` valer no
+  servidor como vale nos hooks.
   **Docs:** —.
 - [ ] **T1.6 · verificação · O workspace que o servidor recebe.** Carregar com
   `claude --plugin-dir integrations/claude-code` num repositório de teste e ler `provenance.workspace`
@@ -349,14 +362,15 @@ estar atualizado. Os seis passos do §1 valem para todas.
   o usuário vê o aviso de servidor duplicado? Registrar: é o cenário do mantenedor hoje (o repositório
   tem `.mcp.json`), e o README diz para remover um dos dois.
   **Docs:** README do plugin.
-- [ ] **T1.8 · `install claude-code` recomenda o plugin.** A página de CLI hints manda imprimir os dois
+- [x] **T1.8 · `install claude-code` recomenda o plugin.** A página de CLI hints manda imprimir os dois
   comandos; a tag `<claude-code-hint>` **não** se aplica (marketplace não oficial).
   **Vermelho:** `tests/cli.rs::install_claude_code_mentions_the_plugin_commands_first`: a saída do dry
   run começa com uma nota com `claude plugin marketplace add aquental/ripwire-broker` e `claude plugin
   install ripwire-broker@aquental`; `install codex` não a tem.
-  **Verde:** a nota em `install::plan` para `Host::ClaudeCode`.
+  **Verde:** a nota em `install::plan` para `Host::ClaudeCode`. Feito como `Plan.lead`, que o `main`
+  imprime antes de tudo, no dry run e com `--write`: em `notes` ela sairia no fim.
   **Docs:** README ("Agent integration").
-- [ ] **T1.9 · Documentação da Etapa 1.**
+- [x] **T1.9 · Documentação da Etapa 1.**
   **Vermelho:** `grep -n "mcp__plugin_ripwire-broker_broker__context_for_task" README.md
   integrations/claude-code/README.md integrations/claude-code/skills/ripwire-broker/SKILL.md` não
   encontra nada.
@@ -366,6 +380,10 @@ estar atualizado. Os seis passos do §1 valem para todas.
   como alternativa); `SKILL.md` cita o nome das tools nas duas formas (plugin e `.mcp.json` de projeto);
   seção nova no PRD principal, "Plugin e mod do Claude Code", com a Etapa 1; D-NNN "Fase 1 do plugin".
   **Docs:** os quatro.
+  Feito depois das T2.2, T2.3, T3.1 a T3.3, para o README do plugin nascer com o binário, o
+  `SessionStart` e a publicação; o D-158 cobre o que foi feito das Fases 1 a 3. O README do plugin diz
+  que ainda não há release (o `checksums.txt` só fixa `v0.1.0`), e o caminho do cache que ele cita é
+  o observado no 2.1.285, não documentado.
 
 #### Fase 2 — O binário chega ao usuário (DM-1)
 
@@ -376,7 +394,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   um tarball por alvo com `ripwire-broker` e `ripwire-eval`; `SHA256SUMS`; release no GitHub. Rodar
   os portões antes de publicar. O `cargo-deny` do `supply-chain.yml` continua valendo.
   **Docs:** README ("Build and run": onde baixar).
-- [ ] **T2.2 · `install-binary.sh` e `checksums.txt`.**
+- [x] **T2.2 · `install-binary.sh` e `checksums.txt`.**
   **Vermelho:** `tests/plugin.rs::install_binary_refuses_a_checksum_mismatch_and_writes_to_plugin_data`:
   com um servidor HTTP falso (ou um arquivo local via `file://`/`--from DIR` de teste), o script baixa
   o asset do alvo da máquina, confere o SHA-256 contra `scripts/checksums.txt`, grava em
@@ -387,15 +405,26 @@ estar atualizado. Os seis passos do §1 valem para todas.
   `sha256  nome-do-asset` por alvo; `tests/plugin.rs::plugin_version_equals_the_pinned_release`:
   `plugin.json.version` == a tag em `checksums.txt` sem o `v` (DM-6).
   **Verde:** os dois arquivos; o script usa `curl` ou `wget`, o que houver, e `shasum -a 256` ou
-  `sha256sum`.
+  `sha256sum`. Feito: o asset é `ripwire-broker-<tag>-<alvo>.tar.gz` (o nome que a T2.1 tem de
+  publicar); `--target` e `--from DIR` servem ao teste; o download vai para um diretório temporário
+  dentro de `bin/`, e o binário só entra com o hash conferido, por `mv` no mesmo sistema de arquivos.
+  Fora de um hook o Claude Code não exporta `CLAUDE_PLUGIN_DATA` (nem no Bash tool, T0.2), então o
+  script cai em `~/.claude/plugins/data/ripwire-broker-aquental` (respeitando `CLAUDE_CONFIG_DIR`).
+  Os testes de forma do `checksums.txt` e da igualdade de versões já nasceram verdes, porque a T1.2
+  criou o arquivo com `v0.1.0`; a mutação da versão os derruba.
   **Docs:** README do plugin (instalar o binário; alternativa `cargo install`).
-- [ ] **T2.3 · `SessionStart` verifica, não baixa.**
+- [x] **T2.3 · `SessionStart` verifica, não baixa.**
   **Vermelho:** `tests/plugin.rs::session_start_check_says_what_is_missing_in_one_line_and_exits_zero`:
   `hooks.json` ganha `SessionStart` → `scripts/broker check`; sem o binário **da versão fixada**
   (um `bin/0.1.0/` presente com o plugin em `0.2.0` conta como ausente, §2.3), imprime uma linha com o
   comando de instalação (vai ao contexto do Claude, que avisa o usuário) e sai 0; sem `ripwire` no
   `PATH`, idem; com os dois, não imprime nada. Nunca faz rede.
-  **Verde:** o subcomando `check` do resolvedor e a entrada no `hooks.json`.
+  **Verde:** o subcomando `check` do resolvedor e a entrada no `hooks.json`. Feito: sem matcher (todas
+  as origens do `SessionStart`), `timeout` 10; a linha junta o que falta e pede ao Claude que avise o
+  usuário. O teste põe um `curl` falso no `PATH` que denuncia qualquer uso. Revisão: o comando que a
+  linha sugere leva `CLAUDE_PLUGIN_DATA='…'`, porque fora de um hook (terminal, Bash tool) o Claude
+  Code não a exporta e o binário iria para o diretório deduzido, que com `--plugin-dir` não é o do
+  plugin.
   **Docs:** README do plugin.
 
 #### Fase 3 — Publicação
@@ -408,7 +437,10 @@ estar atualizado. Os seis passos do §1 valem para todas.
   .` e `claude plugin install ripwire-broker@aquental --scope user` num repositório de teste; registrar
   no §8 se a instalação carrega **in-place** ou uma cópia (a página "In-place and copied plugins").
   **Docs:** README do plugin (os dois comandos); README principal.
-- [ ] **T3.2 · Sincronia de versões.**
+  **Estado:** o arquivo, o teste `the_repository_is_the_marketplace_aquental_listing_the_plugin` e o
+  portão `validate --strict .` feitos; a instalação num repositório de teste fica com o mantenedor,
+  porque muda a configuração do Claude Code dele no escopo do usuário (§8).
+- [x] **T3.2 · Sincronia de versões.**
   **Vermelho:** `tests/plugin.rs::cargo_version_is_not_behind_the_plugin_version`: `Cargo.toml` ≥ versão
   do plugin (semver). Falha se o plugin apontar para um release que o código ainda não alcançou.
   E `tests/plugin.rs::an_update_with_the_old_binary_present_runs_nothing_old`: simula o update
@@ -417,13 +449,18 @@ estar atualizado. Os seis passos do §1 valem para todas.
   **Verde:** nada além dos testes, que ficam como trava do processo de release (§6, "Como publicar").
   **Docs:** README do plugin ("Como publicar uma versão": subir `Cargo.toml`, tag, release,
   `checksums.txt`, `plugin.json.version`, commit).
-- [ ] **T3.3 · CI valida o plugin.**
+- [x] **T3.3 · CI valida o plugin.**
   **Vermelho:** `rust.yml` não tem o job `plugin`.
   **Verde:** job que instala o Claude Code CLI e roda `claude plugin validate --strict
   integrations/claude-code` e `claude plugin validate --strict .`. Registrar se roda sem login (§2.2);
   se não rodar, o job fica `continue-on-error: false` só no `workflow_dispatch` e a validação local
   entra nos portões do §1 como obrigatória.
   **Docs:** este plano (§1, se o CI não puder validar).
+  **Estado:** o job existe (`npm install --global @anthropic-ai/claude-code@2.1.285`, fixado como as
+  actions; o `postinstall` do pacote liga o binário nativo, então sem `--ignore-scripts`) e não é
+  check obrigatório. **Roda sem login:** no PR #75 os dois `validate --strict` passaram num runner
+  `ubuntu-latest` sem credencial nenhuma (job de 10 s). A validação fica no CI; o §1 continua com ela
+  como portão local.
 - [ ] **T3.4 · Fechamento da Etapa 1.** D-NNN "Etapa 1 do plugin" com: o que o plugin contém, os
   nomes novos das tools, o que o `install` continua fazendo, os limites (Unix; `ripwire` à parte;
   barra de status fora do plugin), e as medições: tempo de um hook pelo resolvedor contra o hook
@@ -587,6 +624,7 @@ o que validar; Claude Code 2.1.285, mods em early access desligados. Preencher a
 | Fase | Testes Rust (padrão / online) | `validate --strict` | `plugin test` | Versão do Claude Code |
 |---|---|---|---|---|
 | base | 782 / 809 | — | — | 2.1.285 |
+| Fases 1–3 (parte, D-158) | 802 / 829 | passa no plugin e na raiz | — | 2.1.285 |
 
 ## 8. Registro de evidência
 
@@ -594,4 +632,18 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 
 | Tarefa | Falha vermelha (teste e mensagem) | Verde (commit) | Mutação que derrubou | Docs atualizadas | Portões |
 |---|---|---|---|---|---|
+| T0.2 | tabela "Data lida" vazia | `9de7f3e` | — (sem código) | tabela da T0.2 preenchida | sem código |
+| T1.1 | `tests/plugin.rs::the_manifest_names_the_plugin_and_passes_the_anthropic_name_rules`: `plugin.json: No such file or directory`; o `validate --strict` já passava antes (T0.2, divergência 5) | `91bc0ac` | tirar `license` (pânico "license: …") e acrescentar `"skills"` (pânico "component key skills") | — | verdes, 783 / 810; `validate --strict` passa. O `memory_controller::auth_failures_suspend_the_worker_until_reauthorized` falhou uma vez sob carga na suíte `online` e passou 5/5 isolado e na nova rodada: intermitente, anterior a esta tarefa |
+| T1.2 | sete testes em `tests/plugin.rs` (`the_resolver_*`, `a_missing_binary_lets_a_hook_pass_and_stops_the_server`), todos com `No such file or directory` em `.output()` do script ausente | `9de7f3e` | dez mutantes, todos mortos: `PATH` antes da versão fixada; qualquer versão em `bin/`; `yes` fora das grafias; `--online` junto de `--memory`; a opção vazia sobrescrevendo a chave; a chave vazia não removida; as variáveis da opção chegando ao filho; `MOD_ACTIVE` ignorada; o hook saindo com 1 sem binário; o aviso de versão calado. A suíte também passa com `#!/bin/dash` | — | verdes, 790 / 817; `validate --strict` passa |
+| T1.3 | `tests/plugin.rs::user_config_declares_consent_options_with_the_install_texts`: `E0432 unresolved import ripwire_broker::install::ONLINE_CONSENT` e `E0603 MEMORY_CONSENT is private` | `19a9ec2` | `incremental` com default `false` ("incremental"); sem `sensitive` ("the key goes to secure storage"); "envia previews e trechos" → "envia trechos" só em `install.rs` (igualdade do `online`); sem `title` no `gate` ("gate.title") | — | verdes, 791 / 818; `validate --strict` passa. `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery` falhou uma vez sob carga (`Err(Locked)`) e passou 5/5 isolado e 3/3 sem a mudança: intermitente, anterior. O script de portões passou a repetir uma vez um `cargo test` que falhe, registrando o pânico |
+| T1.4 | `tests/plugin.rs::hooks_json_mirrors_the_install_events_in_exec_form`: primeiro `E0603 function events is private` (o teste compara com `install::events`, que passou a `pub`), depois `hooks/hooks.json: No such file or directory` | `7b54da9` | `Bash` fora do matcher do `PostToolUse`; `--workspace .` nos `args`; `args` removido do `Stop` (forma shell) | README ("Agent integration": a linha dos hooks) | `validate --strict` passa; verdes no worktree do commit |
+| T1.5 | `tests/plugin.rs::mcp_json_runs_the_resolver_and_passes_options_through_env`: `.mcp.json: No such file or directory` | `4dbf755` | a chave em `RIPWIRE_BROKER_JEV_API_KEY` direto; o servidor chamado `ripwire-broker`; `incremental` fixo em `"true"` | README ("Agent integration": o registro manual do servidor não aponta mais para o `mcp.json` removido) | `validate --strict` passa; verdes no worktree do commit |
+| T1.8 | `tests/cli.rs::install_claude_code_mentions_the_plugin_commands_first`: o primeiro parágrafo da saída é "dry run: nothing written; pass --write to apply" | `f0e011d` | a nota também no `install codex`; a nota não impressa; a nota impressa no fim, junto das `notes` | README ("Agent integration": o `install claude-code` cita o plugin primeiro) | verdes no worktree do commit |
+| T2.2 | `install_binary_refuses_a_checksum_mismatch_and_writes_to_plugin_data` e `install_binary_prune_removes_only_the_other_versions`: `sh: …/install-binary.sh: No such file or directory`; `checksums_pin_a_tag_and_list_one_sha_per_asset` e `plugin_version_equals_the_pinned_release` verdes desde a T1.2 | `42707b0` | hash não conferido; modo 0700; `--prune` apagando a fixada; `--prune` fora de `bin/` (dois mutantes); `version` 0.1.1 no manifesto; temporário não removido ("files left behind"). A suíte também passa com `dash` | README do plugin: na T1.9 | verdes no worktree do commit |
+| T2.3 | `tests/plugin.rs::session_start_check_says_what_is_missing_in_one_line_and_exits_zero`: `left: Null` (sem `SessionStart` no `hooks.json`) | `cc4f67e` | `check` saindo com 1; `ripwire` não conferido; `check` caindo no caminho normal (roda o broker ou reclama no stderr); `args` do hook alterados | README do plugin: na T1.9 | verdes no worktree do commit |
+| T3.1 (parte) | `claude plugin validate --strict .`: "No manifest found in directory. Expected .claude-plugin/marketplace.json", exit 1; `the_repository_is_the_marketplace_aquental_listing_the_plugin`: `marketplace.json: No such file or directory` | `1e25604` | nome `ripwire-broker` no marketplace; `source` `./integrations`; `version` na entrada; `source` `../x` (o `validate` recusa: "must start with ./"). **Falta:** `claude plugin marketplace add .` e `install --scope user` num repositório de teste (mantenedor) | README do plugin: na T1.9 | verdes no worktree do commit, com o `validate --strict .` novo |
+| T3.2 | os dois testes nasceram verdes: são travas de processo sobre o que a T1.2 e a T2.3 já fazem, como a tarefa prevê ("nada além dos testes") | `52d0668` | `plugin.json` em 0.2.0 com o `Cargo.toml` em 0.1.0 ("the plugin pins 0.2.0, which the code (0.1.0) has not reached"); o resolvedor escolhendo a versão mais recente em `bin/` em vez da fixada | README do plugin ("Como publicar uma versão"): na T1.9 | verdes no worktree do commit |
+| T3.3 | `grep -c "name: plugin" .github/workflows/rust.yml` → 0 | `87543cd` | — (YAML; conferido que os jobs são `default`, `online`, `plugin`) | este plano | verdes; no PR #75 (run 37546522493) o job `plugin` passou sem login, e `default` e `online` passaram com `tests/plugin.rs` sob o `dash` do Linux |
+| T1.9 | `grep -n "mcp__plugin_ripwire-broker_broker__context_for_task" README.md integrations/claude-code/README.md …/SKILL.md` sai com 2 ("integrations/claude-code/README.md: No such file") | `b0732b8` | — (texto; o mesmo `grep` acha as três) | README do plugin (novo), README principal, `SKILL.md`, PRD §25, D-158, `handoff.md` | verdes no worktree do commit |
+| T2.3 (revisão) | o mesmo teste, com a linha do `check` tendo de levar `CLAUDE_PLUGIN_DATA='…'`: falhou mostrando a linha sem ele | `d370ca8` | tirar o prefixo da linha | — | verdes no worktree do commit |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

@@ -1,0 +1,68 @@
+{
+  "description": "ripwire-broker: context on the first prompt, after edits and before finishing.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/broker",
+            "args": [
+              "check"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/broker",
+            "args": [
+              "hook",
+              "claude-code",
+              "user-prompt-submit"
+            ],
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/broker",
+            "args": [
+              "hook",
+              "claude-code",
+              "post-tool-use"
+            ],
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/broker",
+            "args": [
+              "hook",
+              "claude-code",
+              "stop"
+            ],
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

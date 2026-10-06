@@ -1,0 +1,15 @@
+{
+  "name": "aquental",
+  "owner": {
+    "name": "Antonio Quental",
+    "url": "https://github.com/aquental"
+  },
+  "description": "Plugins by Antonio Quental.",
+  "plugins": [
+    {
+      "name": "ripwire-broker",
+      "source": "./integrations/claude-code",
+      "description": "Structural code context for the agent, within a token budget: an MCP server over ripwire, hooks and a skill."
+    }
+  ]
+}

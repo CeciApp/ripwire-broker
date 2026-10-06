@@ -3025,3 +3025,47 @@ estava pausada) até um prompt com o ripwire de pé. Registrado, não corrigido 
 [D-126](changelog.md#d-126--o-marcador-vale-mesmo-sem-ripwire):** o marcador do prompt é aplicado
 mesmo quando o ripwire não sobe; a pausa é confirmada e salva, e a retomada é salva antes de a falha
 ser reportada.
+
+## 25. Plugin e mod do Claude Code
+
+**Estado:** Etapa 1 (plugin clássico) implementada em
+[D-158](changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes), com as verificações numa
+sessão real, o workflow de release e as medições pendentes; Etapa 2 (o mod) não começada, à espera
+do Claude Code 2.1.287. Plano em [mod-plan.md](plan/mod-plan.md), decisões no
+[D-157](changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code).
+
+### 25.1 Etapa 1: o plugin
+
+A raiz do plugin é `integrations/claude-code/`; o repositório é o marketplace `aquental`
+(`.claude-plugin/marketplace.json`). Instalação: `claude plugin marketplace add aquental/ripwire-broker`
+e `claude plugin install ripwire-broker@aquental`.
+
+- **Manifesto** (`.claude-plugin/plugin.json`): metadados e `userConfig`; nenhuma chave de componente,
+  porque o layout padrão basta. `version` é a do release fixado em `scripts/checksums.txt` (DM-6).
+- **Opções:** `online` e `memory` (desligadas; a `description` de cada uma é o texto de consentimento
+  que o `install` mostra, `install::ONLINE_CONSENT` e `install::MEMORY_CONSENT`), `jev_api_key`
+  (sensível, no cofre do sistema), `incremental` (ligada), `every_prompt`, `gate` e `binary`.
+- **Servidor** (`.mcp.json`): `broker`, logo `plugin:ripwire-broker:broker` e tools
+  `mcp__plugin_ripwire-broker_broker__<tool>`. Roda `scripts/broker serve`; as opções chegam no `env`
+  como `RIPWIRE_BROKER_PLUGIN_<KEY>`. A chave do Jev viaja numa variável própria, e o resolvedor só
+  substitui `RIPWIRE_BROKER_JEV_API_KEY` quando a opção não está vazia.
+- **Hooks** (`hooks/hooks.json`): os três do `install` (`install::events(Host::ClaudeCode)`), em forma
+  exec pelo resolvedor, sem `--workspace`; mais `SessionStart` → `scripts/broker check`, que só
+  verifica e diz em uma linha o que falta.
+- **Resolvedor** (`scripts/broker`, `sh` POSIX): o binário vem da opção `binary`, depois de
+  `${CLAUDE_PLUGIN_DATA}/bin/<versão fixada>/`, depois do `PATH`; nunca de outra versão deixada por um
+  release anterior. Sem binário, um hook passa (sai com 0) e o servidor não sobe (sai com 1). Com
+  `RIPWIRE_BROKER_MOD_ACTIVE=1`, os hooks não fazem nada (Etapa 2).
+- **Binário** (`scripts/install-binary.sh`): só quando o usuário roda; baixa o asset do release
+  fixado, confere o SHA-256 e instala inteiro em `${CLAUDE_PLUGIN_DATA}/bin/<versão>/`. Nenhuma rede
+  sem pedido (CA-10, D-064).
+- **`install claude-code`** passa a abrir a saída com os dois comandos do plugin; o resto não muda.
+- **Limites:** Unix; `ripwire` continua à parte, no `PATH`; a barra de status fica fora do plugin
+  (um plugin não define `statusLine`), no `install --statusline`.
+- **Testes:** `tests/plugin.rs` (forma dos arquivos, argv e ambiente do resolvedor com binários falsos,
+  instalação e poda do binário, sincronia de versões) e o job `plugin` do CI
+  (`claude plugin validate --strict` no plugin e na raiz).
+
+### 25.2 Etapa 2: o mod
+
+Não começada. Ver o plano, Fases 4 a 6.

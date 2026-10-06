@@ -601,7 +601,21 @@ rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · inj 7 · não reenviados 18 
 
 ## Agent integration
 
-The simplest way is `install`, which is a **dry run** unless you pass `--write`:
+**Claude Code: the plugin.** One package with the server, the hooks, the skill and the consent
+options, installed by name and updated with `claude plugin update`:
+
+```sh
+claude plugin marketplace add aquental/ripwire-broker
+claude plugin install ripwire-broker@aquental
+```
+
+The binary comes separately (the plugin's `install-binary.sh` downloads the pinned release and
+checks its SHA-256, or use one on `PATH`). The tools are then named
+`mcp__plugin_ripwire-broker_broker__context_for_task` and so on, not `mcp__ripwire-broker__…`: rules
+and `allowedTools` written for one do not match the other. Everything else, from the options to
+publishing a version, is in [`integrations/claude-code/README.md`](integrations/claude-code/README.md).
+
+**Per workspace, and for Codex: `install`**, which is a **dry run** unless you pass `--write`:
 
 ```sh
 ripwire-broker doctor --workspace /repo
@@ -610,7 +624,8 @@ ripwire-broker install claude-code --workspace /repo --hooks --write  # writes i
 ripwire-broker install codex --workspace /repo --hooks --write
 ```
 
-- Claude Code: merges the server into `/repo/.mcp.json` and, with `--hooks`, the hooks into
+- Claude Code: first prints the two commands that install the plugin instead (one or the other, not
+  both). Then merges the server into `/repo/.mcp.json` and, with `--hooks`, the hooks into
   `/repo/.claude/settings.json`. These are the only files the broker ever writes inside a workspace, and only
   with `--write`.
 - Codex: merges the hooks into `~/.codex/hooks.json` (`--codex-home` to change it). They are global, so they
@@ -629,11 +644,14 @@ ripwire-broker install codex --workspace /repo --hooks --write
 Manual setup, if you prefer:
 
 - Claude Code: copy `integrations/claude-code/skills/ripwire-broker/` to `.claude/skills/`
-  and register the server (example in `integrations/claude-code/mcp.json`, or
-  `claude mcp add ripwire-broker -- /path/ripwire-broker --workspace .`).
+  and register the server with
+  `claude mcp add ripwire-broker -- /path/ripwire-broker --workspace .` (the plugin's
+  `integrations/claude-code/.mcp.json` goes through its `scripts/broker` and is not a file to copy).
 - Codex: add `integrations/codex/config.toml` to `~/.codex/config.toml` and the contents of
   `integrations/codex/AGENTS.md` to the repository's `AGENTS.md`.
-- Hooks: examples in `integrations/claude-code/settings.json` and `integrations/codex/hooks.json`.
+- Hooks: `install --hooks` writes them for either host. `integrations/claude-code/hooks/hooks.json` holds the
+  plugin's, in exec form through the plugin's `scripts/broker`, so it needs the plugin's variables
+  (`${CLAUDE_PLUGIN_ROOT}`) and is not a file to copy; `integrations/codex/hooks.json` is the Codex example.
 - Other clients: `client "$(ripwire-broker prompt --workspace /repo "the task")"` sends the task
   followed by its context inside `<ripwire-broker-context untrusted="true">`. `<` and `>` in the
   payload are escaped (`\u003c`), so repository text cannot close that block.

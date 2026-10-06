@@ -324,6 +324,9 @@ fn install(a: &cli::InstallArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(lead) = &plan.lead {
+        println!("{lead}\n");
+    }
     if a.write {
         match ripwire_broker::install::apply(&plan) {
             Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
