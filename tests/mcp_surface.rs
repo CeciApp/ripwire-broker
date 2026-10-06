@@ -740,6 +740,67 @@ async fn an_online_server_says_so_in_its_status_without_the_credential() {
     client.shut_down().await.unwrap();
 }
 
+/// Without ripwire the broker never connects, yet a `--memory` server still says so in its status,
+/// with the worker's cost; the collection counts belong to the broker and are left out.
+#[cfg(feature = "online")]
+#[tokio::test]
+async fn a_memory_server_says_so_in_its_status_before_the_broker_connects() {
+    let (repo, xdg) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let args = vec![
+        "--workspace".to_string(),
+        repo.path().display().to_string(),
+        "--ripwire".into(),
+        "/nonexistent/ripwire".into(),
+        "--memory".into(),
+        "--memory-selection".into(),
+        "deterministic".into(),
+    ];
+    let env = std::collections::HashMap::from([
+        (
+            "RIPWIRE_BROKER_JEV_API_KEY".to_string(),
+            "tok-e2e-secret".to_string(),
+        ),
+        (
+            "XDG_STATE_HOME".to_string(),
+            xdg.path().display().to_string(),
+        ),
+    ]);
+    let transport = StdioTransport::create_with_server_launch(
+        env!("CARGO_BIN_EXE_ripwire-broker"),
+        args,
+        Some(env),
+        TransportOptions::default(),
+    )
+    .unwrap();
+    let details = ClientDetails {
+        client_info: Implementation {
+            name: "e2e".into(),
+            version: "0".into(),
+            title: None,
+            description: None,
+            icons: vec![],
+            website_url: None,
+        },
+        capabilities: ClientCapabilities::default(),
+    };
+    let client = client_runtime::create_client(McpClientOptions::new(
+        details,
+        transport,
+        Quiet.to_mcp_client_handler(),
+    ));
+    client.clone().start().await.unwrap();
+
+    let st = status(&client).await;
+
+    assert_eq!(st["upstream"]["available"], false, "{st}");
+    let memory = &st["memory"];
+    assert!(memory["worker"]["jobs_done"].is_u64(), "{st}");
+    assert!(memory["worker"]["typing"]["attempts"].is_u64(), "{st}");
+    assert!(memory.get("confirmed").is_none(), "{st}");
+    assert!(!st.to_string().contains("tok-e2e-secret"));
+    client.shut_down().await.unwrap();
+}
+
 /// The status line's view of the server (D-154): published at start, gone when it stops.
 #[cfg(feature = "online")]
 #[tokio::test]

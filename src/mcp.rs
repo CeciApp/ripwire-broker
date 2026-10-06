@@ -242,6 +242,14 @@ impl BrokerServer {
                 "request_limit": o.request_limit,
             });
         }
+        // Nor are memory's collection counts, which the broker's publisher keeps; the worker
+        // runs apart from it, so its cost is already real.
+        if let (Some(m), None) = (&self.settings.broker.memory, status.get("memory")) {
+            status["memory"] = match &m.worker {
+                Some(w) => json!({"worker": *w.lock().unwrap()}),
+                None => json!({}),
+            };
+        }
         status["inflight"] = self.inflight.counts();
         status
     }
