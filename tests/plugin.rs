@@ -496,3 +496,168 @@ fn mcp_json_runs_the_resolver_and_passes_options_through_env() {
         "the old hand-written example is gone"
     );
 }
+
+/// A release asset as T2.1 publishes it: a tarball with the broker inside, named after its tag
+/// and target. Returns the asset's file name and its SHA-256.
+fn release_asset(dir: &Path, tag: &str, target: &str, says: &str) -> (String, String) {
+    use sha2::{Digest, Sha256};
+    let stage = dir.join(format!("stage-{tag}-{says}"));
+    std::fs::create_dir_all(&stage).unwrap();
+    common::write_executable(
+        &stage.join("ripwire-broker"),
+        format!("#!/bin/sh\necho \"ripwire-broker {says}\"\n"),
+    );
+    let name = format!("ripwire-broker-{tag}-{target}.tar.gz");
+    std::fs::create_dir_all(dir.join("from")).unwrap();
+    let status = Command::new("tar")
+        .arg("-czf")
+        .arg(dir.join("from").join(&name))
+        .arg("-C")
+        .arg(&stage)
+        .arg("ripwire-broker")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let bytes = std::fs::read(dir.join("from").join(&name)).unwrap();
+    let sha = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    (name, sha)
+}
+
+const TARGET: &str = "x86_64-unknown-linux-gnu";
+
+impl Resolver {
+    fn install_binary(&self, args: &[&str]) -> Output {
+        Command::new("sh")
+            .arg(plugin_root().join("scripts/install-binary.sh"))
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("CLAUDE_PLUGIN_ROOT", self.at("root"))
+            .env("CLAUDE_PLUGIN_DATA", self.at("data"))
+            .output()
+            .unwrap()
+    }
+
+    fn pin(&self, tag: &str, assets: &[(String, String)]) {
+        let mut text = format!("{tag}\n");
+        for (name, sha) in assets {
+            text.push_str(&format!("{sha}  {name}\n"));
+        }
+        std::fs::write(self.at("root/scripts/checksums.txt"), text).unwrap();
+    }
+}
+
+#[test]
+fn install_binary_refuses_a_checksum_mismatch_and_writes_to_plugin_data() {
+    let r = Resolver::new("v0.2.0");
+    std::fs::create_dir_all(r.at("data/bin/0.1.0")).unwrap();
+    std::fs::write(r.at("data/bin/0.1.0/ripwire-broker"), "old").unwrap();
+    let asset = release_asset(r.dir.path(), "v0.2.0", TARGET, "0.2.0");
+    r.pin("v0.2.0", std::slice::from_ref(&asset));
+    let from = r.at("from").display().to_string();
+
+    let out = r.install_binary(&["--from", &from, "--target", TARGET]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let installed = r.at("data/bin/0.2.0/ripwire-broker");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+    let says = Command::new(&installed).output().unwrap().stdout;
+    assert_eq!(
+        String::from_utf8_lossy(&says).trim(),
+        "ripwire-broker 0.2.0"
+    );
+    // Earlier versions stay until --prune.
+    assert!(r.at("data/bin/0.1.0/ripwire-broker").exists());
+
+    // An asset whose hash is not the pinned one is refused, and leaves nothing behind.
+    let r = Resolver::new("v0.3.0");
+    let (name, _) = release_asset(r.dir.path(), "v0.3.0", TARGET, "tampered");
+    r.pin("v0.3.0", &[(name, "0".repeat(64))]);
+    let from = r.at("from").display().to_string();
+    let out = r.install_binary(&["--from", &from, "--target", TARGET]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("SHA-256"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut left = vec![];
+    for entry in walk(&r.at("data")) {
+        left.push(entry.display().to_string());
+    }
+    assert!(left.is_empty(), "files left behind: {left:?}");
+
+    // A target the release does not list is refused before any download.
+    let out = r.install_binary(&["--from", &from, "--target", "riscv64-unknown-linux-gnu"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("riscv64"));
+}
+
+/// Every file under `dir`, recursively.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut files = vec![];
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        match path.is_dir() {
+            true => files.extend(walk(&path)),
+            false => files.push(path),
+        }
+    }
+    files
+}
+
+#[test]
+fn install_binary_prune_removes_only_the_other_versions() {
+    let r = Resolver::new("v0.2.0");
+    for dir in ["data/bin/0.1.0", "data/bin/0.2.0", "data/other"] {
+        std::fs::create_dir_all(r.at(dir)).unwrap();
+        std::fs::write(r.at(dir).join("ripwire-broker"), "x").unwrap();
+    }
+    let out = r.install_binary(&["--prune"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!r.at("data/bin/0.1.0").exists());
+    assert!(r.at("data/bin/0.2.0/ripwire-broker").exists());
+    assert!(
+        r.at("data/other/ripwire-broker").exists(),
+        "never outside bin/"
+    );
+}
+
+#[test]
+fn checksums_pin_a_tag_and_list_one_sha_per_asset() {
+    let text = std::fs::read_to_string(plugin_root().join("scripts/checksums.txt")).unwrap();
+    let mut lines = text.lines();
+    let tag = lines.next().unwrap();
+    assert!(
+        tag.starts_with('v') && tag[1..].split('.').count() == 3,
+        "first line is the release tag: {tag:?}"
+    );
+    for line in lines {
+        let (sha, name) = line.split_once("  ").expect("sha256  asset");
+        assert!(sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(name.starts_with(&format!("ripwire-broker-{tag}-")) && name.ends_with(".tar.gz"));
+    }
+}
+
+#[test]
+fn plugin_version_equals_the_pinned_release() {
+    let text = std::fs::read_to_string(plugin_root().join("scripts/checksums.txt")).unwrap();
+    let tag = text.lines().next().unwrap();
+    assert_eq!(
+        manifest()["version"].as_str(),
+        tag.strip_prefix('v'),
+        "plugin.json.version is the release in checksums.txt (DM-6)"
+    );
+}
