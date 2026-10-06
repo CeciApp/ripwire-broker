@@ -51,7 +51,8 @@ fi
 if [ "$mode" = check ]; then
     missing=
     if [ -z "$binary" ]; then
-        missing="the ripwire-broker $pinned binary is not installed: \`sh \"$root/scripts/install-binary.sh\"\` downloads the release the plugin pins and checks its SHA-256 (or put ripwire-broker on PATH)"
+        # The Bash tool and a terminal get no CLAUDE_PLUGIN_DATA: the command carries it.
+        missing="the ripwire-broker $pinned binary is not installed: \`${CLAUDE_PLUGIN_DATA:+CLAUDE_PLUGIN_DATA='$CLAUDE_PLUGIN_DATA' }sh '$root/scripts/install-binary.sh'\` downloads the release the plugin pins and checks its SHA-256 (or put ripwire-broker on PATH)"
     fi
     if ! command -v ripwire >/dev/null 2>&1; then
         missing="${missing:+$missing; }ripwire is not on PATH (https://github.com/redhat-et/ripwire)"

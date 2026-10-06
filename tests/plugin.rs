@@ -702,6 +702,12 @@ fn session_start_check_says_what_is_missing_in_one_line_and_exits_zero() {
         "{said}"
     );
     assert!(said.contains("ripwire"), "ripwire is missing too: {said}");
+    // Outside a hook, Claude Code exports no CLAUDE_PLUGIN_DATA: the command carries it, so the
+    // binary lands where this plugin looks for it.
+    assert!(
+        said.contains(&format!("CLAUDE_PLUGIN_DATA='{}'", r.at("data").display())),
+        "{said}"
+    );
 
     r.fake("data/bin/0.2.0/ripwire-broker", "0.2.0");
     let said = check(&r);

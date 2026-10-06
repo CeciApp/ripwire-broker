@@ -421,7 +421,10 @@ estar atualizado. Os seis passos do §1 valem para todas.
   `PATH`, idem; com os dois, não imprime nada. Nunca faz rede.
   **Verde:** o subcomando `check` do resolvedor e a entrada no `hooks.json`. Feito: sem matcher (todas
   as origens do `SessionStart`), `timeout` 10; a linha junta o que falta e pede ao Claude que avise o
-  usuário. O teste põe um `curl` falso no `PATH` que denuncia qualquer uso.
+  usuário. O teste põe um `curl` falso no `PATH` que denuncia qualquer uso. Revisão: o comando que a
+  linha sugere leva `CLAUDE_PLUGIN_DATA='…'`, porque fora de um hook (terminal, Bash tool) o Claude
+  Code não a exporta e o binário iria para o diretório deduzido, que com `--plugin-dir` não é o do
+  plugin.
   **Docs:** README do plugin.
 
 #### Fase 3 — Publicação
@@ -640,4 +643,5 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T3.2 | os dois testes nasceram verdes: são travas de processo sobre o que a T1.2 e a T2.3 já fazem, como a tarefa prevê ("nada além dos testes") | commit da T3.2 | `plugin.json` em 0.2.0 com o `Cargo.toml` em 0.1.0 ("the plugin pins 0.2.0, which the code (0.1.0) has not reached"); o resolvedor escolhendo a versão mais recente em `bin/` em vez da fixada | README do plugin ("Como publicar uma versão"): na T1.9 | portões no worktree do commit |
 | T3.3 (parte) | `grep -c "name: plugin" .github/workflows/rust.yml` → 0 | commit da T3.3 | — (YAML; conferido que os jobs são `default`, `online`, `plugin`) | este plano | **Falta:** o resultado do job no primeiro PR (roda sem login?) |
 | T1.9 | `grep -n "mcp__plugin_ripwire-broker_broker__context_for_task" README.md integrations/claude-code/README.md …/SKILL.md` sai com 2 ("integrations/claude-code/README.md: No such file") | commit da T1.9 | — (texto; o mesmo `grep` acha as três) | README do plugin (novo), README principal, `SKILL.md`, PRD §25, D-158, `handoff.md` | portões no worktree do commit |
+| T2.3 (revisão) | o mesmo teste, com a linha do `check` tendo de levar `CLAUDE_PLUGIN_DATA='…'`: falhou mostrando a linha sem ele | commit da revisão | tirar o prefixo da linha | — | portões no worktree do commit |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |
