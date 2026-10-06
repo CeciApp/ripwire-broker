@@ -9,5 +9,54 @@
   "homepage": "https://github.com/aquental/ripwire-broker/tree/master/integrations/claude-code#readme",
   "repository": "https://github.com/aquental/ripwire-broker",
   "license": "MIT",
-  "keywords": ["mcp", "context", "ripwire", "code-intelligence", "hooks"]
+  "keywords": [
+    "mcp",
+    "context",
+    "ripwire",
+    "code-intelligence",
+    "hooks"
+  ],
+  "userConfig": {
+    "online": {
+      "type": "boolean",
+      "title": "Online mode (Jev)",
+      "description": "O modo online envia previews e trechos elegíveis do workspace ao provider Jev.\nSelecione somente uma raiz cujo conteúdo você tem autorização para enviar.",
+      "default": false
+    },
+    "memory": {
+      "type": "boolean",
+      "title": "Persistent memory (implies online)",
+      "description": "Além do que o modo online envia, guarda localmente observações\ndeste workspace entre sessões (no state dir, fora do repositório)\ne envia as elegíveis ao provider Jev para classificá-las e relacioná-las. Os hooks só gravam localmente; nunca fazem HTTP.\nSelecione somente uma raiz cujo conteúdo você tem autorização para enviar.",
+      "default": false
+    },
+    "jev_api_key": {
+      "type": "string",
+      "title": "Jev API key",
+      "description": "Used by the online mode and memory. Kept in secure storage, never in settings.json. Leave empty to use RIPWIRE_BROKER_JEV_API_KEY from the environment Claude Code starts from.",
+      "sensitive": true
+    },
+    "incremental": {
+      "type": "boolean",
+      "title": "Incremental context",
+      "description": "The server leaves out, per session, what it already delivered to the agent.",
+      "default": true
+    },
+    "every_prompt": {
+      "type": "boolean",
+      "title": "Context on every prompt",
+      "description": "The prompt hook injects context on every prompt, not only the first of the session.",
+      "default": false
+    },
+    "gate": {
+      "type": "boolean",
+      "title": "Finish gate",
+      "description": "The Stop hook holds the turn once when the final check asks for attention.",
+      "default": false
+    },
+    "binary": {
+      "type": "file",
+      "title": "ripwire-broker binary",
+      "description": "A ripwire-broker to run instead of the release the plugin pins (installed by scripts/install-binary.sh) or the one on PATH."
+    }
+  }
 }

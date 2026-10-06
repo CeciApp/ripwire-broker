@@ -309,7 +309,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   a primeira vencendo; as variáveis da chave do Jev saem do ambiente antes do `exec`; o
   `scripts/checksums.txt` nasce aqui só com `v0.1.0`, e a T2.2 acrescenta os hashes.
   **Docs:** —.
-- [ ] **T1.3 · `userConfig`: consentimento e opções.**
+- [x] **T1.3 · `userConfig`: consentimento e opções.**
   **Vermelho:** `tests/plugin.rs::user_config_declares_consent_options_with_the_install_texts`: as opções
   `online` (boolean, default false, `description` igual a `install::ONLINE_CONSENT`), `memory` (boolean,
   default false, description igual a `install::MEMORY_CONSENT`), `jev_api_key` (string, `sensitive:
@@ -318,6 +318,10 @@ estar atualizado. Os seis passos do §1 valem para todas.
   juntos são a feature "Incremental context" do README, §2.3), `every_prompt` (boolean, false), `gate`
   (boolean, false), `binary` (`file`, opcional). Chaves só com letras, dígitos e `_`.
   **Verde:** o bloco no manifesto; os dois textos passam a `pub` em `install.rs` se ainda não forem.
+  Feito (decisão do mantenedor, 2026-10-06): `ONLINE_CONSENT` e `MEMORY_CONSENT` guardam só a parte
+  comum, o que é enviado ao Jev; a nota do `install` os compõe com o prefixo da flag e com
+  `KEY_NOTE` (de onde vem a chave), e sai byte a byte igual à de antes. Toda opção tem `title`, que a
+  referência exige (T0.2).
   **Docs:** —.
 - [ ] **T1.4 · Hooks clássicos em forma exec.**
   **Vermelho:** `tests/plugin.rs::hooks_json_mirrors_the_install_events_in_exec_form`: `hooks/hooks.json`
@@ -597,7 +601,8 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 
 | Tarefa | Falha vermelha (teste e mensagem) | Verde (commit) | Mutação que derrubou | Docs atualizadas | Portões |
 |---|---|---|---|---|---|
-| T0.2 | tabela "Data lida" vazia | (commit da Fase 1) | — (sem código) | tabela da T0.2 preenchida | sem código |
+| T0.2 | tabela "Data lida" vazia | `9de7f3e` | — (sem código) | tabela da T0.2 preenchida | sem código |
 | T1.1 | `tests/plugin.rs::the_manifest_names_the_plugin_and_passes_the_anthropic_name_rules`: `plugin.json: No such file or directory`; o `validate --strict` já passava antes (T0.2, divergência 5) | `91bc0ac` | tirar `license` (pânico "license: …") e acrescentar `"skills"` (pânico "component key skills") | — | verdes, 783 / 810; `validate --strict` passa. O `memory_controller::auth_failures_suspend_the_worker_until_reauthorized` falhou uma vez sob carga na suíte `online` e passou 5/5 isolado e na nova rodada: intermitente, anterior a esta tarefa |
-| T1.2 | sete testes em `tests/plugin.rs` (`the_resolver_*`, `a_missing_binary_lets_a_hook_pass_and_stops_the_server`), todos com `No such file or directory` em `.output()` do script ausente | commit da T1.2 | dez mutantes, todos mortos: `PATH` antes da versão fixada; qualquer versão em `bin/`; `yes` fora das grafias; `--online` junto de `--memory`; a opção vazia sobrescrevendo a chave; a chave vazia não removida; as variáveis da opção chegando ao filho; `MOD_ACTIVE` ignorada; o hook saindo com 1 sem binário; o aviso de versão calado. A suíte também passa com `#!/bin/dash` | — | verdes, 790 / 817; `validate --strict` passa |
+| T1.2 | sete testes em `tests/plugin.rs` (`the_resolver_*`, `a_missing_binary_lets_a_hook_pass_and_stops_the_server`), todos com `No such file or directory` em `.output()` do script ausente | `9de7f3e` | dez mutantes, todos mortos: `PATH` antes da versão fixada; qualquer versão em `bin/`; `yes` fora das grafias; `--online` junto de `--memory`; a opção vazia sobrescrevendo a chave; a chave vazia não removida; as variáveis da opção chegando ao filho; `MOD_ACTIVE` ignorada; o hook saindo com 1 sem binário; o aviso de versão calado. A suíte também passa com `#!/bin/dash` | — | verdes, 790 / 817; `validate --strict` passa |
+| T1.3 | `tests/plugin.rs::user_config_declares_consent_options_with_the_install_texts`: `E0432 unresolved import ripwire_broker::install::ONLINE_CONSENT` e `E0603 MEMORY_CONSENT is private` | `a200fdd` | `incremental` com default `false` ("incremental"); sem `sensitive` ("the key goes to secure storage"); "envia previews e trechos" → "envia trechos" só em `install.rs` (igualdade do `online`); sem `title` no `gate` ("gate.title") | — | verdes, 791 / 818; `validate --strict` passa. `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery` falhou uma vez sob carga (`Err(Locked)`) e passou 5/5 isolado e 3/3 sem a mudança: intermitente, anterior. O script de portões passou a repetir uma vez um `cargo test` que falhe, registrando o pânico |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

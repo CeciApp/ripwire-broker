@@ -374,3 +374,58 @@ fn a_missing_binary_lets_a_hook_pass_and_stops_the_server() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("install-binary.sh"));
     assert_eq!(r.argv(), None, "the old release never runs");
 }
+
+#[test]
+fn user_config_declares_consent_options_with_the_install_texts() {
+    use ripwire_broker::install::{MEMORY_CONSENT, ONLINE_CONSENT};
+    let config = manifest()["userConfig"].clone();
+    let options = config.as_object().expect("userConfig");
+    let mut keys: Vec<&str> = options.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "binary",
+            "every_prompt",
+            "gate",
+            "incremental",
+            "jev_api_key",
+            "memory",
+            "online"
+        ]
+    );
+    for (key, o) in options {
+        assert!(
+            key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !key.starts_with(|c: char| c.is_ascii_digit()),
+            "{key}"
+        );
+        // Both are required by the manifest reference.
+        for field in ["title", "description"] {
+            assert!(
+                o[field].as_str().is_some_and(|s| !s.is_empty()),
+                "{key}.{field}"
+            );
+        }
+    }
+    let boolean = |key: &str, default: bool| {
+        assert_eq!(config[key]["type"], "boolean", "{key}");
+        assert_eq!(config[key]["default"], default, "{key}");
+    };
+    // Consent stays off by default, and says what the install says is sent to Jev.
+    boolean("online", false);
+    assert_eq!(config["online"]["description"], ONLINE_CONSENT);
+    boolean("memory", false);
+    assert_eq!(config["memory"]["description"], MEMORY_CONSENT);
+    // The server dedups per session what the agent and the mod ask it (mod-plan §2.3).
+    boolean("incremental", true);
+    boolean("every_prompt", false);
+    boolean("gate", false);
+    let key = &config["jev_api_key"];
+    assert_eq!(key["type"], "string");
+    assert_eq!(key["sensitive"], true, "the key goes to secure storage");
+    assert_ne!(key["required"], true);
+    assert!(key.get("default").is_none());
+    assert_eq!(config["binary"]["type"], "file");
+    assert_ne!(config["binary"]["required"], true);
+}
