@@ -629,8 +629,9 @@ ripwire-broker install codex --workspace /repo --hooks --write
 Manual setup, if you prefer:
 
 - Claude Code: copy `integrations/claude-code/skills/ripwire-broker/` to `.claude/skills/`
-  and register the server (example in `integrations/claude-code/mcp.json`, or
-  `claude mcp add ripwire-broker -- /path/ripwire-broker --workspace .`).
+  and register the server with
+  `claude mcp add ripwire-broker -- /path/ripwire-broker --workspace .` (the plugin's
+  `integrations/claude-code/.mcp.json` goes through its `scripts/broker` and is not a file to copy).
 - Codex: add `integrations/codex/config.toml` to `~/.codex/config.toml` and the contents of
   `integrations/codex/AGENTS.md` to the repository's `AGENTS.md`.
 - Hooks: `install --hooks` writes them for either host. `integrations/claude-code/hooks/hooks.json` holds the

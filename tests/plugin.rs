@@ -468,3 +468,31 @@ fn hooks_json_mirrors_the_install_events_in_exec_form() {
         "the old hand-written example is gone"
     );
 }
+
+#[test]
+fn mcp_json_runs_the_resolver_and_passes_options_through_env() {
+    let file = read_json(".mcp.json");
+    let servers = file["mcpServers"].as_object().expect("mcpServers");
+    // `broker` gives plugin:ripwire-broker:broker and mcp__plugin_ripwire-broker_broker__* (DM-3).
+    assert_eq!(servers.keys().collect::<Vec<_>>(), ["broker"]);
+    let server = &servers["broker"];
+    assert_eq!(server["command"], "${CLAUDE_PLUGIN_ROOT}/scripts/broker");
+    assert_eq!(server["args"], serde_json::json!(["serve"]));
+    // The key travels in a variable of its own: written straight into
+    // RIPWIRE_BROKER_JEV_API_KEY, an empty option would overwrite the shell's key with ""
+    // (mod-plan §2.3). The resolver decides.
+    assert_eq!(
+        server["env"],
+        serde_json::json!({
+            "RIPWIRE_BROKER_PLUGIN_JEV_API_KEY": "${user_config.jev_api_key}",
+            "RIPWIRE_BROKER_PLUGIN_ONLINE": "${user_config.online}",
+            "RIPWIRE_BROKER_PLUGIN_MEMORY": "${user_config.memory}",
+            "RIPWIRE_BROKER_PLUGIN_INCREMENTAL": "${user_config.incremental}",
+            "RIPWIRE_BROKER_PLUGIN_BINARY": "${user_config.binary}"
+        })
+    );
+    assert!(
+        !plugin_root().join("mcp.json").exists(),
+        "the old hand-written example is gone"
+    );
+}

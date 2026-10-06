@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "ripwire-broker": {
-      "command": "/path/to/ripwire-broker",
-      "args": ["--workspace", "."]
-    }
-  }
-}

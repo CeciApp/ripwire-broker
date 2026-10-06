@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "broker": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/broker",
+      "args": ["serve"],
+      "env": {
+        "RIPWIRE_BROKER_PLUGIN_JEV_API_KEY": "${user_config.jev_api_key}",
+        "RIPWIRE_BROKER_PLUGIN_ONLINE": "${user_config.online}",
+        "RIPWIRE_BROKER_PLUGIN_MEMORY": "${user_config.memory}",
+        "RIPWIRE_BROKER_PLUGIN_INCREMENTAL": "${user_config.incremental}",
+        "RIPWIRE_BROKER_PLUGIN_BINARY": "${user_config.binary}"
+      }
+    }
+  }
+}

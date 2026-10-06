@@ -332,7 +332,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   `--memory` (vem da opção pelo resolvedor). `integrations/claude-code/settings.json` deixa de existir.
   **Verde:** o arquivo; remover o antigo; `install.rs` não muda.
   **Docs:** README (seção "Agent integration": o exemplo manual aponta para `hooks/hooks.json`).
-- [ ] **T1.5 · O servidor MCP do plugin.**
+- [x] **T1.5 · O servidor MCP do plugin.**
   **Vermelho:** `tests/plugin.rs::mcp_json_runs_the_resolver_and_passes_options_through_env`: `.mcp.json`
   na raiz do plugin, servidor `broker` (DM-3), `command` é o resolvedor, `args` começam por `serve`,
   `env` tem `RIPWIRE_BROKER_PLUGIN_JEV_API_KEY: "${user_config.jev_api_key}"` (**não**
@@ -340,7 +340,11 @@ estar atualizado. Os seis passos do §1 valem para todas.
   `RIPWIRE_BROKER_PLUGIN_ONLINE: "${user_config.online}"`, `…_MEMORY`, `…_INCREMENTAL`; nenhum
   `${user_config.*}` em `command`.
   `integrations/claude-code/mcp.json` deixa de existir.
-  **Verde:** o arquivo.
+  **Verde:** o arquivo. Feito com `args: ["serve"]` só: o workspace sai do resolvedor
+  (`${CLAUDE_PROJECT_DIR:-$PWD}`), já que as páginas discordam sobre `CLAUDE_PROJECT_DIR` no ambiente
+  do servidor (T0.2) e um `${CLAUDE_PROJECT_DIR}` não resolvido nos `args` viraria um caminho literal;
+  a T1.6 confere. `env` leva também `RIPWIRE_BROKER_PLUGIN_BINARY`, para a opção `binary` valer no
+  servidor como vale nos hooks.
   **Docs:** —.
 - [ ] **T1.6 · verificação · O workspace que o servidor recebe.** Carregar com
   `claude --plugin-dir integrations/claude-code` num repositório de teste e ler `provenance.workspace`
@@ -605,5 +609,6 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T1.1 | `tests/plugin.rs::the_manifest_names_the_plugin_and_passes_the_anthropic_name_rules`: `plugin.json: No such file or directory`; o `validate --strict` já passava antes (T0.2, divergência 5) | `91bc0ac` | tirar `license` (pânico "license: …") e acrescentar `"skills"` (pânico "component key skills") | — | verdes, 783 / 810; `validate --strict` passa. O `memory_controller::auth_failures_suspend_the_worker_until_reauthorized` falhou uma vez sob carga na suíte `online` e passou 5/5 isolado e na nova rodada: intermitente, anterior a esta tarefa |
 | T1.2 | sete testes em `tests/plugin.rs` (`the_resolver_*`, `a_missing_binary_lets_a_hook_pass_and_stops_the_server`), todos com `No such file or directory` em `.output()` do script ausente | `9de7f3e` | dez mutantes, todos mortos: `PATH` antes da versão fixada; qualquer versão em `bin/`; `yes` fora das grafias; `--online` junto de `--memory`; a opção vazia sobrescrevendo a chave; a chave vazia não removida; as variáveis da opção chegando ao filho; `MOD_ACTIVE` ignorada; o hook saindo com 1 sem binário; o aviso de versão calado. A suíte também passa com `#!/bin/dash` | — | verdes, 790 / 817; `validate --strict` passa |
 | T1.3 | `tests/plugin.rs::user_config_declares_consent_options_with_the_install_texts`: `E0432 unresolved import ripwire_broker::install::ONLINE_CONSENT` e `E0603 MEMORY_CONSENT is private` | `a200fdd` | `incremental` com default `false` ("incremental"); sem `sensitive` ("the key goes to secure storage"); "envia previews e trechos" → "envia trechos" só em `install.rs` (igualdade do `online`); sem `title` no `gate` ("gate.title") | — | verdes, 791 / 818; `validate --strict` passa. `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery` falhou uma vez sob carga (`Err(Locked)`) e passou 5/5 isolado e 3/3 sem a mudança: intermitente, anterior. O script de portões passou a repetir uma vez um `cargo test` que falhe, registrando o pânico |
-| T1.4 | `tests/plugin.rs::hooks_json_mirrors_the_install_events_in_exec_form`: primeiro `E0603 function events is private` (o teste compara com `install::events`, que passou a `pub`), depois `hooks/hooks.json: No such file or directory` | commit da T1.4 | `Bash` fora do matcher do `PostToolUse`; `--workspace .` nos `args`; `args` removido do `Stop` (forma shell) | README ("Agent integration": a linha dos hooks) | `validate --strict` passa; portões no worktree do commit |
+| T1.4 | `tests/plugin.rs::hooks_json_mirrors_the_install_events_in_exec_form`: primeiro `E0603 function events is private` (o teste compara com `install::events`, que passou a `pub`), depois `hooks/hooks.json: No such file or directory` | `7b54da9` | `Bash` fora do matcher do `PostToolUse`; `--workspace .` nos `args`; `args` removido do `Stop` (forma shell) | README ("Agent integration": a linha dos hooks) | `validate --strict` passa; portões no worktree do commit |
+| T1.5 | `tests/plugin.rs::mcp_json_runs_the_resolver_and_passes_options_through_env`: `.mcp.json: No such file or directory` | commit da T1.5 | a chave em `RIPWIRE_BROKER_JEV_API_KEY` direto; o servidor chamado `ripwire-broker`; `incremental` fixo em `"true"` | README ("Agent integration": o registro manual do servidor não aponta mais para o `mcp.json` removido) | `validate --strict` passa; portões no worktree do commit |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |
