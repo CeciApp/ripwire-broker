@@ -161,7 +161,7 @@ const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
 /// The bytes of a private file, opened once without following a link or blocking on a FIFO, and
 /// every check made on what was opened (D-147). `None` when it is missing, unreadable, larger than
 /// `max`, or not a regular file.
-fn read_regular(path: &Path, max: u64) -> Option<Vec<u8>> {
+pub(crate) fn read_regular(path: &Path, max: u64) -> Option<Vec<u8>> {
     use std::io::Read as _;
     let file = fs::OpenOptions::new()
         .read(true)

@@ -10,6 +10,8 @@ pub mod credential;
 pub mod decision;
 #[cfg(feature = "online")]
 pub mod jev;
+#[cfg(feature = "online")]
+pub mod log;
 pub(crate) mod merge;
 pub mod metrics;
 pub mod prompt;
@@ -32,6 +34,20 @@ pub const DEFAULT_MAX_IN_FLIGHT: usize = 4;
 /// The variable that carries the provider key. Defined outside the `online` feature: every build
 /// keeps it out of the processes it starts, since the variable can be set either way (D-146).
 pub const KEY_VAR: &str = "RIPWIRE_BROKER_JEV_API_KEY";
+
+/// `no_jev_api_key` (D-155): set by `serve` when [`KEY_VAR`] is not set. While it is on, every call
+/// to Jev is skipped before anything is sent, whatever client makes it.
+static NO_JEV_API_KEY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn no_jev_api_key() -> bool {
+    NO_JEV_API_KEY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Only `serve` sets it, once, at startup: a test process never does, so its clients are not
+/// affected by one another.
+pub fn set_no_jev_api_key(on: bool) {
+    NO_JEV_API_KEY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 use crate::model::{Item, Role};
 use serde::Serialize;

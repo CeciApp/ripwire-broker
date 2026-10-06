@@ -862,3 +862,94 @@ async fn memory_responses_are_not_counted_as_discovery_bytes() {
         "jev_response_bytes stays discovery's"
     );
 }
+
+#[tokio::test]
+async fn every_request_sent_is_recorded_for_the_status_line_even_a_refused_one() {
+    use ripwire_broker::server_status::Activities;
+    let f = fixture(vec![json(200, OK), json(500, "{}")]).await;
+    let activity = Arc::new(Activities::default());
+    let c = client(f.port, Duration::from_secs(5)).with_activity(activity.clone());
+    let req = request();
+    c.classify(&req).await.unwrap();
+    let _ = c.classify(&req).await.unwrap_err();
+    let now = ripwire_broker::hook::now();
+    let total: u32 = activity.jev.calls(now).iter().map(|(_, n)| n).sum();
+    assert_eq!(total, 2);
+}
+
+#[tokio::test]
+async fn a_client_without_a_key_sends_nothing_and_says_so() {
+    use ripwire_broker::server_status::{Activities, KeyState};
+    let f = fixture(vec![json(200, OK)]).await;
+    let activity = Arc::new(Activities::default());
+    let c = JevClient::loopback_without_key(f.port, "jev-1.13.0", Duration::from_secs(5))
+        .unwrap()
+        .with_activity(activity.clone());
+    let err = c.classify(&request()).await.unwrap_err();
+    assert_eq!(err, ClassifyError::NoKey);
+    assert_eq!(err.category(), "no_key");
+    assert!(!err.is_transient(), "never retried");
+    assert!(f.seen.lock().unwrap().is_empty(), "no request left");
+    let now = ripwire_broker::hook::now();
+    assert!(
+        activity.jev.calls(now).is_empty(),
+        "a skipped call is not a call"
+    );
+    assert_eq!(
+        activity.key(),
+        KeyState::Ok,
+        "the server sets Missing, not the client"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_key_marks_the_key_invalid_until_an_answer_succeeds() {
+    use ripwire_broker::server_status::{Activities, KeyState};
+    let f = fixture(vec![json(401, "{}"), json(200, OK)]).await;
+    let activity = Arc::new(Activities::default());
+    let c = client(f.port, Duration::from_secs(5)).with_activity(activity.clone());
+    assert_eq!(
+        c.classify(&request()).await.unwrap_err(),
+        ClassifyError::Auth(401)
+    );
+    assert_eq!(activity.key(), KeyState::Invalid);
+    c.classify(&request()).await.unwrap();
+    assert_eq!(activity.key(), KeyState::Ok);
+}
+
+#[tokio::test]
+async fn the_log_shows_each_call_sent_received_and_timed_without_the_key() {
+    use ripwire_broker::online::log::JevLog;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("jev.log");
+    let f = fixture(vec![
+        json(200, OK),
+        json(401, r#"{"error":"bad key tok-123"}"#),
+    ])
+    .await;
+    let c = client(f.port, Duration::from_secs(5)).with_log(Arc::new(JevLog::open(&file).unwrap()));
+    c.classify(&request()).await.unwrap();
+    let _ = c.classify(&request()).await.unwrap_err();
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(text.matches("Jev call #").count(), 2, "{text}");
+    for section in ["── enviado ", "── recebido ", "── duração "] {
+        assert_eq!(text.matches(section).count(), 2, "{section}: {text}");
+    }
+    assert!(text.contains("HTTP 200"), "{text}");
+    assert!(text.contains("HTTP 401"), "{text}");
+    // Pretty printed: one key per line, indented.
+    assert!(text.contains("\n  \"model\": \"jev-1.13.0\""), "{text}");
+    assert!(text.contains("\"noul\": 0.81"), "{text}");
+    assert!(text.contains(" ms\n"), "{text}");
+    assert!(
+        !text.contains("tok-123"),
+        "the key never reaches the log: {text}"
+    );
+    assert!(text.contains("Bearer [redacted]"), "{text}");
+}

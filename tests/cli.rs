@@ -258,6 +258,22 @@ fn unknown_input_is_a_usage_error() {
 }
 
 #[test]
+fn log_turns_on_the_jev_log_and_needs_online() {
+    let Ok(Command::Serve(s)) = parse(&["--workspace", "/w", "--online", "--log"]) else {
+        panic!()
+    };
+    assert!(s.online.unwrap().log);
+    let Ok(Command::Serve(m)) = parse(&["--workspace", "/w", "--memory", "--log"]) else {
+        panic!()
+    };
+    assert!(m.online.unwrap().log, "--memory implies --online");
+    let err = parse(&["--workspace", "/w", "--log"]).unwrap_err();
+    assert!(err.contains("--log needs --online"), "{err}");
+    let err = parse(&["hook", "claude-code", "stop", "--log"]).unwrap_err();
+    assert!(err.contains("unknown argument '--log'"), "{err}");
+}
+
+#[test]
 fn online_flags_parse_and_default_to_the_pinned_model() {
     let Ok(Command::Serve(off)) = parse(&["--workspace", "/w"]) else {
         panic!()
@@ -280,6 +296,7 @@ fn online_flags_parse_and_default_to_the_pinned_model() {
             max_candidates: 16,
             lookahead_max: 32,
             deadline: Duration::from_millis(8_000),
+            log: false,
         })
     );
 
@@ -687,11 +704,19 @@ fn a_build_without_the_online_feature_refuses_online_clearly() {
 }
 
 #[cfg(feature = "online")]
+/// D-155: without the key the server starts, sends nothing to Jev and says so; a malformed key is
+/// an invalid one. The value is never echoed.
+#[cfg(feature = "online")]
 #[test]
-fn online_without_a_credential_fails_before_publishing_mcp() {
+fn online_without_a_usable_credential_starts_without_jev_and_says_why() {
     let ws = tempfile::tempdir().unwrap();
     let ws = ws.path().to_str().unwrap();
-    for key in [None, Some(""), Some("   \n"), Some("tok en-123")] {
+    for (key, says) in [
+        (None, "is not set"),
+        (Some(""), "is not set"),
+        (Some("   \n"), "is not set"),
+        (Some("tok en-123"), "whitespace"),
+    ] {
         let mut cmd = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"));
         cmd.args([
             "--workspace",
@@ -705,23 +730,15 @@ fn online_without_a_credential_fails_before_publishing_mcp() {
             None => cmd.env_remove("RIPWIRE_BROKER_JEV_API_KEY"),
         };
         let out = cmd.stdin(Stdio::null()).output().unwrap();
-        let (stdout, stderr) = (
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-
-        assert_eq!(out.status.code(), Some(2), "{key:?}: {stderr}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(2), "{key:?}: not refused: {stderr}");
         assert!(
-            stdout.is_empty(),
-            "{key:?}: no MCP server is published: {stdout}"
-        );
-        assert!(
-            stderr.contains("RIPWIRE_BROKER_JEV_API_KEY"),
+            stderr.contains("RIPWIRE_BROKER_JEV_API_KEY") && stderr.contains(says),
             "{key:?}: {stderr}"
         );
         assert!(
-            stderr.starts_with("RIPWIRE_BROKER_JEV_API_KEY"),
-            "{key:?}: --online keeps the message it had before --memory: {stderr}"
+            stderr.contains("no request goes to Jev"),
+            "{key:?}: {stderr}"
         );
         assert!(
             !stderr.contains("en-123"),
@@ -755,38 +772,26 @@ fn a_build_without_the_online_feature_refuses_memory_clearly() {
 
 #[cfg(feature = "online")]
 #[test]
-fn memory_without_a_credential_fails_before_publishing_mcp() {
+fn memory_without_a_credential_starts_without_jev_too() {
     let ws = tempfile::tempdir().unwrap();
-    let ws = ws.path().to_str().unwrap();
+    let st = tempfile::tempdir().unwrap();
     let out = Proc::new(env!("CARGO_BIN_EXE_ripwire-broker"))
         .args([
             "--workspace",
-            ws,
+            ws.path().to_str().unwrap(),
             "--ripwire",
             "/nonexistent/ripwire",
+            "--state-dir",
+            st.path().to_str().unwrap(),
             "--memory",
         ])
         .env_remove("RIPWIRE_BROKER_JEV_API_KEY")
-        .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    let (stdout, stderr) = (
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "no downgrade to offline: {stderr}"
-    );
-    assert!(stdout.is_empty(), "no MCP server is published: {stdout}");
-    assert!(stderr.contains("RIPWIRE_BROKER_JEV_API_KEY"), "{stderr}");
-    assert!(
-        stderr.contains("--memory"),
-        "names the flag asked for: {stderr}"
-    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("no request goes to Jev"), "{stderr}");
 }
 
 #[cfg(feature = "online")]

@@ -18,7 +18,7 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--online [--jev-provider typesafe] [--jev-model MODEL] [--jev-max-in-flight N]
                                 [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
                                 [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
-                                [--jev-lookahead-max N]]
+                                [--jev-lookahead-max N] [--log]]
                       [--memory [--memory-read-deadline-ms N] [--memory-read-request-limit N]
                                 [--memory-write-candidates N] [--memory-retention-days N] [--memory-max-nodes N]
                                 [--memory-selection jev|deterministic]]
@@ -132,6 +132,8 @@ pub struct OnlineArgs {
     pub lookahead_max: usize,
     /// Past it the semantic stage stops and reports `interrupted` (D-063).
     pub deadline: Duration,
+    /// `--log`: every exchange with Jev written to `jev.log` in the state dir (D-155).
+    pub log: bool,
 }
 
 /// `--summarizer-cmd "ollama run phi4"` and its companions (D-034..D-036).
@@ -354,6 +356,9 @@ impl Flags {
     /// `--memory` counts as `--online` (PRD jev-mem §4).
     fn online(&self) -> Result<Option<OnlineArgs>, String> {
         if !self.on("--online") && !self.on("--memory") {
+            if self.on("--log") {
+                return Err(usage("--log needs --online"));
+            }
             return match self.jev.is_empty() && !self.on("--jev-no-cache") {
                 true => Ok(None),
                 false => Err(usage("the --jev-* options need --online")),
@@ -396,6 +401,7 @@ impl Flags {
             max_candidates: positive("--jev-max-candidates", 16)? as usize,
             lookahead_max: number("--jev-lookahead-max", 32)? as usize,
             deadline: Duration::from_millis(positive("--jev-deadline-ms", 8_000)?),
+            log: self.on("--log"),
         }))
     }
 
@@ -464,6 +470,7 @@ const SWITCHES: &[&str] = &[
     "--memory",
     "--jev-no-cache",
     "--jev-probe",
+    "--log",
     "--all",
 ];
 
@@ -657,6 +664,7 @@ fn parse_serve(it: Args) -> Result<Command, String> {
                 "--online",
                 "--memory",
                 "--jev-no-cache",
+                "--log",
                 "--state-dir",
             ]
             .into_iter()

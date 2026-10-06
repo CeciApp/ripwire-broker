@@ -1,6 +1,8 @@
 //! The status line (PRD §24): rendering, the `statusline` command and its projection.
+use ripwire_broker::server_status::{KeyState, View};
 use ripwire_broker::statusline::{
-    HostInput, Options, model_label, parse_input, render, resolve_root, sanitize, width,
+    HostInput, Options, model_label, parse_input, render, render_with_server, resolve_root,
+    sanitize, width,
 };
 use ripwire_broker::statusline_state::*;
 use std::io::Write;
@@ -71,6 +73,132 @@ fn the_spec_examples_render_as_written() {
     );
     let err = snap(false, 0, 0, Some(AnalysisStatus::Error));
     assert!(render(&host(SONNET), Some(&err), &WIDE, 1_000).contains("última: erro"));
+}
+
+const ONLINE: View = View {
+    online: true,
+    memory: false,
+    jev_calls: 3,
+    mem_reads: 0,
+    mem_stores: 0,
+    jev_key: KeyState::Ok,
+};
+
+#[test]
+fn an_online_server_adds_the_jev_count_and_ends_the_line_with_online() {
+    let s = snap(false, 7, 18, Some(AnalysisStatus::AttentionRequired));
+    assert_eq!(
+        render_with_server(&host(SONNET), Some(&s), Some(&ONLINE), &WIDE, 1_000),
+        "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · última: atenção · inj 7 · não reenviados 18 · [jev:3] · (online)"
+    );
+    // The server is not the hooks: its segments show without a hooks snapshot too.
+    let idle = View {
+        jev_calls: 0,
+        ..ONLINE
+    };
+    assert_eq!(
+        render_with_server(&host(SONNET), None, Some(&idle), &WIDE, 1_000),
+        "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks sem dados · [jev:0] · (online)"
+    );
+}
+
+#[test]
+fn a_memory_server_adds_its_reads_and_stores_after_the_jev_count() {
+    let s = snap(false, 7, 18, None);
+    let memory = View {
+        memory: true,
+        mem_reads: 2,
+        mem_stores: 5,
+        ..ONLINE
+    };
+    assert_eq!(
+        render_with_server(&host(SONNET), Some(&s), Some(&memory), &WIDE, 1_000),
+        "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · inj 7 · não reenviados 18 · [jev:3] · \
+         [mem: retr 2, stor 5] · (online)"
+    );
+}
+
+#[test]
+fn a_missing_or_refused_key_replaces_the_jev_count_and_is_red_when_colored() {
+    let s = snap(false, 7, 18, None);
+    for (key, text) in [
+        (KeyState::Missing, "[jev: no key]"),
+        (KeyState::Invalid, "[jev: invalid key]"),
+    ] {
+        let v = View {
+            jev_key: key,
+            ..ONLINE
+        };
+        assert_eq!(
+            render_with_server(&host(SONNET), Some(&s), Some(&v), &WIDE, 1_000),
+            format!(
+                "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · inj 7 · não reenviados 18 · {text} · (online)"
+            )
+        );
+        let colored = Options {
+            color: true,
+            ..WIDE
+        };
+        let line = render_with_server(&host(SONNET), Some(&s), Some(&v), &colored, 1_000);
+        assert!(line.contains(&format!("\x1b[31m{text}\x1b[0m")), "{line:?}");
+        // An alert: kept when the counters go.
+        let narrow = Options {
+            width: width(&format!(
+                "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · {text} · (online)"
+            )),
+            ..WIDE
+        };
+        assert_eq!(
+            render_with_server(&host(SONNET), Some(&s), Some(&v), &narrow, 1_000),
+            format!("rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · {text} · (online)")
+        );
+    }
+}
+
+#[test]
+fn online_stays_last_after_the_details() {
+    let s = snap(false, 7, 18, None);
+    let detail = Options {
+        detail: true,
+        ..WIDE
+    };
+    assert_eq!(
+        render_with_server(&host(SONNET), Some(&s), Some(&ONLINE), &detail, 1_000),
+        "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · inj 7 · não reenviados 18 · [jev:3] · \
+         entregues 25 · reuso 42% · último contexto ~1,2k tok há 30s · visto há 0s · (online)"
+    );
+}
+
+#[test]
+fn an_offline_or_absent_server_changes_nothing() {
+    let s = snap(false, 7, 18, None);
+    let offline = View {
+        online: false,
+        jev_calls: 0,
+        ..ONLINE
+    };
+    let plain = render(&host(SONNET), Some(&s), &WIDE, 1_000);
+    assert_eq!(
+        render_with_server(&host(SONNET), Some(&s), Some(&offline), &WIDE, 1_000),
+        plain
+    );
+    assert_eq!(
+        render_with_server(&host(SONNET), Some(&s), None, &WIDE, 1_000),
+        plain
+    );
+}
+
+#[test]
+fn a_narrow_line_drops_the_jev_count_with_the_counters_and_keeps_online_longer() {
+    let s = snap(false, 7, 18, None);
+    let narrow = Options {
+        width: width("rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · (online)"),
+        ..WIDE
+    };
+    assert_eq!(
+        render_with_server(&host(SONNET), Some(&s), Some(&ONLINE), &narrow, 1_000),
+        "rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · (online)"
+    );
 }
 
 #[test]
@@ -1425,4 +1553,62 @@ fn the_agent_segment_is_soft_and_goes_before_the_alert_and_ctx() {
         at(80),
         "rw-brkr · Opus 5.5 · agente: reviewer · ctx 12% · hooks on · última: atenção"
     );
+}
+
+#[test]
+fn the_command_shows_a_live_online_server_of_the_workspace() {
+    use ripwire_broker::server_status::{self as server, Status};
+    let ws = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let now = ripwire_broker::hook::now();
+    server::publish(
+        state.path(),
+        &root,
+        &Status {
+            schema_version: server::SCHEMA_VERSION,
+            workspace_key: workspace_key(&root),
+            pid: 7,
+            updated_at: now,
+            online: true,
+            memory: true,
+            jev_calls: vec![(now, 4)],
+            mem_reads: vec![(now, 1)],
+            mem_stores: vec![(now, 2)],
+            jev_key: server::KeyState::Ok,
+        },
+    )
+    .unwrap();
+    let args = [
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--state-dir",
+        state.path().to_str().unwrap(),
+    ];
+    let (code, out, err) = run_bar(&args, br#"{"session_id":"s"}"#, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "rw-brkr · hooks sem dados · [jev:4] · [mem: retr 1, stor 2] · (online)\n"
+    );
+    // A file is not a live server: once stale, the bar is as before.
+    server::publish(
+        state.path(),
+        &root,
+        &Status {
+            schema_version: server::SCHEMA_VERSION,
+            workspace_key: workspace_key(&root),
+            pid: 7,
+            updated_at: now - server::STALE_SECS - 5,
+            online: true,
+            memory: true,
+            jev_calls: vec![],
+            mem_reads: vec![],
+            mem_stores: vec![],
+            jev_key: server::KeyState::Ok,
+        },
+    )
+    .unwrap();
+    let (_, out, _) = run_bar(&args, br#"{"session_id":"s"}"#, &[]);
+    assert_eq!(out, "rw-brkr · hooks sem dados\n");
 }

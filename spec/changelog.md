@@ -97,6 +97,8 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-06 16:34 | Sem chave o servidor online sobe sem chamar o Jev (`no_jev_api_key`, `[jev: no key]`); chave malformada ou recusada mostra `[jev: invalid key]`; `--log` grava cada troca com o Jev em `jev.log` (enviado, recebido, duração); o invariante 3 do §23 e o CA-ONLINE-02 foram revistos | [D-155](#d-155--sem-chave-chave-recusada-e-o-log-do-jev) |
+| 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
 | 2026-10-05 02:30 | Leitor do workspace abre cada componente por `openat` sem seguir link (crate `rustix`): um diretório do caminho trocado por link depois das conferências não leva mais para fora do workspace | [D-152](#d-152--leitor-do-workspace-por-openat) |
@@ -6855,3 +6857,89 @@ deixa de valer se alguém criar um repositório com o nome antigo.
 **Mantido:** as menções a `CeciApp` em D-054, D-055, D-087 (PR #1) e em
 `docs/2026-10-03_Jev-Mem.md` são registro histórico e ficam como estão. A nota do D-055 sobre a
 titularidade da licença deixa de ter ressalva: repositório e copyright estão com o autor.
+
+## D-154 — O servidor na barra: Jev, memória e online
+
+**Data:** 2026-10-06 15:52.
+
+**Pedido do usuário:** três segmentos novos na barra de status:
+- `[jev:N]` no "modo --jev", com as chamadas ao Jev dos últimos 5 segundos;
+- `[mem: retr N, stor M]` com `--memory`, com as leituras e as gravações da memória dos últimos 5 segundos;
+- `(online)` no fim da linha com `--online`.
+
+**Interpretação:** não existe flag `--jev`. O Jev só entra pelo `--online`, e o `--memory` implica o
+`--online`. Por isso `[jev:N]` e `(online)` aparecem juntos, sempre que um `serve` online está vivo. O
+`[mem: …]` aparece além deles só com `--memory`. `retr` conta cada leitura de memória do
+`context_for_task`. `stor` conta cada observação que as ferramentas despacham para gravar.
+
+**Desenho:** a barra é um processo à parte e só lia a projeção dos hooks, que não sabem o modo do servidor
+(§24.3.1). O §24.4.2 deixava "estado ao vivo do servidor MCP" fora da primeira versão, sem IPC nem daemon. O
+caminho escolhido mantém isso: um arquivo privado por processo `serve` e workspace, em `statusline/`, com
+modo e contagens por segundo (`src/server_status.rs`).
+- O `JevClient` registra cada POST antes de enviá-lo, recusado ou não. O broker registra cada leitura, e o
+  `Publisher` da memória cada gravação despachada.
+- Uma task reescreve o arquivo no máximo uma vez por segundo com atividade nova, e a cada 10 s sem ela. O
+  `Drop` apaga o arquivo sob o mesmo lock da escrita, então uma escrita em curso não o recria.
+- A barra lê só os arquivos do workspace (até 16), com as proteções do `read_regular`. Ela ignora os não
+  renovados há 30 s, porque um arquivo não prova um servidor vivo (§24.6.4), e soma os servidores vivos.
+- `render` e `segments` ficam como estavam. `render_with_server` recebe o estado do servidor.
+- `[jev:N]` e `[mem: …]` têm a prioridade dos contadores, e `(online)` a de `hooks on`.
+
+**Limites:** o `stor` não vê as observações dos hooks, que são outros processos. Sem `refreshInterval`, a
+barra só se redesenha em eventos do host. O instalador continua sem adicioná-lo (§24.7).
+
+**Testes:** 755 → 773 no build padrão, 773 → 793 com `online`. Em TDD, com mutações que derrubam:
+- a remoção do arquivo ao encerrar, no teste do publisher e no ponta a ponta do `serve --online`;
+- a contagem de leituras e a de gravações da memória, no teste do broker.
+
+## D-155 — Sem chave, chave recusada e o log do Jev
+
+**Data:** 2026-10-06 16:34.
+
+**Pedido do usuário**, no modo `--jev` (o `--online`, como no D-154):
+- **sem `RIPWIRE_BROKER_JEV_API_KEY`:** mostrar `[jev: no key]` e ligar a variável global
+  `no_jev_api_key`, que faz pular toda chamada ao Jev;
+- **chave existente que o Jev recusa** (expirada ou mal copiada): mostrar `[jev: invalid key]`;
+- **`--log`:** gravar `jev.log` com tudo o que vai ao Jev e a resposta, com a duração, fácil de ler.
+
+**O que muda numa regra:** o invariante 3 do §23 e o CA-ONLINE-02 mandavam o `serve --online` sem
+credencial falhar antes de publicar o MCP, para não haver downgrade silencioso. O pedido o faz subir.
+O downgrade continua não sendo silencioso: o stderr diz por quê (sem ecoar o valor) e a barra mostra o
+estado. Os dois textos foram riscados e revistos na spec. Os testes que fixavam a recusa
+(`online_without_a_credential…`, `memory_without_a_credential…`) agora fixam o comportamento novo.
+`doctor --jev-probe`, `memory drain --online` e o eval continuam exigindo a chave: são pedidos
+explícitos de falar com o Jev.
+
+**Desenho:**
+- **Sem chave:** `online::no_jev_api_key` é um `AtomicBool` do processo, ligado só pelo `serve`. O
+  `JevClient` ganhou chave opcional (`without_key`). Sem chave, ou com o interruptor ligado, o `bearer`
+  devolve `ClassifyError::NoKey` antes de qualquer envio, contagem ou log. `NoKey` (categoria `no_key`,
+  nunca repetido) é tratado como a chave recusada: a descoberta para (`Stop::Auth`) e a memória falha
+  com `Failure::Auth`, então os jobs esperam. A resposta é a offline.
+- **Chave malformada** (espaço no meio): também não é enviada. Ela mostra `[jev: invalid key]`, e o
+  interruptor global fica desligado, porque a chave existe.
+- **Estado da chave:** `Activities` guarda `KeyState` (`ok`, `invalid`, `missing`). Um 401/403 marca
+  `invalid`, e o próximo 200 volta a `ok`, porque um 403 pode ser passageiro. A mudança é publicada como
+  atividade nova, e o arquivo do servidor ganhou `jev_key`. Entre servidores vivos vale o pior estado.
+  Na barra o rótulo substitui `[jev:N]`, em vermelho e com prioridade de alerta (`Essential`).
+- **`--log`** (só no `serve`, exige `--online`; o `install` não repassa as opções `--jev-*`):
+  - o arquivo é `jev.log` no state dir, 0600, aberto sem seguir link, e o caminho sai no stderr;
+  - cada chamada é um bloco escrito de uma vez, com régua, número, hora UTC e finalidade
+    (`discovery` ou `memory`), e as seções `enviado`, `recebido` (status HTTP, ou "sem resposta", mais
+    a categoria do erro) e `duração` (ms do envio ao último byte lido);
+  - o JSON sai indentado, e o corpo de uma resposta de erro só é lido quando há log;
+  - o header sai como `Bearer [redacted]`, e qualquer eco da chave é trocado antes da escrita.
+
+**Limites:**
+- **Contexto:** o arquivo cresce sem rotação e guarda o código enviado ao classificador, então
+  apague-o quando não precisar mais.
+- **Métricas:** com `NoKey` a memória ainda conta a tentativa na sua métrica, mas nada foi enviado.
+
+**Testes:** 773 → 778 no build padrão, 793 → 804 com `online`. Em TDD, com mutações que derrubam:
+- a checagem do interruptor global, num binário de teste próprio, porque o estado é do processo;
+- a marcação de chave inválida;
+- a redação da chave no log.
+
+Um teste antigo de memória (`hashes_and_generation_are_revalidated_right_before_delivery`) falhou
+uma vez na suíte cheia, num `unwrap` do `forget` sob carga. Ele passou em 5 de 5 execuções isoladas e
+na suíte seguinte. Ele usa `Recall` direto, que esta mudança não toca.

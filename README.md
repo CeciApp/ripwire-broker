@@ -73,7 +73,8 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
-| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` and the credential, and never falls back to offline (exit 2 before anything starts). **Experimental** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects, enriches, consolidates and reads memories back in `context_for_task`; the hooks do not deliver them yet, and no host has been validated (T3.11) |
+| `--log` | off | With `--online`: every exchange with Jev written to `jev.log` in the state dir, readable ([below](#online-mode-optional)) |
+| `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` (exit 2 before anything starts without it); without the credential it starts with no request to Jev ([D-155](spec/changelog.md#d-155--sem-chave-chave-recusada-e-o-log-do-jev)). **Experimental** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects, enriches, consolidates and reads memories back in `context_for_task`; the hooks do not deliver them yet, and no host has been validated (T3.11) |
 | `--memory-read-deadline-ms N` | `750` | 1–750; longest a task waits for memory |
 | `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read, taken out of `--jev-request-limit` (discovery keeps the rest); 0 serves only the local index |
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
@@ -247,6 +248,46 @@ reduces risk; it cannot guarantee that every secret is recognized. Choose the ro
 a symbol, a symbol the repository lacks). Traces, known symbols, reviews and docs skip it and
 say so (`semantic_skipped`). A provider that refuses the key stops the whole discovery: no
 later stage sends anything.
+
+**Without a usable key** ([D-155](spec/changelog.md#d-155--sem-chave-chave-recusada-e-o-log-do-jev)):
+the server still starts. With `RIPWIRE_BROKER_JEV_API_KEY` unset (or empty) it sets the
+process-wide `no_jev_api_key` switch and skips every call to Jev before anything is sent; the answers
+are the offline ones, stderr says why and the status line shows `[jev: no key]`. A key with
+whitespace inside is never sent either, and shows `[jev: invalid key]`, as does a key Jev refuses
+(401/403, expired or badly pasted) until a call succeeds. Memory jobs wait, as for a refused key.
+
+**`--log`** writes every exchange with Jev to `jev.log` in the state dir (the path is printed on
+stderr at start): one block per call, separated by rules, with the request (`enviado`) and the
+answer (`recebido`, with the HTTP status) as pretty-printed JSON, and the time between sending and
+the last byte read (`duração`). The file is private (0600) and only grows; delete it when done. It
+holds the source sent to the classifier. The key is never in it: the `Authorization` header is
+written as `Bearer [redacted]`, and an echo of the key in an answer is replaced.
+
+```text
+════════════════════════════════════════════════════════════════════════
+Jev call #1 · 2026-10-06 18:52:01 UTC · discovery
+════════════════════════════════════════════════════════════════════════
+
+── enviado ─────────────────────────────────────────────────────────────
+POST https://api.typesafe.ai/v1/systemone
+Authorization: Bearer [redacted]
+Content-Type: application/json
+
+{
+  "model": "jev-1.13.0",
+  ...
+}
+
+── recebido ────────────────────────────────────────────────────────────
+HTTP 200
+
+{
+  "answers": { ... }
+}
+
+── duração ─────────────────────────────────────────────────────────────
+812 ms
+```
 
 **What the answer gains** (additive to the v1 envelope, absent without `--online`):
 
@@ -483,7 +524,8 @@ count as zero events but still contribute their fingerprints.
 ## Status line
 
 Claude Code can run a command to draw its status bar. `ripwire-broker statusline` reads the JSON the host
-sends on stdin, adds what the hooks last published for the session, and prints **one line**
+sends on stdin, adds what the hooks last published for the session and what a live online `serve` of the
+workspace published, and prints **one line**
 ([PRD §24](spec/ripwire-broker-mcp.md#24-barra-de-status-do-claude-code)). It never starts ripwire, never
 connects to the broker and never creates a file.
 
@@ -492,6 +534,7 @@ rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · última: atenção · inj 7 
 rw-brkr · Opus 4.6 max · ctx 71% · hooks off · inj 7 · não reenviados 18
 rw-brkr · Sonnet 4.6 mid · ctx 12% · hooks sem dados
 rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
+rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · inj 7 · não reenviados 18 · [jev:3] · [mem: retr 1, stor 2] · (online)
 ```
 
 | Segment | Meaning |
@@ -504,14 +547,26 @@ rw-brkr · Sonnet 4.6 low · ctx 45% · hooks on · última: erro
 | `inj 7` | Injections and blocks the hooks counted in this session |
 | `não reenviados 18` | Logical items not resent because the session already had them (not tokens, not Anthropic prompt-cache hits) |
 | `hooks sem dados` | No projection for this session |
+| `[jev:3]` | With a live `serve --online`: Jev requests it sent in the last five seconds, refused ones included |
+| `[jev: no key]` / `[jev: invalid key]` | In place of `[jev:N]`, red when colored, kept when the line is narrow: the key is unset (nothing is sent), or malformed or refused by Jev |
+| `[mem: retr 1, stor 2]` | With a live `serve --memory`: memory reads by `context_for_task` and observations written by the tools, in the last five seconds |
+| `(online)` | A live `serve --online` (or `--memory`) runs for this workspace; always the last segment |
 
+- **The server segments** come from a small file each online `serve` keeps in the `statusline/` directory
+  of its state dir (counts only), rewritten within a second of new activity and every 10 s otherwise, and
+  removed when the server stops. A file not refreshed for 30 s is ignored, so a crashed server drops off the
+  bar. Several servers of one workspace add up. The bar only redraws on host events: for a live count while
+  idle, set `refreshInterval` in `statusLine` yourself. Observations written by the hooks are not in
+  `stor`: hooks are separate processes. The server needs the same `--state-dir` as the bar (both default
+  to the standard one).
 - **`hooks sem dados` does not prove the hooks are uninstalled.** It can be a new session, a failed write or a
   session that only uses MCP.
 - **`--detail`** adds, if they fit, `entregues N`, `reuso 42%`, `último contexto ~1,2k tok há 5min` (when the
   last context reached the model) and `visto há 20s` (when a hook last wrote the snapshot; `dados antigos`
   after five minutes).
 - **`--width N`**, then `COLUMNS`, then 100 columns. When the line is too wide, details go first, then the
-  counters, then the model, then the soft hook segments; the prefix, `ctx`, `hooks off` and an
+  counters (`[jev:N]` and `[mem: …]` among them), then the model, then the soft segments (`(online)` among
+  them); the prefix, `ctx`, `hooks off` and an
   `atenção`/`erro` alert are kept. **`--color never`** is the default; `--color always` emits ANSI even
   without a TTY and even with `NO_COLOR`.
 - **Install:** `ripwire-broker install claude-code --workspace DIR --hooks --statusline --write` writes the

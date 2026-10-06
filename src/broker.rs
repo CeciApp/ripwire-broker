@@ -939,7 +939,12 @@ impl Broker {
         }
         let recall = async {
             match &self.recall {
-                Some(r) => Some(r.read(&req.task).await),
+                Some(r) => {
+                    if let Some(a) = self.memory.as_ref().and_then(Publisher::activity) {
+                        a.mem_reads.record(crate::hook::now());
+                    }
+                    Some(r.read(&req.task).await)
+                }
                 None => None,
             }
         };

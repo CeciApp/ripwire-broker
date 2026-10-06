@@ -740,6 +740,144 @@ async fn an_online_server_says_so_in_its_status_without_the_credential() {
     client.shut_down().await.unwrap();
 }
 
+/// The status line's view of the server (D-154): published at start, gone when it stops.
+#[cfg(feature = "online")]
+#[tokio::test]
+async fn an_online_server_publishes_itself_for_the_status_line_and_removes_it_on_exit() {
+    use ripwire_broker::server_status::{self as server, View};
+    let repo = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let args = vec![
+        "--workspace".to_string(),
+        repo.path().display().to_string(),
+        "--ripwire".into(),
+        "/nonexistent/ripwire".into(),
+        "--state-dir".into(),
+        state.path().display().to_string(),
+        "--online".into(),
+    ];
+    let env = std::collections::HashMap::from([(
+        "RIPWIRE_BROKER_JEV_API_KEY".to_string(),
+        "tok-e2e-secret".to_string(),
+    )]);
+    let transport = StdioTransport::create_with_server_launch(
+        env!("CARGO_BIN_EXE_ripwire-broker"),
+        args,
+        Some(env),
+        TransportOptions::default(),
+    )
+    .unwrap();
+    let details = ClientDetails {
+        client_info: Implementation {
+            name: "e2e".into(),
+            version: "0".into(),
+            title: None,
+            description: None,
+            icons: vec![],
+            website_url: None,
+        },
+        capabilities: ClientCapabilities::default(),
+    };
+    let client = client_runtime::create_client(McpClientOptions::new(
+        details,
+        transport,
+        Quiet.to_mcp_client_handler(),
+    ));
+    client.clone().start().await.unwrap();
+    let root = repo.path().canonicalize().unwrap();
+    let read = || server::read(state.path(), &root, ripwire_broker::hook::now());
+    let mut seen = None;
+    for _ in 0..50 {
+        seen = read();
+        if seen.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        seen,
+        Some(View {
+            online: true,
+            ..View::default()
+        })
+    );
+    let text = std::fs::read_dir(state.path().join("statusline"))
+        .unwrap()
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(!text.contains("tok-e2e-secret") && !text.contains(&root.display().to_string()));
+    client.shut_down().await.unwrap();
+    for _ in 0..50 {
+        if read().is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(read(), None, "the file outlived the server");
+}
+
+/// D-155: without the key an online server starts anyway, and the status line learns why.
+#[cfg(feature = "online")]
+#[tokio::test]
+async fn an_online_server_without_a_key_starts_and_tells_the_status_line() {
+    use ripwire_broker::server_status::{self as server, KeyState};
+    let repo = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let args = vec![
+        "--workspace".to_string(),
+        repo.path().display().to_string(),
+        "--ripwire".into(),
+        "/nonexistent/ripwire".into(),
+        "--state-dir".into(),
+        state.path().display().to_string(),
+        "--online".into(),
+    ];
+    // Empty counts as unset, and overrides a key the developer's environment may carry.
+    let env = std::collections::HashMap::from([(
+        "RIPWIRE_BROKER_JEV_API_KEY".to_string(),
+        String::new(),
+    )]);
+    let transport = StdioTransport::create_with_server_launch(
+        env!("CARGO_BIN_EXE_ripwire-broker"),
+        args,
+        Some(env),
+        TransportOptions::default(),
+    )
+    .unwrap();
+    let details = ClientDetails {
+        client_info: Implementation {
+            name: "e2e".into(),
+            version: "0".into(),
+            title: None,
+            description: None,
+            icons: vec![],
+            website_url: None,
+        },
+        capabilities: ClientCapabilities::default(),
+    };
+    let client = client_runtime::create_client(McpClientOptions::new(
+        details,
+        transport,
+        Quiet.to_mcp_client_handler(),
+    ));
+    client.clone().start().await.unwrap();
+    let st = status(&client).await;
+    assert_eq!(st["online"]["enabled"], true, "{st}");
+    let root = repo.path().canonicalize().unwrap();
+    let mut seen = None;
+    for _ in 0..50 {
+        seen = server::read(state.path(), &root, ripwire_broker::hook::now());
+        if seen.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let seen = seen.expect("published");
+    assert_eq!(seen.jev_key, KeyState::Missing);
+    assert!(seen.online);
+    client.shut_down().await.unwrap();
+}
+
 /// The provider key belongs to the broker: no process it starts inherits it (D-146). Spies stand
 /// in for ripwire (its `--version` and its MCP server) and for the summarizer's version command,
 /// and write what they received.

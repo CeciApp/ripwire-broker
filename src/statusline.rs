@@ -1,6 +1,7 @@
 //! The `statusline` renderer (PRD §24.5): the host's JSON and the hooks' projection
 //! become one line. Pure: no clock, no disk, no environment; the caller passes all of them.
 
+use crate::server_status::{KeyState, View};
 use crate::statusline_state::{AnalysisStatus, Snapshot};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -226,6 +227,54 @@ pub fn segments(
     detail: bool,
     now: u64,
 ) -> Vec<Segment> {
+    segments_with_server(input, snapshot, None, detail, now)
+}
+
+/// [`segments`] plus what the live `serve` of the workspace says (D-154), over the last five
+/// seconds: `[jev:N]`, the Jev requests (`[jev: no key]` or `[jev: invalid key]` instead when the
+/// key is missing or refused, D-155), and with `--memory` `[mem: retr N, stor M]`, the memory
+/// reads and stores, after the counters; `(online)` at the very end. The server is not the hooks,
+/// so these show without a hooks snapshot too. An offline server adds nothing.
+pub fn segments_with_server(
+    input: &HostInput,
+    snapshot: Option<&Snapshot>,
+    server: Option<&View>,
+    detail: bool,
+    now: u64,
+) -> Vec<Segment> {
+    let online = server.filter(|v| v.online);
+    let mut counters = Vec::new();
+    if let Some(v) = online {
+        // A key problem is an alert (D-155): red, and kept when the counters go.
+        counters.push(match v.jev_key {
+            KeyState::Ok => seg(
+                format!("[jev:{}]", v.jev_calls),
+                Keep::Counter,
+                Style::Plain,
+            ),
+            KeyState::Missing => seg("[jev: no key]", Keep::Essential, Style::Red),
+            KeyState::Invalid => seg("[jev: invalid key]", Keep::Essential, Style::Red),
+        });
+        if v.memory {
+            let text = format!("[mem: retr {}, stor {}]", v.mem_reads, v.mem_stores);
+            counters.push(seg(text, Keep::Counter, Style::Plain));
+        }
+    }
+    let mut out = hooks_segments(input, snapshot, counters, detail, now);
+    if online.is_some() {
+        out.push(seg("(online)", Keep::Soft, Style::Plain));
+    }
+    out
+}
+
+/// The host's and the hooks' segments, with the server's `counters` after the hooks' counters.
+fn hooks_segments(
+    input: &HostInput,
+    snapshot: Option<&Snapshot>,
+    counters: Vec<Segment>,
+    detail: bool,
+    now: u64,
+) -> Vec<Segment> {
     let mut out = vec![seg(PREFIX, Keep::Essential, Style::Plain)];
     if let Some(m) = model_label(
         input.model_name.as_deref(),
@@ -260,6 +309,7 @@ pub fn segments(
     }
     let Some(s) = snapshot else {
         out.push(seg("hooks sem dados", Keep::Soft, Style::Plain));
+        out.extend(counters);
         return out;
     };
     out.push(match s.opted_out {
@@ -286,6 +336,7 @@ pub fn segments(
         Keep::Counter,
         Style::Plain,
     ));
+    out.extend(counters);
     if detail {
         out.push(seg(
             format!("entregues {}", s.stats.delivered),
@@ -390,8 +441,19 @@ pub fn render(
     options: &Options,
     now: u64,
 ) -> String {
+    render_with_server(input, snapshot, None, options, now)
+}
+
+/// [`render`] with the live server's view (D-154).
+pub fn render_with_server(
+    input: &HostInput,
+    snapshot: Option<&Snapshot>,
+    server: Option<&View>,
+    options: &Options,
+    now: u64,
+) -> String {
     let segs = fit(
-        segments(input, snapshot, options.detail, now),
+        segments_with_server(input, snapshot, server, options.detail, now),
         options.width,
     );
     segs.iter()

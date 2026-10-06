@@ -3262,3 +3262,49 @@ async fn a_missing_affected_never_says_the_gate_cannot_conclude() {
     let detail = missing["detail"].as_str().unwrap();
     assert!(!detail.contains("cannot conclude"), "{detail}");
 }
+
+/// The status line's `[mem: retr N, stor M]` (D-154): each memory read of `context_for_task`, and
+/// each observation the tools write, is counted once.
+#[tokio::test]
+async fn memory_reads_and_stores_are_counted_for_the_status_line() {
+    use ripwire_broker::server_status::Activities;
+    let total = |a: &ripwire_broker::server_status::Activity| -> u32 {
+        a.calls(ripwire_broker::hook::now())
+            .iter()
+            .map(|(_, n)| n)
+            .sum()
+    };
+    let activity = Arc::new(Activities::default());
+    let shared = activity.clone();
+    let fake = FakeUpstream::new().answer("explore", "explore_export_auth");
+    let r = common::memory::remembering_configured(
+        fake,
+        |_| Arc::new(Agreeable::default()),
+        ReadConfig::default(),
+        move |c| c.memory.as_mut().unwrap().activity = Some(shared),
+    )
+    .await;
+    for _ in 0..2 {
+        r.broker
+            .context_for_task(TaskRequest::new("how is the cache evicted?"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(total(&activity.mem_reads), 2);
+    assert_eq!(total(&activity.mem_stores), 0, "a task observes nothing");
+
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = Arc::new(Store::new(state.path(), &"w".repeat(64)));
+    let activity = Arc::new(Activities::default());
+    let mut config = BrokerConfig::new(ws.path());
+    let mut memory = MemoryConfig::new(store, "w".repeat(64), 1_000_000);
+    memory.wait = std::time::Duration::from_secs(10);
+    memory.activity = Some(activity.clone());
+    config.memory = Some(memory);
+    let b = Broker::connect(Arc::new(memory_fake()), config)
+        .await
+        .unwrap();
+    three_calls(&b, ws.path()).await;
+    assert_eq!(total(&activity.mem_stores), 2, "one per edit and finish");
+    assert_eq!(total(&activity.mem_reads), 0, "no read setup, no read");
+}

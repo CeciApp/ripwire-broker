@@ -34,6 +34,7 @@ mod normalize;
 pub mod notes;
 pub mod online;
 mod router;
+pub mod server_status;
 pub mod session;
 pub mod state;
 pub mod statusline;
