@@ -802,6 +802,75 @@ async fn each_attempt_gets_at_most_250ms_and_there_are_no_automatic_retries() {
     );
 }
 
+/// Discovery's requests take 300 ms; memory's, through `Slow`, take what it says.
+struct Contended(Slow);
+
+#[async_trait]
+impl ripwire_broker::online::classifier::Classifier for Contended {
+    fn model(&self) -> &str {
+        "jev-1.13.0"
+    }
+    async fn classify(
+        &self,
+        req: &ripwire_broker::online::request::JevRequest,
+    ) -> Result<Vec<Option<f64>>, ClassifyError> {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        Ok(vec![Some(0.5); req.questions.0.len()])
+    }
+}
+
+#[async_trait]
+impl MemoryClassifier for Contended {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        self.0.decide(req).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiting_for_a_slot_is_not_spent_from_the_attempts_250ms() {
+    use ripwire_broker::online::SemanticStage;
+    use ripwire_broker::online::classifier::{Classifier, Shared};
+    use ripwire_broker::online::request::{StateItem, build};
+    // Each memory request answers in 100 ms, well inside its 250 ms, but discovery holds the
+    // four slots for the first 300 ms. The 250 ms are the HTTP attempt's (PRD jev-mem §8.2):
+    // the queue comes out of the read's 750 ms, which still leave 450 ms for three requests.
+    let slow = Slow(
+        reader(&[], 0.0, |_, _| p(0.9)),
+        std::time::Duration::from_millis(100),
+    );
+    let shared = Arc::new(Shared::new(Arc::new(Contended(slow)), 4));
+    let mut discovery = tokio::task::JoinSet::new();
+    for n in 0..4 {
+        let d = shared.clone();
+        discovery.spawn(async move {
+            let item = StateItem {
+                id: format!("i{n}"),
+                path: "a.rs".into(),
+                text: "x".into(),
+            };
+            d.classify(&build(
+                "jev-1.13.0",
+                "q",
+                SemanticStage::FileAdmission,
+                vec![item],
+            ))
+            .await
+        });
+    }
+    tokio::task::yield_now().await;
+
+    let got = retrieve::read(&one(), "eviction", shared.as_ref(), &ReadConfig::default()).await;
+    assert_ne!(got.stop, StopReason::Deadline, "requests {}", got.requests);
+    assert_eq!(
+        got.memories.len(),
+        1,
+        "the anchor was scored once a slot was free"
+    );
+    while let Some(done) = discovery.join_next().await {
+        done.unwrap().unwrap();
+    }
+}
+
 #[tokio::test]
 async fn the_fourth_request_is_reserved_for_stopping() {
     let is_stopping = |r: &StateRequest| r.state.get("depth").is_some();

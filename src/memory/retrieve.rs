@@ -89,7 +89,7 @@ use super::index;
 use super::model::{Edge, Record};
 use super::prompts::{self, Stage};
 use super::store::State;
-use crate::online::classifier::MemoryClassifier;
+use crate::online::classifier::{ClassifyError, MemoryClassifier};
 use crate::online::reader::WorkspaceReader;
 use crate::online::request::StateRequest;
 use serde_json::{Value, json};
@@ -271,15 +271,19 @@ impl Run<'_> {
         if left.is_zero() {
             return Err(StopReason::Deadline);
         }
-        let left = left.min(self.cfg.attempt_timeout);
         let req = StateRequest::new(&self.cfg.model, state, questions);
         self.requests += 1;
         self.questions += req.questions.0.len();
-        // No retry on the read path: a failure ends the read and keeps what it validated.
+        // No retry on the read path: a failure ends the read and keeps what it validated. The
+        // attempt gets `attempt_timeout`; a wait for a slot shared with discovery comes out of
+        // the read's deadline only.
+        let attempt = self
+            .classifier
+            .decide_within(&req, self.cfg.attempt_timeout);
         tokio::select! {
             _ = cancel.cancelled() => Err(StopReason::Cancelled),
-            answer = tokio::time::timeout(left, self.classifier.decide(&req)) => match answer {
-                Err(_) => Err(StopReason::Deadline),
+            answer = tokio::time::timeout(left, attempt) => match answer {
+                Err(_) | Ok(Err(ClassifyError::Timeout)) => Err(StopReason::Deadline),
                 Ok(Err(_)) => Err(StopReason::ProviderError),
                 Ok(Ok(d)) => Ok(d),
             },
