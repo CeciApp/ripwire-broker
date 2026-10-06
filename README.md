@@ -75,7 +75,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
 | `--log` | off | With `--online`: every exchange with Jev written to `jev.log` in the state dir, readable ([below](#online-mode-optional)) |
 | `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` (exit 2 before anything starts without it); without the credential it starts with no request to Jev ([D-155](spec/changelog.md#d-155--sem-chave-chave-recusada-e-o-log-do-jev)). **Experimental** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects, enriches, consolidates and reads memories back in `context_for_task`; the hooks do not deliver them yet, and no host has been validated (T3.11) |
-| `--memory-read-deadline-ms N` | `750` | 1–750; longest a task waits for memory |
+| `--memory-read-deadline-ms N` | `850` | 1–850; longest a task waits for memory ([D-156](spec/changelog.md#d-156--prazos-da-leitura-de-memória-e-recurso-local)) |
 | `--memory-read-request-limit N` | `4` | 0–4 classifier requests per read, taken out of `--jev-request-limit` (discovery keeps the rest); 0 serves only the local index |
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
 | `--memory-retention-days N` | `30` | 1–365 |
@@ -419,7 +419,12 @@ in which case none goes out, or the 24-hour budget is spent, in which case no re
 With `--incremental` a memory goes out once per session. The task text is sent to the classifier
 and never written to disk. A read takes at most four of `--jev-request-limit`'s requests per call
 and discovery the rest (the status shows discovery's share), and what it sends is charged to the
-workspace's 24-hour budget. Only the memories a read is about to use have their sources checked,
+workspace's 24-hour budget. Each request to Jev gets at most 450 ms, counted from when it
+leaves: waiting for one of the four requests in flight that discovery shares only spends the
+read's deadline. When Jev cannot answer in time and has validated nothing yet, the read delivers
+the local matches instead, with `basis: deterministic_rank`, no `scores` and
+`provenance.memory.degraded: true`; a refused or broken request still delivers nothing
+([D-156](spec/changelog.md#d-156--prazos-da-leitura-de-memória-e-recurso-local)). Only the memories a read is about to use have their sources checked,
 off the async threads and inside the deadline, so a large store never holds the structural answer
 up. With memory on, a task answer holds back about 150 tokens of its budget for that record, so
 memory never pushes it past the budget nor takes the place of an item, with or without notes;

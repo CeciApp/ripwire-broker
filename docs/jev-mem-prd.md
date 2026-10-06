@@ -133,7 +133,7 @@ Descoberta e memória compartilham cliente HTTP, autenticação e controle globa
 | Superfície proposta | Default / regra |
 |---|---|
 | `--memory` | falso; implica `--online` e habilita coleta estruturada, recuperação e worker durante o processo autorizado |
-| `--memory-read-deadline-ms` | `750`, faixa 1–750 nesta versão |
+| `--memory-read-deadline-ms` | `850`, faixa 1–850 nesta versão (era 750; D-156) |
 | `--memory-read-request-limit` | `4`, faixa 0–4; zero permite só cache/índice e declara modo degradado |
 | `--memory-write-candidates` | `4`, faixa 0–10 |
 | `--memory-retention-days` | `30`, faixa 1–365 |
@@ -272,8 +272,8 @@ Cache só de decisões, separado do cache semântico atual: chave inclui workspa
 | Request de memória | ≤32 perguntas e ≤38.000 bytes serializados; dividir antes de enviar, sem cortar um par |
 | Retry | máximo 1 retry por batch transitório, dentro dos 4 attempts do job; 401/403 suspendem worker até reautorização |
 | Reagendamento do write | no máximo 2 execuções do job ao todo, contadas em disco; depois `failed` recuperável por ação explícita |
-| Read de memória | deadline 750 ms; p95 ≤750 ms, retorno/cancelamento observado p99 ≤800 ms no cenário de teste |
-| Read: HTTP | máximo 4 tentativas totais, cada uma ≤250 ms e ≤tempo restante; zero retries automáticos |
+| Read de memória | deadline 850 ms (era 750; D-156); p95 ≤850 ms, retorno/cancelamento observado p99 ≤900 ms no cenário de teste |
+| Read: HTTP | máximo 4 tentativas totais, cada uma ≤450 ms (era 250; D-156) e ≤tempo restante, contados do envio: a espera por vaga entre os pedidos em voo sai só do deadline; zero retries automáticos. Prazo esgotado antes de o Jev validar qualquer memória: entrega as âncoras locais com `basis: deterministic_rank`, sem `scores`, e `degraded: true`; erro do provedor não entrega nada |
 | Read: grafo | 12 expansões, 16 nós examinados/scorados, profundidade 2, 128 arestas inspecionadas, beam 4 |
 | Contexto de memória | até 3 registros, até 600 tokens estimados e até 20% do budget total; cabe dentro, nunca soma acima dele |
 

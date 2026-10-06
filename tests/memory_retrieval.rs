@@ -627,6 +627,7 @@ impl MemoryClassifier for Silent {
 async fn deadline() {
     let got = retrieve::read(&one(), "eviction", &Silent, &ReadConfig::default()).await;
     assert_eq!(got.stop, StopReason::Deadline);
+    assert!(got.degraded, "the local anchors went out instead (D-156)");
 }
 
 #[tokio::test]
@@ -759,12 +760,12 @@ async fn the_deadline_cuts_the_requests() {
     let got = retrieve::read(&one(), "eviction", &Silent, &ReadConfig::default()).await;
     assert_eq!(got.stop, StopReason::Deadline);
     assert!(
-        started.elapsed() <= std::time::Duration::from_millis(760),
+        started.elapsed() <= std::time::Duration::from_millis(860),
         "{:?}",
         started.elapsed()
     );
 
-    // Two answers at 240 ms each, then the third would start after the 750 ms: never sent.
+    // Two answers at 240 ms each, then the third would start after the 480 ms: never sent.
     let slow = Slow(
         reader(&["semantic"], 0.0, |_, _| p(0.9)),
         std::time::Duration::from_millis(240),
@@ -780,23 +781,32 @@ async fn the_deadline_cuts_the_requests() {
         1,
         "what was validated before the deadline is kept"
     );
+    assert!(
+        got.memories[0].scores.is_some() && !got.degraded,
+        "validated memories are not replaced by the local ranking"
+    );
 }
 
 #[tokio::test(start_paused = true)]
-async fn each_attempt_gets_at_most_250ms_and_there_are_no_automatic_retries() {
+async fn each_attempt_gets_at_most_450ms_and_there_are_no_automatic_retries() {
     let slow = Slow(
         reader(&[], 0.0, |_, _| p(0.9)),
-        std::time::Duration::from_millis(300),
+        std::time::Duration::from_millis(500),
     );
     let started = tokio::time::Instant::now();
     let got = retrieve::read(&one(), "eviction", &slow, &ReadConfig::default()).await;
     assert_eq!(
         (got.stop, got.requests),
         (StopReason::Deadline, 1),
-        "cut at 250 ms, and not tried again"
+        "cut at 450 ms, and not tried again"
     );
     assert!(
-        started.elapsed() <= std::time::Duration::from_millis(260),
+        started.elapsed() >= std::time::Duration::from_millis(450),
+        "the attempt is not cut before its 450 ms: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() <= std::time::Duration::from_millis(460),
         "{:?}",
         started.elapsed()
     );
@@ -827,13 +837,13 @@ impl MemoryClassifier for Contended {
 }
 
 #[tokio::test(start_paused = true)]
-async fn waiting_for_a_slot_is_not_spent_from_the_attempts_250ms() {
+async fn waiting_for_a_slot_is_not_spent_from_the_attempt() {
     use ripwire_broker::online::SemanticStage;
     use ripwire_broker::online::classifier::{Classifier, Shared};
     use ripwire_broker::online::request::{StateItem, build};
-    // Each memory request answers in 100 ms, well inside its 250 ms, but discovery holds the
-    // four slots for the first 300 ms. The 250 ms are the HTTP attempt's (PRD jev-mem §8.2):
-    // the queue comes out of the read's 750 ms, which still leave 450 ms for three requests.
+    // Each memory request answers in 100 ms, well inside its 450 ms, but discovery holds the
+    // four slots for the first 300 ms. The 450 ms are the HTTP attempt's (PRD jev-mem §8.2):
+    // the queue comes out of the read's 850 ms, which still leave 550 ms for three requests.
     let slow = Slow(
         reader(&[], 0.0, |_, _| p(0.9)),
         std::time::Duration::from_millis(100),
@@ -866,9 +876,70 @@ async fn waiting_for_a_slot_is_not_spent_from_the_attempts_250ms() {
         1,
         "the anchor was scored once a slot was free"
     );
+    assert!(!got.degraded, "scored by Jev, not the local fallback");
     while let Some(done) = discovery.join_next().await {
         done.unwrap().unwrap();
     }
+}
+
+/// Answers routing like `Reader`; never answers a request that scores candidates.
+struct SilentScoring(Reader);
+
+#[async_trait]
+impl MemoryClassifier for SilentScoring {
+    async fn decide(&self, req: &StateRequest) -> Result<Vec<Decision>, ClassifyError> {
+        if req.state.get("candidates").is_some() {
+            return std::future::pending().await;
+        }
+        self.0.decide(req).await
+    }
+}
+
+fn delivered_bases(read: &Read) -> Vec<String> {
+    retrieve::items(read)
+        .into_iter()
+        .map(|i| i.basis.to_string())
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_read_jev_cannot_answer_in_time_delivers_the_local_anchors_degraded() {
+    // D-156: Jev never answers routing; the anchors the local index found go out in its order,
+    // as the deterministic arm would deliver them, and the read says it is degraded.
+    let s = state(vec![
+        rec(1, "eviction policy", &[]),
+        rec(2, "eviction", &[]),
+    ]);
+    let got = retrieve::read(&s, "eviction", &Silent, &ReadConfig::default()).await;
+    assert_eq!((got.stop, got.requests), (StopReason::Deadline, 1));
+    assert!(got.degraded);
+    assert_eq!(got.memories.len(), 2);
+    assert!(got.memories.iter().all(|f| f.scores.is_none()));
+    assert_eq!(delivered_bases(&got), ["deterministic_rank"; 2]);
+    assert!(retrieve::provenance(&got).degraded);
+
+    // Routing answered, scoring never did: the same fallback.
+    let r = SilentScoring(reader(&[], 0.0, |_, _| p(0.9)));
+    let got = retrieve::read(&one(), "eviction", &r, &ReadConfig::default()).await;
+    assert_eq!((got.stop, got.requests), (StopReason::Deadline, 2));
+    assert!(got.degraded);
+    assert_eq!(delivered_bases(&got), ["deterministic_rank"]);
+}
+
+#[tokio::test]
+async fn a_provider_error_is_not_a_late_answer_and_delivers_nothing() {
+    // Only a deadline falls back: a refused or broken request says nothing about the anchors.
+    let got = retrieve::read(&one(), "eviction", &Down, &ReadConfig::default()).await;
+    assert_eq!(got.stop, StopReason::ProviderError);
+    assert!(got.memories.is_empty() && !got.degraded);
+}
+
+#[tokio::test]
+async fn memories_jev_scored_say_so() {
+    let r = stopping(|_| p(0.5));
+    let got = retrieve::read(&one(), "eviction", &r, &ReadConfig::default()).await;
+    assert_eq!(delivered_bases(&got), ["jev_scored"]);
+    assert!(!got.degraded);
 }
 
 #[tokio::test]

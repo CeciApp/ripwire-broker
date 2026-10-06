@@ -154,9 +154,9 @@ impl Default for ReadConfig {
     fn default() -> Self {
         Self {
             model: crate::online::DEFAULT_MODEL.into(),
-            deadline: Duration::from_millis(750),
+            deadline: Duration::from_millis(850),
             request_limit: 4,
-            attempt_timeout: Duration::from_millis(250),
+            attempt_timeout: Duration::from_millis(450),
             max_questions: 74,
             cancel: None,
             selection: Selection::Jev,
@@ -498,6 +498,16 @@ async fn read_with(
     if anchors.is_empty() {
         return out;
     }
+    // What goes out if Jev cannot answer in time (D-156): the anchors in their local order.
+    let local_rank: Vec<Found> = anchors
+        .iter()
+        .map(|(record, rrf)| Found {
+            record: record.clone(),
+            score: *rrf,
+            scores: None,
+            via: None,
+        })
+        .collect();
     // There is no decision cache yet: with no request allowed, nothing can be validated. One is
     // not enough either: routing would spend it, and scoring would find the limit (D-150).
     if cfg.request_limit < 2 {
@@ -511,10 +521,7 @@ async fn read_with(
     let questions = routing.iter().map(|(_, q)| q.clone()).collect();
     let answers = match run.ask(json!({"query": query}), questions).await {
         Ok(a) => a,
-        Err(reason) => {
-            out.stop = reason;
-            return finish(out, run);
-        }
+        Err(reason) => return fall_back(out, run, reason, local_rank),
     };
     let by_name: BTreeMap<&str, Decision> = routing.iter().map(|(n, _)| *n).zip(answers).collect();
     let route = route(&by_name);
@@ -534,10 +541,7 @@ async fn read_with(
     out.visited = visited.len();
     let mut selected = match run.score(query, &[], batch).await {
         Ok(s) => s,
-        Err(reason) => {
-            out.stop = reason;
-            return finish(out, run);
-        }
+        Err(reason) => return fall_back(out, run, reason, local_rank),
     };
     rank(&mut selected, route.recency);
 
@@ -667,6 +671,18 @@ async fn read_with(
     finish(out, run)
 }
 
+/// A read stopped before Jev validated anything. Past the deadline the local anchors go out,
+/// marked degraded, as the deterministic arm would deliver them (D-156); any other stop delivers
+/// nothing, since a refused or broken request says nothing about them.
+fn fall_back(mut out: Read, run: Run<'_>, reason: StopReason, local_rank: Vec<Found>) -> Read {
+    out.stop = reason;
+    if reason == StopReason::Deadline {
+        out.memories = local_rank;
+        out.degraded = true;
+    }
+    finish(out, run)
+}
+
 fn finish(mut out: Read, run: Run<'_>) -> Read {
     out.requests = run.requests;
     out.questions = run.questions;
@@ -744,9 +760,10 @@ pub fn items(read: &Read) -> Vec<crate::model::MemoryItem> {
                 .collect(),
             observed_at_ms: f.record.observed_at_ms,
             time_basis: snake(json!(f.record.timestamp_role)),
-            basis: match read.selection {
-                Selection::Jev => "jev_scored",
-                Selection::Deterministic => "deterministic_rank",
+            // Per memory: a `jev` read that fell back delivers the local ranking too (D-156).
+            basis: match f.scores {
+                Some(_) => "jev_scored",
+                None => "deterministic_rank",
             },
             derived_from: f
                 .record

@@ -428,7 +428,7 @@ impl Flags {
         // Each option with its default and its range (PRD jev-mem §4).
         let within = |k: &str, default: u64, min: u64, max: u64| self.within(k, default, min, max);
         Ok(Some(MemoryArgs {
-            read_deadline: Duration::from_millis(within("--memory-read-deadline-ms", 750, 1, 750)?),
+            read_deadline: Duration::from_millis(within("--memory-read-deadline-ms", 850, 1, 850)?),
             read_request_limit: within("--memory-read-request-limit", 4, 0, 4)? as usize,
             write_candidates: within(
                 "--memory-write-candidates",

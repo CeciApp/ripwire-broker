@@ -30,7 +30,7 @@ pub trait MemoryClassifier: Send + Sync {
         req: &super::request::StateRequest,
     ) -> Result<Vec<super::response::Decision>, ClassifyError>;
 
-    /// One attempt of at most `attempt` (PRD jev-mem §8.2: the HTTP attempt's 250 ms). A client
+    /// One attempt of at most `attempt` (PRD jev-mem §8.2: the HTTP attempt's 450 ms, D-156). A client
     /// that queues for a slot first waits outside `attempt`: only the caller's deadline bounds
     /// the wait. `Timeout` when the attempt itself ran out.
     async fn decide_within(

@@ -415,6 +415,8 @@ fn eval(args: &[&str], counter: &Path) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_ripwire-eval"))
         .args(args)
         .env("COUNTER", counter)
+        // The online arm's refusal is asserted without a key: one in the caller's shell runs it.
+        .env_remove("RIPWIRE_BROKER_JEV_API_KEY")
         .output()
         .unwrap();
     (
