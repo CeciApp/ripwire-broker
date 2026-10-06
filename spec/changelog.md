@@ -7119,7 +7119,7 @@ divergências do plano, decididas pelo mantenedor antes de começar:
 - T3.3: se o `validate` roda no CI sem login só o primeiro PR diz.
 - T3.4 (fechamento e medição do resolvedor) e toda a Etapa 2 (Claude Code 2.1.287).
 
-**Testes:** 782 → 803 no build padrão e 809 → 830 com `online` ao fim da T3.3 (o número de cada
+**Testes:** 782 → 802 no build padrão e 809 → 829 com `online` ao fim da T3.3 (20 testes novos: 19 em `tests/plugin.rs`, 1 em `tests/cli.rs`) (o número de cada
 tarefa está no §8 do plano). Dois testes antigos falharam uma vez cada sob carga e passaram em
 seguida, isolados e sem as mudanças: `memory_controller::auth_failures_suspend_the_worker_until_reauthorized`
 e `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery` (`Err(Locked)`).

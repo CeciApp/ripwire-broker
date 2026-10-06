@@ -622,7 +622,7 @@ o que validar; Claude Code 2.1.285, mods em early access desligados. Preencher a
 | Fase | Testes Rust (padrão / online) | `validate --strict` | `plugin test` | Versão do Claude Code |
 |---|---|---|---|---|
 | base | 782 / 809 | — | — | 2.1.285 |
-| Fases 1–3 (parte, D-158) | ver o D-158 | passa no plugin e na raiz | — | 2.1.285 |
+| Fases 1–3 (parte, D-158) | 802 / 829 | passa no plugin e na raiz | — | 2.1.285 |
 
 ## 8. Registro de evidência
 
