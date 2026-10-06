@@ -601,7 +601,21 @@ rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · inj 7 · não reenviados 18 
 
 ## Agent integration
 
-The simplest way is `install`, which is a **dry run** unless you pass `--write`:
+**Claude Code: the plugin.** One package with the server, the hooks, the skill and the consent
+options, installed by name and updated with `claude plugin update`:
+
+```sh
+claude plugin marketplace add aquental/ripwire-broker
+claude plugin install ripwire-broker@aquental
+```
+
+The binary comes separately (the plugin's `install-binary.sh` downloads the pinned release and
+checks its SHA-256, or use one on `PATH`). The tools are then named
+`mcp__plugin_ripwire-broker_broker__context_for_task` and so on, not `mcp__ripwire-broker__…`: rules
+and `allowedTools` written for one do not match the other. Everything else, from the options to
+publishing a version, is in [`integrations/claude-code/README.md`](integrations/claude-code/README.md).
+
+**Per workspace, and for Codex: `install`**, which is a **dry run** unless you pass `--write`:
 
 ```sh
 ripwire-broker doctor --workspace /repo

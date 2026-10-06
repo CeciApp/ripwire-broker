@@ -100,6 +100,7 @@
 | 2026-10-06 16:34 | Sem chave o servidor online sobe sem chamar o Jev (`no_jev_api_key`, `[jev: no key]`); chave malformada ou recusada mostra `[jev: invalid key]`; `--log` grava cada troca com o Jev em `jev.log` (enviado, recebido, duração); o invariante 3 do §23 e o CA-ONLINE-02 foram revistos | [D-155](#d-155--sem-chave-chave-recusada-e-o-log-do-jev) |
 | 2026-10-06 18:06 | Leitura de memória: tentativa ao Jev de 250 para 450 ms, contada do envio (a espera por vaga sai só do prazo); prazo de 750 para 850 ms; prazo esgotado sem nada validado entrega as âncoras locais como `deterministic_rank`, degradado; o teste do eval deixa de herdar a chave do Jev | [D-156](#d-156--prazos-da-leitura-de-memória-e-recurso-local) |
 | 2026-10-06 19:00 | Plano para distribuir o broker como plugin do Claude Code (Etapa 1) e dar-lhe um mod (Etapa 2), `spec/plan/mod-plan.md`; sete decisões: binário por script explícito com SHA-256 fixado, raiz em `integrations/claude-code/`, servidor `broker`, marketplace `aquental`, interruptor mod ↔ clássico pelo ambiente, versão fixada igual ao release, chave do Jev como opção sensível | [D-157](#d-157--plano-do-plugin-e-do-mod-do-claude-code) |
+| 2026-10-06 20:15 | Etapa 1 do plugin, os arquivos e os testes: manifesto, resolvedor `scripts/broker`, `userConfig` com os textos de consentimento do `install`, hooks em forma exec, servidor `broker`, `install-binary.sh` com SHA-256, `check` no `SessionStart`, marketplace `aquental`, job `plugin` no CI; pendentes as verificações numa sessão real, o release e a Etapa 2 | [D-158](#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7076,3 +7077,50 @@ saindo com 1; o verde é esta entrada e o plano com `Status: aprovado`.
   passa a `true` por padrão no plugin;
 - variáveis do módulo zeram no reload → o estado de controle da sessão vai para `$.state`, com uma
   verificação de reload real.
+
+## D-158 — Etapa 1 do plugin: os arquivos e os testes
+
+**Data:** 2026-10-06 20:15.
+
+**Pedido do usuário:** implementar o [plano do plugin](plan/mod-plan.md) em TDD, de uma vez, no que
+não depende de uma sessão interativa, de um release publicado nem do Claude Code 2.1.287. Três
+divergências do plano, decididas pelo mantenedor antes de começar:
+- **Nome da constante:** a T1.3 citava `install::ONLINE_CONSENT`, que se chamava `CONSENT`.
+  Renomeada para `ONLINE_CONSENT`, e passou a `pub`.
+- **Texto do consentimento:** o texto do `install` dizia "export RIPWIRE_BROKER_JEV_API_KEY" e
+  "built with `--features online`", errado como `description` de uma opção do plugin, que tem chave
+  própria e binário do release. `ONLINE_CONSENT` e `MEMORY_CONSENT` agora guardam só o que é enviado
+  ao Jev; a nota do `install` os compõe com o prefixo da flag e com `KEY_NOTE`, e sai byte a byte
+  igual. O teste confere a igualdade só dessa parte comum.
+- **Ordem T1.2 ↔ T2.2:** o resolvedor lê a versão do `scripts/checksums.txt`, que só nascia na T2.2.
+  Ele nasce na T1.2 com a linha `v0.1.0`; a T2.2 acrescenta os hashes (quando houver release).
+
+**Feito** (cada tarefa com vermelho, verde, mutação, docs e portões; evidência no §8 do plano):
+- T0.2: as páginas da Anthropic relidas; sete divergências anotadas no plano. As que mudaram o
+  trabalho: `title` é obrigatório em toda opção do `userConfig`; `claude plugin validate --strict`
+  passa num diretório sem manifesto, então o vermelho da T1.1 é só o teste Rust; as páginas
+  discordam sobre `CLAUDE_PROJECT_DIR` no ambiente do servidor stdio, e o resolvedor usa
+  `${CLAUDE_PROJECT_DIR:-$PWD}`.
+- T1.1 a T1.5: manifesto, resolvedor `scripts/broker`, `userConfig`, `hooks/hooks.json` em forma exec,
+  `.mcp.json` com o servidor `broker`. Os modelos `settings.json` e `mcp.json` saíram.
+- T1.8: `install claude-code` abre a saída com os dois comandos do plugin (`Plan.lead`).
+- T1.9: README do plugin, README principal, `SKILL.md` com os dois nomes das tools, §25 do PRD.
+- T2.2 e T2.3: `install-binary.sh` (SHA-256 antes de desempacotar; nada parcial; `--prune` só dentro
+  de `bin/`) e o `check` do `SessionStart`, que não baixa nada.
+- T3.1 (arquivo), T3.2, T3.3 (job): o marketplace `aquental` na raiz, os testes que travam a ordem do
+  release, e o job `plugin` do CI com o Claude Code CLI fixado em 2.1.285.
+
+**Pendente, e por quê:**
+- T1.6, T1.7 e a instalação da T3.1: pedem uma sessão do Claude Code com `--plugin-dir` e uma
+  instalação no escopo do usuário, que muda a configuração do mantenedor.
+- T2.1 (`release.yml`) e os hashes reais em `checksums.txt`: pedem uma tag empurrada, que é
+  autorização do mantenedor. Até lá, `install-binary.sh` diz que o release não tem asset e aponta o
+  `cargo install`; o README do plugin diz isso.
+- T3.3: se o `validate` roda no CI sem login só o primeiro PR diz.
+- T3.4 (fechamento e medição do resolvedor) e toda a Etapa 2 (Claude Code 2.1.287).
+
+**Testes:** 782 → 803 no build padrão e 809 → 830 com `online` ao fim da T3.3 (o número de cada
+tarefa está no §8 do plano). Dois testes antigos falharam uma vez cada sob carga e passaram em
+seguida, isolados e sem as mudanças: `memory_controller::auth_failures_suspend_the_worker_until_reauthorized`
+e `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery` (`Err(Locked)`).
+São intermitentes anteriores a este trabalho; ficam registrados para quem investigar.

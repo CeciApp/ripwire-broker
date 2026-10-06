@@ -7,6 +7,11 @@ description: Budgeted, task-oriented code context from the local ripwire-broker 
 
 The `ripwire-broker` MCP server exposes three read-only tools. Call them at these moments.
 
+Their names depend on how the server was registered. From the Claude Code plugin:
+`mcp__plugin_ripwire-broker_broker__context_for_task`, `..._context_after_edit` and
+`..._context_before_finish`. From a project `.mcp.json` (`ripwire-broker install`):
+`mcp__ripwire-broker__context_for_task` and so on. They are the same tools; use whichever you have.
+
 If hooks are installed, context may already be in the conversation: a block that starts with
 `ripwire-broker context (...)`. Use it as if you had called the tool yourself, and don't call the same tool
 again for the same moment unless you need more (a larger budget, `mode`, or a specific symbol).

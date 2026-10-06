@@ -1,6 +1,7 @@
 # ripwire-broker como plugin e mod do Claude Code — Plano de implementação
 
-**Data:** 2026-10-06 · **Status:** aprovado em 2026-10-06 19:00 ([D-157](../changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code));
+**Data:** 2026-10-06 · **Status:** Etapa 1 em andamento, arquivos e testes feitos
+([D-158](../changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes)); aprovado em 2026-10-06 19:00 ([D-157](../changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code));
 as sete decisões do §2.4 tomadas, todas na opção recomendada; os quatro achados da revisão
 adversarial (§2.3) incorporados; nada implementado.
 **Spec:** [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md) (PRD principal; §21 hooks, §24 barra
@@ -369,7 +370,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   **Verde:** a nota em `install::plan` para `Host::ClaudeCode`. Feito como `Plan.lead`, que o `main`
   imprime antes de tudo, no dry run e com `--write`: em `notes` ela sairia no fim.
   **Docs:** README ("Agent integration").
-- [ ] **T1.9 · Documentação da Etapa 1.**
+- [x] **T1.9 · Documentação da Etapa 1.**
   **Vermelho:** `grep -n "mcp__plugin_ripwire-broker_broker__context_for_task" README.md
   integrations/claude-code/README.md integrations/claude-code/skills/ripwire-broker/SKILL.md` não
   encontra nada.
@@ -379,6 +380,10 @@ estar atualizado. Os seis passos do §1 valem para todas.
   como alternativa); `SKILL.md` cita o nome das tools nas duas formas (plugin e `.mcp.json` de projeto);
   seção nova no PRD principal, "Plugin e mod do Claude Code", com a Etapa 1; D-NNN "Fase 1 do plugin".
   **Docs:** os quatro.
+  Feito depois das T2.2, T2.3, T3.1 a T3.3, para o README do plugin nascer com o binário, o
+  `SessionStart` e a publicação; o D-158 cobre o que foi feito das Fases 1 a 3. O README do plugin diz
+  que ainda não há release (o `checksums.txt` só fixa `v0.1.0`), e o caminho do cache que ele cita é
+  o observado no 2.1.285, não documentado.
 
 #### Fase 2 — O binário chega ao usuário (DM-1)
 
@@ -614,6 +619,7 @@ o que validar; Claude Code 2.1.285, mods em early access desligados. Preencher a
 | Fase | Testes Rust (padrão / online) | `validate --strict` | `plugin test` | Versão do Claude Code |
 |---|---|---|---|---|
 | base | 782 / 809 | — | — | 2.1.285 |
+| Fases 1–3 (parte, D-158) | ver o D-158 | passa no plugin e na raiz | — | 2.1.285 |
 
 ## 8. Registro de evidência
 
@@ -633,4 +639,5 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T3.1 (parte) | `claude plugin validate --strict .`: "No manifest found in directory. Expected .claude-plugin/marketplace.json", exit 1; `the_repository_is_the_marketplace_aquental_listing_the_plugin`: `marketplace.json: No such file or directory` | commit da T3.1 | nome `ripwire-broker` no marketplace; `source` `./integrations`; `version` na entrada; `source` `../x` (o `validate` recusa: "must start with ./"). **Falta:** `claude plugin marketplace add .` e `install --scope user` num repositório de teste (mantenedor) | README do plugin: na T1.9 | portões no worktree do commit, com o `validate --strict .` novo |
 | T3.2 | os dois testes nasceram verdes: são travas de processo sobre o que a T1.2 e a T2.3 já fazem, como a tarefa prevê ("nada além dos testes") | commit da T3.2 | `plugin.json` em 0.2.0 com o `Cargo.toml` em 0.1.0 ("the plugin pins 0.2.0, which the code (0.1.0) has not reached"); o resolvedor escolhendo a versão mais recente em `bin/` em vez da fixada | README do plugin ("Como publicar uma versão"): na T1.9 | portões no worktree do commit |
 | T3.3 (parte) | `grep -c "name: plugin" .github/workflows/rust.yml` → 0 | commit da T3.3 | — (YAML; conferido que os jobs são `default`, `online`, `plugin`) | este plano | **Falta:** o resultado do job no primeiro PR (roda sem login?) |
+| T1.9 | `grep -n "mcp__plugin_ripwire-broker_broker__context_for_task" README.md integrations/claude-code/README.md …/SKILL.md` sai com 2 ("integrations/claude-code/README.md: No such file") | commit da T1.9 | — (texto; o mesmo `grep` acha as três) | README do plugin (novo), README principal, `SKILL.md`, PRD §25, D-158, `handoff.md` | portões no worktree do commit |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |
