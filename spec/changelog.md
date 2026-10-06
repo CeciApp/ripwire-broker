@@ -7064,3 +7064,15 @@ Windows continua fora, como o broker.
 
 **Testes:** nenhum código de produção. O vermelho da T0.1 foi `grep -n "D-157" spec/changelog.md`
 saindo com 1; o verde é esta entrada e o plano com `Status: aprovado`.
+
+**Revisão adversarial (Codex), 2026-10-06 19:30:** quatro achados, incorporados no §2.3 do plano:
+- o binário em `${CLAUDE_PLUGIN_DATA}/bin/` sobreviveria ao update e seguiria preferido → um
+  diretório por versão, e o resolvedor só aceita a versão fixada em `checksums.txt` (DM-1 revista);
+- `env` com `RIPWIRE_BROKER_JEV_API_KEY: ${user_config.jev_api_key}` sobrescreveria a chave do shell
+  com `""` → a opção viaja em `RIPWIRE_BROKER_PLUGIN_JEV_API_KEY`, e o resolvedor só substitui a chave
+  real quando a opção não está vazia (DM-7 revista);
+- `context_after_edit({ files: [] })` depois de um Bash reanalisaria uma árvore suja → o mod usa a
+  lista do host, senão `git status` antes/depois, e não pergunta quando nada mudou; `incremental`
+  passa a `true` por padrão no plugin;
+- variáveis do módulo zeram no reload → o estado de controle da sessão vai para `$.state`, com uma
+  verificação de reload real.
