@@ -259,7 +259,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   **Verde:** D-157 no changelog com as escolhas DM-1 a DM-7 e a linha no índice; este plano ganha
   `Status: aprovado` e as escolhas marcadas.
   **Docs:** changelog; este plano.
-- [ ] **T0.2 · doc · Conferir as páginas da Anthropic na data da implementação.**
+- [x] **T0.2 · doc · Conferir as páginas da Anthropic na data da implementação.**
   **Vermelho:** a coluna "Data lida" da tabela abaixo está vazia.
   **Verde:** reler manifest-reference, components, hooks (forma exec) e, antes da Fase 4, mods/reference
   e mods/test; anotar a data e qualquer divergência com o §2.1 neste plano antes de codar.
@@ -267,14 +267,14 @@ estar atualizado. Os seis passos do §1 valem para todas.
 
   | Página | Data lida | Divergência |
   |---|---|---|
-  | manifest-reference, components, hooks, publish | | |
+  | manifest-reference, components, hooks, publish (e marketplace-reference, cli-reference) | 2026-10-06 | (1) `title` **e** `description` são obrigatórios em toda opção do `userConfig`, e uma chave desconhecida dentro de uma opção impede o plugin de carregar (T1.3). (2) `CLAUDE_PLUGIN_OPTION_<KEY>` (chave em maiúsculas) chega a hooks nas **duas** formas, não só na exec; `${user_config.KEY}` substitui em toda a config do servidor MCP e também no `command` exec, nunca em comando shell (§2.1 itens 7 e 9, mais largos do que diziam). (3) O `sensitive` vai ao "secure credential store" da plataforma; a página não diz "keychain". (4) `CLAUDE_PROJECT_DIR` no ambiente do servidor stdio: `hooks` diz que é exportado, `manifest-reference` não o lista; o resolvedor usa `${CLAUDE_PROJECT_DIR:-$PWD}` e a T1.6 decide. (5) O manifesto é opcional e `claude plugin validate --strict` passa num diretório sem ele (validou só os componentes, 2.1.285): o vermelho da T1.1 é só o teste Rust. (6) `version` só no `plugin.json`: com ela também na entrada do marketplace, o `validate` avisa (T3.1). (7) Validar diretório com `marketplace.json` **e** `plugin.json` juntos pede 2.1.289; aqui são diretórios distintos. Cópias brutas das páginas no scratchpad da sessão. |
   | mods/overview, create, events, api, test, reference | | |
 
 ### Etapa 1 — Plugin clássico
 
 #### Fase 1 — O plugin carrega com `--plugin-dir`
 
-- [ ] **T1.1 · Manifesto.**
+- [x] **T1.1 · Manifesto.**
   **Vermelho:** `tests/plugin.rs::the_manifest_names_the_plugin_and_passes_the_anthropic_name_rules`:
   lê `integrations/claude-code/.claude-plugin/plugin.json`; `name == "ripwire-broker"`; tem `version`,
   `description`, `author.name`, `homepage` (parseável como URL), `repository`, `license`, `keywords`;
@@ -282,7 +282,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   basta. Falha com "arquivo não existe". Depois do verde, `claude plugin validate --strict` passa.
   **Verde:** o arquivo. `userConfig` entra na T1.3.
   **Docs:** —.
-- [ ] **T1.2 · O resolvedor `scripts/broker`.** Um `sh` que acha o binário e monta o argv.
+- [x] **T1.2 · O resolvedor `scripts/broker`.** Um `sh` que acha o binário e monta o argv.
   **Vermelho:** `tests/plugin.rs::the_resolver_picks_the_binary_in_order_and_maps_options_to_flags`:
   roda o script com um binário falso (que grava o argv recebido, como `common::slow_ripwire`) e
   confere, nesta ordem de preferência: `CLAUDE_PLUGIN_OPTION_BINARY` (opção `binary`), depois
@@ -304,7 +304,10 @@ estar atualizado. Os seis passos do §1 valem para todas.
   `RIPWIRE_BROKER_MOD_ACTIVE=1` faz `hook …` sair com 0 sem executar nada (DM-5, usado na Fase 4);
   faltando binário, sai com 0 em `hook` (um hook que falha não pode travar a sessão) e com 1 em `serve`,
   dizendo no stderr como instalar. Falha com "No such file".
-  **Verde:** o script, `chmod +x` (o git guarda o modo).
+  **Verde:** o script, `chmod +x` (o git guarda o modo). Feito: a opção chega como
+  `RIPWIRE_BROKER_PLUGIN_<KEY>` (do `env` do `.mcp.json`) ou `CLAUDE_PLUGIN_OPTION_<KEY>` (dos hooks),
+  a primeira vencendo; as variáveis da chave do Jev saem do ambiente antes do `exec`; o
+  `scripts/checksums.txt` nasce aqui só com `v0.1.0`, e a T2.2 acrescenta os hashes.
   **Docs:** —.
 - [ ] **T1.3 · `userConfig`: consentimento e opções.**
   **Vermelho:** `tests/plugin.rs::user_config_declares_consent_options_with_the_install_texts`: as opções
@@ -594,4 +597,7 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 
 | Tarefa | Falha vermelha (teste e mensagem) | Verde (commit) | Mutação que derrubou | Docs atualizadas | Portões |
 |---|---|---|---|---|---|
+| T0.2 | tabela "Data lida" vazia | (commit da Fase 1) | — (sem código) | tabela da T0.2 preenchida | sem código |
+| T1.1 | `tests/plugin.rs::the_manifest_names_the_plugin_and_passes_the_anthropic_name_rules`: `plugin.json: No such file or directory`; o `validate --strict` já passava antes (T0.2, divergência 5) | `91bc0ac` | tirar `license` (pânico "license: …") e acrescentar `"skills"` (pânico "component key skills") | — | verdes, 783 / 810; `validate --strict` passa. O `memory_controller::auth_failures_suspend_the_worker_until_reauthorized` falhou uma vez sob carga na suíte `online` e passou 5/5 isolado e na nova rodada: intermitente, anterior a esta tarefa |
+| T1.2 | sete testes em `tests/plugin.rs` (`the_resolver_*`, `a_missing_binary_lets_a_hook_pass_and_stops_the_server`), todos com `No such file or directory` em `.output()` do script ausente | commit da T1.2 | dez mutantes, todos mortos: `PATH` antes da versão fixada; qualquer versão em `bin/`; `yes` fora das grafias; `--online` junto de `--memory`; a opção vazia sobrescrevendo a chave; a chave vazia não removida; as variáveis da opção chegando ao filho; `MOD_ACTIVE` ignorada; o hook saindo com 1 sem binário; o aviso de versão calado. A suíte também passa com `#!/bin/dash` | — | verdes, 790 / 817; `validate --strict` passa |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

@@ -1,0 +1,96 @@
+#!/bin/sh
+# The plugin's way to the ripwire-broker binary (spec/plan/mod-plan.md, T1.2; D-157).
+#
+#   broker hook claude-code <event>   a classic hook; the options become hook flags
+#   broker serve                      the MCP server; the options become server flags
+#   broker <anything else>            passed through as is
+#
+# The binary, in this order: the `binary` option; the release the plugin pins, under
+# ${CLAUDE_PLUGIN_DATA}/bin/<version>/ (never another version left by an earlier release);
+# `ripwire-broker` on PATH. An option reaches this script as RIPWIRE_BROKER_PLUGIN_<KEY> from
+# the server's `env` in .mcp.json, or as CLAUDE_PLUGIN_OPTION_<KEY>, which Claude Code exports
+# to hooks.
+set -eu
+
+root=${CLAUDE_PLUGIN_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}
+pinned=$(sed -n '1s/^v//p' "$root/scripts/checksums.txt" 2>/dev/null || true)
+mode=${1:-}
+
+# option KEY: the option's value, empty when unset. KEY is always a literal of this script.
+option() {
+    eval "printf '%s' \"\${RIPWIRE_BROKER_PLUGIN_$1:-\${CLAUDE_PLUGIN_OPTION_$1:-}}\""
+}
+
+# on KEY: whether a boolean option is set. How Claude Code writes a boolean into
+# ${user_config.KEY} is not documented, so every usual spelling counts.
+on() {
+    case $(option "$1" | tr '[:upper:]' '[:lower:]') in
+        true | 1 | yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# With the mod loaded, it answers the events itself; a classic hook would inject twice (DM-5).
+if [ "$mode" = hook ] && [ "${RIPWIRE_BROKER_MOD_ACTIVE:-}" = 1 ]; then
+    exit 0
+fi
+
+binary=$(option BINARY)
+check_version=$binary
+if [ -z "$binary" ] && [ -n "$pinned" ] && [ -n "${CLAUDE_PLUGIN_DATA:-}" ] &&
+    [ -x "$CLAUDE_PLUGIN_DATA/bin/$pinned/ripwire-broker" ]; then
+    binary=$CLAUDE_PLUGIN_DATA/bin/$pinned/ripwire-broker
+elif [ -z "$binary" ]; then
+    binary=$(command -v ripwire-broker 2>/dev/null || true)
+    check_version=$binary
+fi
+
+if [ -z "$binary" ]; then
+    echo "ripwire-broker: the binary for version ${pinned:-?} is not installed. Install it with" \
+        "\`sh \"$root/scripts/install-binary.sh\"\`, or put ripwire-broker $pinned on PATH" \
+        "(cargo install --git https://github.com/aquental/ripwire-broker --tag v$pinned --features online)." >&2
+    # A failing hook would get in the way of the session; a server without a binary cannot start.
+    [ "$mode" = hook ] && exit 0
+    exit 1
+fi
+
+# A binary the user pointed at, or found on PATH, runs whatever its version: it was their choice.
+if [ -n "$check_version" ] && [ -n "$pinned" ]; then
+    got=$("$binary" --version 2>/dev/null | sed -n '1s/^ripwire-broker //p' || true)
+    if [ "$got" != "$pinned" ]; then
+        echo "ripwire-broker: $binary is version ${got:-unknown}; the plugin pins $pinned. Running it anyway." >&2
+    fi
+fi
+
+# The option replaces the shell's key only when it is not empty: an empty one would
+# overwrite a working key with "", which the broker refuses as malformed (D-155).
+key=$(option JEV_API_KEY)
+if [ -n "$key" ]; then
+    RIPWIRE_BROKER_JEV_API_KEY=$key
+    export RIPWIRE_BROKER_JEV_API_KEY
+elif [ -z "${RIPWIRE_BROKER_JEV_API_KEY:-}" ]; then
+    unset RIPWIRE_BROKER_JEV_API_KEY
+fi
+unset RIPWIRE_BROKER_PLUGIN_JEV_API_KEY CLAUDE_PLUGIN_OPTION_JEV_API_KEY key
+
+case $mode in
+    hook)
+        # No --workspace: the hook follows the event's cwd.
+        if on MEMORY; then set -- "$@" --memory; fi
+        if on EVERY_PROMPT; then set -- "$@" --every-prompt; fi
+        if on GATE; then set -- "$@" --gate; fi
+        ;;
+    serve)
+        shift
+        set -- serve --workspace "${CLAUDE_PROJECT_DIR:-$PWD}" "$@"
+        # --memory implies online on the server.
+        if on MEMORY; then
+            set -- "$@" --memory
+        elif on ONLINE; then
+            set -- "$@" --online
+        fi
+        if on INCREMENTAL; then set -- "$@" --incremental; fi
+        ;;
+esac
+
+exec "$binary" "$@"
