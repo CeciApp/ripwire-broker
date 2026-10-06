@@ -360,12 +360,13 @@ estar atualizado. Os seis passos do §1 valem para todas.
   o usuário vê o aviso de servidor duplicado? Registrar: é o cenário do mantenedor hoje (o repositório
   tem `.mcp.json`), e o README diz para remover um dos dois.
   **Docs:** README do plugin.
-- [ ] **T1.8 · `install claude-code` recomenda o plugin.** A página de CLI hints manda imprimir os dois
+- [x] **T1.8 · `install claude-code` recomenda o plugin.** A página de CLI hints manda imprimir os dois
   comandos; a tag `<claude-code-hint>` **não** se aplica (marketplace não oficial).
   **Vermelho:** `tests/cli.rs::install_claude_code_mentions_the_plugin_commands_first`: a saída do dry
   run começa com uma nota com `claude plugin marketplace add aquental/ripwire-broker` e `claude plugin
   install ripwire-broker@aquental`; `install codex` não a tem.
-  **Verde:** a nota em `install::plan` para `Host::ClaudeCode`.
+  **Verde:** a nota em `install::plan` para `Host::ClaudeCode`. Feito como `Plan.lead`, que o `main`
+  imprime antes de tudo, no dry run e com `--write`: em `notes` ela sairia no fim.
   **Docs:** README ("Agent integration").
 - [ ] **T1.9 · Documentação da Etapa 1.**
   **Vermelho:** `grep -n "mcp__plugin_ripwire-broker_broker__context_for_task" README.md
@@ -611,4 +612,5 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T1.3 | `tests/plugin.rs::user_config_declares_consent_options_with_the_install_texts`: `E0432 unresolved import ripwire_broker::install::ONLINE_CONSENT` e `E0603 MEMORY_CONSENT is private` | `a200fdd` | `incremental` com default `false` ("incremental"); sem `sensitive` ("the key goes to secure storage"); "envia previews e trechos" → "envia trechos" só em `install.rs` (igualdade do `online`); sem `title` no `gate` ("gate.title") | — | verdes, 791 / 818; `validate --strict` passa. `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery` falhou uma vez sob carga (`Err(Locked)`) e passou 5/5 isolado e 3/3 sem a mudança: intermitente, anterior. O script de portões passou a repetir uma vez um `cargo test` que falhe, registrando o pânico |
 | T1.4 | `tests/plugin.rs::hooks_json_mirrors_the_install_events_in_exec_form`: primeiro `E0603 function events is private` (o teste compara com `install::events`, que passou a `pub`), depois `hooks/hooks.json: No such file or directory` | `7b54da9` | `Bash` fora do matcher do `PostToolUse`; `--workspace .` nos `args`; `args` removido do `Stop` (forma shell) | README ("Agent integration": a linha dos hooks) | `validate --strict` passa; portões no worktree do commit |
 | T1.5 | `tests/plugin.rs::mcp_json_runs_the_resolver_and_passes_options_through_env`: `.mcp.json: No such file or directory` | commit da T1.5 | a chave em `RIPWIRE_BROKER_JEV_API_KEY` direto; o servidor chamado `ripwire-broker`; `incremental` fixo em `"true"` | README ("Agent integration": o registro manual do servidor não aponta mais para o `mcp.json` removido) | `validate --strict` passa; portões no worktree do commit |
+| T1.8 | `tests/cli.rs::install_claude_code_mentions_the_plugin_commands_first`: o primeiro parágrafo da saída é "dry run: nothing written; pass --write to apply" | commit da T1.8 | a nota também no `install codex`; a nota não impressa; a nota impressa no fim, junto das `notes` | README ("Agent integration": o `install claude-code` cita o plugin primeiro) | portões no worktree do commit |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

@@ -15,10 +15,20 @@ pub struct Change {
 }
 
 pub struct Plan {
+    /// Shown before anything else: a better way than this plan, when there is one.
+    pub lead: Option<String>,
     pub changes: Vec<Change>,
     /// Text for the user to apply by hand (the Codex TOML).
     pub notes: Vec<String>,
 }
+
+/// The Claude Code plugin does what `install claude-code` does, with the options as consent
+/// dialogs. Printed as plain text: `<claude-code-hint>` is for official marketplaces only.
+const PLUGIN_LEAD: &str =
+    "Claude Code: the plugin installs the server, the hooks and the skill in one step:
+  claude plugin marketplace add aquental/ripwire-broker
+  claude plugin install ripwire-broker@aquental
+What follows is the per-workspace alternative; use one or the other, not both.";
 
 /// The hook events `install` writes for `host`: (host event, `hook` argument, tool matcher).
 /// The plugin's `hooks/hooks.json` mirrors the Claude Code ones (tests/plugin.rs).
@@ -349,6 +359,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
     // directory whose name is not UTF-8.
     let workspace_text = utf8(&workspace, "the workspace")?;
     let mut plan = Plan {
+        lead: matches!(args.host, Host::ClaudeCode).then(|| PLUGIN_LEAD.to_string()),
         changes: vec![],
         notes: vec![],
     };

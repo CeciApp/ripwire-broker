@@ -610,7 +610,8 @@ ripwire-broker install claude-code --workspace /repo --hooks --write  # writes i
 ripwire-broker install codex --workspace /repo --hooks --write
 ```
 
-- Claude Code: merges the server into `/repo/.mcp.json` and, with `--hooks`, the hooks into
+- Claude Code: first prints the two commands that install the plugin instead (one or the other, not
+  both). Then merges the server into `/repo/.mcp.json` and, with `--hooks`, the hooks into
   `/repo/.claude/settings.json`. These are the only files the broker ever writes inside a workspace, and only
   with `--write`.
 - Codex: merges the hooks into `~/.codex/hooks.json` (`--codex-home` to change it). They are global, so they
