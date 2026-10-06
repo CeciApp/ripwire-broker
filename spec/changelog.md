@@ -99,6 +99,7 @@
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
 | 2026-10-06 16:34 | Sem chave o servidor online sobe sem chamar o Jev (`no_jev_api_key`, `[jev: no key]`); chave malformada ou recusada mostra `[jev: invalid key]`; `--log` grava cada troca com o Jev em `jev.log` (enviado, recebido, duração); o invariante 3 do §23 e o CA-ONLINE-02 foram revistos | [D-155](#d-155--sem-chave-chave-recusada-e-o-log-do-jev) |
 | 2026-10-06 18:06 | Leitura de memória: tentativa ao Jev de 250 para 450 ms, contada do envio (a espera por vaga sai só do prazo); prazo de 750 para 850 ms; prazo esgotado sem nada validado entrega as âncoras locais como `deterministic_rank`, degradado; o teste do eval deixa de herdar a chave do Jev | [D-156](#d-156--prazos-da-leitura-de-memória-e-recurso-local) |
+| 2026-10-06 19:00 | Plano para distribuir o broker como plugin do Claude Code (Etapa 1) e dar-lhe um mod (Etapa 2), `spec/plan/mod-plan.md`; sete decisões: binário por script explícito com SHA-256 fixado, raiz em `integrations/claude-code/`, servidor `broker`, marketplace `aquental`, interruptor mod ↔ clássico pelo ambiente, versão fixada igual ao release, chave do Jev como opção sensível | [D-157](#d-157--plano-do-plugin-e-do-mod-do-claude-code) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7009,3 +7010,57 @@ falharam antes da mudança:
 - `a_read_jev_cannot_answer_in_time_delivers_the_local_anchors_degraded`, no roteamento e no scoring;
 - `a_provider_error_is_not_a_late_answer_and_delivers_nothing` e `memories_jev_scored_say_so`;
 - `deadline`, `the_deadline_cuts_the_requests` e os defaults da CLI (850, e 851 recusado).
+
+## D-157 — Plano do plugin e do mod do Claude Code
+
+**Data:** 2026-10-06 19:00.
+
+**Pedido do usuário:** um plano em `spec/plan/mod-plan.md` para transformar o projeto num mod do
+Claude Code, em duas etapas, validado contra a documentação da Anthropic.
+
+**O que é um mod, e por que duas etapas:** um mod é um plugin cujo comportamento está num módulo
+JavaScript ou TypeScript (`hooks/hooks.json` com `"modules"`), que o Claude Code chama em cada
+evento. Tudo o que o broker já faz pelos hooks clássicos, pelo servidor MCP e pela skill cabe num
+**plugin comum**, que é estável e instalável por nome. O mod acrescenta o que só código dentro do
+Claude Code consegue: usar o servidor MCP já conectado em vez de abrir um processo por evento,
+entregar memória pelos hooks e desenhar a barra de status. A API dos mods é de acesso antecipado,
+exige Claude Code 2.1.287 (o mantenedor tem 2.1.285) e pode mudar entre versões, então ela fica
+numa etapa própria, condicionada, e nada da Etapa 1 depende dela.
+
+**O plano:** [`spec/plan/mod-plan.md`](plan/mod-plan.md). Seis fases, trinta tarefas, a regra de TDD
+do plano do `--memory` adaptada a três costuras (Rust, arquivos do plugin via `tests/plugin.rs` e
+`claude plugin validate --strict`, e o mod via `claude plugin test`). O §2 do plano registra a
+validação contra a documentação: 29 recomendações aplicadas, 7 pontos que a documentação não fecha
+e viraram tarefas de verificação, e as 7 decisões abaixo.
+
+**Decisões do mantenedor** (todas as recomendadas pelo plano):
+- **DM-1 · Binário por script explícito.** `scripts/install-binary.sh` baixa o asset do GitHub Release
+  fixado em `scripts/checksums.txt`, confere o SHA-256 e grava em `${CLAUDE_PLUGIN_DATA}/bin/`; o
+  hook `SessionStart` só verifica e diz como instalar; `cargo install` continua valendo. Rejeitado o
+  download automático na sessão: contradiz a postura de nenhuma rede sem pedido (CA-10, D-064) e
+  executaria um binário baixado sem ninguém pedir.
+- **DM-2 · Raiz do plugin em `integrations/claude-code/`.** Já tem a skill no layout padrão; os
+  modelos `settings.json` e `mcp.json` viram os arquivos reais. Uma pasta nova duplicaria a integração.
+- **DM-3 · Servidor MCP chamado `broker`.** Dá `plugin:ripwire-broker:broker` e tools
+  `mcp__plugin_ripwire-broker_broker__context_for_task`. O nome muda em relação ao `.mcp.json` de
+  projeto em qualquer escolha; o mais curto foi preferido.
+- **DM-4 · Marketplace `aquental`.** O nome identifica o publicador, como a documentação exemplifica, e
+  comporta outros plugins sem renomear; `ripwire-broker@ripwire-broker` seria redundante. O nome é
+  permanente para quem já instalou.
+- **DM-5 · Interruptor mod ↔ clássico pelo ambiente.** O mod põe `RIPWIRE_BROKER_MOD_ACTIVE=1` em
+  `session.start`; o resolvedor dos hooks clássicos sai com 0 ao vê-la. Um plugin só, com fallback onde
+  mods não carregam. Condicionado à verificação T4.1 (a documentação não garante que `$.env.set`
+  chegue aos filhos); reserva `CLAUDE_ENV_FILE`, e, se nem isso, dois plugins. Rejeitado responder os
+  eventos `classic.*` sem `next`: calaria hooks de outros plugins.
+- **DM-6 · Versão fixada igual ao release.** `plugin.json.version` é a tag cujos SHA-256 estão em
+  `checksums.txt`; `Cargo.toml` sobe antes da tag; um teste trava a igualdade. Omitir a versão faria
+  cada commit virar uma versão nova e desacoplaria plugin e binário.
+- **DM-7 · Chave do Jev como opção sensível.** `jev_api_key` com `sensitive: true` vai ao cofre do
+  sistema e chega ao servidor por `env`; a variável do shell continua valendo. O resolvedor remove a
+  variável vazia, porque o D-155 trataria `""` como chave malformada.
+
+**Fora do plano:** Codex não muda; o eval ganha um braço `broker-plugin` só como proposta (T6.2);
+Windows continua fora, como o broker.
+
+**Testes:** nenhum código de produção. O vermelho da T0.1 foi `grep -n "D-157" spec/changelog.md`
+saindo com 1; o verde é esta entrada e o plano com `Status: aprovado`.
