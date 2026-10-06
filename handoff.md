@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-05, até o
-[D-151](spec/changelog.md#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval).
+[D-152](spec/changelog.md#d-152--leitor-do-workspace-por-openat).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -27,9 +27,10 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | auditoria de 2026-10-04 (D-143, D-144) | os cinco defeitos mais graves e os achados médios corrigidos em TDD; ficam os baixos, o código morto e as simplificações (lista abaixo) |
 | achados baixos, área da CLI e dos hooks (D-147) | corrigidos em TDD, com o código morto e as simplificações da área; as outras áreas seguem |
 | achados baixos, núcleo MCP (D-148) | corrigidos em TDD, com as simplificações da área; seguem online, memória e eval |
-| achados baixos, modo online (D-149) | corrigidos em TDD, com as simplificações da área; o `openat` do leitor espera decisão |
+| achados baixos, modo online (D-149) | corrigidos em TDD, com as simplificações da área; o `openat` do leitor veio no D-152 |
 | achados baixos, memória, primeira parte (D-150) | sete corrigidos em TDD, entre eles o worker esperando o store no pool bloqueante (grupo 3) |
 | achados baixos, memória (segunda parte) e eval (D-151) | corrigidos em TDD, com o pânico do worker, o `is_error` de infraestrutura e o prompt que segurava o timeout (grupo 3); o `connected` conferido num init real |
+| leitor do workspace por `openat` (D-152) | cada componente aberto relativo ao anterior, sem seguir link, pela crate `rustix`: um diretório trocado por link depois das conferências não leva mais para fora do workspace |
 | revisão de 2026-10-04 (D-146) | os cinco achados de maior impacto em produção corrigidos em TDD (leitura do online fora da thread assíncrona, TOCTOU do leitor, chave fora dos processos filhos, prazo no `ripwire --version`, erros do worker de memória no stderr); os demais ficam na lista abaixo |
 | `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 5 feitas (D-136 a D-142): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory`, `memory drain --online`, a leitura em `context_for_task` (`memories[]`, `provenance.memory`, seção legível no texto MCP), a consolidação (cadência de 20 enriquecimentos ou 24 h, decisões e ligações por par, nota derivada pelo `--summarizer-cmd` só com o gate de 0,85) e o instrumento da avaliação (`--memory-selection deterministic`, braços `broker-memory` e `broker-memory-deterministic`, sequências no corpus, custo da memória no relatório). A T2.0 (Choice no modelo pinado) rodou com a chave real. Pendente: a T3.11, validar num Claude Code e num Codex reais que os hosts usam as memórias; os hooks não as trazem na v1 (não fazem HTTP e não há cache de decisões). Pendente também a T5.3, a rodada da avaliação (≥ 30 tarefas em sequências, fora do repositório; o plano lista o que o instrumento ainda não faz). Fase 6 (fechamento) não começada; **experimental** |
 
@@ -39,8 +40,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 754 testes, 5 ignorados (opt-in)
-cargo test --all-targets --features online  # 772 testes, 8 ignorados
+cargo test --all-targets                    # 755 testes, 5 ignorados (opt-in)
+cargo test --all-targets --features online  # 773 testes, 8 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 ```
@@ -77,7 +78,7 @@ cargo fmt --check
   `notes`, `summarizer`, `worktree`, `upstream_ripwire`, `online*`, `memory_*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-151, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-152, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -139,10 +140,8 @@ Os instrumentos estão prontos; as medições, não.
   - cerca de 25 itens de API pública usados só por testes;
   - as simplificações maiores listadas no D-143 (`read_with`, `commit_*`, batches de controller e
     consolidate, `admit`/`admit_note`).
-- **Revisão de 2026-10-04, o que ficou (D-146; D-147 a D-151 fecharam o resto):**
-  - `unwrap` de mutex dentro de `Drop` (`broker.rs`, mantido pelo D-094, ver D-148);
-  - o diretório intermediário trocado por link no leitor do online, que pede `openat` pela crate
-    `rustix` ou por `unsafe` (D-149, decisão do mantenedor).
+- **Revisão de 2026-10-04, o que ficou (D-146; D-147 a D-152 fecharam o resto):** `unwrap` de
+  mutex dentro de `Drop` (`broker.rs`, mantido pelo D-094, ver D-148).
 - **Memória, registrado nas Fases 2 a 5 (D-138 a D-142):** o cache de decisões (sem ele os hooks
   não entregam memória e `--memory-read-request-limit 0` não serve nada), as notas derivadas fora
   dos 5 s da rodada, a cadência fora do `memory status`, e os demais itens dos D-140 e D-142.

@@ -97,7 +97,9 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
+| 2026-10-05 02:30 | Leitor do workspace abre cada componente por `openat` sem seguir link (crate `rustix`): um diretório do caminho trocado por link depois das conferências não leva mais para fora do workspace | [D-152](#d-152--leitor-do-workspace-por-openat) |
 | 2026-10-04 22:15 | Achados baixos da memória, primeira parte, em TDD: gasto de leitura que não chegou à quota gravado pela leitura seguinte, leitura com uma requisição sem gastá-la, arquivos de lease e temporários de escritor morto apagados com o job e o nó, `memory drain` que perde o slot diz ocupado, worker esperando o store no pool bloqueante (grupo 3), id adulterado recusado sem bloquear os outros jobs | [D-150](#d-150--achados-baixos-da-memória-primeira-parte) |
 | 2026-10-04 21:25 | Achados baixos do modo online, em TDD: metades de um lote obsoleto contadas uma vez, `Retry-After` além de `u64` como espera máxima, ganho além do ripwire sem os arquivos descartados, `last_error` como a falha mais recente, credencial recusada que para a descoberta inteira, mais arquivos de segredo fora do envio; métricas `jev_*` com `--memory` documentadas; um mapa FIFO limitado para os dois caches, o `discover` em etapas | [D-149](#d-149--achados-baixos-do-modo-online) |
 | 2026-10-04 19:40 | Achados baixos do núcleo MCP, em TDD: símbolos além do limite nomeados, corte declarado só sobre conteúdo mostrado, tarefa vazia recusada, status que não acusa queda com o broker conectado, `isError` do upstream como recusa, `affected` ausente sem dizer que o gate não conclui, cancelamento atômico e registro de chamadas com guarda de drop; a poda de sessões respeita o lock (CodeRabbit no PR #58); simplificações do `broker`, do `normalize` e do roteador | [D-148](#d-148--achados-baixos-do-núcleo-mcp) |
@@ -6793,3 +6795,63 @@ para fora e sem custo.
 - as refatorações maiores do D-143 (`read_with`, `commit_*`, batches, `admit`/`admit_note`).
 
 **Testes:** 738 → 754 no build padrão, 756 → 772 com `online` (gates locais verdes).
+
+## D-152 — Leitor do workspace por `openat`
+
+**Data:** 2026-10-05 02:30.
+
+**Contexto:** o resíduo do D-149. O `WorkspaceReader::snapshot` confere cada componente com
+`symlink_metadata` e depois abre o arquivo pelo caminho inteiro, com `O_NOFOLLOW` só no último
+componente. Um diretório do caminho trocado por um link depois das conferências era seguido, e o
+conteúdo de fora do workspace podia ir ao classificador remoto. A biblioteca padrão não expõe
+`openat`, e o crate proíbe `unsafe`.
+
+**Decisão:** a crate `rustix` (só as features `std` e `fs`), escolhida pelo mantenedor em vez de
+uma exceção ao `#![forbid(unsafe_code)]`. Ela já estava no grafo pelo `tempfile` dos testes, não
+tem rede (CA-10 segue) e é a base do `tempfile` e do `cap-std`. O `cap-std` resolveria o mesmo com
+mais crates para um uso só. A dependência é normal, não da feature `online`: a memória usa o mesmo
+leitor no build padrão.
+
+**Mudança:** o arquivo é aberto componente por componente, cada um relativo ao diretório aberto
+antes e com `O_NOFOLLOW`; os diretórios com `O_DIRECTORY`, o arquivo com `O_NONBLOCK`. Um link em
+qualquer nível falha a abertura (`ELOOP` vira `Symlink`, o resto `Unreadable`), e as conferências
+de arquivo regular e de tamanho continuam valendo sobre o que foi aberto. As conferências por nome
+de antes ficam, porque dão os motivos na ordem de precedência. Não usei `openat2` com
+`RESOLVE_BENEATH`, que só existe no Linux: a descida por componente funciona igual no macOS.
+
+**Teste:** `a_directory_swapped_for_a_link_after_the_checks_is_never_followed`. O mesmo tronco
+fundo existe dentro e fora do workspace, e `src` troca de nome com um link para fora de forma
+atômica (`renameat_with` com `EXCHANGE`: `RENAME_SWAP` no macOS, `RENAME_EXCHANGE` no Linux). Sem
+a troca atômica, o instante em que `src` não existe derrubava toda conferência que o pegava, e a
+corrida nunca aparecia. O diretório real fica um tempo variável antes da troca, para que as
+conferências, que andam o caminho inteiro, às vezes passem nele logo antes do link. Antes da
+correção, 34 e 50 de cerca de 1.350 leituras seguiram o link em 3 s.
+
+**Mutações:** derrubadas: diretórios abertos seguindo link, arquivo aberto seguindo link, arquivo
+sem `O_NONBLOCK` (trava na FIFO), diretório aberto pelo caminho inteiro. Sobrevive `ELOOP` como
+`Unreadable` em vez de `Symlink`: o motivo só muda dentro da corrida, que os testes não conferem
+por motivo, e a leitura é recusada nos dois casos.
+
+**Testes:** 754 → 755 no build padrão, 772 → 773 com `online`.
+
+## D-153 — Migração do repositório para aquental
+
+**Data:** 2026-10-06 15:15.
+
+**Contexto:** o usuário transferiu o repositório da organização `CeciApp` para a sua conta
+`aquental` no GitHub. O GitHub redireciona (HTTP 301) `CeciApp/ripwire-broker` para
+`aquental/ripwire-broker`, então o clone antigo continuava funcionando, mas o redirecionamento
+deixa de valer se alguém criar um repositório com o nome antigo.
+
+**Feito:**
+
+- `origin` passou a `git@github.com:aquental/ripwire-broker.git` (`git remote set-url`; só o
+  `.git/config` local, nada versionado).
+- `spec/diagrams/ripwire-broker.architecture.json` e o `.html` gerado dele apontam para
+  `https://github.com/aquental/ripwire-broker` (a URL do repositório e os 27 links `blob/` para a
+  revisão `dff7a9d`).
+- `Cargo.toml`, CI e código fonte não referenciavam a organização; nada a mudar.
+
+**Mantido:** as menções a `CeciApp` em D-054, D-055, D-087 (PR #1) e em
+`docs/2026-10-03_Jev-Mem.md` são registro histórico e ficam como estão. A nota do D-055 sobre a
+titularidade da licença deixa de ter ressalva: repositório e copyright estão com o autor.
