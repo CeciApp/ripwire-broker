@@ -1,0 +1,13 @@
+{
+  "name": "ripwire-broker",
+  "version": "0.1.0",
+  "description": "Structural code context for the agent, within a token budget: an MCP server with three tools over ripwire, hooks that inject it on the first prompt, after edits and before finishing, and a skill.",
+  "author": {
+    "name": "Antonio Quental",
+    "url": "https://github.com/aquental"
+  },
+  "homepage": "https://github.com/aquental/ripwire-broker/tree/master/integrations/claude-code#readme",
+  "repository": "https://github.com/aquental/ripwire-broker",
+  "license": "MIT",
+  "keywords": ["mcp", "context", "ripwire", "code-intelligence", "hooks"]
+}
