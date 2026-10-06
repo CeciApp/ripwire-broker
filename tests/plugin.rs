@@ -661,3 +661,56 @@ fn plugin_version_equals_the_pinned_release() {
         "plugin.json.version is the release in checksums.txt (DM-6)"
     );
 }
+
+#[test]
+fn session_start_check_says_what_is_missing_in_one_line_and_exits_zero() {
+    let hooks = read_json("hooks/hooks.json");
+    assert_eq!(
+        hooks["hooks"]["SessionStart"],
+        serde_json::json!([{"hooks": [{
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/broker",
+            "args": ["check"],
+            "timeout": 10
+        }]}])
+    );
+
+    let mut r = Resolver::new("v0.2.0");
+    // A binary of the previous release does not count (mod-plan §2.3).
+    r.fake("data/bin/0.1.0/ripwire-broker", "0.1.0");
+    // A `curl` that tells on itself: the check never goes to the network.
+    common::write_executable(
+        &r.at("pathbin/curl"),
+        format!("#!/bin/sh\ntouch {}/network\n", r.at("out").display()),
+    );
+    r.path.insert(0, r.at("pathbin"));
+    let check = |r: &Resolver| {
+        let out = r.run(&["check"], &[]);
+        assert!(out.status.success());
+        assert!(
+            out.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let said = check(&r);
+    assert_eq!(said.lines().count(), 1, "{said}");
+    assert!(
+        said.contains("install-binary.sh") && said.contains("0.2.0"),
+        "{said}"
+    );
+    assert!(said.contains("ripwire"), "ripwire is missing too: {said}");
+
+    r.fake("data/bin/0.2.0/ripwire-broker", "0.2.0");
+    let said = check(&r);
+    assert_eq!(said.lines().count(), 1, "{said}");
+    assert!(!said.contains("install-binary.sh"), "{said}");
+    assert!(said.contains("ripwire"), "{said}");
+
+    common::write_executable(&r.at("pathbin/ripwire"), "#!/bin/sh\n");
+    assert_eq!(check(&r), "");
+    assert_eq!(r.argv(), None, "the check runs no broker");
+    assert!(!r.at("out/network").exists());
+}

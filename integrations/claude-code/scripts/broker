@@ -3,6 +3,7 @@
 #
 #   broker hook claude-code <event>   a classic hook; the options become hook flags
 #   broker serve                      the MCP server; the options become server flags
+#   broker check                      SessionStart: one line on what is missing, never a download
 #   broker <anything else>            passed through as is
 #
 # The binary, in this order: the `binary` option; the release the plugin pins, under
@@ -43,6 +44,22 @@ if [ -z "$binary" ] && [ -n "$pinned" ] && [ -n "${CLAUDE_PLUGIN_DATA:-}" ] &&
 elif [ -z "$binary" ]; then
     binary=$(command -v ripwire-broker 2>/dev/null || true)
     check_version=$binary
+fi
+
+# SessionStart: what is missing, in one line that reaches Claude's context so it can tell the
+# user. Only looks; installing is the user's call (DM-1).
+if [ "$mode" = check ]; then
+    missing=
+    if [ -z "$binary" ]; then
+        missing="the ripwire-broker $pinned binary is not installed: \`sh \"$root/scripts/install-binary.sh\"\` downloads the release the plugin pins and checks its SHA-256 (or put ripwire-broker on PATH)"
+    fi
+    if ! command -v ripwire >/dev/null 2>&1; then
+        missing="${missing:+$missing; }ripwire is not on PATH (https://github.com/redhat-et/ripwire)"
+    fi
+    if [ -n "$missing" ]; then
+        echo "ripwire-broker plugin: $missing. Its tools and hooks give no context until then; tell the user."
+    fi
+    exit 0
 fi
 
 if [ -z "$binary" ]; then

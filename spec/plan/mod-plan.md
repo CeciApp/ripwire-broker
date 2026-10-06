@@ -407,13 +407,15 @@ estar atualizado. Os seis passos do §1 valem para todas.
   Os testes de forma do `checksums.txt` e da igualdade de versões já nasceram verdes, porque a T1.2
   criou o arquivo com `v0.1.0`; a mutação da versão os derruba.
   **Docs:** README do plugin (instalar o binário; alternativa `cargo install`).
-- [ ] **T2.3 · `SessionStart` verifica, não baixa.**
+- [x] **T2.3 · `SessionStart` verifica, não baixa.**
   **Vermelho:** `tests/plugin.rs::session_start_check_says_what_is_missing_in_one_line_and_exits_zero`:
   `hooks.json` ganha `SessionStart` → `scripts/broker check`; sem o binário **da versão fixada**
   (um `bin/0.1.0/` presente com o plugin em `0.2.0` conta como ausente, §2.3), imprime uma linha com o
   comando de instalação (vai ao contexto do Claude, que avisa o usuário) e sai 0; sem `ripwire` no
   `PATH`, idem; com os dois, não imprime nada. Nunca faz rede.
-  **Verde:** o subcomando `check` do resolvedor e a entrada no `hooks.json`.
+  **Verde:** o subcomando `check` do resolvedor e a entrada no `hooks.json`. Feito: sem matcher (todas
+  as origens do `SessionStart`), `timeout` 10; a linha junta o que falta e pede ao Claude que avise o
+  usuário. O teste põe um `curl` falso no `PATH` que denuncia qualquer uso.
   **Docs:** README do plugin.
 
 #### Fase 3 — Publicação
@@ -620,4 +622,5 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T1.5 | `tests/plugin.rs::mcp_json_runs_the_resolver_and_passes_options_through_env`: `.mcp.json: No such file or directory` | `4dbf755` | a chave em `RIPWIRE_BROKER_JEV_API_KEY` direto; o servidor chamado `ripwire-broker`; `incremental` fixo em `"true"` | README ("Agent integration": o registro manual do servidor não aponta mais para o `mcp.json` removido) | `validate --strict` passa; portões no worktree do commit |
 | T1.8 | `tests/cli.rs::install_claude_code_mentions_the_plugin_commands_first`: o primeiro parágrafo da saída é "dry run: nothing written; pass --write to apply" | `f0e011d` | a nota também no `install codex`; a nota não impressa; a nota impressa no fim, junto das `notes` | README ("Agent integration": o `install claude-code` cita o plugin primeiro) | portões no worktree do commit |
 | T2.2 | `install_binary_refuses_a_checksum_mismatch_and_writes_to_plugin_data` e `install_binary_prune_removes_only_the_other_versions`: `sh: …/install-binary.sh: No such file or directory`; `checksums_pin_a_tag_and_list_one_sha_per_asset` e `plugin_version_equals_the_pinned_release` verdes desde a T1.2 | commit da T2.2 | hash não conferido; modo 0700; `--prune` apagando a fixada; `--prune` fora de `bin/` (dois mutantes); `version` 0.1.1 no manifesto; temporário não removido ("files left behind"). A suíte também passa com `dash` | README do plugin: na T1.9 | portões no worktree do commit |
+| T2.3 | `tests/plugin.rs::session_start_check_says_what_is_missing_in_one_line_and_exits_zero`: `left: Null` (sem `SessionStart` no `hooks.json`) | commit da T2.3 | `check` saindo com 1; `ripwire` não conferido; `check` caindo no caminho normal (roda o broker ou reclama no stderr); `args` do hook alterados | README do plugin: na T1.9 | portões no worktree do commit |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

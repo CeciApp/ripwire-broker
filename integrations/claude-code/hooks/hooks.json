@@ -1,6 +1,20 @@
 {
   "description": "ripwire-broker: context on the first prompt, after edits and before finishing.",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/broker",
+            "args": [
+              "check"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
