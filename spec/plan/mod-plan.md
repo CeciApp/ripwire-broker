@@ -72,6 +72,7 @@ cargo clippy --all-targets --locked --features online -- -D warnings
 cargo test --all-targets --locked
 cargo test --all-targets --locked --features online
 claude plugin validate --strict integrations/claude-code          # a partir da T1.1
+claude plugin validate --strict .                                 # a partir da T3.1
 claude plugin test integrations/claude-code                       # a partir da T4.2
 ```
 
@@ -428,6 +429,9 @@ estar atualizado. Os seis passos do §1 valem para todas.
   .` e `claude plugin install ripwire-broker@aquental --scope user` num repositório de teste; registrar
   no §8 se a instalação carrega **in-place** ou uma cópia (a página "In-place and copied plugins").
   **Docs:** README do plugin (os dois comandos); README principal.
+  **Estado:** o arquivo, o teste `the_repository_is_the_marketplace_aquental_listing_the_plugin` e o
+  portão `validate --strict .` feitos; a instalação num repositório de teste fica com o mantenedor,
+  porque muda a configuração do Claude Code dele no escopo do usuário (§8).
 - [ ] **T3.2 · Sincronia de versões.**
   **Vermelho:** `tests/plugin.rs::cargo_version_is_not_behind_the_plugin_version`: `Cargo.toml` ≥ versão
   do plugin (semver). Falha se o plugin apontar para um release que o código ainda não alcançou.
@@ -623,4 +627,5 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T1.8 | `tests/cli.rs::install_claude_code_mentions_the_plugin_commands_first`: o primeiro parágrafo da saída é "dry run: nothing written; pass --write to apply" | `f0e011d` | a nota também no `install codex`; a nota não impressa; a nota impressa no fim, junto das `notes` | README ("Agent integration": o `install claude-code` cita o plugin primeiro) | portões no worktree do commit |
 | T2.2 | `install_binary_refuses_a_checksum_mismatch_and_writes_to_plugin_data` e `install_binary_prune_removes_only_the_other_versions`: `sh: …/install-binary.sh: No such file or directory`; `checksums_pin_a_tag_and_list_one_sha_per_asset` e `plugin_version_equals_the_pinned_release` verdes desde a T1.2 | commit da T2.2 | hash não conferido; modo 0700; `--prune` apagando a fixada; `--prune` fora de `bin/` (dois mutantes); `version` 0.1.1 no manifesto; temporário não removido ("files left behind"). A suíte também passa com `dash` | README do plugin: na T1.9 | portões no worktree do commit |
 | T2.3 | `tests/plugin.rs::session_start_check_says_what_is_missing_in_one_line_and_exits_zero`: `left: Null` (sem `SessionStart` no `hooks.json`) | commit da T2.3 | `check` saindo com 1; `ripwire` não conferido; `check` caindo no caminho normal (roda o broker ou reclama no stderr); `args` do hook alterados | README do plugin: na T1.9 | portões no worktree do commit |
+| T3.1 (parte) | `claude plugin validate --strict .`: "No manifest found in directory. Expected .claude-plugin/marketplace.json", exit 1; `the_repository_is_the_marketplace_aquental_listing_the_plugin`: `marketplace.json: No such file or directory` | commit da T3.1 | nome `ripwire-broker` no marketplace; `source` `./integrations`; `version` na entrada; `source` `../x` (o `validate` recusa: "must start with ./"). **Falta:** `claude plugin marketplace add .` e `install --scope user` num repositório de teste (mantenedor) | README do plugin: na T1.9 | portões no worktree do commit, com o `validate --strict .` novo |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

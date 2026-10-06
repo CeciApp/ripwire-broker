@@ -714,3 +714,23 @@ fn session_start_check_says_what_is_missing_in_one_line_and_exits_zero() {
     assert_eq!(r.argv(), None, "the check runs no broker");
     assert!(!r.at("out/network").exists());
 }
+
+#[test]
+fn the_repository_is_the_marketplace_aquental_listing_the_plugin() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".claude-plugin/marketplace.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let market: Value = serde_json::from_str(&text).unwrap();
+    // `claude plugin install ripwire-broker@aquental` (DM-4).
+    assert_eq!(market["name"], "aquental");
+    assert!(
+        market["owner"]["name"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
+    let plugins = market["plugins"].as_array().unwrap();
+    assert_eq!(plugins.len(), 1);
+    assert_eq!(plugins[0]["name"], manifest()["name"]);
+    assert_eq!(plugins[0]["source"], "./integrations/claude-code");
+    // The version lives in plugin.json only; in both, validate warns and plugin.json wins.
+    assert!(plugins[0].get("version").is_none());
+}
