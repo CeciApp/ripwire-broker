@@ -1,5 +1,8 @@
 {
   "description": "ripwire-broker: context on the first prompt, after edits and before finishing.",
+  "modules": [
+    "./register.ts"
+  ],
   "hooks": {
     "SessionStart": [
       {

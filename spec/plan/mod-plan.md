@@ -74,7 +74,7 @@ cargo test --all-targets --locked
 cargo test --all-targets --locked --features online
 claude plugin validate --strict integrations/claude-code          # a partir da T1.1
 claude plugin validate --strict .                                 # a partir da T3.1
-claude plugin test integrations/claude-code                       # a partir da T4.2
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test integrations/claude-code   # a partir da T4.2; a variável até a P5
 ```
 
 O `claude plugin validate` também imprime, para um mod, as linhas `hooks:` e `calls:` (eventos
@@ -270,7 +270,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
   | Página | Data lida | Divergência |
   |---|---|---|
   | manifest-reference, components, hooks, publish (e marketplace-reference, cli-reference) | 2026-10-06 | (1) `title` **e** `description` são obrigatórios em toda opção do `userConfig`, e uma chave desconhecida dentro de uma opção impede o plugin de carregar (T1.3). (2) `CLAUDE_PLUGIN_OPTION_<KEY>` (chave em maiúsculas) chega a hooks nas **duas** formas, não só na exec; `${user_config.KEY}` substitui em toda a config do servidor MCP e também no `command` exec, nunca em comando shell (§2.1 itens 7 e 9, mais largos do que diziam). (3) O `sensitive` vai ao "secure credential store" da plataforma; a página não diz "keychain". (4) `CLAUDE_PROJECT_DIR` no ambiente do servidor stdio: `hooks` diz que é exportado, `manifest-reference` não o lista; o resolvedor usa `${CLAUDE_PROJECT_DIR:-$PWD}` e a T1.6 decide. (5) O manifesto é opcional e `claude plugin validate --strict` passa num diretório sem ele (validou só os componentes, 2.1.285): o vermelho da T1.1 é só o teste Rust. (6) `version` só no `plugin.json`: com ela também na entrada do marketplace, o `validate` avisa (T3.1). (7) Validar diretório com `marketplace.json` **e** `plugin.json` juntos pede 2.1.289; aqui são diretórios distintos. Cópias brutas das páginas no scratchpad da sessão. |
-  | mods/overview, create, events, api, test, reference | | |
+  | mods/overview, create, events, api, test, reference, interface; e o `claude-code/index.d.ts` que o 2.1.285 gera | 2026-10-06 | (1) As páginas pedem 2.1.287, mas o 2.1.285 roda mods com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`: `claude plugin test` passa e um mod carrega numa sessão `claude -p --plugin-dir` (T4.0). (2) `$.mcp.connect(chave do manifesto)` devolve o nome que `$.mcp.call` aceita, "normalmente `plugin:<plugin>:<server>`": o mod não adivinha o nome (T4.1 a). (3) `$.env.set` vale "para este processo e tudo o que ele inicia depois" (T4.1 b, pelos tipos). (4) O `context` do resultado de `tool.call` é o que o modelo lê depois do resultado, "como o de um `PostToolUse`" (T4.1 d). (5) Os tipos centrais não têm `bashEditDiff`; o resultado de um Bash é o registro da ferramenta, e o hook clássico do 2.1.285 recebe `tool_response.bashEditDiff.changedFiles` (D-131), então o mod tenta `result.bashEditDiff` e cai no `git status` (T4.1 f, a confirmar na P6). O core marca `isReadOnly` num Bash que a própria ferramenta acha só de leitura: o mod não pergunta nada nesse caso. (6) `structuredContent` só chega "quando a tool declara um output schema", e o broker não declara: o mod lê o envelope da primeira linha do bloco de texto, que é o JSON numa linha (`mcp::text_of`). (7) `$.state` some com `/clear`, `/resume` e `/branch`, como o arquivo de sessão do hook, que é por `session_id`. (8) `turn.complete` traz `reason` (`answer`, `aborted`, `refusal`, `error`) além de `isAborted`. |
 
 ### Etapa 1 — Plugin clássico
 
@@ -471,13 +471,18 @@ estar atualizado. Os seis passos do §1 valem para todas.
 
 #### Fase 4 — Pré-requisitos e verificações do runtime
 
-- [ ] **T4.0 · gate · Versão e kit de testes.**
+- [x] **T4.0 · gate · Versão e kit de testes.**
   **Vermelho:** `claude --version` < 2.1.287, ou `claude plugin test integrations/claude-code` responde
   "hooks modules are not turned on in this build yet".
   **Verde:** atualizar o Claude Code; a mesma chamada, com um `tests/smoke.test.ts` que só faz
   `test('loads', async () => {})`, imprime `1 pass`. Nada da Fase 5 começa antes.
   **Docs:** este plano (Base).
-- [ ] **T4.1 · verificação · O que a documentação não fecha (§2.2).** Com um `register.ts` mínimo
+  **Estado:** o Claude Code desta máquina continua 2.1.285 (P5), mas o próprio CLI diz como ligar os
+  módulos: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`. Com ela, uma cópia descartável do plugin com um
+  `register.ts` mínimo imprime `1 pass` em `claude plugin test`, o `validate` lista `hooks:` e
+  `calls:`, e o mod carrega numa sessão `claude -p "/rwprobe" --plugin-dir …`
+  (`ripwire-broker: probe ok`). Os portões e o CI usam a variável até a P5.
+- [ ] **T4.1 · verificação · O que a documentação não fecha (§2.2).** (parte feita; o resto é a P6) Com um `register.ts` mínimo
   carregado por `--plugin-dir`: (a) ler em `.claude-plugin/types/claude-code-mcp/index.d.ts` o nome
   exato do servidor e das tools do plugin para `$.mcp.call`; (b) `$.env.set('RIPWIRE_BROKER_MOD_ACTIVE',
   '1')` em `session.start` e um hook clássico que imprime `env` no `PostToolUse`: a variável chega?
@@ -492,11 +497,15 @@ estar atualizado. Os seis passos do §1 valem para todas.
   estende o gerado; `.gitignore` ganha `integrations/claude-code/
   .claude-plugin/types/` e `.mcpb-cache/`. Resultados no §8.
   **Docs:** este plano (§2.2 fechado); README do plugin (versão testada).
-- [ ] **T4.2 · `claude plugin test` nos portões.** `tests/smoke.test.ts` vira o primeiro teste real
+  **Estado:** (a), (b) e (d) respondidas pelos tipos do 2.1.285 (T0.2, linha dos mods); (f) em
+  parte: o mod tenta `result.bashEditDiff.changedFiles` e cai no `git status`. A confirmar numa
+  sessão real, com (c) e (e): P6. O `tsconfig.json` que estende o gerado o próprio Claude Code cria
+  ao carregar o plugin, e é o que o repositório guarda; `.gitignore` feito.
+- [x] **T4.2 · `claude plugin test` nos portões.** `tests/smoke.test.ts` vira o primeiro teste real
   (T5.1); o §1 ganha o portão. `rust.yml` ganha `claude plugin test` no job `plugin` (se o CI puder,
   T3.3).
   **Docs:** este plano.
-- [ ] **T4.3 · O interruptor mod ↔ clássico.**
+- [x] **T4.3 · O interruptor mod ↔ clássico.**
   **Vermelho:** `tests/register.test.ts::session_start_marks_the_mod_active_for_the_classic_hooks`:
   stub de `env.set` captura a chamada; `$.session.start(...)` faz o mod chamar
   `$.env.set('RIPWIRE_BROKER_MOD_ACTIVE','1')`. E `tests/plugin.rs` (T1.2) já prova que o resolvedor
@@ -599,6 +608,23 @@ orçamento, dedup de itens, memória) é do servidor, que recebe `--incremental`
   servidor do prefixo `mcp__NAME__`, que com plugin é `mcp__plugin_NAME_server__`. Anotar como
   trabalho futuro no changelog.
 
+## 5a. Pendências do mantenedor
+
+Registradas em 2026-10-06, depois do merge do PR #75. São as tarefas, ou partes de tarefas, que só o
+mantenedor pode fazer: pedem uma sessão interativa do Claude Code, mudam a configuração dele, ou
+publicam algo. O resto do plano segue sem elas; cada uma diz o que destrava.
+
+| # | O quê | Como | Destrava |
+|---|---|---|---|
+| P1 | **T1.6** · o workspace do servidor do plugin | `claude --plugin-dir integrations/claude-code` num repositório de teste; `/mcp` mostra `plugin:ripwire-broker:broker` conectado; um `context_for_task` traz `provenance.workspace` igual ao diretório do projeto | fecha a dúvida do `CLAUDE_PROJECT_DIR` no ambiente do servidor (T0.2, divergência 4) |
+| P2 | **T1.7** · os hooks clássicos numa sessão real | na mesma sessão: um prompt injeta `context_for_task`; uma edição injeta `context_after_edit`; o `Stop` roda; `hook-stats` conta a sessão; com `memory` ligada, `memory status` mostra pendentes sem chave; com o `.mcp.json` de projeto **e** o plugin, há aviso de servidor duplicado? | T3.4 |
+| P3 | **T3.1** · instalar pelo marketplace | `claude plugin marketplace add .` e `claude plugin install ripwire-broker@aquental --scope user` num repositório de teste; anotar se a cópia é in-place ou no cache | T3.4 |
+| P4 | **T2.1** · o primeiro release | autorizar a tag `v0.1.0` (e o `release.yml`, que o Claude escreve quando autorizado); depois, os SHA-256 reais em `scripts/checksums.txt` | `install-binary.sh` passa a ter o que baixar; T3.4 |
+| P5 | **Atualizar o Claude Code** | o `claude` no `PATH` desta máquina ainda é o 2.1.285 (`~/.local/share/claude/versions` só tem 2.1.274, 2.1.277 e 2.1.285). `claude update`, ou o instalador | rodar o mod sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` (T4.0) |
+| P6 | **T4.1** · o que só uma sessão com o mod responde | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir integrations/claude-code`: (b) um hook clássico vê `RIPWIRE_BROKER_MOD_ACTIVE=1`, isto é, os clássicos ficam calados; (c) a ordem de um `tool.call` e de um `PostToolUse` clássico; (e) um valor em `$.state` sobrevive a editar `register.ts` com a sessão aberta; (f) o resultado de um `tool.call` de Bash traz `bashEditDiff.changedFiles` | confirma o interruptor (DM-5) e as escolhas da Fase 5 feitas pelos tipos |
+| P7 | **T5.5** · ver a faixa acima do prompt | na sessão da P6, olhar a faixa `rw-brkr · …` e rodar `/ripwire-status` | o teste do kit confere a árvore, não a pintura (mods/test) |
+| P8 | **T3.4 e T6.1** · medir | a latência de um hook pelo resolvedor contra o direto, e a do `prompt.submit` do mod contra o `context_for_task`; memórias entregues numa sessão de teste | fechamento das Etapas 1 e 2 |
+
 ## 6. Cobertura
 
 | O que o usuário ganha | Tarefas |
@@ -646,4 +672,7 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T3.3 | `grep -c "name: plugin" .github/workflows/rust.yml` → 0 | `87543cd` | — (YAML; conferido que os jobs são `default`, `online`, `plugin`) | este plano | verdes; no PR #75 (run 37546522493) o job `plugin` passou sem login, e `default` e `online` passaram com `tests/plugin.rs` sob o `dash` do Linux |
 | T1.9 | `grep -n "mcp__plugin_ripwire-broker_broker__context_for_task" README.md integrations/claude-code/README.md …/SKILL.md` sai com 2 ("integrations/claude-code/README.md: No such file") | `b0732b8` | — (texto; o mesmo `grep` acha as três) | README do plugin (novo), README principal, `SKILL.md`, PRD §25, D-158, `handoff.md` | verdes no worktree do commit |
 | T2.3 (revisão) | o mesmo teste, com a linha do `check` tendo de levar `CLAUDE_PLUGIN_DATA='…'`: falhou mostrando a linha sem ele | `d370ca8` | tirar o prefixo da linha | — | verdes no worktree do commit |
+| T4.0 | `claude plugin test`: "hooks modules are not turned on in this build yet (early access)"; com a variável e sem módulo: "no hooks module to load" | (sem código no repositório: a sonda foi uma cópia descartável) | — | este plano (T0.2, T4.0, §5a) | — |
+| T4.2 | — (portão) | commit da Fase 4 | — | §1 deste plano | o `plugin test` nos portões locais e no job `plugin` do CI, com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` |
+| T4.3 | `tests/register.test.ts` · "session.start marks the mod active for the classic hooks": `claude plugin test` sai com 1, "no hooks module to load; hooks/hooks.json names none in modules" | commit da Fase 4 | o `$.env.set` removido; o valor `'true'` no lugar de `'1'` | — (README do plugin na T5.6) | `validate --strict` lista `env writes: RIPWIRE_BROKER_MOD_ACTIVE` |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |
