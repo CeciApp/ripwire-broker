@@ -448,6 +448,9 @@ estar atualizado. Os seis passos do §1 valem para todas.
   se não rodar, o job fica `continue-on-error: false` só no `workflow_dispatch` e a validação local
   entra nos portões do §1 como obrigatória.
   **Docs:** este plano (§1, se o CI não puder validar).
+  **Estado:** o job existe (`npm install --global @anthropic-ai/claude-code@2.1.285`, fixado como as
+  actions; o `postinstall` do pacote liga o binário nativo, então sem `--ignore-scripts`) e não é
+  check obrigatório. Se ele roda sem login só se sabe no primeiro PR: registrar aqui e no §8.
 - [ ] **T3.4 · Fechamento da Etapa 1.** D-NNN "Etapa 1 do plugin" com: o que o plugin contém, os
   nomes novos das tools, o que o `install` continua fazendo, os limites (Unix; `ripwire` à parte;
   barra de status fora do plugin), e as medições: tempo de um hook pelo resolvedor contra o hook
@@ -629,4 +632,5 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T2.3 | `tests/plugin.rs::session_start_check_says_what_is_missing_in_one_line_and_exits_zero`: `left: Null` (sem `SessionStart` no `hooks.json`) | commit da T2.3 | `check` saindo com 1; `ripwire` não conferido; `check` caindo no caminho normal (roda o broker ou reclama no stderr); `args` do hook alterados | README do plugin: na T1.9 | portões no worktree do commit |
 | T3.1 (parte) | `claude plugin validate --strict .`: "No manifest found in directory. Expected .claude-plugin/marketplace.json", exit 1; `the_repository_is_the_marketplace_aquental_listing_the_plugin`: `marketplace.json: No such file or directory` | commit da T3.1 | nome `ripwire-broker` no marketplace; `source` `./integrations`; `version` na entrada; `source` `../x` (o `validate` recusa: "must start with ./"). **Falta:** `claude plugin marketplace add .` e `install --scope user` num repositório de teste (mantenedor) | README do plugin: na T1.9 | portões no worktree do commit, com o `validate --strict .` novo |
 | T3.2 | os dois testes nasceram verdes: são travas de processo sobre o que a T1.2 e a T2.3 já fazem, como a tarefa prevê ("nada além dos testes") | commit da T3.2 | `plugin.json` em 0.2.0 com o `Cargo.toml` em 0.1.0 ("the plugin pins 0.2.0, which the code (0.1.0) has not reached"); o resolvedor escolhendo a versão mais recente em `bin/` em vez da fixada | README do plugin ("Como publicar uma versão"): na T1.9 | portões no worktree do commit |
+| T3.3 (parte) | `grep -c "name: plugin" .github/workflows/rust.yml` → 0 | commit da T3.3 | — (YAML; conferido que os jobs são `default`, `online`, `plugin`) | este plano | **Falta:** o resultado do job no primeiro PR (roda sem login?) |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

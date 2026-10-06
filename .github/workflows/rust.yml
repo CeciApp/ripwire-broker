@@ -104,3 +104,23 @@ jobs:
         # cancelled at its own limit keeps none, and the hung test could not be named.
         timeout-minutes: 12
         run: cargo nextest run --locked --features online
+
+  # The Claude Code plugin (spec/plan/mod-plan.md, T3.3). Not a required check: whether
+  # `claude plugin validate` runs without a login on a runner is what this job finds out. The
+  # shape of the plugin's files and its scripts are already tested by tests/plugin.rs in the
+  # two jobs above; this is Anthropic's own check of the manifests.
+  plugin:
+    name: plugin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Pinned like the actions: the version the plugin was validated with locally.
+      - name: Claude Code CLI
+        run: npm install --global @anthropic-ai/claude-code@2.1.285
+      - name: The plugin
+        run: claude plugin validate --strict integrations/claude-code
+      - name: The marketplace
+        run: claude plugin validate --strict .
