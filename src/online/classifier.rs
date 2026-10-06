@@ -51,6 +51,8 @@ pub enum ClassifyError {
     TooLarge,
     /// Connection refused, reset or closed.
     Network,
+    /// No usable key (D-155): nothing was sent. Handled like a refused key, never retried.
+    NoKey,
 }
 
 impl ClassifyError {
@@ -65,6 +67,7 @@ impl ClassifyError {
             Self::Invalid(_) => "invalid_response",
             Self::TooLarge => "response_too_large",
             Self::Network => "network",
+            Self::NoKey => "no_key",
         }
     }
 

@@ -1705,8 +1705,11 @@ e somente pelo `env` do servidor MCP é ***sem fonte na v0.1*** (§23.17).
    CA-10 continua valendo sem alteração no build sem a feature `online`.
 2. Presença de `--online` significa consentimento explícito para enviar somente o
    conteúdo elegível da raiz configurada.
-3. Credencial ausente ou inválida em modo online causa falha clara; não há downgrade
-   silencioso para offline.
+3. ~~Credencial ausente ou inválida em modo online causa falha clara; não há downgrade
+   silencioso para offline.~~ **Revisto no
+   [D-155](changelog.md#d-155--sem-chave-chave-recusada-e-o-log-do-jev):** sem credencial o
+   servidor sobe e não envia nada ao Jev, mas nunca em silêncio: o stderr diz por quê e a barra de
+   status mostra `[jev: no key]` (ou `[jev: invalid key]`, para uma chave malformada ou recusada).
 4. A **descoberta** semântica participa só de `context_for_task`. `context_after_edit` e
    `context_before_finish` permanecem estruturais nas respostas: suas entradas são
    alterações conhecidas e obrigações para as quais o Ripwire já tem evidência mais
@@ -2347,8 +2350,9 @@ incluem query, fonte ou path em claro.
   as três tools MCP forem usadas, **então** nenhuma tentativa de rede ao
   classificador ocorre.
 - **CA-ONLINE-02 — Configuração explícita.** **Dado** `--online` sem credencial,
-  **quando** o processo iniciar, **então** falha com mensagem segura antes de
-  publicar o servidor MCP.
+  **quando** o processo iniciar, **então** ~~falha com mensagem segura antes de
+  publicar o servidor MCP~~ sobe com `no_jev_api_key` ligado, não envia nenhuma requisição ao
+  Jev, diz por quê no stderr sem ecoar o valor e publica `[jev: no key]` para a barra (D-155).
 - **CA-ONLINE-03 — Request tipado.** **Dado** um lote com duas perguntas, **quando**
   o cliente chamar um servidor fixture, **então** `state`, ordem, IDs, tipo `noul` e
   `instructions` chegam sem alteração semântica.
@@ -2665,7 +2669,8 @@ Manter modos separados: `serve` atende MCP e `statusline` imprime a barra. No tr
 
 #### 24.4.2 Fora da primeira versão
 
-Estado ao vivo do servidor MCP, IPC, daemon novo, reconstrução automática do grafo, varredura do repositório, leitura do transcript, preços por modelo, estimativa de economia monetária, barra para Codex ou Claude Desktop genérico e configuração automática de barra para subagentes.
+Estado ao vivo do servidor MCP (o modo online e as contagens do §24.5.4 entraram depois, no
+[D-154](changelog.md#d-154--o-servidor-na-barra-jev-memória-e-online), por arquivo e sem IPC), IPC, daemon novo, reconstrução automática do grafo, varredura do repositório, leitura do transcript, preços por modelo, estimativa de economia monetária, barra para Codex ou Claude Desktop genérico e configuração automática de barra para subagentes.
 
 Git branch, nós/arestas e último arquivo editado ficam para expansão posterior. Branch exige fonte adicional; nomes de arquivos ampliam a exposição de dados; números do grafo exigem contrato upstream validado. A barra não deve iniciar trabalho para obter esses campos.
 
@@ -2736,6 +2741,32 @@ Colorir o segmento inteiro `ctx xx%` conforme o percentual inteiro exibido, depo
 O segmento de estado dos hooks também é colorido: `hooks off` em vermelho (`"\x1b[31m"`), por ser uma pausa que o usuário precisa ver, e `hooks on` em azul claro (`"\x1b[38;5;117m"`). `hooks sem dados` não é um estado escolhido pela sessão e fica sem cor (D-124).
 
 Usar `"\x1b[0m"` ao terminar cada segmento colorido, antes do separador, para impedir vazamento de cor aos campos seguintes. Aplicar ANSI somente após sanitização e cálculo de largura; os escapes gerados pelo renderizador não contam como colunas. Percentual ausente/inválido continua omitido, sem cor artificial. Essa paleta é um requisito de produto; a aparência exata depende da paleta do terminal.
+
+#### 24.5.4 Estado do servidor (D-154)
+
+Com um `serve --online` vivo para o workspace, a barra acrescenta, nos últimos cinco segundos:
+
+| Segmento | Origem | Regra |
+|---|---|---|
+| `[jev:3]` | Cada requisição que o `JevClient` envia, recusada ou não | Depois dos contadores dos hooks; sai junto com eles quando falta largura |
+| `[jev: no key]` / `[jev: invalid key]` | Chave ausente (nada é enviado), ou malformada ou recusada pelo Jev (401/403) até a próxima resposta de sucesso (D-155) | No lugar de `[jev:N]`; alerta em vermelho, mantido quando falta largura; entre servidores vivos vale o pior estado |
+| `[mem: retr 1, stor 2]` | Só com `--memory`: cada leitura de memória do `context_for_task` e cada observação que as ferramentas gravam | Logo depois de `[jev:N]`, com a mesma prioridade |
+| `(online)` | Servidor vivo com `--online` (o `--memory` o implica) | Sempre o último segmento; prioridade igual à de `hooks on` |
+
+Os três aparecem também sem snapshot dos hooks, porque o servidor não é os hooks. Um servidor offline não
+acrescenta nada.
+
+**Fonte.** Cada processo `serve` online mantém `state-dir/statusline/server-<workspace_key>-<pid>.json`
+(0600, até 4 KiB): modo, `updated_at` e contagens por segundo da janela, sem prompt, caminho, consulta ou
+resposta. Ele reescreve o arquivo no máximo uma vez por segundo, quando há atividade nova, e a cada 10 s
+sem ela, e o apaga ao encerrar. A barra lê só os arquivos do workspace (no máximo 16), sem lock, sem seguir
+link e sem criar nada, valida schema e `workspace_key` no conteúdo, ignora os não renovados há mais de
+30 s (um arquivo não prova um servidor vivo, §24.6.4) e soma os servidores vivos. As sobras de um servidor
+que caiu saem pela limpeza dos hooks, que já remove os arquivos antigos de `statusline/`.
+
+**Limites.** O `stor` conta só o servidor: as observações dos hooks vêm de outros processos. Sem
+`refreshInterval`, a barra só se redesenha em eventos do host, então a janela de cinco segundos mostra a
+atividade em torno do último evento.
 
 ### 24.6 Arquitetura proposta em Rust
 

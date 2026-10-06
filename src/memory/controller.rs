@@ -286,7 +286,7 @@ pub(crate) async fn send(
         };
         *metrics.failures.entry(error.category()).or_default() += 1;
         match error {
-            ClassifyError::Auth(_) => return Err(Failure::Auth),
+            ClassifyError::Auth(_) | ClassifyError::NoKey => return Err(Failure::Auth),
             ClassifyError::RateLimited { retry_after } => {
                 let wait = retry_after
                     .as_deref()

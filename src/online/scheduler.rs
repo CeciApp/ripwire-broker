@@ -299,7 +299,8 @@ impl Scheduler {
         } = attempt;
         let items = job.request.state.items.len();
         match &result {
-            Err(ClassifyError::Auth(_)) => report.stop = Some(Stop::Auth),
+            // No key (D-155) stops discovery like a refused one: nothing more is tried.
+            Err(ClassifyError::Auth(_) | ClassifyError::NoKey) => report.stop = Some(Stop::Auth),
             Err(ClassifyError::RateLimited { retry_after }) => {
                 report.rate_limited += 1;
                 let wait = retry_after

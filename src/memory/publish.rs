@@ -27,6 +27,8 @@ pub struct MemoryConfig {
     pub worker: Option<Arc<Mutex<super::metrics::Metrics>>>,
     /// What `context_for_task` reads memory with; `None` collects without reading.
     pub read: Option<super::retrieve::ReadSetup>,
+    /// Where `serve` counts memory reads and stores for the status line (D-154); `None` elsewhere.
+    pub activity: Option<Arc<crate::server_status::Activities>>,
 }
 
 impl std::fmt::Debug for MemoryConfig {
@@ -48,6 +50,7 @@ impl MemoryConfig {
             max_in_flight: 4,
             worker: None,
             read: None,
+            activity: None,
         }
     }
 }
@@ -91,6 +94,11 @@ impl Publisher {
 
     pub fn counts(&self) -> Counts {
         *self.counts.lock().unwrap()
+    }
+
+    /// Where `serve` counts memory activity for the status line (D-154).
+    pub fn activity(&self) -> Option<&Arc<crate::server_status::Activities>> {
+        self.config.activity.as_ref()
     }
 
     /// The status resource's `memory` field.
@@ -155,6 +163,9 @@ impl Publisher {
             generation: 0,
             retention_ms: self.config.retention_ms,
         };
+        if let Some(a) = &self.config.activity {
+            a.mem_stores.record(crate::hook::now());
+        }
         let (spool, workspace_id) = (self.config.spool.clone(), self.config.workspace_id.clone());
         let write = tokio::task::spawn_blocking(move || {
             let _slot = slot;

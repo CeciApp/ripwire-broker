@@ -6,7 +6,8 @@ use ripwire_broker::broker::BrokerConfig;
 use ripwire_broker::cli::{self, Command, ServeArgs};
 use ripwire_broker::hook;
 use ripwire_broker::mcp::{BrokerServer, Settings};
-use ripwire_broker::memory::{self, runtime::Runtime};
+use ripwire_broker::memory::{self, publish::MemoryConfig, runtime::Runtime};
+use ripwire_broker::server_status::{Activities, Mode, Publisher};
 use ripwire_broker::state::StateStore;
 use ripwire_broker::summarizer::CommandSummarizer;
 use ripwire_broker::upstream::{UpstreamConfig, ripwire_version};
@@ -25,8 +26,13 @@ use std::sync::Arc;
 type MemoryClient = Arc<dyn ripwire_broker::online::classifier::MemoryClassifier>;
 
 /// Canonical workspace, ripwire version and the broker/upstream configuration for `serve`, and
-/// the memory runtime when `--memory` is on.
-fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
+/// the memory runtime when `--memory` is on. `activity` counts Jev requests and memory reads and
+/// stores for the status line (D-154).
+fn settings(
+    a: ServeArgs,
+    activity: Arc<Activities>,
+) -> Result<(Settings, Option<Runtime>), String> {
+    let activity_for_memory = activity.clone();
     // The flag the operator typed: `--memory` turns online on by itself (PRD jev-mem §4).
     let asked = match a.memory {
         Some(_) => "--memory",
@@ -45,16 +51,20 @@ fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
         // Only `--memory` gets a prefix: the `--online` message stays as it was.
         Some(o) => {
             let (config, client) =
-                online_config(o, a.memory.is_some()).map_err(|e| match a.memory {
-                    Some(_) => format!("{asked}: {e}"),
-                    None => e,
-                })?;
+                online_config(o, a.memory.is_some(), a.state_dir.as_deref(), activity).map_err(
+                    |e| match a.memory {
+                        Some(_) => format!("{asked}: {e}"),
+                        None => e,
+                    },
+                )?;
             (Some(config), client)
         }
         None => (None, None),
     };
     #[cfg(not(feature = "online"))]
     let memory_client: Option<MemoryClient> = None;
+    #[cfg(not(feature = "online"))]
+    let _ = activity;
     let runtime = match &a.memory {
         None => None,
         Some(_) => {
@@ -99,22 +109,56 @@ fn settings(a: ServeArgs) -> Result<(Settings, Option<Runtime>), String> {
     {
         broker.online = online;
     }
-    broker.memory = runtime.as_ref().map(|r| r.publish().clone());
+    broker.memory = runtime.as_ref().map(|r| MemoryConfig {
+        activity: Some(activity_for_memory),
+        ..r.publish().clone()
+    });
     Ok((Settings { upstream, broker }, runtime))
 }
 
 /// The classifier behind `--online`: the credential from the environment, one shared HTTP
 /// client to the allowlisted endpoint, and the Phase 4 limits (PRD §23.6).
+///
+/// Without a usable key the server still starts (D-155): no request goes to Jev, stderr says why
+/// and the status line shows `[jev: no key]` (`no_jev_api_key` on) or `[jev: invalid key]`.
 #[cfg(feature = "online")]
 fn online_config(
     o: &cli::OnlineArgs,
     with_memory: bool,
+    state_dir: Option<&std::path::Path>,
+    activity: Arc<Activities>,
 ) -> Result<(ripwire_broker::online::OnlineConfig, Option<MemoryClient>), String> {
     use ripwire_broker::online::classifier::for_process;
-    use ripwire_broker::online::credential::Credential;
+    use ripwire_broker::online::credential::{Credential, CredentialError};
     use ripwire_broker::online::jev::JevClient;
-    let key = Credential::from_env().map_err(|e| e.to_string())?;
-    let client = JevClient::new(key, &o.model, o.timeout)?;
+    use ripwire_broker::server_status::KeyState;
+    let client = match Credential::from_env() {
+        Ok(key) => JevClient::new(key, &o.model, o.timeout)?,
+        Err(e) => {
+            let (state, label) = match e {
+                CredentialError::Missing => {
+                    ripwire_broker::online::set_no_jev_api_key(true);
+                    (KeyState::Missing, "[jev: no key]")
+                }
+                CredentialError::InternalWhitespace => (KeyState::Invalid, "[jev: invalid key]"),
+            };
+            eprintln!("ripwire-broker: {e}; no request goes to Jev {label}");
+            activity.set_key(state);
+            JevClient::without_key(&o.model, o.timeout)?
+        }
+    };
+    let mut client = client.with_activity(activity);
+    if o.log {
+        let dir = state_dir
+            .map(std::path::Path::to_path_buf)
+            .or_else(StateStore::default_dir)
+            .ok_or("--log: no state directory (pass --state-dir, or set XDG_STATE_HOME or HOME)")?;
+        let path = dir.join("jev.log");
+        let log = ripwire_broker::online::log::JevLog::open(&path)
+            .map_err(|e| format!("--log: {}: {e}", path.display()))?;
+        eprintln!("ripwire-broker: Jev log: {}", path.display());
+        client = client.with_log(Arc::new(log));
+    }
     // With memory, one client and one ceiling of requests in flight for discovery and memory;
     // without it, discovery as before (PRD jev-mem §4).
     let (discovery, memory_client) = for_process(Arc::new(client), o.max_in_flight, with_memory);
@@ -318,14 +362,24 @@ fn statusline(a: &cli::StatuslineArgs) -> ExitCode {
         false => String::from_utf8(raw).unwrap_or_default(),
     };
     let input = statusline::parse_input(&text);
-    let snapshot = input.session_id.as_ref().and_then(|session| {
+    let place = || {
         let root = statusline::resolve_root(a.workspace.as_deref(), &input)?;
         let dir = a.state_dir.clone().or_else(StateStore::default_dir)?;
-        match projection::read(&dir, HOST, session, &root) {
+        Some((dir, root))
+    };
+    let place = place();
+    let snapshot = input.session_id.as_ref().and_then(|session| {
+        let (dir, root) = place.as_ref()?;
+        match projection::read(dir, HOST, session, root) {
             Read::Valid(s) => Some(s),
             _ => None,
         }
     });
+    let now = hook::now();
+    // The server is per workspace, not per session: read even without a session id.
+    let server = place
+        .as_ref()
+        .and_then(|(dir, root)| ripwire_broker::server_status::read(dir, root, now));
     let width = a
         .width
         .or_else(|| std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()))
@@ -339,7 +393,7 @@ fn statusline(a: &cli::StatuslineArgs) -> ExitCode {
     let _ = writeln!(
         std::io::stdout(),
         "{}",
-        statusline::render(&input, snapshot.as_ref(), &options, hook::now())
+        statusline::render_with_server(&input, snapshot.as_ref(), server.as_ref(), &options, now)
     );
     ExitCode::SUCCESS
 }
@@ -405,8 +459,23 @@ async fn main() -> ExitCode {
 
 /// `serve`: the MCP server over stdio, with the memory worker when `--memory` is on.
 async fn serve(serve: ServeArgs) -> ExitCode {
+    // The status line's view of this server (D-154): only an online server publishes one, and
+    // `--memory` implies online.
+    let mode = Mode {
+        online: serve.online.is_some(),
+        memory: serve.memory.is_some(),
+    };
+    let status_target = match mode.online {
+        true => serve
+            .state_dir
+            .clone()
+            .or_else(StateStore::default_dir)
+            .zip(serve.workspace.canonicalize().ok()),
+        false => None,
+    };
+    let activity = Arc::new(Activities::default());
     // Held until `main` returns: dropping it stops the worker with the server.
-    let (settings, mut memory) = match settings(serve) {
+    let (settings, mut memory) = match settings(serve, activity.clone()) {
         Ok(s) => s,
         Err(msg) => {
             eprintln!("{msg}");
@@ -437,6 +506,8 @@ async fn serve(serve: ServeArgs) -> ExitCode {
     if let Some(runtime) = memory.as_mut() {
         runtime.start(std::time::Duration::from_secs(5));
     }
+    // Held like the memory runtime: dropping it removes the file, so the bar stops showing it.
+    let _status = status_target.map(|(dir, root)| Publisher::start(dir, root, mode, activity));
     let handler = BrokerServer::start(settings).await;
     let observer = handler.observer();
     let transport = match StdioTransport::new(TransportOptions::default()) {
