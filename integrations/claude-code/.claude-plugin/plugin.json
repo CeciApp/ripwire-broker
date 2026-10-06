@@ -16,6 +16,7 @@
     "code-intelligence",
     "hooks"
   ],
+  "types": "./types/index.d.ts",
   "userConfig": {
     "online": {
       "type": "boolean",
