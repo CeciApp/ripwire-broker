@@ -734,3 +734,37 @@ fn the_repository_is_the_marketplace_aquental_listing_the_plugin() {
     // The version lives in plugin.json only; in both, validate warns and plugin.json wins.
     assert!(plugins[0].get("version").is_none());
 }
+
+fn semver(text: &str) -> (u64, u64, u64) {
+    let mut parts = text.split('.').map(|p| p.parse::<u64>().unwrap());
+    let mut next = || parts.next().unwrap_or_else(|| panic!("not x.y.z: {text}"));
+    (next(), next(), next())
+}
+
+#[test]
+fn cargo_version_is_not_behind_the_plugin_version() {
+    // Release order (mod-plan §6): Cargo.toml goes up first, then the tag, then the plugin.
+    let plugin = manifest()["version"].as_str().unwrap().to_string();
+    assert!(
+        semver(env!("CARGO_PKG_VERSION")) >= semver(&plugin),
+        "the plugin pins {plugin}, which the code ({}) has not reached",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+#[test]
+fn an_update_with_the_old_binary_present_runs_nothing_old() {
+    // Before the update: v0.1.0 pinned and installed.
+    let r = Resolver::new("v0.1.0");
+    r.fake("data/bin/0.1.0/ripwire-broker", "0.1.0");
+    r.run(&["serve"], &[]);
+    assert_eq!(ran(&r), r.at("data/bin/0.1.0/ripwire-broker"));
+    // The update brings a plugin pinned to v0.2.0; ${CLAUDE_PLUGIN_DATA} keeps 0.1.0.
+    r.reset();
+    r.pin("v0.2.0", &[]);
+    let check = r.run(&["check"], &[]);
+    assert!(String::from_utf8_lossy(&check.stdout).contains("install-binary.sh"));
+    assert_eq!(r.run(&["serve"], &[]).status.code(), Some(1));
+    assert!(r.run(&HOOK, &[]).status.success());
+    assert_eq!(r.argv(), None, "0.1.0 never runs after the update");
+}
