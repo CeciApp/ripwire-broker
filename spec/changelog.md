@@ -97,6 +97,7 @@
 | 2026-09-28 16:45 | As duas ressalvas do D-092 fechadas: o `install` valida o workspace antes de tocar o disco (testável em qualquer plataforma) e o registro `Inflight` ganhou teto com remoção do mais antigo | [D-093](#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) |
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
+| 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
 | 2026-10-04 22:15 | Achados baixos da memória, primeira parte, em TDD: gasto de leitura que não chegou à quota gravado pela leitura seguinte, leitura com uma requisição sem gastá-la, arquivos de lease e temporários de escritor morto apagados com o job e o nó, `memory drain` que perde o slot diz ocupado, worker esperando o store no pool bloqueante (grupo 3), id adulterado recusado sem bloquear os outros jobs | [D-150](#d-150--achados-baixos-da-memória-primeira-parte) |
 | 2026-10-04 21:25 | Achados baixos do modo online, em TDD: metades de um lote obsoleto contadas uma vez, `Retry-After` além de `u64` como espera máxima, ganho além do ripwire sem os arquivos descartados, `last_error` como a falha mais recente, credencial recusada que para a descoberta inteira, mais arquivos de segredo fora do envio; métricas `jev_*` com `--memory` documentadas; um mapa FIFO limitado para os dois caches, o `discover` em etapas | [D-149](#d-149--achados-baixos-do-modo-online) |
@@ -6793,3 +6794,25 @@ para fora e sem custo.
 - as refatorações maiores do D-143 (`read_with`, `commit_*`, batches, `admit`/`admit_note`).
 
 **Testes:** 738 → 754 no build padrão, 756 → 772 com `online` (gates locais verdes).
+
+## D-153 — Migração do repositório para aquental
+
+**Data:** 2026-10-06 15:15.
+
+**Contexto:** o usuário transferiu o repositório da organização `CeciApp` para a sua conta
+`aquental` no GitHub. O GitHub redireciona (HTTP 301) `CeciApp/ripwire-broker` para
+`aquental/ripwire-broker`, então o clone antigo continuava funcionando, mas o redirecionamento
+deixa de valer se alguém criar um repositório com o nome antigo.
+
+**Feito:**
+
+- `origin` passou a `git@github.com:aquental/ripwire-broker.git` (`git remote set-url`; só o
+  `.git/config` local, nada versionado).
+- `spec/diagrams/ripwire-broker.architecture.json` e o `.html` gerado dele apontam para
+  `https://github.com/aquental/ripwire-broker` (a URL do repositório e os 27 links `blob/` para a
+  revisão `dff7a9d`).
+- `Cargo.toml`, CI e código fonte não referenciavam a organização; nada a mudar.
+
+**Mantido:** as menções a `CeciApp` em D-054, D-055, D-087 (PR #1) e em
+`docs/2026-10-03_Jev-Mem.md` são registro histórico e ficam como estão. A nota do D-055 sobre a
+titularidade da licença deixa de ter ressalva: repositório e copyright estão com o autor.
