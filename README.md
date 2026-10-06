@@ -633,7 +633,9 @@ Manual setup, if you prefer:
   `claude mcp add ripwire-broker -- /path/ripwire-broker --workspace .`).
 - Codex: add `integrations/codex/config.toml` to `~/.codex/config.toml` and the contents of
   `integrations/codex/AGENTS.md` to the repository's `AGENTS.md`.
-- Hooks: examples in `integrations/claude-code/settings.json` and `integrations/codex/hooks.json`.
+- Hooks: `install --hooks` writes them for either host. `integrations/claude-code/hooks/hooks.json` holds the
+  plugin's, in exec form through the plugin's `scripts/broker`, so it needs the plugin's variables
+  (`${CLAUDE_PLUGIN_ROOT}`) and is not a file to copy; `integrations/codex/hooks.json` is the Codex example.
 - Other clients: `client "$(ripwire-broker prompt --workspace /repo "the task")"` sends the task
   followed by its context inside `<ripwire-broker-context untrusted="true">`. `<` and `>` in the
   payload are escaped (`\u003c`), so repository text cannot close that block.

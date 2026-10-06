@@ -20,7 +20,9 @@ pub struct Plan {
     pub notes: Vec<String>,
 }
 
-fn events(host: Host) -> [(&'static str, &'static str, Option<&'static str>); 3] {
+/// The hook events `install` writes for `host`: (host event, `hook` argument, tool matcher).
+/// The plugin's `hooks/hooks.json` mirrors the Claude Code ones (tests/plugin.rs).
+pub fn events(host: Host) -> [(&'static str, &'static str, Option<&'static str>); 3] {
     let edits = match host {
         Host::ClaudeCode => "Edit|Write|MultiEdit|NotebookEdit|Bash",
         Host::Codex => "apply_patch|Edit|Write",

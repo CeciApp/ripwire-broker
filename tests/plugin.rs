@@ -429,3 +429,42 @@ fn user_config_declares_consent_options_with_the_install_texts() {
     assert_eq!(config["binary"]["type"], "file");
     assert_ne!(config["binary"]["required"], true);
 }
+
+#[test]
+fn hooks_json_mirrors_the_install_events_in_exec_form() {
+    use ripwire_broker::cli::Host;
+    use ripwire_broker::install;
+    let file = read_json("hooks/hooks.json");
+    let events = file["hooks"].as_object().expect("the \"hooks\" envelope");
+    let expected = install::events(Host::ClaudeCode);
+    let classic: Vec<&str> = expected.iter().map(|(event, ..)| *event).collect();
+    for name in events.keys() {
+        assert!(
+            classic.contains(&name.as_str()) || name == "SessionStart",
+            "unexpected event {name}"
+        );
+    }
+    for (event, arg, matcher) in expected {
+        let groups = events[event]
+            .as_array()
+            .unwrap_or_else(|| panic!("{event}"));
+        assert_eq!(groups.len(), 1, "{event}");
+        assert_eq!(groups[0].get("matcher").and_then(Value::as_str), matcher);
+        // Exec form: no shell, no quoting, and the options arrive as CLAUDE_PLUGIN_OPTION_*.
+        // No --workspace (the hook follows the event's cwd) and no --memory (an option).
+        assert_eq!(
+            groups[0]["hooks"],
+            serde_json::json!([{
+                "type": "command",
+                "command": "${CLAUDE_PLUGIN_ROOT}/scripts/broker",
+                "args": ["hook", "claude-code", arg],
+                "timeout": 60
+            }]),
+            "{event}"
+        );
+    }
+    assert!(
+        !plugin_root().join("settings.json").exists(),
+        "the old hand-written example is gone"
+    );
+}
