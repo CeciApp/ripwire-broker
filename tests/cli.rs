@@ -502,7 +502,7 @@ fn memory_implies_online_and_both_flags_are_equivalent() {
     assert_eq!(m.memory, both.memory);
     assert_eq!(
         m.memory.as_ref().map(|a| a.read_deadline),
-        Some(Duration::from_millis(750))
+        Some(Duration::from_millis(850))
     );
 }
 
@@ -548,7 +548,7 @@ fn memory_options_have_defaults_and_refuse_values_out_of_range() {
         panic!()
     };
     let m = d.memory.unwrap();
-    assert_eq!(m.read_deadline, Duration::from_millis(750));
+    assert_eq!(m.read_deadline, Duration::from_millis(850));
     assert_eq!(
         (
             m.read_request_limit,
@@ -588,7 +588,7 @@ fn memory_options_have_defaults_and_refuse_values_out_of_range() {
     );
 
     for (flag, bad) in [
-        ("--memory-read-deadline-ms", "751"),
+        ("--memory-read-deadline-ms", "851"),
         ("--memory-read-deadline-ms", "0"),
         ("--memory-read-request-limit", "5"),
         ("--memory-write-candidates", "11"),

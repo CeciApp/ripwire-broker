@@ -686,7 +686,13 @@ esfriam. A carga, o ranking das âncoras e a conferência das fontes rodam fora 
 assíncronas, e só as âncoras e os candidatos expandidos têm as fontes conferidas; os pedidos param
 50 ms antes do prazo (um quinto dele, se for menor) para a revalidação final caber. A leitura usa
 no máximo 4 dos pedidos de `--jev-request-limit` por consulta, e a descoberta fica com o resto;
-cada pedido entra na quota de 24 h do workspace (`quota.json`, com lock próprio, dividida com o
+cada pedido ao Jev tem até 450 ms, contados de quando sai: a espera por uma das vagas em voo que
+a descoberta divide sai só do prazo da leitura (D-156). Se o prazo acaba antes de o Jev validar
+alguma memória, a leitura entrega as âncoras locais como no braço determinístico, com
+`basis: deterministic_rank`, sem `scores` e com `provenance.memory.degraded` verdadeiro; um erro
+do provedor continua sem entregar nada. O `basis` é de cada memória: uma leitura que caiu no
+recurso local entrega só `deterministic_rank`, e uma que validou alguma coisa entrega só
+`jev_scored`. Cada pedido entra na quota de 24 h do workspace (`quota.json`, com lock próprio, dividida com o
 worker), e a leitura nunca pede mais do que a quota tem. Faltando memória, o envelope diz por quê:
 `memory_cold` (o snapshot ainda carrega; a carga continua e a próxima chamada o encontra pronto),
 `memory_unavailable` (store ilegível: corrompido, esquema novo, I/O) ou `memory_incomplete`

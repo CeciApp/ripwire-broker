@@ -98,6 +98,7 @@
 | 2026-09-28 16:52 | Teto do `Inflight` revertido por decisão do usuário: a convenção de testar só por costuras públicas pesa mais que a defesa em profundidade sem defeito demonstrado | [D-094](#d-094--reversão-do-teto-do-inflight) |
 | 2026-09-28 17:47 | `spec/prompt/ci-cd.md` preenchido com os fatos do código, traduzido para o português e auditado quanto a segurança e práticas de DevOps | [D-095](#d-095--prompt-de-testes-de-propriedade-e-cicd) |
 | 2026-10-06 16:34 | Sem chave o servidor online sobe sem chamar o Jev (`no_jev_api_key`, `[jev: no key]`); chave malformada ou recusada mostra `[jev: invalid key]`; `--log` grava cada troca com o Jev em `jev.log` (enviado, recebido, duração); o invariante 3 do §23 e o CA-ONLINE-02 foram revistos | [D-155](#d-155--sem-chave-chave-recusada-e-o-log-do-jev) |
+| 2026-10-06 18:06 | Leitura de memória: tentativa ao Jev de 250 para 450 ms, contada do envio (a espera por vaga sai só do prazo); prazo de 750 para 850 ms; prazo esgotado sem nada validado entrega as âncoras locais como `deterministic_rank`, degradado; o teste do eval deixa de herdar a chave do Jev | [D-156](#d-156--prazos-da-leitura-de-memória-e-recurso-local) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -6943,3 +6944,68 @@ explícitos de falar com o Jev.
 Um teste antigo de memória (`hashes_and_generation_are_revalidated_right_before_delivery`) falhou
 uma vez na suíte cheia, num `unwrap` do `forget` sob carga. Ele passou em 5 de 5 execuções isoladas e
 na suíte seguinte. Ele usa `Recall` direto, que esta mudança não toca.
+
+## D-156 — Prazos da leitura de memória e recurso local
+
+**Data:** 2026-10-06 18:06.
+
+**Sintoma:** num teste ponta a ponta com `serve --memory` e o Jev real, o `context_for_task` nunca
+devolvia memória. A leitura parava em `stop_reason: deadline`, às vezes com `requests 1` e
+`visited 0`, às vezes com `visited 2` e mesmo assim sem nada. O braço determinístico, sobre o mesmo
+store, entregava as duas memórias.
+
+**Causas:**
+- **A fila contava como HTTP.** Com `--memory`, descoberta e memória dividem 4 pedidos em voo
+  (`Shared`). O `Run::ask` punha a chamada inteira, espera pela vaga incluída, dentro dos 250 ms da
+  tentativa. Uma leitura atrás da descoberta estourava antes de enviar. O PRD dá os 250 ms à
+  tentativa HTTP (§8.2), então isso era bug.
+- **O Jev é mais lento que a tentativa.** Com `--log`, as chamadas mediram 255–418 ms na descoberta
+  e 228–334 ms na memória. Mesmo sem fila, uma tentativa de 250 ms quase nunca cabia.
+- **Nada validado, nada entregue.** `out.memories` só era preenchido depois do scoring das âncoras.
+  Um prazo esgotado no roteamento ou no scoring devolvia a lista vazia.
+
+**Pedido do usuário:** subir a tentativa para 450 ms e o prazo total para 850 ms, e, quando o Jev
+não responde a tempo, entregar as candidatas locais como `deterministic_rank`, marcadas como
+degradadas.
+
+**O que muda numa regra:** a tabela do §8.2 do PRD jev-mem ("deadline 750 ms", "cada uma ≤250 ms")
+e o default de `--memory-read-deadline-ms` (§4: `750`, faixa 1–750) foram revistos. As metas de
+latência sobem junto: p95 ≤850 ms e p99 observado ≤900 ms. A spec MCP e o README dizem o mesmo.
+
+**Desenho:**
+- **Tentativa:** `ReadConfig::attempt_timeout` passa a 450 ms. `MemoryClassifier::decide_within`
+  aplica o limite à tentativa. O `Shared` espera a vaga antes e só então começa a contar. A espera
+  sai do prazo da leitura, que continua cortando tudo. Sem retries, como antes.
+- **Prazo:** `ReadConfig::deadline` e o default da CLI passam a 850 ms, faixa 1–850. Os 50 ms da
+  revalidação final continuam reservados.
+- **Recurso local:** `read_with` guarda as âncoras frescas na ordem do índice antes de perguntar
+  ao Jev. Se o roteamento ou o scoring das âncoras terminam em `Deadline`, elas saem como no braço
+  determinístico, sem `scores`, com `degraded: true` e `stop_reason: deadline`. A limitação
+  `memory_incomplete` continua dizendo que a leitura parou cedo.
+- **Fora do recurso:**
+  - `ProviderError`: um pedido recusado ou quebrado não diz nada sobre as âncoras, então não entrega
+    nada.
+  - `Cancelled`, `RequestLimit` e `QuestionLimit`: a leitura não terminou por falta de tempo do Jev.
+  - Prazo esgotado depois do scoring (expansão, parada): o que o Jev já validou é entregue, como antes.
+- **`basis`:** passa a ser de cada memória, `jev_scored` com `scores` e `deterministic_rank` sem
+  eles. Numa leitura `jev` os dois nunca se misturam: ela entrega o recurso local inteiro ou só o
+  que o Jev validou.
+
+**Junto, sem relação com a memória:** `ripwire_eval_runs_every_arm_and_never_touches_the_source_repo`
+falhava no `master` em qualquer shell com `RIPWIRE_BROKER_JEV_API_KEY`. O teste afirma que o braço
+`broker-online` recusa sem chave, mas o helper `eval()` herdava o ambiente, e o braço rodava. O
+helper agora remove a variável, como `tests/cli.rs` já fazia.
+
+**Medido de novo**, mesmo store e mesmas tarefas, release com o Jev real: de 6 leituras, 5
+entregaram memória `jev_scored` (score ~0,77) e 1 caiu no recurso local com as duas âncoras. Antes,
+só com a correção da fila, foi 1 de 12, e sem ela 0 de 5.
+
+**Testes:** 778 → 782 no build padrão, 805 → 809 com `online`. Em TDD, os novos e os revistos
+falharam antes da mudança:
+- `waiting_for_a_slot_is_not_spent_from_the_attempt` (a descoberta segura as 4 vagas por
+  300 ms; a memória responde em 100 ms);
+- `each_attempt_gets_at_most_450ms_and_there_are_no_automatic_retries`, agora com limite inferior,
+  então um corte antes dos 450 ms o derruba;
+- `a_read_jev_cannot_answer_in_time_delivers_the_local_anchors_degraded`, no roteamento e no scoring;
+- `a_provider_error_is_not_a_late_answer_and_delivers_nothing` e `memories_jev_scored_say_so`;
+- `deadline`, `the_deadline_cuts_the_requests` e os defaults da CLI (850, e 851 recusado).

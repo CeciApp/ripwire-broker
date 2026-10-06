@@ -29,6 +29,19 @@ pub trait MemoryClassifier: Send + Sync {
         &self,
         req: &super::request::StateRequest,
     ) -> Result<Vec<super::response::Decision>, ClassifyError>;
+
+    /// One attempt of at most `attempt` (PRD jev-mem §8.2: the HTTP attempt's 450 ms, D-156). A client
+    /// that queues for a slot first waits outside `attempt`: only the caller's deadline bounds
+    /// the wait. `Timeout` when the attempt itself ran out.
+    async fn decide_within(
+        &self,
+        req: &super::request::StateRequest,
+        attempt: std::time::Duration,
+    ) -> Result<Vec<super::response::Decision>, ClassifyError> {
+        tokio::time::timeout(attempt, self.decide(req))
+            .await
+            .map_err(|_| ClassifyError::Timeout)?
+    }
 }
 
 /// A failed attempt, classified (PRD §23.10).
@@ -142,6 +155,19 @@ impl<T: MemoryClassifier + 'static> MemoryClassifier for Shared<T> {
             .await
             .map_err(|_| ClassifyError::Network)?;
         self.inner.decide(req).await
+    }
+
+    async fn decide_within(
+        &self,
+        req: &super::request::StateRequest,
+        attempt: std::time::Duration,
+    ) -> Result<Vec<super::response::Decision>, ClassifyError> {
+        let _permit = self
+            .permits
+            .acquire()
+            .await
+            .map_err(|_| ClassifyError::Network)?;
+        self.inner.decide_within(req, attempt).await
     }
 }
 
