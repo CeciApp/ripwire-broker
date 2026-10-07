@@ -5,6 +5,8 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  # release.yml runs these same gates before it publishes anything.
+  workflow_call:
 
 # Least privilege at the workflow level; no job here needs more. Without this the workflow
 # inherits the repository/organization default, which may be write-all.

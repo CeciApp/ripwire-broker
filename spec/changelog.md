@@ -102,6 +102,7 @@
 | 2026-10-06 19:00 | Plano para distribuir o broker como plugin do Claude Code (Etapa 1) e dar-lhe um mod (Etapa 2), `spec/plan/mod-plan.md`; sete decisões: binário por script explícito com SHA-256 fixado, raiz em `integrations/claude-code/`, servidor `broker`, marketplace `aquental`, interruptor mod ↔ clássico pelo ambiente, versão fixada igual ao release, chave do Jev como opção sensível | [D-157](#d-157--plano-do-plugin-e-do-mod-do-claude-code) |
 | 2026-10-06 20:15 | Etapa 1 do plugin, os arquivos e os testes: manifesto, resolvedor `scripts/broker`, `userConfig` com os textos de consentimento do `install`, hooks em forma exec, servidor `broker`, `install-binary.sh` com SHA-256, `check` no `SessionStart`, marketplace `aquental`, job `plugin` no CI; pendentes as verificações numa sessão real, o release e a Etapa 2 | [D-158](#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes) |
 | 2026-10-06 21:12 | Etapa 2 do plugin, o mod: `hooks/register.ts` responde os três momentos pelo servidor MCP já conectado, com as regras de `hook::plan` e o estado em `$.state`; interruptor com os hooks clássicos; faixa acima do prompt e `/ripwire-status`; paridade por `hook::decide` e um golden; o prompt do portão não volta ao próprio mod; pendências do mantenedor no §5a do plano | [D-159](#d-159--etapa-2-do-plugin-o-mod) |
+| 2026-10-06 22:21 | Workflow de release: a tag `v*` igual à versão do `Cargo.toml` roda os portões do `rust.yml`, compila com `--features online` para os quatro alvos do `install-binary.sh`, publica `ripwire-broker-<tag>-<alvo>.tar.gz` e `SHA256SUMS` num release que só sai do rascunho com tudo no lugar; o mantenedor autorizou a tag `v0.1.0` | [D-160](#d-160--workflow-de-release) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7180,3 +7181,42 @@ e `hook-log` só contam sessões dos hooks clássicos. T6.1 (medir) é a P8; T6.
 
 **Testes:** Rust 803 no build padrão e 830 com `online` (o teste de paridade em `tests/hooks.rs`); o
 kit, 45. Portões em cada commit, com `claude plugin test` desde a T4.2.
+
+## D-160 — Workflow de release
+
+**Data:** 2026-10-06 22:21.
+
+**Pedido do usuário:** "autorizo a tag v0.1.0, escreve o release.yml" (P4 do §5a do
+[plano](plan/mod-plan.md), T2.1). O mantenedor disse também que o Claude Code está atualizado; nesta
+máquina o `claude` do `PATH` ainda responde 2.1.285, então a P5 continua aberta.
+
+**O que o `.github/workflows/release.yml` faz**, numa tag `v*`:
+1. `gates`: chama o `rust.yml` (que ganhou `workflow_call`), com os mesmos jobs `default`, `online` e
+   `plugin` de um PR.
+2. `draft`: recusa a tag que não for `v` + a versão do `Cargo.toml` e cria o release como rascunho
+   (`gh release create --draft --verify-tag --generate-notes`).
+3. `build`: um job por alvo, os quatro que o `install-binary.sh` conhece. `aarch64-apple-darwin` e
+   `x86_64-apple-darwin` no `macos-latest` (o segundo compilado de forma cruzada), `x86_64-unknown-linux-gnu`
+   no `ubuntu-latest` e `aarch64-unknown-linux-gnu` no `ubuntu-24.04-arm`, todos nativos menos um.
+   `cargo build --release --locked --features online --bins`; onde o runner executa o alvo,
+   `ripwire-broker --version` tem de dizer a versão da tag. O tarball
+   `ripwire-broker-<tag>-<alvo>.tar.gz` leva `ripwire-broker` e `ripwire-eval` na raiz, como o
+   `install-binary.sh` espera, e sobe para o rascunho.
+4. `publish`: baixa os quatro tarballs do rascunho, confere que são quatro, gera e sobe o
+   `SHA256SUMS`, escreve no resumo do job as linhas do `checksums.txt` e tira o release do rascunho.
+
+**Decisões.** Só `actions/checkout` (fixado por SHA, como no `rust.yml`) e o `gh` do runner: sem ações
+de artefato, o rascunho do release é o lugar onde os jobs se encontram. Uma falha em qualquer alvo
+deixa o rascunho sem publicar (`fail-fast`). A tag não precisa bater com o `plugin.json` nem com o
+`checksums.txt`, porque a ordem de publicação do README do plugin fixa o plugin **depois** que o
+release existe; para a `v0.1.0` os três já dizem `0.1.0`. Os binários de Linux vêm do Ubuntu 24.04 e
+pedem glibc 2.39 ou mais nova (dito no README).
+
+**Depois da tag:** os SHA-256 do `SHA256SUMS` publicado vão para o
+`integrations/claude-code/scripts/checksums.txt` num PR; só então o `install-binary.sh` tem o que
+baixar. Os builds não são reprodutíveis, então os hashes vêm dos assets publicados.
+
+**Testes:** `tests/plugin.rs::the_release_workflow_publishes_what_install_binary_downloads` lê os
+alvos do `install-binary.sh` e exige um build para cada um, o nome do asset, os dois binários, o
+`--features online`, o `SHA256SUMS`, os portões antes e o rascunho até o fim; cinco mutantes
+derrubados. `actionlint` sem achados nos dois workflows.

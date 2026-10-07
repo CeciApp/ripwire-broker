@@ -26,6 +26,13 @@ cargo build --release
   [--ripwire /path/to/ripwire] [--timeout-ms 60000] [--redact-workspace] [--incremental]
 ```
 
+Or download a build: each [GitHub release](https://github.com/aquental/ripwire-broker/releases),
+from `v0.1.0` on, has `ripwire-broker-<tag>-<target>.tar.gz` for `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, with
+`ripwire-broker` and `ripwire-eval` built with `--features online`, and a `SHA256SUMS`. The Linux
+builds come from Ubuntu 24.04 runners and need its glibc (2.39) or newer. The Claude Code plugin
+installs the one for your machine ([`integrations/claude-code`](integrations/claude-code/README.md)).
+
 That is the MCP server (`serve`, the default command). The same binary has one-shot
 commands; `ripwire-broker --help` lists them all:
 

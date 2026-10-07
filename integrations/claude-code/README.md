@@ -148,8 +148,13 @@ Its tests run without a session, sign-in or network:
 The order is fixed, and `tests/plugin.rs` holds it:
 
 1. Raise `version` in `Cargo.toml`; run the gates.
-2. Tag `vX.Y.Z`; the release workflow (`.github/workflows/release.yml`, not written yet) builds `ripwire-broker-vX.Y.Z-<target>.tar.gz` per target and
-   publishes them with `SHA256SUMS`.
+2. Tag `vX.Y.Z` on `master`. The release workflow (`.github/workflows/release.yml`) refuses a tag
+   that is not the `Cargo.toml` version, runs the gates of `rust.yml`, builds
+   `ripwire-broker-vX.Y.Z-<target>.tar.gz` (with `ripwire-broker` and `ripwire-eval`, built with
+   `--features online`) for `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+   `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, and publishes them with
+   `SHA256SUMS`. The release stays a draft until every target is up; the job summary of `publish`
+   has the lines for step 3.
 3. Write `vX.Y.Z` on the first line of `scripts/checksums.txt` and one `sha256  asset` line per
    target; set `.claude-plugin/plugin.json` `version` to `X.Y.Z` (the tests require both to agree,
    and the plugin never to be ahead of `Cargo.toml`).
