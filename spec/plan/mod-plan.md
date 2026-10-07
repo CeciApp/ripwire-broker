@@ -121,7 +121,7 @@ só o mantenedor pode tomar.
 | 26 | Mod: tipos gerados em `.claude-plugin/types/` ao carregar com `--plugin-dir`; confiar neles acima das páginas (mods/create) | T4.1; `.gitignore` |
 | 27 | Mod: onde roda — hooks sim em terminal, Desktop, VS Code e `claude -p`; desenho só no terminal e no Desktop (mods/overview) | T5.5: desenha só com `e.surface`; fora disso, `$.ui.log` |
 | 28 | Mod: é código com as permissões do usuário; dizer no README a versão do Claude Code testada (mods/overview, mods/create) | T5.6 |
-| T6.2 | — (decisão; sem código) | (este PR) | — | changelog (D-162) | portões verdes |
+| T6.2 | — (decisão; sem código) | `6f1a384` | — | changelog (D-162) | portões verdes |
 | 29 | Hooks de `PreToolUse` dos plugins rodam **dentro** do `next(e)` do `tool.call`; um mod que responde sem `next` os impede (mods/events) | T4.1 verifica o mesmo para `PostToolUse`; T4.3 desliga os clássicos pelo ambiente, não pela cadeia |
 
 ### 2.2 O que a documentação não fecha (viram tarefas de verificação)
