@@ -389,7 +389,7 @@ estar atualizado. Os seis passos do §1 valem para todas.
 
 #### Fase 2 — O binário chega ao usuário (DM-1)
 
-- [ ] **T2.1 · Workflow de release.**
+- [x] **T2.1 · Workflow de release.**
   **Vermelho:** `.github/workflows/release.yml` não existe; `gh release list` não tem `v0.1.0`.
   **Verde:** na tag `v*`: `cargo build --release --locked --features online` para
   `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`;
@@ -399,8 +399,11 @@ estar atualizado. Os seis passos do §1 valem para todas.
   Feito o workflow (D-160): `tests/plugin.rs::the_release_workflow_publishes_what_install_binary_downloads`
   liga os alvos do `release.yml` aos do `install-binary.sh`; os portões entram pelo `rust.yml` como
   `workflow_call`; o release é rascunho até o `SHA256SUMS`. A tag só confere o `Cargo.toml`, porque o
-  plugin fixa o release depois que ele existe. Falta a tag `v0.1.0` (autorizada pelo mantenedor),
-  depois do merge, e os hashes no `checksums.txt`.
+  plugin fixa o release depois que ele existe. A tag `v0.1.0` (autorizada pelo mantenedor) saiu em
+  `ccd5a2e`; o run 37558534044 publicou os quatro tarballs e o `SHA256SUMS`, e o `checksums.txt`
+  fixa os quatro hashes. Conferido aqui: `shasum -c` dos quatro, o `install-binary.sh` de verdade
+  baixou, conferiu e instalou o de `aarch64-apple-darwin` (`ripwire-broker 0.1.0`); os outros três
+  têm a arquitetura certa (`file`; sem Rosetta nesta máquina para rodar o x86_64).
 - [x] **T2.2 · `install-binary.sh` e `checksums.txt`.**
   **Vermelho:** `tests/plugin.rs::install_binary_refuses_a_checksum_mismatch_and_writes_to_plugin_data`:
   com um servidor HTTP falso (ou um arquivo local via `file://`/`--from DIR` de teste), o script baixa
@@ -662,7 +665,7 @@ publicam algo. O resto do plano segue sem elas; cada uma diz o que destrava.
 | P1 | **T1.6** · o workspace do servidor do plugin | `claude --plugin-dir integrations/claude-code` num repositório de teste; `/mcp` mostra `plugin:ripwire-broker:broker` conectado; um `context_for_task` traz `provenance.workspace` igual ao diretório do projeto | fecha a dúvida do `CLAUDE_PROJECT_DIR` no ambiente do servidor (T0.2, divergência 4) |
 | P2 | **T1.7** · os hooks clássicos numa sessão real | na mesma sessão: um prompt injeta `context_for_task`; uma edição injeta `context_after_edit`; o `Stop` roda; `hook-stats` conta a sessão; com `memory` ligada, `memory status` mostra pendentes sem chave; com o `.mcp.json` de projeto **e** o plugin, há aviso de servidor duplicado? | T3.4 |
 | P3 | **T3.1** · instalar pelo marketplace | `claude plugin marketplace add .` e `claude plugin install ripwire-broker@aquental --scope user` num repositório de teste; anotar se a cópia é in-place ou no cache | T3.4 |
-| P4 | **T2.1** · o primeiro release | ~~autorizar a tag `v0.1.0`~~ autorizada em 2026-10-06, `release.yml` escrito (D-160); a tag sai depois do merge; depois, os SHA-256 reais em `scripts/checksums.txt` | `install-binary.sh` passa a ter o que baixar; T3.4 |
+| P4 | **T2.1** · o primeiro release | **feito** (D-160): tag `v0.1.0` autorizada e publicada, os SHA-256 reais em `scripts/checksums.txt` | `install-binary.sh` passa a ter o que baixar; T3.4 |
 | P5 | **Atualizar o Claude Code** | o `claude` no `PATH` desta máquina ainda é o 2.1.285 (`~/.local/share/claude/versions` só tem 2.1.274, 2.1.277 e 2.1.285). `claude update`, ou o instalador | rodar o mod sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` (T4.0) |
 | P6 | **T4.1** · o que só uma sessão com o mod responde | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir integrations/claude-code`: (b) um hook clássico vê `RIPWIRE_BROKER_MOD_ACTIVE=1`, isto é, os clássicos ficam calados; (c) a ordem de um `tool.call` e de um `PostToolUse` clássico; (e) um valor em `$.state` sobrevive a editar `register.ts` com a sessão aberta; (f) o resultado de um `tool.call` de Bash traz `bashEditDiff.changedFiles` | confirma o interruptor (DM-5) e as escolhas da Fase 5 feitas pelos tipos |
 | P7 | **T5.5** · ver a faixa acima do prompt | na sessão da P6, olhar a faixa `rw-brkr · …` e rodar `/ripwire-status` | o teste do kit confere a árvore, não a pintura (mods/test) |

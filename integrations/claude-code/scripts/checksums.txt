@@ -1,1 +1,5 @@
 v0.1.0
+abc8af0d2ac7547559b2b2a8b81cf16f72fe0f6071e259c3967c75d87a19e962  ripwire-broker-v0.1.0-aarch64-apple-darwin.tar.gz
+64fc4cb6296aabf255c3e9db5ca60276265ec036245cb995e1516b3a46dfa714  ripwire-broker-v0.1.0-aarch64-unknown-linux-gnu.tar.gz
+bacf813db3d1818475dfd7ef6c08de21c66e600bf2980a96afd5ac26fb7b4054  ripwire-broker-v0.1.0-x86_64-apple-darwin.tar.gz
+7649367216c9b9b9f7925e6966f12ce68546427ac042d2bd539b507901053ab7  ripwire-broker-v0.1.0-x86_64-unknown-linux-gnu.tar.gz

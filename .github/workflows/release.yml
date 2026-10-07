@@ -64,8 +64,10 @@ jobs:
           # Cross-compiled on the arm64 runner; Apple's toolchain builds both.
           - target: x86_64-apple-darwin
             runner: macos-latest
+          # Pinned, not ubuntu-latest: the runner's glibc is the oldest one the binary runs on, and
+          # the README promises 2.39 (ubuntu-latest moves to Ubuntu 26 on 2026-10-19).
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
     env:
