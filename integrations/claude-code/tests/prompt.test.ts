@@ -75,3 +75,12 @@ test('a server that did not connect passes the prompt through', async ($, on) =>
   expect(reached[0].context).toBeUndefined()
   expect(lines.some((l) => l.includes('did not start'))).toBe(true)
 })
+
+test("a prompt the engine stamps as ripwire-broker's (the finish gate's) is neither counted nor analysed", async ($, on) => {
+  const calls = broker(on, [envelope('context_for_task', 7)])
+  core(on)
+  logs(on)
+  await $.prompt.submit({ text: 'ripwire-broker context (…)', wait: false, origin: { kind: 'plugin', name: 'ripwire-broker' } })
+  await $.prompt.submit(typed('fix the parser'))
+  expect(calls.map((c) => c.args.task)).toEqual(['fix the parser'])
+})

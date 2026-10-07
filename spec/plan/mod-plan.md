@@ -570,13 +570,21 @@ orçamento, dedup de itens, memória) é do servidor, que recebe `--incremental`
   existe: o hook clássico do 2.1.285 já a recebe (D-131), e o mod a lê em `result.bashEditDiff`
   (a confirmar na P6). A mais: um Bash que o core marca `isReadOnly` não pergunta nada. A raiz do
   workspace é `$.session.cwd()`. Não testado: o corte em 50 arquivos de um Bash.
-- [ ] **T5.3 · `turn.complete` → `context_before_finish`.**
+- [x] **T5.3 · `turn.complete` → `context_before_finish`.**
   **Vermelho:** `tests/register.test.ts`: `ready_shows_nothing`; `attention_required_without_gate_shows_the_notice_under_the_answer`
   (`{ text }` igual a `gate_notice`); `attention_required_with_gate_submits_a_prompt_once`
   (stub `prompt.submit` capturado; a segunda conclusão do mesmo encadeamento não reenvia, o
   equivalente de `stop_hook_active`); `an_aborted_turn_is_not_analysed` (`e.isAborted`).
   **Verde:** o hook.
   **Docs:** —.
+  Feito. Um achado no caminho: segundo os tipos, um `$.prompt.submit` passa por todos os hooks menos
+  o que chamou, então o prompt do portão chegava ao `prompt.submit` do próprio mod e virava uma
+  pergunta `context_for_task` (o hook clássico nunca vê a continuação de um bloqueio do `Stop`). O
+  mod agora deixa passar, sem contar nem perguntar, o prompt de origem
+  `{ kind: 'plugin', name: 'ripwire-broker' }` e o texto que ele mesmo enviou (`gate_prompt` em
+  `$.state`), porque o kit de testes não carimba a origem. Também fora: o turno de um subagente
+  (`e.agentId`), que o `Stop` clássico não cobre. A mais: `status: unknown` mostra o aviso, como o
+  `_ =>` do `hook::ask`.
 - [ ] **T5.4 · Paridade com `hook::plan` por fixtures.**
   **Vermelho:** `tests/hooks.rs::plan_decisions_are_exported_for_the_mod` grava
   `tests/fixtures/plugin/parity.json`: para as sequências de eventos dos fixtures existentes
@@ -688,5 +696,6 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T4.2 | — (portão) | `384b0c1` | — | §1 deste plano | o `plugin test` nos portões locais e no job `plugin` do CI, com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` |
 | T4.3 | `tests/register.test.ts` · "session.start marks the mod active for the classic hooks": `claude plugin test` sai com 1, "no hooks module to load; hooks/hooks.json names none in modules" | `384b0c1` | o `$.env.set` removido; o valor `'true'` no lugar de `'1'` | — (README do plugin na T5.6) | `validate --strict` lista `env writes: RIPWIRE_BROKER_MOD_ACTIVE` |
 | T5.1 | `tests/prompt.test.ts`: 6 de 7 falhando (sem hook de `prompt.submit`); "an envelope without content is not injected" passava por vacuidade | `cd390cd` | segundo prompt também perguntando; sem o filtro de conteúdo; o marcador ficando na tarefa; o prompt reescrito sem o marcador; orçamento 2000; `#ripwire-on` ignorado; marcador colado a uma palavra contando (sobreviveu ao primeiro conjunto de testes, que ganhou o caso `notes#ripwire-off`). Equivalente: lançar o erro em vez de seguir o prompt (o Claude Code pula o hook e o prompt segue igual) | — | `validate --strict` passa; kit 8/8 |
-| T5.2 | `tests/edit.test.ts`: 4 de 11 falhando sem o hook; os outros 7 passavam por vacuidade (nenhuma chamada) | commit da T5.2 | doze mutantes, todos mortos: negado ou com erro analisado; `/workshop` aceito como dentro de `/work`; sem janela; seguradas descartadas; só presença, sem data e tamanho; o arquivo revertido esquecido (o teste ganhou esse caso antes da rodada); `isReadOnly` ignorado; o corte de lentidão em 3; a lista do host ignorada; sem filtro de novidade; a pausa ignorada; `files: []` perguntado | — | `validate --strict` passa; kit 19/19 |
+| T5.2 | `tests/edit.test.ts`: 4 de 11 falhando sem o hook; os outros 7 passavam por vacuidade (nenhuma chamada) | `2ca371d` | doze mutantes, todos mortos: negado ou com erro analisado; `/workshop` aceito como dentro de `/work`; sem janela; seguradas descartadas; só presença, sem data e tamanho; o arquivo revertido esquecido (o teste ganhou esse caso antes da rodada); `isReadOnly` ignorado; o corte de lentidão em 3; a lista do host ignorada; sem filtro de novidade; a pausa ignorada; `files: []` perguntado | — | `validate --strict` passa; kit 19/19 |
+| T5.3 | `tests/finish.test.ts`: 5 de 8 falhando sem o hook; depois, o do portão falhando porque o prompt dele voltava ao `prompt.submit` do mod (achado acima), com um teste próprio em `prompt.test.ts` | commit da T5.3 | dez mutantes, todos mortos: sem o `!looping`; aviso no `ready`; turno interrompido analisado; turno de subagente analisado; pausa ignorada; o texto do portão não reconhecido; a origem `plugin` não reconhecida; tipos de risco sem ordenar; sem deduplicar; orçamento 2000 | — | `validate --strict` passa; kit 28/28 |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

@@ -15,6 +15,7 @@ const MAX_CONTEXT_CHARS = 9000
 const PROMPT_BUDGET = 1500
 const EDIT_BUDGET = 800
 const EDIT_INTERVAL_MS = 1000
+const FINISH_BUDGET = 1800
 /** As `hook::MAX_HELD_EDITS` and `hook::MAX_BASH_EDIT_FILES`. */
 const MAX_HELD_EDITS = 32
 const MAX_BASH_EDIT_FILES = 50
@@ -37,6 +38,8 @@ const heldEdits = atom({ plugin: 'ripwire-broker', key: 'held_edits' }, [] as st
 const lastEditMs = atom({ plugin: 'ripwire-broker', key: 'last_edit_ms' }, 0)
 const slowStatuses = atom({ plugin: 'ripwire-broker', key: 'slow_statuses' }, 0)
 const worktreeOff = atom({ plugin: 'ripwire-broker', key: 'worktree_off' }, false)
+const loopingTurn = atom({ plugin: 'ripwire-broker', key: 'looping_turn' }, false)
+const gatePrompt = atom({ plugin: 'ripwire-broker', key: 'gate_prompt' }, '')
 
 /** A prompt's marker and the task without it: the whole last word, else the whole first word
  *  (`hook::marker`), so a marker quoted inside the text toggles nothing. */
@@ -90,6 +93,12 @@ function hasNews(env): boolean {
     (env.items ?? []).some((i) => i.why_included !== SEEN_REFERENCE) ||
     ['tests', 'risks', 'memories'].some((k) => (env[k]?.length ?? 0) > 0)
   )
+}
+
+/** The finish gate in one line (`hook::gate_notice`): status, risk kinds, tests to run. */
+function gateNotice(env): string {
+  const kinds = [...new Set((env.risks ?? []).map((r) => r.kind))].sort()
+  return `ripwire-broker: finish gate ${env.status} · risks: ${kinds.length ? kinds.join(', ') : 'none'} · ${(env.tests ?? []).length} tests to run`
 }
 
 /** `path` relative to the workspace `root`, or undefined outside it. */
@@ -159,6 +168,14 @@ export function register(on, options) {
 
   // UserPromptSubmit: the first prompt of the session, or every one with every_prompt.
   on('prompt.submit', async ($, e, next) => {
+    // The finish gate's own prompt reaches this hook too (only the calling hook is skipped); it
+    // is a Stop hook's block, not a prompt of the user's (a classic hook never sees it).
+    const pending = await read($, gatePrompt)
+    if (pending !== '' && e.text === pending) {
+      await update($, gatePrompt, () => '')
+      return next(e)
+    }
+    if (e.origin?.kind === 'plugin' && e.origin.name === 'ripwire-broker') return next(e)
     const seen = await read($, promptsSeen)
     await update($, promptsSeen, (n) => n + 1)
     const [mark, task] = marker(e.text)
@@ -226,6 +243,31 @@ export function register(on, options) {
       return { ...result, context: [...(result.context ?? []), render(envelope, text)] }
     } catch (error) {
       $.ui.log(`no context (${error.message}); continuing without it`)
+      return result
+    }
+  })
+
+  // Stop: the main loop's turn ended; an interrupted one or a subagent's is not checked.
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.isAborted || e.agentId !== undefined || (await read($, optedOut))) return result
+    const looping = await read($, loopingTurn)
+    await update($, loopingTurn, () => false)
+    try {
+      const { envelope, text } = await ask($, 'context_before_finish', { budget_tokens: FINISH_BUDGET })
+      if (envelope.status === 'ready') return result
+      if (envelope.status === 'attention_required' && options.gate && !looping) {
+        // What a Stop hook's block does: one more turn, with the open obligations to act on. The
+        // prompt runs once the session is idle; not awaited, so this turn can end first.
+        const prompt = render(envelope, text)
+        await update($, loopingTurn, () => true)
+        await update($, gatePrompt, () => prompt)
+        void $.prompt.submit({ text: prompt })
+        return result
+      }
+      return { ...result, text: gateNotice(envelope) }
+    } catch (error) {
+      $.ui.log(`no finish check (${error.message}); continuing without it`)
       return result
     }
   })

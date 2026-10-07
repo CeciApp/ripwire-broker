@@ -16,6 +16,12 @@ declare module 'claude-code' {
       slow_statuses: number
       /** Bash edit detection is off for the session: git is too slow or the tree too dirty. */
       worktree_off: boolean
+      /** The running turn was started by the finish gate's prompt: it is not gated again, as a
+       *  Stop hook with `stop_hook_active` is not. */
+      looping_turn: boolean
+      /** The text the finish gate submitted and has not seen come back yet: the engine stamps
+       *  its origin, the test kit does not, and either way the prompt hook lets it pass. */
+      gate_prompt: string
     }
   }
 }
