@@ -3095,5 +3095,5 @@ dos hooks clássicos.
 - **Faixa e comando:** a faixa acima do prompt no terminal e no Desktop e `/ripwire-status`, com os
   rótulos do §24.
 - **Testes:** `claude plugin test integrations/claude-code` (o kit do Claude Code, sem sessão nem
-  rede), com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` no 2.1.285; a paridade com `hook::plan` vem de
+  rede), testado no 2.1.292; a paridade com `hook::plan` vem de
   `hook::decide` e de um arquivo golden escrito por `tests/hooks.rs`.

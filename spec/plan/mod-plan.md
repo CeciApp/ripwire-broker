@@ -76,7 +76,7 @@ cargo test --all-targets --locked
 cargo test --all-targets --locked --features online
 claude plugin validate --strict integrations/claude-code          # a partir da T1.1
 claude plugin validate --strict .                                 # a partir da T3.1
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test integrations/claude-code   # a partir da T4.2; a variável até a P5
+claude plugin test integrations/claude-code                       # a partir da T4.2
 ```
 
 O `claude plugin validate` também imprime, para um mod, as linhas `hooks:` e `calls:` (eventos
@@ -666,8 +666,8 @@ publicam algo. O resto do plano segue sem elas; cada uma diz o que destrava.
 | P2 | **T1.7** · os hooks clássicos numa sessão real | na mesma sessão: um prompt injeta `context_for_task`; uma edição injeta `context_after_edit`; o `Stop` roda; `hook-stats` conta a sessão; com `memory` ligada, `memory status` mostra pendentes sem chave; com o `.mcp.json` de projeto **e** o plugin, há aviso de servidor duplicado? | T3.4 |
 | P3 | **T3.1** · instalar pelo marketplace | `claude plugin marketplace add .` e `claude plugin install ripwire-broker@aquental --scope user` num repositório de teste; anotar se a cópia é in-place ou no cache | T3.4 |
 | P4 | **T2.1** · o primeiro release | **feito** (D-160): tag `v0.1.0` autorizada e publicada, os SHA-256 reais em `scripts/checksums.txt` | `install-binary.sh` passa a ter o que baixar; T3.4 |
-| P5 | **Atualizar o Claude Code** | o `claude` no `PATH` desta máquina ainda é o 2.1.285 (`~/.local/share/claude/versions` só tem 2.1.274, 2.1.277 e 2.1.285). `claude update`, ou o instalador | rodar o mod sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` (T4.0) |
-| P6 | **T4.1** · o que só uma sessão com o mod responde | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir integrations/claude-code`: (b) um hook clássico vê `RIPWIRE_BROKER_MOD_ACTIVE=1`, isto é, os clássicos ficam calados; (c) a ordem de um `tool.call` e de um `PostToolUse` clássico; (e) um valor em `$.state` sobrevive a editar `register.ts` com a sessão aberta; (f) o resultado de um `tool.call` de Bash traz `bashEditDiff.changedFiles` | confirma o interruptor (DM-5) e as escolhas da Fase 5 feitas pelos tipos |
+| P5 | **Atualizar o Claude Code** | **feito** em 2026-10-06: o canal `stable` do instalador parava no 2.1.285; `claude install 2.1.292` (o `latest`). Sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, o 2.1.292 roda o kit (45) e carrega um mod numa sessão `claude -p --plugin-dir`; o 2.1.285 também carrega agora, o que antes recusava (o early access foi ligado do lado do servidor, ao que parece). Portões e CI sem a variável, CI fixado no 2.1.292 | rodar o mod sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` (T4.0) |
+| P6 | **T4.1** · o que só uma sessão com o mod responde | `claude --plugin-dir integrations/claude-code` (2.1.292): (b) um hook clássico vê `RIPWIRE_BROKER_MOD_ACTIVE=1`, isto é, os clássicos ficam calados; (c) a ordem de um `tool.call` e de um `PostToolUse` clássico; (e) um valor em `$.state` sobrevive a editar `register.ts` com a sessão aberta; (f) o resultado de um `tool.call` de Bash traz `bashEditDiff.changedFiles` | confirma o interruptor (DM-5) e as escolhas da Fase 5 feitas pelos tipos |
 | P7 | **T5.5** · ver a faixa acima do prompt | na sessão da P6, olhar a faixa `rw-brkr · …` e rodar `/ripwire-status` | o teste do kit confere a árvore, não a pintura (mods/test) |
 | P8 | **T3.4 e T6.1** · medir | a latência de um hook pelo resolvedor contra o direto, e a do `prompt.submit` do mod contra o `context_for_task`; memórias entregues numa sessão de teste | fechamento das Etapas 1 e 2 |
 
@@ -698,6 +698,7 @@ o que validar; Claude Code 2.1.285, mods em early access desligados. Preencher a
 | base | 782 / 809 | — | — | 2.1.285 |
 | Fases 1–3 (parte, D-158) | 802 / 829 | passa no plugin e na raiz | — | 2.1.285 |
 | Fases 4–5 (D-159) | 803 / 830 | passa no plugin e na raiz | 45 testes (com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`) | 2.1.285 |
+| T2.1 e P5 (D-160, D-161) | 804 / 831 | passa no plugin e na raiz | 45 testes, sem a variável | 2.1.292 |
 
 ## 8. Registro de evidência
 

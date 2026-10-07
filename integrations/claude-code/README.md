@@ -6,8 +6,7 @@ The plugin ships, in one versioned package: the MCP server (three read-only tool
 inject context on the first prompt, after edits and before finishing, the `ripwire-broker` skill,
 and the consent options for the online mode and memory.
 
-Tested with Claude Code 2.1.285, on macOS and Linux (the broker is Unix only). The mod (below)
-needs hooks modules turned on.
+Tested with Claude Code 2.1.292, on macOS and Linux (the broker is Unix only).
 
 ## Install
 
@@ -97,9 +96,8 @@ starting a process per event; where they do not load (an older Claude Code, `--b
 the mod sets `RIPWIRE_BROKER_MOD_ACTIVE=1`, and `scripts/broker` then leaves every classic hook
 silent.
 
-Tested with Claude Code 2.1.285, which keeps hooks modules in early access behind
-`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`; the documentation asks for 2.1.287 or later. The mods API
-can change between versions without notice.
+Tested with Claude Code 2.1.292; the documentation asks for 2.1.287 or later. The mods API can
+change between versions without notice.
 
 What it does more than the classic hooks:
 
@@ -138,7 +136,7 @@ server's status files under the broker's state directory and stats the dirty fil
 `$.prompt.submit` is the finish gate's one extra turn, with the `gate` option only.
 
 Its tests run without a session, sign-in or network:
-`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test integrations/claude-code`.
+`claude plugin test integrations/claude-code`.
 
 ## Publishing a version
 
