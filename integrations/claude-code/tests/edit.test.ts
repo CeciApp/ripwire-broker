@@ -158,3 +158,21 @@ test('a paused session analyses no edit', async ($, on) => {
   await $.tool.call(edit('/work/a.rs'))
   expect(calls).toEqual([])
 })
+
+test('once the host reports bashEditDiff, git is not asked again and its absence means nothing changed', async ($, on) => {
+  mock.clock(on, { now: 10_000 })
+  cwd(on)
+  logs(on)
+  const calls = broker(on, [envelope('context_after_edit', 9)])
+  const runs = git(on, [[], [], [], ['?? stray.rs']])
+  let answers = [
+    { result: { stdout: '', bashEditDiff: { changedFiles: ['/work/src/gen.rs'] } } },
+    { result: { stdout: 'listing' } },
+  ]
+  tools(on, () => answers.shift() ?? { result: 'ok' })
+  await $.tool.call(bash('./generate'))
+  const gitBefore = runs.length
+  await $.tool.call(bash('ls -R'))
+  expect(runs.length).toBe(gitBefore)
+  expect(calls.map((c) => c.args.files)).toEqual([['src/gen.rs']])
+})

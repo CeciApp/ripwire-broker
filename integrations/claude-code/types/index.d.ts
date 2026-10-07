@@ -16,6 +16,9 @@ declare module 'claude-code' {
       slow_statuses: number
       /** Bash edit detection is off for the session: git is too slow or the tree too dirty. */
       worktree_off: boolean
+      /** The host has said which files a Bash changed (`bashEditDiff`, D-131): from then on its
+       *  list is the answer, its absence means nothing changed, and git is not asked again. */
+      host_reports_bash_edits: boolean
       /** The running turn was started by the finish gate's prompt: it is not gated again, as a
        *  Stop hook with `stop_hook_active` is not. */
       looping_turn: boolean

@@ -38,6 +38,7 @@ const heldEdits = atom({ plugin: 'ripwire-broker', key: 'held_edits' }, [] as st
 const lastEditMs = atom({ plugin: 'ripwire-broker', key: 'last_edit_ms' }, 0)
 const slowStatuses = atom({ plugin: 'ripwire-broker', key: 'slow_statuses' }, 0)
 const worktreeOff = atom({ plugin: 'ripwire-broker', key: 'worktree_off' }, false)
+const hostReports = atom({ plugin: 'ripwire-broker', key: 'host_reports_bash_edits' }, false)
 const loopingTurn = atom({ plugin: 'ripwire-broker', key: 'looping_turn' }, false)
 const gatePrompt = atom({ plugin: 'ripwire-broker', key: 'gate_prompt' }, '')
 
@@ -203,7 +204,8 @@ export function register(on, options) {
     if (await read($, optedOut)) return next(e)
     const root = await $.session.cwd()
     const shell = e.tool === 'Bash'
-    const before = shell ? await bashSnapshot($, root) : undefined
+    const reports = shell && (await read($, hostReports))
+    const before = shell && !reports ? await bashSnapshot($, root) : undefined
     const result = await next(e)
     if (result.deny !== undefined || result.isError) return result
     let named: string[]
@@ -211,8 +213,10 @@ export function register(on, options) {
       named = [e.file_path ?? e.notebook_path].filter((p) => typeof p === 'string')
     } else if (Array.isArray(result.result?.bashEditDiff?.changedFiles)) {
       // What the host says the command changed, as the classic hook reads it (D-131).
+      await update($, hostReports, () => true)
       named = result.result.bashEditDiff.changedFiles
     } else if (result.isReadOnly || before === undefined) {
+      // No baseline: detection is off, or the host reports and named nothing, so nothing changed.
       return result
     } else {
       const after = await bashSnapshot($, root)
