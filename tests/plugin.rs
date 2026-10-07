@@ -774,3 +774,53 @@ fn an_update_with_the_old_binary_present_runs_nothing_old() {
     assert!(r.run(&HOOK, &[]).status.success());
     assert_eq!(r.argv(), None, "0.1.0 never runs after the update");
 }
+
+/// The targets `install-binary.sh` maps this machine to: the `) target=TRIPLE ;;` arms.
+fn installer_targets() -> Vec<String> {
+    let script = std::fs::read_to_string(plugin_root().join("scripts/install-binary.sh")).unwrap();
+    let targets: Vec<String> = script
+        .lines()
+        .filter_map(|l| {
+            l.split_once(") target=")?
+                .1
+                .split_once(" ;;")
+                .map(|(t, _)| t.to_string())
+        })
+        .filter(|t| {
+            t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .collect();
+    assert_eq!(targets.len(), 4, "{targets:?}");
+    targets
+}
+
+#[test]
+fn the_release_workflow_publishes_what_install_binary_downloads() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml");
+    let yml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert!(yml.contains("tags: [ \"v*\" ]"), "runs on a v* tag");
+    for target in installer_targets() {
+        assert!(
+            yml.contains(&format!("target: {target}")),
+            "no build for {target}"
+        );
+    }
+    // The asset name install-binary.sh asks for, and the broker at the top of the tarball.
+    assert!(
+        yml.contains("ripwire-broker-$tag-$target.tar.gz"),
+        "asset name"
+    );
+    assert!(
+        yml.contains("ripwire-broker ripwire-eval"),
+        "both binaries in the tarball"
+    );
+    assert!(
+        yml.contains("--features online"),
+        "the release carries the classifier"
+    );
+    assert!(yml.contains("SHA256SUMS"));
+    // The gates run before anything is published; the release stays a draft until the end.
+    assert!(yml.contains("uses: ./.github/workflows/rust.yml"));
+    assert!(yml.contains("--draft") && yml.contains("--draft=false"));
+}

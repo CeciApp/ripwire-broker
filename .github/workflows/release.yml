@@ -1,0 +1,130 @@
+name: Release
+
+# A v* tag publishes the binaries the Claude Code plugin downloads (spec/plan/mod-plan.md, T2.1).
+# The tag must name the version in Cargo.toml. The release is a draft
+# until every target is built and SHA256SUMS is uploaded, so a failed build publishes nothing.
+#
+# After the release, the SHA-256 of each asset goes into integrations/claude-code/scripts/checksums.txt
+# (the publish job prints the lines). Builds are not reproducible, so the hashes come from the
+# published assets and not from a local build.
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    uses: ./.github/workflows/rust.yml
+
+  draft:
+    name: draft
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      tag: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The plugin pins the release after it exists (integrations/claude-code/README.md,
+      # "Publishing a version"), so only the crate has to agree with the tag here.
+      - name: The tag names the crate's version
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          [ "$tag" = "v$crate" ] || {
+            echo "::error::the tag $tag is not the version in Cargo.toml ($crate)"
+            exit 1
+          }
+      - name: Draft release
+        run: gh release create "$tag" --draft --verify-tag --title "$tag" --generate-notes
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: draft
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          # Cross-compiled on the arm64 runner; Apple's toolchain builds both.
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      tag: ${{ github.ref_name }}
+      target: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - name: Target
+        run: rustup target add "$target"
+      - name: Build
+        run: cargo build --release --locked --features online --target "$target" --bins
+      # Only where the runner can execute the target; the cross build is checked by its hash.
+      - name: Smoke
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [ "$host" = "$target" ]; then
+            "target/$target/release/ripwire-broker" --version | grep -qx "ripwire-broker ${tag#v}"
+          else
+            echo "built on $host; $target is not run here"
+          fi
+      # install-binary.sh unpacks ripwire-broker from the top of the tarball.
+      - name: Package and upload
+        run: |
+          mkdir dist
+          tar -czf "dist/ripwire-broker-$tag-$target.tar.gz" -C "target/$target/release" ripwire-broker ripwire-eval
+          gh release upload "$tag" "dist/ripwire-broker-$tag-$target.tar.gz"
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      tag: ${{ github.ref_name }}
+    steps:
+      - name: SHA256SUMS
+        run: |
+          mkdir dist
+          gh release download "$tag" --pattern '*.tar.gz' --dir dist
+          cd dist
+          [ "$(ls ./*.tar.gz | wc -l)" -eq 4 ] || { ls; echo "::error::expected 4 assets"; exit 1; }
+          sha256sum ./*.tar.gz | sed 's|  \./|  |' > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$tag" SHA256SUMS
+          {
+            echo '### integrations/claude-code/scripts/checksums.txt'
+            echo '```'
+            echo "$tag"
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish
+        run: gh release edit "$tag" --draft=false
