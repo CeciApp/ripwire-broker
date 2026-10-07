@@ -107,10 +107,10 @@ jobs:
         timeout-minutes: 12
         run: cargo nextest run --locked --features online
 
-  # The Claude Code plugin (spec/plan/mod-plan.md, T3.3). Not a required check: whether
-  # `claude plugin validate` runs without a login on a runner is what this job finds out. The
-  # shape of the plugin's files and its scripts are already tested by tests/plugin.rs in the
-  # two jobs above; this is Anthropic's own check of the manifests.
+  # The Claude Code plugin (spec/plan/mod-plan.md, T3.3, T4.2). Not a required check. It runs
+  # without a login on a runner (PRs #75 and #76). The shape of the plugin's files and its scripts
+  # are already tested by tests/plugin.rs in the two jobs above; this is Anthropic's own check of
+  # the manifests, and the mod's tests through Claude Code's kit.
   plugin:
     name: plugin
     runs-on: ubuntu-latest

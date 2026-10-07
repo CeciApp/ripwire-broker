@@ -1,11 +1,16 @@
 # ripwire-broker como plugin e mod do Claude Code — Plano de implementação
 
-**Data:** 2026-10-06 · **Status:** Etapas 1 e 2 implementadas
+**Data:** 2026-10-06 · **Status** (2026-10-07): Etapas 1 e 2 implementadas
 ([D-158](../changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes),
-[D-159](../changelog.md#d-159--etapa-2-do-plugin-o-mod)); o que falta depende do mantenedor
-([§5a](#5a-pendências-do-mantenedor)); aprovado em 2026-10-06 19:00 ([D-157](../changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code));
-as sete decisões do §2.4 tomadas, todas na opção recomendada; os quatro achados da revisão
-adversarial (§2.3) incorporados; nada implementado.
+[D-159](../changelog.md#d-159--etapa-2-do-plugin-o-mod)); release `v0.1.0` publicado e fixado
+([D-160](../changelog.md#d-160--workflow-de-release)); Claude Code 2.1.292, mods sem a variável de
+early access ([D-161](../changelog.md#d-161--claude-code-21292-sem-a-variável-dos-mods)); o braço
+`broker-plugin` do eval anotado como trabalho futuro
+([D-162](../changelog.md#d-162--trabalho-futuro-o-braço-broker-plugin-do-eval)). O que falta depende
+do mantenedor: P1–P3, P6–P8 do [§5a](#5a-pendências-do-mantenedor), e depois a T3.4 e a T6.1.
+Aprovado em 2026-10-06 19:00 ([D-157](../changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code)),
+com as sete decisões do §2.4 tomadas, todas na opção recomendada, e os quatro achados da revisão
+adversarial (§2.3) incorporados.
 **Spec:** [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md) (PRD principal; §21 hooks, §24 barra
 de status) e [`docs/jev-mem-prd.md`](../../docs/jev-mem-prd.md) (§4: consentimento do `--memory`).
 **Documentação da Anthropic usada** (lida em 2026-10-06; a API dos mods "pode mudar entre versões

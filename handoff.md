@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
-Estado em 2026-10-05, até o
-[D-152](spec/changelog.md#d-152--leitor-do-workspace-por-openat).
+Estado em 2026-10-07, até o
+[D-162](spec/changelog.md#d-162--trabalho-futuro-o-braço-broker-plugin-do-eval).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -32,7 +32,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | achados baixos, memória (segunda parte) e eval (D-151) | corrigidos em TDD, com o pânico do worker, o `is_error` de infraestrutura e o prompt que segurava o timeout (grupo 3); o `connected` conferido num init real |
 | leitor do workspace por `openat` (D-152) | cada componente aberto relativo ao anterior, sem seguir link, pela crate `rustix`: um diretório trocado por link depois das conferências não leva mais para fora do workspace |
 | revisão de 2026-10-04 (D-146) | os cinco achados de maior impacto em produção corrigidos em TDD (leitura do online fora da thread assíncrona, TOCTOU do leitor, chave fora dos processos filhos, prazo no `ripwire --version`, erros do worker de memória no stderr); os demais ficam na lista abaixo |
-| plugin do Claude Code ([plano](spec/plan/mod-plan.md), §25 do PRD) | Etapas 1 e 2 implementadas (D-158, D-159): `integrations/claude-code/` é o plugin e o mod (`hooks/register.ts`, testes em `integrations/claude-code/tests/`, `claude plugin test integrations/claude-code`, Claude Code 2.1.292), a raiz é o marketplace `aquental`. Release `v0.1.0` publicado pelo `release.yml` e fixado no `checksums.txt` (D-160). O que falta é do mantenedor, listado no §5a do plano: verificações numa sessão real, instalar pelo marketplace, medir |
+| plugin do Claude Code ([plano](spec/plan/mod-plan.md), §25 do PRD) | Etapas 1 e 2 implementadas (D-158, D-159): `integrations/claude-code/` é o plugin e o mod (`hooks/register.ts`, testes em `integrations/claude-code/tests/`, `claude plugin test integrations/claude-code`, Claude Code 2.1.292), a raiz é o marketplace `aquental`. Release `v0.1.0` publicado pelo `release.yml` e fixado no `checksums.txt` (D-160). Mods sem variável de early access desde o 2.1.292 (D-161); o braço `broker-plugin` do eval é trabalho futuro (D-162). O que falta é do mantenedor, listado no §5a do plano: verificações numa sessão real (P1, P2, P6, P7), instalar pelo marketplace (P3), medir (P8); depois a T3.4 e a T6.1 |
 | `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 5 feitas (D-136 a D-142): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory`, `memory drain --online`, a leitura em `context_for_task` (`memories[]`, `provenance.memory`, seção legível no texto MCP), a consolidação (cadência de 20 enriquecimentos ou 24 h, decisões e ligações por par, nota derivada pelo `--summarizer-cmd` só com o gate de 0,85) e o instrumento da avaliação (`--memory-selection deterministic`, braços `broker-memory` e `broker-memory-deterministic`, sequências no corpus, custo da memória no relatório). A T2.0 (Choice no modelo pinado) rodou com a chave real. Pendente: a T3.11, validar num Claude Code e num Codex reais que os hosts usam as memórias; os hooks não as trazem na v1 (não fazem HTTP e não há cache de decisões). Pendente também a T5.3, a rodada da avaliação (≥ 30 tarefas em sequências, fora do repositório; o plano lista o que o instrumento ainda não faz). Fase 6 (fechamento) não começada; **experimental** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
@@ -41,15 +41,23 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 755 testes, 5 ignorados (opt-in)
-cargo test --all-targets --features online  # 773 testes, 8 ignorados
+cargo test --all-targets                    # 804 testes, 5 ignorados (opt-in)
+cargo test --all-targets --features online  # 831 testes, 8 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
+claude plugin validate --strict integrations/claude-code   # o plugin
+claude plugin validate --strict .                          # o marketplace
+claude plugin test integrations/claude-code                # o mod: 45 testes, sem sessão nem rede
 ```
 
 - **CI** (`.github/workflows/rust.yml`): dois jobs, `default` e `online`, obrigatórios no `master`.
   Também cobre a porta do CA-10 (nenhum crate de rede no build padrão), a guarda de fixtures
-  sintéticas e as propriedades.
+  sintéticas e as propriedades. Um terceiro, `plugin`, não obrigatório, instala o Claude Code
+  2.1.292 pelo npm e roda as três linhas `claude plugin` acima.
+- **Release** (`.github/workflows/release.yml`, D-160): só numa tag `v*` igual à versão do
+  `Cargo.toml`. Chama o `rust.yml`, compila os quatro alvos e publica tarballs e `SHA256SUMS`. A
+  ordem de publicar uma versão está no README do plugin ("Publishing a version"): os hashes entram
+  no `scripts/checksums.txt` depois do release, num PR.
 - **`cargo-deny`:** agendado às segundas no `master` (`supply-chain.yml`), nunca em PR (D-108).
 - **Ignorados:** precisam de algo externo — modelo local (`RIPWIRE_BROKER_TEST_MODEL`), chave da Jev
   (`RIPWIRE_BROKER_JEV_API_KEY`) ou um benchmark. O SLO do `hook --memory` também é medição manual em
@@ -76,13 +84,21 @@ cargo fmt --check
   e workspace (`statusline/<hash>.json` no state-dir) e que o comando só lê. `src/hook.rs` publica,
   `src/install.rs` registra com `--statusline`.
 - **`tests/`:** um arquivo por costura pública (`broker`, `mcp_surface`, `hooks`, `cli`, `statusline`,
-  `notes`, `summarizer`, `worktree`, `upstream_ripwire`, `online*`, `memory_*`, `props*`, `eval`). As fixtures do ripwire e dos hosts são gravações reais.
+  `notes`, `summarizer`, `worktree`, `upstream_ripwire`, `online*`, `memory_*`, `props*`, `eval`,
+  `plugin`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-152, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-162, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
+- **`integrations/claude-code/`:** também é o plugin do Claude Code (§25 do PRD): manifesto em
+  `.claude-plugin/plugin.json`, servidor em `.mcp.json`, hooks em `hooks/hooks.json`, o mod em
+  `hooks/register.ts` (testes em `tests/*.test.ts`, contrato do `$.state` em `types/index.d.ts`),
+  o resolvedor `scripts/broker`, `scripts/install-binary.sh` e `scripts/checksums.txt` (o release
+  fixado). A raiz do repositório é o marketplace `aquental` (`.claude-plugin/marketplace.json`).
+  `tests/plugin.rs` testa os arquivos e scripts; `tests/hooks.rs` escreve o golden
+  `integrations/claude-code/tests/parity.ts` com `RIPWIRE_BROKER_WRITE_PARITY=1`.
 
 ## Em andamento: as duas medições (D-116, D-117)
 
@@ -126,6 +142,13 @@ Os instrumentos estão prontos; as medições, não.
   ≥ 30% o põe no plano.
 
 ## Pendências conhecidas, fora das medições
+
+- **Plugin do Claude Code:** as pendências do mantenedor no §5a do
+  [plano](spec/plan/mod-plan.md#5a-pendências-do-mantenedor). Numa sessão `claude --plugin-dir
+  integrations/claude-code`: o workspace que o servidor recebe (P1), os hooks clássicos (P2), o
+  interruptor mod ↔ clássico, a ordem `tool.call` ↔ `PostToolUse`, o `$.state` depois de um reload e
+  o `bashEditDiff` (P6), a faixa e o `/ripwire-status` (P7). Depois, instalar pelo marketplace (P3) e
+  medir (P8); com as medições saem a T3.4 e a T6.1.
 
 - **Barra de status: o campo `agent` (§24.8) nunca foi visto num payload real.** A validação do
   D-128 rodou sem `--agent`, e nenhum dos 121 payloads o trouxe. Uma sessão com `--agent`, gravada
@@ -171,6 +194,18 @@ Cada uma custou uma conclusão errada antes de ser achada. O changelog conta sei
 - **O `master` é protegido** (checks obrigatórios, `enforce_admins`). Tudo entra por PR, e os PRs
   entram por squash. Um push num branch de PR já mesclado não volta ao `master`: foi o que gerou o
   #29.
+- **O canal `stable` do Claude Code pode estar atrás.** Em 2026-10-06 o `stable` era o 2.1.285 e
+  o `latest` o 2.1.292; `claude update` não saía do 2.1.285, e o updater voltava a ele. A saída foi
+  `autoUpdatesChannel: "latest"` e `minimumVersion` no `~/.claude/settings.json` e `claude install
+  <versão>` com as sessões antigas fechadas: uma sessão aberta reaponta o `~/.local/bin/claude`
+  (D-161). Conferir com `readlink ~/.local/bin/claude`.
+- **O kit de testes do mod não carimba `origin`.** Um `$.prompt.submit` do próprio mod volta ao
+  `prompt.submit` dele no kit; o mod se reconhece pelo texto que guardou no `$.state` (D-159). E o
+  `claude plugin validate` recusa `export {}` no `types/index.d.ts`.
+- **Dois testes de memória falham sob carga e passam isolados**
+  (`memory_controller::auth_failures_suspend_the_worker_until_reauthorized`,
+  `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery`, `Err(Locked)`).
+  Já existiam antes do plugin (D-158). Rodar de novo, isolado, antes de concluir que algo quebrou.
 - **O repositório é público.** Detalhes dos repositórios privados do corpus não entram em commit,
   changelog nem PR.
 - **A suíte do repositório A abre uma porta fixa, e parte dos testes lê a data.** A porta é da
