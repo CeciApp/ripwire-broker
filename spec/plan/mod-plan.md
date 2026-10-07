@@ -505,7 +505,8 @@ estar atualizado. Os seis passos do §1 valem para todas.
   ao carregar o plugin, e é o que o repositório guarda; `.gitignore` feito.
 - [x] **T4.2 · `claude plugin test` nos portões.** `tests/smoke.test.ts` vira o primeiro teste real
   (T5.1); o §1 ganha o portão. `rust.yml` ganha `claude plugin test` no job `plugin` (se o CI puder,
-  T3.3).
+  T3.3). **Roda sem login:** no PR #76 (run 37551966653) o passo "The mod" do job `plugin` rodou os
+  45 testes do kit num runner `ubuntu-latest` sem credencial, com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
   **Docs:** este plano.
 - [x] **T4.3 · O interruptor mod ↔ clássico.**
   **Vermelho:** `tests/register.test.ts::session_start_marks_the_mod_active_for_the_classic_hooks`:
@@ -711,7 +712,7 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T1.9 | `grep -n "mcp__plugin_ripwire-broker_broker__context_for_task" README.md integrations/claude-code/README.md …/SKILL.md` sai com 2 ("integrations/claude-code/README.md: No such file") | `b0732b8` | — (texto; o mesmo `grep` acha as três) | README do plugin (novo), README principal, `SKILL.md`, PRD §25, D-158, `handoff.md` | verdes no worktree do commit |
 | T2.3 (revisão) | o mesmo teste, com a linha do `check` tendo de levar `CLAUDE_PLUGIN_DATA='…'`: falhou mostrando a linha sem ele | `d370ca8` | tirar o prefixo da linha | — | verdes no worktree do commit |
 | T4.0 | `claude plugin test`: "hooks modules are not turned on in this build yet (early access)"; com a variável e sem módulo: "no hooks module to load" | (sem código no repositório: a sonda foi uma cópia descartável) | — | este plano (T0.2, T4.0, §5a) | — |
-| T4.2 | — (portão) | `384b0c1` | — | §1 deste plano | o `plugin test` nos portões locais e no job `plugin` do CI, com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` |
+| T4.2 | — (portão) | `384b0c1` | — | §1 deste plano | o `plugin test` nos portões locais e no job `plugin` do CI, com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`; no PR #76 (run 37551966653) o kit passou 45/45 no CI sem login |
 | T4.3 | `tests/register.test.ts` · "session.start marks the mod active for the classic hooks": `claude plugin test` sai com 1, "no hooks module to load; hooks/hooks.json names none in modules" | `384b0c1` | o `$.env.set` removido; o valor `'true'` no lugar de `'1'` | — (README do plugin na T5.6) | `validate --strict` lista `env writes: RIPWIRE_BROKER_MOD_ACTIVE` |
 | T5.1 | `tests/prompt.test.ts`: 6 de 7 falhando (sem hook de `prompt.submit`); "an envelope without content is not injected" passava por vacuidade | `cd390cd` | segundo prompt também perguntando; sem o filtro de conteúdo; o marcador ficando na tarefa; o prompt reescrito sem o marcador; orçamento 2000; `#ripwire-on` ignorado; marcador colado a uma palavra contando (sobreviveu ao primeiro conjunto de testes, que ganhou o caso `notes#ripwire-off`). Equivalente: lançar o erro em vez de seguir o prompt (o Claude Code pula o hook e o prompt segue igual) | — | `validate --strict` passa; kit 8/8 |
 | T5.2 | `tests/edit.test.ts`: 4 de 11 falhando sem o hook; os outros 7 passavam por vacuidade (nenhuma chamada) | `2ca371d` | doze mutantes, todos mortos: negado ou com erro analisado; `/workshop` aceito como dentro de `/work`; sem janela; seguradas descartadas; só presença, sem data e tamanho; o arquivo revertido esquecido (o teste ganhou esse caso antes da rodada); `isReadOnly` ignorado; o corte de lentidão em 3; a lista do host ignorada; sem filtro de novidade; a pausa ignorada; `files: []` perguntado | — | `validate --strict` passa; kit 19/19 |
