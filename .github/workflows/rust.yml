@@ -121,14 +121,11 @@ jobs:
           persist-credentials: false
       # Pinned like the actions: the version the plugin was validated with locally.
       - name: Claude Code CLI
-        run: npm install --global @anthropic-ai/claude-code@2.1.285
+        run: npm install --global @anthropic-ai/claude-code@2.1.292
       - name: The plugin
         run: claude plugin validate --strict integrations/claude-code
       - name: The marketplace
         run: claude plugin validate --strict .
-      # The mod's tests, through Claude Code's test kit: no session, sign-in or network. 2.1.285
-      # keeps hooks modules behind this variable (mod-plan T4.0).
+      # The mod's tests, through Claude Code's test kit: no session, sign-in or network.
       - name: The mod
-        env:
-          CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1"
         run: claude plugin test integrations/claude-code
