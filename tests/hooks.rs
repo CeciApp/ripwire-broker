@@ -1696,3 +1696,187 @@ async fn hook_output_stays_under_the_host_limit_with_many_cut_bodies() {
         text.chars().count()
     );
 }
+
+/// One step of a parity scenario: a recorded event (its fixture, with the fields that differ),
+/// at a time, for `hook::decide`.
+struct Step {
+    fixture: &'static str,
+    set: Value,
+    now_ms: u64,
+}
+
+fn step(fixture: &'static str, set: Value, now_ms: u64) -> Step {
+    Step {
+        fixture,
+        set,
+        now_ms,
+    }
+}
+
+/// The decisions of `hook::plan` for sequences of recorded Claude Code events, written for the
+/// mod's parity test (integrations/claude-code/tests/parity.test.ts, mod-plan T5.4). A change to
+/// `plan` that the mod does not follow shows up here as a file that no longer matches;
+/// `RIPWIRE_BROKER_WRITE_PARITY=1` writes it again, and the mod's test then says what to fix.
+/// Bash steps carry the host's `bashEditDiff` (D-131), as `hook::run` hands it to `plan`; the
+/// git path is the mod's own tests'.
+#[test]
+fn plan_decisions_are_exported_for_the_mod() {
+    let ws = Path::new("/work");
+    let prompt = |text: &str| json!({"prompt": text});
+    let edit = |file: &str| json!({"tool_input": {"file_path": format!("/work/{file}")}});
+    let scenarios: Vec<(&str, Policy, Vec<Step>)> = vec![
+        (
+            "only the first prompt",
+            Policy::default(),
+            vec![
+                step("claude_code_user_prompt_submit", json!({}), 10_000),
+                step(
+                    "claude_code_user_prompt_submit",
+                    prompt("and now the tests"),
+                    20_000,
+                ),
+            ],
+        ),
+        (
+            "every prompt",
+            Policy {
+                every_prompt: true,
+                ..Policy::default()
+            },
+            vec![
+                step("claude_code_user_prompt_submit", json!({}), 10_000),
+                step(
+                    "claude_code_user_prompt_submit",
+                    prompt("and now the tests"),
+                    20_000,
+                ),
+            ],
+        ),
+        (
+            "a pause and a resume",
+            Policy {
+                every_prompt: true,
+                ..Policy::default()
+            },
+            vec![
+                step(
+                    "claude_code_user_prompt_submit",
+                    prompt("#ripwire-off"),
+                    10_000,
+                ),
+                step("claude_code_post_tool_use", json!({}), 11_000),
+                step("claude_code_stop", json!({}), 12_000),
+                step(
+                    "claude_code_user_prompt_submit",
+                    prompt("fix it #ripwire-on"),
+                    13_000,
+                ),
+                step("claude_code_post_tool_use", json!({}), 14_000),
+            ],
+        ),
+        (
+            "a burst of edits",
+            Policy::default(),
+            vec![
+                step("claude_code_post_tool_use", edit("a.txt"), 10_000),
+                step("claude_code_post_tool_use", edit("b.txt"), 10_500),
+                // At the window's edges: 999 ms after the last ask is held, 1000 ms is asked.
+                step("claude_code_post_tool_use", edit("a.txt"), 10_999),
+                step("claude_code_post_tool_use", edit("c.txt"), 11_000),
+            ],
+        ),
+        (
+            "an edit outside the workspace",
+            Policy::default(),
+            vec![step(
+                "claude_code_post_tool_use",
+                json!({"tool_input": {"file_path": "/elsewhere/a.txt"}}),
+                10_000,
+            )],
+        ),
+        (
+            "shell commands",
+            Policy::default(),
+            vec![
+                step("claude_code_post_tool_use_bash", json!({}), 10_000),
+                step("claude_code_post_tool_use_bash_many", json!({}), 20_000),
+            ],
+        ),
+        (
+            "the end of a turn",
+            Policy::default(),
+            vec![
+                step("claude_code_stop", json!({}), 10_000),
+                step(
+                    "claude_code_stop",
+                    json!({"stop_hook_active": true}),
+                    20_000,
+                ),
+            ],
+        ),
+    ];
+    let mut out = vec![];
+    for (name, policy, steps) in scenarios {
+        let mut state = SessionState::default();
+        let mut decided = vec![];
+        for s in steps {
+            let mut input = event(s.fixture, ws);
+            merge(&mut input, &s.set);
+            let ev = match input["hook_event_name"].as_str().unwrap() {
+                "UserPromptSubmit" => Event::UserPromptSubmit,
+                "PostToolUse" => Event::PostToolUse,
+                _ => Event::Stop,
+            };
+            if hook::is_shell(ev, &input) {
+                state.shell_edits = hook::host_bash_edits(&input).unwrap_or_default();
+            }
+            let policy = Policy {
+                now_ms: Some(s.now_ms),
+                ..policy.clone()
+            };
+            let decision = hook::decide(ev, &input, &mut state, &policy, &|p| {
+                p.strip_prefix("/work/").map(str::to_string)
+            });
+            decided.push(json!({"event": input, "now_ms": s.now_ms, "decision": decision}));
+        }
+        out.push(json!({
+            "name": name,
+            "every_prompt": policy.every_prompt,
+            "steps": decided,
+        }));
+    }
+    let text = format!(
+        "// Written by tests/hooks.rs::plan_decisions_are_exported_for_the_mod (hook::plan's\n\
+         // decisions for recorded events); do not edit. RIPWIRE_BROKER_WRITE_PARITY=1 writes it again.\n\
+         export const PARITY = {} as const\n",
+        serde_json::to_string_pretty(&out).unwrap()
+    );
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations/claude-code/tests/parity.ts");
+    if std::env::var_os("RIPWIRE_BROKER_WRITE_PARITY").is_some() {
+        std::fs::write(&path, &text).unwrap();
+    }
+    let written = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        written == text,
+        "{} does not match hook::plan; run RIPWIRE_BROKER_WRITE_PARITY=1 cargo test --test hooks \
+         plan_decisions, then the mod's parity test",
+        path.display()
+    );
+}
+
+/// Sets `set`'s fields over `input`, one level deep for objects.
+fn merge(input: &mut Value, set: &Value) {
+    for (k, v) in set.as_object().unwrap() {
+        match (input.get_mut(k), v) {
+            (Some(Value::Object(old)), Value::Object(new)) => {
+                for (nk, nv) in new {
+                    old.insert(nk.clone(), nv.clone());
+                }
+            }
+            _ => {
+                input[k] = v.clone();
+            }
+        }
+    }
+}

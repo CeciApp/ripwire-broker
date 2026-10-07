@@ -2610,6 +2610,13 @@ do mantenedor, não versionada. Plano em
 [status-bar-plan.md](plan/status-bar-plan.md), executado por subagentes, uma tarefa por vez com
 revisão. Vem antes da Fase 6 (§19).
 
+**Com o mod do plugin (§25.2):** a faixa acima do prompt é desenhada pelo mod, no terminal e no
+Desktop, com os mesmos rótulos (`rw-brkr · hooks on|off · última: … · inj N`, e os segmentos do
+servidor lidos dos mesmos arquivos `statusline/server-*.json`), e `/ripwire-status` imprime a mesma
+linha. O `statusline` clássico continua para quem não tem mods; com o mod, os hooks clássicos ficam
+calados e não alimentam o retrato que ele lê, então ele mostra `hooks sem dados`. A faixa não tem
+`não reenviados`: o mod não sabe quantos itens o servidor deixou de reenviar.
+
 **Fonte.** Este capítulo transporta a spec `spec/status-bar.md`, escrita pelo mantenedor e fundida
 aqui no [D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd), que depois a removeu. A seção
 `N` da spec é o §24.`N`; o §24.13 é novo e vem do plano. Os dados de origem da spec:
@@ -3029,9 +3036,9 @@ ser reportada.
 ## 25. Plugin e mod do Claude Code
 
 **Estado:** Etapa 1 (plugin clássico) implementada em
-[D-158](changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes), com as verificações numa
-sessão real, o workflow de release e as medições pendentes; Etapa 2 (o mod) não começada, à espera
-do Claude Code 2.1.287. Plano em [mod-plan.md](plan/mod-plan.md), decisões no
+[D-158](changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes) e Etapa 2 (o mod) em
+[D-159](changelog.md#d-159--etapa-2-do-plugin-o-mod); pendentes as verificações numa sessão real, o
+workflow de release e as medições (§5a do plano). Plano em [mod-plan.md](plan/mod-plan.md), decisões no
 [D-157](changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code).
 
 ### 25.1 Etapa 1: o plugin
@@ -3068,4 +3075,25 @@ e `claude plugin install ripwire-broker@aquental`.
 
 ### 25.2 Etapa 2: o mod
 
-Não começada. Ver o plano, Fases 4 a 6.
+Implementado em [D-159](changelog.md#d-159--etapa-2-do-plugin-o-mod), com as verificações numa
+sessão real pendentes (§5a do plano). `hooks/hooks.json` ganha `"modules": ["./register.ts"]` ao lado
+dos hooks clássicos.
+
+- **Interruptor (DM-5):** em `session.start` o mod põe `RIPWIRE_BROKER_MOD_ACTIVE=1`
+  (`$.env.set`, que vale para os processos que a sessão inicia depois); `scripts/broker` então não
+  roda nenhum hook clássico. Onde mods não carregam, os clássicos seguem.
+- **Os três momentos**, pelo servidor já conectado (`$.mcp.connect('broker')` dá o nome que
+  `$.mcp.call` aceita): `prompt.submit` → `context_for_task` (o bloco vai em `context`, depois do
+  prompt); `tool.call` de `Edit|Write|MultiEdit|NotebookEdit|Bash` → `context_after_edit` (o
+  `context` do resultado); `turn.complete` → `context_before_finish` (aviso sob a resposta, ou, com
+  `gate`, um prompt a mais). O mod reproduz só as regras de `hook::plan` (primeiro prompt,
+  marcadores, janela de 1 s, Bash pelo `bashEditDiff` do host ou pelo retrato do `git`, portão de
+  custo de 50 ms, nada sem conteúdo, cabeçalho do bloco); ranking, orçamento, deduplicação e memória
+  são do servidor, que recebe `--incremental` por padrão.
+- **Estado** em `$.state`, declarado em `types/index.d.ts` (`"types"` no manifesto): sobrevive a um
+  reload do módulo e zera com `/clear`, `/resume` e `/branch`.
+- **Faixa e comando:** a faixa acima do prompt no terminal e no Desktop e `/ripwire-status`, com os
+  rótulos do §24.
+- **Testes:** `claude plugin test integrations/claude-code` (o kit do Claude Code, sem sessão nem
+  rede), com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` no 2.1.285; a paridade com `hook::plan` vem de
+  `hook::decide` e de um arquivo golden escrito por `tests/hooks.rs`.

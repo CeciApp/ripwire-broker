@@ -11,3 +11,7 @@
 # by accident was committable.
 .env
 .envrc
+
+# Written by Claude Code when it loads the plugin with --plugin-dir (mod-plan T4.1).
+integrations/claude-code/.claude-plugin/types/
+.mcpb-cache/

@@ -124,3 +124,9 @@ jobs:
         run: claude plugin validate --strict integrations/claude-code
       - name: The marketplace
         run: claude plugin validate --strict .
+      # The mod's tests, through Claude Code's test kit: no session, sign-in or network. 2.1.285
+      # keeps hooks modules behind this variable (mod-plan T4.0).
+      - name: The mod
+        env:
+          CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1"
+        run: claude plugin test integrations/claude-code

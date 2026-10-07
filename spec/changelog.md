@@ -101,6 +101,7 @@
 | 2026-10-06 18:06 | Leitura de memória: tentativa ao Jev de 250 para 450 ms, contada do envio (a espera por vaga sai só do prazo); prazo de 750 para 850 ms; prazo esgotado sem nada validado entrega as âncoras locais como `deterministic_rank`, degradado; o teste do eval deixa de herdar a chave do Jev | [D-156](#d-156--prazos-da-leitura-de-memória-e-recurso-local) |
 | 2026-10-06 19:00 | Plano para distribuir o broker como plugin do Claude Code (Etapa 1) e dar-lhe um mod (Etapa 2), `spec/plan/mod-plan.md`; sete decisões: binário por script explícito com SHA-256 fixado, raiz em `integrations/claude-code/`, servidor `broker`, marketplace `aquental`, interruptor mod ↔ clássico pelo ambiente, versão fixada igual ao release, chave do Jev como opção sensível | [D-157](#d-157--plano-do-plugin-e-do-mod-do-claude-code) |
 | 2026-10-06 20:15 | Etapa 1 do plugin, os arquivos e os testes: manifesto, resolvedor `scripts/broker`, `userConfig` com os textos de consentimento do `install`, hooks em forma exec, servidor `broker`, `install-binary.sh` com SHA-256, `check` no `SessionStart`, marketplace `aquental`, job `plugin` no CI; pendentes as verificações numa sessão real, o release e a Etapa 2 | [D-158](#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes) |
+| 2026-10-06 21:12 | Etapa 2 do plugin, o mod: `hooks/register.ts` responde os três momentos pelo servidor MCP já conectado, com as regras de `hook::plan` e o estado em `$.state`; interruptor com os hooks clássicos; faixa acima do prompt e `/ripwire-status`; paridade por `hook::decide` e um golden; o prompt do portão não volta ao próprio mod; pendências do mantenedor no §5a do plano | [D-159](#d-159--etapa-2-do-plugin-o-mod) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7124,3 +7125,58 @@ tarefa está no §8 do plano). Dois testes antigos falharam uma vez cada sob car
 seguida, isolados e sem as mudanças: `memory_controller::auth_failures_suspend_the_worker_until_reauthorized`
 e `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery` (`Err(Locked)`).
 São intermitentes anteriores a este trabalho; ficam registrados para quem investigar.
+
+## D-159 — Etapa 2 do plugin: o mod
+
+**Data:** 2026-10-06 21:12.
+
+**Pedido do usuário:** depois do merge da Etapa 1 (PR #75), registrar as pendências que só o
+mantenedor pode fazer e seguir para a Etapa 2. O mantenedor disse que o Claude Code fora atualizado;
+nesta máquina o `claude` do `PATH` continua 2.1.285 (`~/.local/share/claude/versions` não tem versão
+mais nova). O próprio CLI diz como ligar os módulos nessa versão, `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`,
+e com ela o kit de testes roda e um mod carrega numa sessão `claude -p --plugin-dir`. A Etapa 2 foi
+feita assim, e a atualização ficou como pendência (P5).
+
+**Pendências do mantenedor:** a seção §5a do [plano](plan/mod-plan.md) lista oito (P1 a P8): as
+verificações numa sessão real da Etapa 1 (T1.6, T1.7, a instalação da T3.1), o primeiro release
+(T2.1), atualizar o Claude Code, o que só uma sessão com o mod responde (T4.1 b, c, e, f), ver a faixa
+(T5.5) e as medições (T3.4, T6.1).
+
+**O que os tipos do 2.1.285 resolveram da T4.1** (o `claude-code/index.d.ts` que ele gera ao carregar
+o plugin): `$.mcp.connect('broker')` devolve o nome que `$.mcp.call` aceita, então o mod não adivinha
+`plugin:ripwire-broker:broker`; `$.env.set` vale para os processos que a sessão inicia depois, o que
+sustenta o interruptor DM-5; o `context` do resultado de `tool.call` é lido pelo modelo como o de um
+`PostToolUse`; o broker não declara output schema, então o envelope chega no bloco de texto, não em
+`structuredContent`; as opções do `userConfig` chegam em `register(on, options)`.
+
+**Feito**, em TDD com o kit de testes do Claude Code (45 testes em `integrations/claude-code/tests/`)
+e mutação em cada tarefa:
+- T4.0 a T4.3: o kit nos portões e no job `plugin` do CI; o `modules` e o interruptor.
+- T5.1 a T5.3: os três momentos pelo servidor conectado, com as regras de `hook::plan`. O retrato de
+  um Bash porta o `worktree::fingerprint` inteiro (`git status` mais data e tamanho de cada arquivo
+  sujo), porque só o `git status` não vê um arquivo já sujo que o comando escreveu de novo; depois que
+  o host manda `bashEditDiff` uma vez, o `git` não é mais chamado, como no `hook::run`.
+- T5.4: a paridade. `hook::decide` devolve como dados o que `plan` decidiu; `tests/hooks.rs` roda sete
+  cenários a partir dos fixtures reais e guarda o resultado em `integrations/claude-code/tests/parity.ts`,
+  um golden que o mod tem de reproduzir.
+- T5.5: a faixa acima do prompt e `/ripwire-status`, com os rótulos do `statusline` e os segmentos do
+  servidor lidos dos mesmos arquivos.
+- T5.6: README do plugin (o que o mod faz a mais e a menos, por que `incremental` vem ligada, e as
+  linhas `hooks:`/`calls:` do `validate`), §25.2 e nota no §24 do PRD.
+
+**Achados no caminho:**
+- Um `$.prompt.submit` passa por todos os hooks menos o que chamou: o prompt do portão do `Stop`
+  chegava ao `prompt.submit` do próprio mod e virava uma pergunta `context_for_task`. O mod reconhece
+  o próprio prompt pela origem `{ kind: 'plugin', name: 'ripwire-broker' }` e, onde ela não vem
+  carimbada (o kit), pelo texto que enviou.
+- A mutação achou lacunas nos testes, todas fechadas antes do commit: o marcador colado a uma
+  palavra; um arquivo sujo antes e limpo depois; as bordas da janela de 1 s, que o primeiro cenário
+  de paridade não tocava; e seis pontos da faixa (a chave conferida no conteúdo, a borda da janela de
+  5 s, o limite de 16 arquivos, o `inj` e o erro registrado em cada um dos três caminhos).
+
+**Fora:** `não reenviados` na faixa (o mod não sabe o que o servidor deixou de reenviar); `hook-stats`
+e `hook-log` só contam sessões dos hooks clássicos. T6.1 (medir) é a P8; T6.2 (o braço
+`broker-plugin` do eval) segue proposta.
+
+**Testes:** Rust 803 no build padrão e 830 com `online` (o teste de paridade em `tests/hooks.rs`); o
+kit, 45. Portões em cada commit, com `claude plugin test` desde a T4.2.

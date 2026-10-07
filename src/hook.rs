@@ -636,6 +636,32 @@ fn plan(
     }
 }
 
+/// What `plan` decides for one event, as data: which tool it would ask, and with what. Written by
+/// tests/hooks.rs for the Claude Code mod's parity test (mod-plan T5.4). Public for that test;
+/// internal, no stability promise.
+pub fn decide(
+    event: Event,
+    input: &Value,
+    state: &mut SessionState,
+    policy: &Policy,
+    in_workspace: &dyn Fn(&str) -> Option<String>,
+) -> Value {
+    match plan(event, input, state, policy, in_workspace) {
+        Plan::Done(_) => json!({"ask": null}),
+        Plan::Prompt(req) => json!({
+            "ask": "context_for_task",
+            "task": req.task,
+            "budget_tokens": req.budget_tokens,
+        }),
+        Plan::Edit(req) => json!({
+            "ask": "context_after_edit",
+            "files": req.files,
+            "budget_tokens": req.budget_tokens,
+        }),
+        Plan::Finish { looping } => json!({"ask": "context_before_finish", "looping": looping}),
+    }
+}
+
 /// Sends the request `plan` decided on and turns its envelope into the host's output.
 async fn ask(
     event: Event,
