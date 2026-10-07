@@ -2610,6 +2610,13 @@ do mantenedor, não versionada. Plano em
 [status-bar-plan.md](plan/status-bar-plan.md), executado por subagentes, uma tarefa por vez com
 revisão. Vem antes da Fase 6 (§19).
 
+**Com o mod do plugin (§25.2):** a faixa acima do prompt é desenhada pelo mod, no terminal e no
+Desktop, com os mesmos rótulos (`rw-brkr · hooks on|off · última: … · inj N`, e os segmentos do
+servidor lidos dos mesmos arquivos `statusline/server-*.json`), e `/ripwire-status` imprime a mesma
+linha. O `statusline` clássico continua para quem não tem mods; com o mod, os hooks clássicos ficam
+calados e não alimentam o retrato que ele lê, então ele mostra `hooks sem dados`. A faixa não tem
+`não reenviados`: o mod não sabe quantos itens o servidor deixou de reenviar.
+
 **Fonte.** Este capítulo transporta a spec `spec/status-bar.md`, escrita pelo mantenedor e fundida
 aqui no [D-122](changelog.md#d-122--a-barra-de-status-entra-no-prd), que depois a removeu. A seção
 `N` da spec é o §24.`N`; o §24.13 é novo e vem do plano. Os dados de origem da spec:

@@ -602,7 +602,7 @@ orçamento, dedup de itens, memória) é do servidor, que recebe `--incremental`
   fora do workspace, dois Bash (um com 60 arquivos, que cobre o corte em 50) e o fim de turno. Os
   passos de Bash levam o `bashEditDiff` do host, como `hook::run` entrega a `plan`; o caminho do
   `git` é dos testes do próprio mod (T5.2).
-- [ ] **T5.5 · Barra e comando.**
+- [x] **T5.5 · Barra e comando.**
   **Vermelho:** `tests/register.test.ts`: `the_band_draws_the_status_segments_on_terminal_and_desktop`
   (`$.ui.mount` em `AbovePrompt`, um `Text` com `rw-brkr · hooks on · última: atenção · inj N`, os
   mesmos rótulos de `src/statusline.rs`; nada em outro `surface`); `jev_and_mem_come_from_the_server_file`
@@ -616,6 +616,13 @@ orçamento, dedup de itens, memória) é do servidor, que recebe `--incremental`
   **Verde:** os hooks `ui.render`, `command.run` e o estado.
   **Docs:** README do plugin; PRD §24 ganha a nota "com o mod, a barra é desenhada pelo mod; o
   `statusline` clássico continua para quem não tem mods".
+  Feito. O vermelho dos contadores foi o `validate` ("ripwire-broker.injections is not declared",
+  idem `last_status`), que faz o que o plano esperava do `tsc`, ausente aqui. Os segmentos do
+  servidor saem dos arquivos `statusline/server-<hex do caminho>-<pid>.json` do state dir
+  (`$XDG_STATE_HOME/ripwire-broker`, senão `~/.local/state/ripwire-broker`), com as regras de
+  `server_status::read`: chave conferida no conteúdo, 30 s de validade, janela de 5 s, no máximo 16
+  arquivos, a pior situação da chave. Sem `não reenviados` (o mod não sabe). A faixa mantém o que os
+  mods seguintes desenham (`await next(e)` dentro de um `Box`). Ver a faixa de verdade é a P7.
 - [ ] **T5.6 · Documentação da Etapa 2.**
   **Vermelho:** `grep -n "hooks: \|calls: " integrations/claude-code/README.md` não encontra.
   **Verde:** o README do plugin publica as linhas `hooks:` e `calls:` do `validate` (o inventário que a
@@ -707,5 +714,6 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T5.2 | `tests/edit.test.ts`: 4 de 11 falhando sem o hook; os outros 7 passavam por vacuidade (nenhuma chamada) | `2ca371d` | doze mutantes, todos mortos: negado ou com erro analisado; `/workshop` aceito como dentro de `/work`; sem janela; seguradas descartadas; só presença, sem data e tamanho; o arquivo revertido esquecido (o teste ganhou esse caso antes da rodada); `isReadOnly` ignorado; o corte de lentidão em 3; a lista do host ignorada; sem filtro de novidade; a pausa ignorada; `files: []` perguntado | — | `validate --strict` passa; kit 19/19 |
 | T5.3 | `tests/finish.test.ts`: 5 de 8 falhando sem o hook; depois, o do portão falhando porque o prompt dele voltava ao `prompt.submit` do mod (achado acima), com um teste próprio em `prompt.test.ts` | `25caed5` | dez mutantes, todos mortos: sem o `!looping`; aviso no `ready`; turno interrompido analisado; turno de subagente analisado; pausa ignorada; o texto do portão não reconhecido; a origem `plugin` não reconhecida; tipos de risco sem ordenar; sem deduplicar; orçamento 2000 | — | `validate --strict` passa; kit 28/28 |
 | T5.4 | `tests/hooks.rs::plan_decisions_are_exported_for_the_mod`: `E0425 cannot find function decide in module hook`; depois "parity.ts does not match hook::plan" (arquivo ausente) | `80dc466` | no mod: corte em 60 arquivos; seguradas antes das novas; `<=` na janela. No Rust: `every_prompt` ignorado; janela de 1 200 ms, que **sobreviveu** à primeira versão do cenário da rajada (folga de 1 600 ms) e morreu depois que o cenário passou a ter passos a 999 ms e a 1 000 ms | — | kit 35/35; clippy |
-| T5.2 (revisão) | `edit.test.ts` · "once the host reports bashEditDiff, git is not asked again…": o mod rodava o `git` em volta de todo Bash, enquanto `hook::run` para de perguntar ao `git` depois que o host reporta uma vez | commit da revisão da T5.2 | o retrato de antes mesmo com o host reportando. Uma condição redundante (`reports ||`) sobreviveu à mutação e saiu | — | kit 36/36 |
+| T5.2 (revisão) | `edit.test.ts` · "once the host reports bashEditDiff, git is not asked again…": o mod rodava o `git` em volta de todo Bash, enquanto `hook::run` para de perguntar ao `git` depois que o host reporta uma vez | `568e397` | o retrato de antes mesmo com o host reportando. Uma condição redundante (`reports ||`) sobreviveu à mutação e saiu | — | kit 36/36 |
+| T5.5 | `tests/status.test.ts`: 4 de 4 falhando sem os hooks; depois `validate --strict`: "ripwire-broker.injections is not declared", "ripwire-broker.last_status is not declared" | commit da T5.5 | desenhando em qualquer superfície; chave do arquivo ignorada no conteúdo; arquivo velho contando; borda da janela (`<=`); chave ausente sem aviso; `[mem]` sem memória; `inj` sem subir; erro não registrado no prompt, na edição e no fim de turno; o portão sem contar; mais de 16 arquivos. Seis deles **sobreviveram** à primeira rodada e cada um ganhou um caso nos testes antes de morrer | PRD §24 (nota) | kit 45/45 |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

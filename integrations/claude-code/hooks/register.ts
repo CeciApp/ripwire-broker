@@ -41,6 +41,9 @@ const worktreeOff = atom({ plugin: 'ripwire-broker', key: 'worktree_off' }, fals
 const hostReports = atom({ plugin: 'ripwire-broker', key: 'host_reports_bash_edits' }, false)
 const loopingTurn = atom({ plugin: 'ripwire-broker', key: 'looping_turn' }, false)
 const gatePrompt = atom({ plugin: 'ripwire-broker', key: 'gate_prompt' }, '')
+/** What the band shows (src/statusline.rs): the last analysis, and the context that reached Claude. */
+const lastStatus = atom({ plugin: 'ripwire-broker', key: 'last_status' }, '')
+const injections = atom({ plugin: 'ripwire-broker', key: 'injections' }, 0)
 
 /** A prompt's marker and the task without it: the whole last word, else the whole first word
  *  (`hook::marker`), so a marker quoted inside the text toggles nothing. */
@@ -94,6 +97,84 @@ function hasNews(env): boolean {
     (env.items ?? []).some((i) => i.why_included !== SEEN_REFERENCE) ||
     ['tests', 'risks', 'memories'].some((k) => (env[k]?.length ?? 0) > 0)
   )
+}
+
+/** The labels of `statusline::hooks_segments` for the last analysis. */
+const STATUS_LABEL = {
+  ready: 'última: pronta',
+  unknown: 'última: incerta',
+  attention_required: 'última: atenção',
+  error: 'última: erro',
+}
+
+/** As `server_status`: a count covers the last WINDOW_SECS, a file older than STALE_SECS is a
+ *  server that is gone, and at most MAX_FILES files are read. */
+const WINDOW_SECS = 5
+const STALE_SECS = 30
+const MAX_FILES = 16
+
+/** Records an analysis for the band, and whether its context reached Claude. */
+async function analysed($, status: string, injected: boolean) {
+  await update($, lastStatus, () => status)
+  if (injected) await update($, injections, (n) => n + 1)
+}
+
+/** The bytes of `text` as lowercase hex: `statusline_state::workspace_key`. */
+function hex(text: string): string {
+  return [...new TextEncoder().encode(text)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** The live servers of this workspace taken together (`server_status::read`), or undefined. */
+async function serverView($) {
+  const xdg = await $.env.get('XDG_STATE_HOME')
+  const base = xdg?.startsWith('/') ? xdg : `${await $.env.get('HOME')}/.local/state`
+  const cwd = await $.session.cwd()
+  const root = (await $.fs.stat(cwd, { resolve: true }).catch(() => undefined))?.realPath ?? cwd
+  const key = hex(root)
+  const dir = `${base}/ripwire-broker/statusline`
+  const names = ((await $.fs.list(dir).catch(() => [])) as Array<{ name: string }>)
+    .map((f) => f.name)
+    .filter((n) => n.startsWith(`server-${key}-`) && n.endsWith('.json'))
+    .slice(0, MAX_FILES)
+  const now = Math.floor((await $.clock.now()) / 1000)
+  const recent = (pairs) =>
+    (pairs ?? []).filter(([at]) => at <= now && now - at < WINDOW_SECS).reduce((sum, [, n]) => sum + n, 0)
+  const keyRank = { ok: 0, invalid: 1, missing: 2 }
+  let view
+  for (const name of names) {
+    let s
+    try {
+      s = JSON.parse(await $.fs.read(`${dir}/${name}`))
+    } catch {
+      continue
+    }
+    if (s.schema_version !== 1 || s.workspace_key !== key || now - s.updated_at > STALE_SECS) continue
+    view ??= { online: false, memory: false, jev_calls: 0, mem_reads: 0, mem_stores: 0, jev_key: 'ok' }
+    view.online ||= s.online === true
+    view.memory ||= s.memory === true
+    view.jev_calls += recent(s.jev_calls)
+    view.mem_reads += recent(s.mem_reads)
+    view.mem_stores += recent(s.mem_stores)
+    if ((keyRank[s.jev_key] ?? 0) > keyRank[view.jev_key]) view.jev_key = s.jev_key
+  }
+  return view
+}
+
+/** The status line, as `statusline::segments_with_server` writes it for these counters. */
+async function statusLine($): Promise<string> {
+  const parts = ['rw-brkr', (await read($, optedOut)) ? 'hooks off' : 'hooks on']
+  const last = STATUS_LABEL[await read($, lastStatus)]
+  if (last) parts.push(last)
+  parts.push(`inj ${await read($, injections)}`)
+  const view = await serverView($)
+  if (view?.online) {
+    parts.push(
+      view.jev_key === 'missing' ? '[jev: no key]' : view.jev_key === 'invalid' ? '[jev: invalid key]' : `[jev:${view.jev_calls}]`,
+    )
+    if (view.memory) parts.push(`[mem: retr ${view.mem_reads}, stor ${view.mem_stores}]`)
+    parts.push('(online)')
+  }
+  return parts.join(' · ')
 }
 
 /** The finish gate in one line (`hook::gate_notice`): status, risk kinds, tests to run. */
@@ -164,7 +245,12 @@ export function register(on, options) {
     // The classic hooks run scripts/broker, which does nothing while this is set (DM-5):
     // one plugin, never two injections.
     await $.env.set('RIPWIRE_BROKER_MOD_ACTIVE', '1')
-    return next(e)
+    const started = await next(e)
+    // Last, and guarded: it throws when the name is taken, and session.start runs again on reload.
+    try {
+      await $.command.register({ name: 'ripwire-status', description: "ripwire-broker's status line" })
+    } catch {}
+    return started
   })
 
   // UserPromptSubmit: the first prompt of the session, or every one with every_prompt.
@@ -190,10 +276,13 @@ export function register(on, options) {
     try {
       const { envelope, text } = await ask($, 'context_for_task', { task, budget_tokens: PROMPT_BUDGET })
       // Only limitations cost the model tokens and tell it nothing (D-130).
-      if (!carriesContent(envelope)) return next(e)
+      const injected = carriesContent(envelope)
+      await analysed($, envelope.status, injected)
+      if (!injected) return next(e)
       // The marker leaves the task, never the prompt the model sees.
       return next({ ...e, context: [...(e.context ?? []), render(envelope, text)] })
     } catch (error) {
+      await analysed($, 'error', false)
       $.ui.log(`no context (${error.message}); continuing without it`)
       return next(e)
     }
@@ -243,9 +332,12 @@ export function register(on, options) {
     files = [...files, ...held.filter((f) => !files.includes(f))]
     try {
       const { envelope, text } = await ask($, 'context_after_edit', { files, budget_tokens: EDIT_BUDGET })
-      if (!hasNews(envelope)) return result
+      const injected = hasNews(envelope)
+      await analysed($, envelope.status, injected)
+      if (!injected) return result
       return { ...result, context: [...(result.context ?? []), render(envelope, text)] }
     } catch (error) {
+      await analysed($, 'error', false)
       $.ui.log(`no context (${error.message}); continuing without it`)
       return result
     }
@@ -259,8 +351,10 @@ export function register(on, options) {
     await update($, loopingTurn, () => false)
     try {
       const { envelope, text } = await ask($, 'context_before_finish', { budget_tokens: FINISH_BUDGET })
+      const gated = envelope.status === 'attention_required' && options.gate && !looping
+      await analysed($, envelope.status, gated)
       if (envelope.status === 'ready') return result
-      if (envelope.status === 'attention_required' && options.gate && !looping) {
+      if (gated) {
         // What a Stop hook's block does: one more turn, with the open obligations to act on. The
         // prompt runs once the session is idle; not awaited, so this turn can end first.
         const prompt = render(envelope, text)
@@ -271,8 +365,21 @@ export function register(on, options) {
       }
       return { ...result, text: gateNotice(envelope) }
     } catch (error) {
+      await analysed($, 'error', false)
       $.ui.log(`no finish check (${error.message}); continuing without it`)
       return result
     }
   })
+
+  // The band above the prompt, where the app draws one (terminal, Desktop): the classic status
+  // line's segments, since with the mod the classic hooks that feed it are silent.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const line = await statusLine($)
+    const rest = await next(e)
+    return Box({ flexDirection: 'column', children: [Text({ dimColor: true, children: [line] }), rest].filter(Boolean) })
+  })
+
+  on('command.run', { command: 'ripwire-status' }, async ($) => ({ text: await statusLine($) }))
 }

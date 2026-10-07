@@ -25,6 +25,10 @@ declare module 'claude-code' {
       /** The text the finish gate submitted and has not seen come back yet: the engine stamps
        *  its origin, the test kit does not, and either way the prompt hook lets it pass. */
       gate_prompt: string
+      /** The band's last analysis: `ready`, `attention_required`, `unknown`, `error`, or '' for none. */
+      last_status: string
+      /** Answers whose context reached Claude this session (the band's `inj N`). */
+      injections: number
     }
   }
 }
