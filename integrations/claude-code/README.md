@@ -32,9 +32,6 @@ A mismatch installs nothing. `--prune` removes the versions the plugin no longer
 downloaded unless you run it: at the start of each session the plugin only **checks**, and when the
 pinned binary or `ripwire` is missing it says so in one line, which Claude passes on to you.
 
-**Until the first release is published, there is nothing to download yet** (`scripts/checksums.txt`
-pins `v0.1.0` with no asset): use one of the alternatives below.
-
 Alternatives: put a `ripwire-broker` on `PATH`
 (`cargo install --git https://github.com/aquental/ripwire-broker --tag v0.1.0 --features online`), or
 point the `binary` option at one. Either runs whatever its version, with a warning on stderr when

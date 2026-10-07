@@ -7220,3 +7220,13 @@ baixar. Os builds não são reprodutíveis, então os hashes vêm dos assets pub
 alvos do `install-binary.sh` e exige um build para cada um, o nome do asset, os dois binários, o
 `--features online`, o `SHA256SUMS`, os portões antes e o rascunho até o fim; cinco mutantes
 derrubados. `actionlint` sem achados nos dois workflows.
+
+**Publicado (2026-10-06):** com o `release.yml` no `master` (PR #77), a tag `v0.1.0` em `ccd5a2e`
+rodou o Release (run 37558534044): portões, rascunho, os quatro builds e o `publish`, todos verdes;
+<https://github.com/aquental/ripwire-broker/releases/tag/v0.1.0>. O `checksums.txt` passa a fixar os
+quatro SHA-256 do `SHA256SUMS` publicado. Conferido nesta máquina: `shasum -a 256 -c` dos quatro; o
+`install-binary.sh` real (rede, sem `--from`) instalou o de `aarch64-apple-darwin`, que responde
+`ripwire-broker 0.1.0`; os outros três têm a arquitetura do alvo (`file`), e o de `x86_64-apple-darwin`
+não rodou só porque esta máquina não tem Rosetta. O build de `x86_64-unknown-linux-gnu` passa a usar
+`ubuntu-24.04` fixo, e não `ubuntu-latest`, que vira Ubuntu 26 em 2026-10-19 (aviso do próprio run) e
+subiria em silêncio a glibc mínima que o README promete.
