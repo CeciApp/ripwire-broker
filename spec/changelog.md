@@ -104,6 +104,7 @@
 | 2026-10-06 21:12 | Etapa 2 do plugin, o mod: `hooks/register.ts` responde os três momentos pelo servidor MCP já conectado, com as regras de `hook::plan` e o estado em `$.state`; interruptor com os hooks clássicos; faixa acima do prompt e `/ripwire-status`; paridade por `hook::decide` e um golden; o prompt do portão não volta ao próprio mod; pendências do mantenedor no §5a do plano | [D-159](#d-159--etapa-2-do-plugin-o-mod) |
 | 2026-10-06 22:21 | Workflow de release: a tag `v*` igual à versão do `Cargo.toml` roda os portões do `rust.yml`, compila com `--features online` para os quatro alvos do `install-binary.sh`, publica `ripwire-broker-<tag>-<alvo>.tar.gz` e `SHA256SUMS` num release que só sai do rascunho com tudo no lugar; o mantenedor autorizou a tag `v0.1.0` | [D-160](#d-160--workflow-de-release) |
 | 2026-10-06 23:10 | Claude Code 2.1.292: o canal `stable` do instalador parava no 2.1.285; com o 2.1.292 o mod carrega e o kit roda sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, que sai dos portões, do CI e dos READMEs; o job `plugin` fixa o 2.1.292 | [D-161](#d-161--claude-code-21292-sem-a-variável-dos-mods) |
+| 2026-10-07 01:20 | Trabalho futuro (T6.2): um braço `broker-plugin` no eval, que carregue o plugin com `--plugin-dir`, fica proposto e não feito; o que ele exigiria do `src/eval/arm.rs` (os dois nomes do servidor do plugin) e por que esperar | [D-162](#d-162--trabalho-futuro-o-braço-broker-plugin-do-eval) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7254,3 +7255,33 @@ plugin, do §25 do PRD e do `handoff.md`; o job `plugin` passa a instalar o 2.1.
 2.1.285 que descrevem o que foi observado nele (fixtures, D-128, D-131) ficam.
 
 **Pendências:** a P5 está feita. A P6 e a P7 devem ser feitas no 2.1.292.
+
+## D-162 — Trabalho futuro: o braço `broker-plugin` do eval
+
+**Data:** 2026-10-07 01:20.
+
+**Pedido do usuário:** "anota a T6.2 como trabalho futuro no changelog" (T6.2 do
+[plano](plan/mod-plan.md)).
+
+**A proposta.** Um braço `broker-plugin` em `src/eval/arm.rs` que rode o Claude Code com
+`--plugin-dir integrations/claude-code`, em vez de `--mcp-config` com o `.mcp.json` e os hooks do
+`install`, para medir o broker como o usuário do plugin o recebe: o servidor pelo resolvedor
+`scripts/broker` e, com mods, os três momentos pelo `hooks/register.ts`.
+
+**O que ele exigiria do `arm.rs`.** O braço declara um servidor pelo nome que as tools carregam
+(`mcp__NAME__tool`, `arm.rs:71`) e recusa a sessão em que aparece um servidor que não declarou
+(`arm.rs:143-160`). Com o plugin, o mesmo servidor tem dois nomes: `plugin:ripwire-broker:broker` na
+lista de servidores da sessão, e `plugin_ripwire-broker_broker` no prefixo das tools
+(`mcp__plugin_ripwire-broker_broker__context_for_task`, que o `split("__")` da linha 151 corta aí).
+Os dois seriam lidos como estrangeiros, e o braço seria recusado pelo próprio servidor. O braço
+precisaria declarar os dois nomes, ou o eval normalizar `plugin:P:S` para `plugin_P_S` antes de
+comparar. Além disso: os hooks do plugin e os do braço `broker` não podem rodar juntos (o
+interruptor `RIPWIRE_BROKER_MOD_ACTIVE` vale só para o mod), e o braço teria de instalar o binário
+fixado ou apontar a opção `binary` para o build em teste.
+
+**Por que esperar.** O plugin roda o mesmo binário e as mesmas tools que o braço `broker`; o que ele
+muda é a entrega (o resolvedor e o mod), e o que essa entrega custa está nas medições da P8 (T3.4 e
+T6.1), que ainda não existem. Sem elas não há pergunta para o braço responder. A decisão volta
+depois da P8, ou se o eval passar a medir latência por evento.
+
+**Nada muda no código.** A T6.2 sai do plano como decidida: proposta, não feita.

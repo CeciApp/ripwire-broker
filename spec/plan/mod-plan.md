@@ -121,6 +121,7 @@ só o mantenedor pode tomar.
 | 26 | Mod: tipos gerados em `.claude-plugin/types/` ao carregar com `--plugin-dir`; confiar neles acima das páginas (mods/create) | T4.1; `.gitignore` |
 | 27 | Mod: onde roda — hooks sim em terminal, Desktop, VS Code e `claude -p`; desenho só no terminal e no Desktop (mods/overview) | T5.5: desenha só com `e.surface`; fora disso, `$.ui.log` |
 | 28 | Mod: é código com as permissões do usuário; dizer no README a versão do Claude Code testada (mods/overview, mods/create) | T5.6 |
+| T6.2 | — (decisão; sem código) | (este PR) | — | changelog (D-162) | portões verdes |
 | 29 | Hooks de `PreToolUse` dos plugins rodam **dentro** do `next(e)` do `tool.call`; um mod que responde sem `next` os impede (mods/events) | T4.1 verifica o mesmo para `PostToolUse`; T4.3 desliga os clássicos pelo ambiente, não pela cadeia |
 
 ### 2.2 O que a documentação não fecha (viram tarefas de verificação)
@@ -649,10 +650,13 @@ orçamento, dedup de itens, memória) é do servidor, que recebe `--incremental`
   do `context_for_task` direto, sem o processo do hook); memórias entregues pelos hooks em uma sessão
   de teste como a de 2026-10-06 (hoje zero, porque os hooks clássicos só coletam); cobertura do §6.
   Registrar no changelog.
-- [ ] **T6.2 · Decidir o braço do eval.** Um braço `broker-plugin` em `src/eval/arm.rs` (carrega o
+- [x] **T6.2 · Decidir o braço do eval.** Um braço `broker-plugin` em `src/eval/arm.rs` (carrega o
   plugin com `--plugin-dir`) fica proposto, não feito; o nome das tools muda, e `arm.rs:151` deduz o
   servidor do prefixo `mcp__NAME__`, que com plugin é `mcp__plugin_NAME_server__`. Anotar como
   trabalho futuro no changelog.
+  **Feito** (D-162): anotado como trabalho futuro. Conferido no código: com o plugin, a lista de
+  servidores diz `plugin:ripwire-broker:broker` e o prefixo das tools dá `plugin_ripwire-broker_broker`,
+  e o `arm.rs:143-160` recusaria os dois como estrangeiros. Volta depois das medições da P8.
 
 ## 5a. Pendências do mantenedor
 
