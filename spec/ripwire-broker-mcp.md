@@ -3037,8 +3037,11 @@ ser reportada.
 
 **Estado:** Etapa 1 (plugin clássico) implementada em
 [D-158](changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes) e Etapa 2 (o mod) em
-[D-159](changelog.md#d-159--etapa-2-do-plugin-o-mod); pendentes as verificações numa sessão real, o
-workflow de release e as medições (§5a do plano). Plano em [mod-plan.md](plan/mod-plan.md), decisões no
+[D-159](changelog.md#d-159--etapa-2-do-plugin-o-mod); release `v0.1.0` publicado pelo
+`.github/workflows/release.yml` e fixado no plugin ([D-160](changelog.md#d-160--workflow-de-release));
+testado no Claude Code 2.1.292 ([D-161](changelog.md#d-161--claude-code-21292-sem-a-variável-dos-mods)).
+Pendentes as verificações numa sessão real, a instalação pelo marketplace e as medições (§5a do
+plano). Plano em [mod-plan.md](plan/mod-plan.md), decisões no
 [D-157](changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code).
 
 ### 25.1 Etapa 1: o plugin
@@ -3066,12 +3069,18 @@ e `claude plugin install ripwire-broker@aquental`.
 - **Binário** (`scripts/install-binary.sh`): só quando o usuário roda; baixa o asset do release
   fixado, confere o SHA-256 e instala inteiro em `${CLAUDE_PLUGIN_DATA}/bin/<versão>/`. Nenhuma rede
   sem pedido (CA-10, D-064).
+- **Release** (`.github/workflows/release.yml`, D-160): uma tag `v*` igual à versão do `Cargo.toml`
+  roda os portões do `rust.yml`, compila com `--features online` para `aarch64-apple-darwin`,
+  `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` e `aarch64-unknown-linux-gnu`, e publica
+  `ripwire-broker-<tag>-<alvo>.tar.gz` e `SHA256SUMS`; o rascunho só sai com tudo no lugar. Os hashes
+  entram no `checksums.txt` depois, num PR.
 - **`install claude-code`** passa a abrir a saída com os dois comandos do plugin; o resto não muda.
 - **Limites:** Unix; `ripwire` continua à parte, no `PATH`; a barra de status fica fora do plugin
   (um plugin não define `statusLine`), no `install --statusline`.
 - **Testes:** `tests/plugin.rs` (forma dos arquivos, argv e ambiente do resolvedor com binários falsos,
-  instalação e poda do binário, sincronia de versões) e o job `plugin` do CI
-  (`claude plugin validate --strict` no plugin e na raiz).
+  instalação e poda do binário, sincronia de versões, alvos do `release.yml` iguais aos do
+  instalador) e o job `plugin` do CI (`claude plugin validate --strict` no plugin e na raiz, e o kit
+  do mod).
 
 ### 25.2 Etapa 2: o mod
 
