@@ -8,6 +8,14 @@ declare module 'claude-code' {
       prompts_seen: number
       /** `#ripwire-off` was typed and no `#ripwire-on` since. */
       opted_out: boolean
+      /** Files edited inside the one-second window, sent with the next edit asked about. */
+      held_edits: string[]
+      /** When the last edit was asked about, ms since the epoch; 0 for never. */
+      last_edit_ms: number
+      /** Slow `git status` snapshots in a row. */
+      slow_statuses: number
+      /** Bash edit detection is off for the session: git is too slow or the tree too dirty. */
+      worktree_off: boolean
     }
   }
 }

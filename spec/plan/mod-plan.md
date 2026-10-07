@@ -548,7 +548,7 @@ orçamento, dedup de itens, memória) é do servidor, que recebe `--incremental`
   não expõe `state.get` ao teste, então o `prompts_seen` em `$.state` aparece no `validate`
   (`state writes: ripwire-broker.opted_out, ripwire-broker.prompts_seen`) e a sobrevivência a um
   reload fica na P6. Sete testes em `tests/prompt.test.ts`, com os stubs em `tests/broker.ts`.
-- [ ] **T5.2 · `tool.call` → `context_after_edit`.**
+- [x] **T5.2 · `tool.call` → `context_after_edit`.**
   **Vermelho:** `tests/register.test.ts`: `an_edit_calls_after_edit_with_the_file_and_adds_context`
   (matcher na forma dos mods, `{ tool: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'] }`, não a
   regex dos hooks clássicos; `await next(e)`; `{ ...result, context }`);
@@ -563,6 +563,13 @@ orçamento, dedup de itens, memória) é do servidor, que recebe `--incremental`
   perde a primeira alternativa); `no_news_no_context`.
   **Verde:** o hook.
   **Docs:** —.
+  Feito, com o retrato do `worktree::fingerprint` portado inteiro: `git rev-parse --show-toplevel`,
+  `git status --porcelain=v1 -z --untracked-files=all` com `GIT_OPTIONAL_LOCKS=0`, e um `$.fs.stat`
+  por arquivo sujo (data e tamanho), porque só o `git status` não vê um arquivo já sujo que o comando
+  escreveu de novo; um arquivo sujo antes e limpo depois também conta. O teste da lista do host
+  existe: o hook clássico do 2.1.285 já a recebe (D-131), e o mod a lê em `result.bashEditDiff`
+  (a confirmar na P6). A mais: um Bash que o core marca `isReadOnly` não pergunta nada. A raiz do
+  workspace é `$.session.cwd()`. Não testado: o corte em 50 arquivos de um Bash.
 - [ ] **T5.3 · `turn.complete` → `context_before_finish`.**
   **Vermelho:** `tests/register.test.ts`: `ready_shows_nothing`; `attention_required_without_gate_shows_the_notice_under_the_answer`
   (`{ text }` igual a `gate_notice`); `attention_required_with_gate_submits_a_prompt_once`
@@ -680,5 +687,6 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T4.0 | `claude plugin test`: "hooks modules are not turned on in this build yet (early access)"; com a variável e sem módulo: "no hooks module to load" | (sem código no repositório: a sonda foi uma cópia descartável) | — | este plano (T0.2, T4.0, §5a) | — |
 | T4.2 | — (portão) | `384b0c1` | — | §1 deste plano | o `plugin test` nos portões locais e no job `plugin` do CI, com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` |
 | T4.3 | `tests/register.test.ts` · "session.start marks the mod active for the classic hooks": `claude plugin test` sai com 1, "no hooks module to load; hooks/hooks.json names none in modules" | `384b0c1` | o `$.env.set` removido; o valor `'true'` no lugar de `'1'` | — (README do plugin na T5.6) | `validate --strict` lista `env writes: RIPWIRE_BROKER_MOD_ACTIVE` |
-| T5.1 | `tests/prompt.test.ts`: 6 de 7 falhando (sem hook de `prompt.submit`); "an envelope without content is not injected" passava por vacuidade | commit da T5.1 | segundo prompt também perguntando; sem o filtro de conteúdo; o marcador ficando na tarefa; o prompt reescrito sem o marcador; orçamento 2000; `#ripwire-on` ignorado; marcador colado a uma palavra contando (sobreviveu ao primeiro conjunto de testes, que ganhou o caso `notes#ripwire-off`). Equivalente: lançar o erro em vez de seguir o prompt (o Claude Code pula o hook e o prompt segue igual) | — | `validate --strict` passa; kit 8/8 |
+| T5.1 | `tests/prompt.test.ts`: 6 de 7 falhando (sem hook de `prompt.submit`); "an envelope without content is not injected" passava por vacuidade | `cd390cd` | segundo prompt também perguntando; sem o filtro de conteúdo; o marcador ficando na tarefa; o prompt reescrito sem o marcador; orçamento 2000; `#ripwire-on` ignorado; marcador colado a uma palavra contando (sobreviveu ao primeiro conjunto de testes, que ganhou o caso `notes#ripwire-off`). Equivalente: lançar o erro em vez de seguir o prompt (o Claude Code pula o hook e o prompt segue igual) | — | `validate --strict` passa; kit 8/8 |
+| T5.2 | `tests/edit.test.ts`: 4 de 11 falhando sem o hook; os outros 7 passavam por vacuidade (nenhuma chamada) | commit da T5.2 | doze mutantes, todos mortos: negado ou com erro analisado; `/workshop` aceito como dentro de `/work`; sem janela; seguradas descartadas; só presença, sem data e tamanho; o arquivo revertido esquecido (o teste ganhou esse caso antes da rodada); `isReadOnly` ignorado; o corte de lentidão em 3; a lista do host ignorada; sem filtro de novidade; a pausa ignorada; `files: []` perguntado | — | `validate --strict` passa; kit 19/19 |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |

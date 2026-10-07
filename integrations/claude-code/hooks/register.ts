@@ -11,14 +11,32 @@ const SERVER = 'broker'
 
 /** As `hook::MAX_CONTEXT_CHARS`: both hosts inline about 10k characters of context (D-041). */
 const MAX_CONTEXT_CHARS = 9000
-/** As the hook's `Policy::default().prompt_budget`, which fits MAX_CONTEXT_CHARS. */
+/** As the hook's `Policy::default()`: budgets that fit MAX_CONTEXT_CHARS, and the edit window. */
 const PROMPT_BUDGET = 1500
+const EDIT_BUDGET = 800
+const EDIT_INTERVAL_MS = 1000
+/** As `hook::MAX_HELD_EDITS` and `hook::MAX_BASH_EDIT_FILES`. */
+const MAX_HELD_EDITS = 32
+const MAX_BASH_EDIT_FILES = 50
+/** As `hook::SLOW_FINGERPRINT`, `hook::SLOW_FINGERPRINTS_OFF` and
+ *  `worktree::MAX_FINGERPRINT_ENTRIES` (D-129). */
+const SLOW_STATUS_MS = 50
+const SLOW_STATUSES_OFF = 2
+const MAX_STATUS_ENTRIES = 5000
+/** As `session::SEEN_REFERENCE`: an item the session was already given. */
+const SEEN_REFERENCE =
+  'already delivered in this session (unchanged); call again with include_seen=true for the full item'
+const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash']
 
 const OPT_OUT = '#ripwire-off'
 const OPT_IN = '#ripwire-on'
 
 const promptsSeen = atom({ plugin: 'ripwire-broker', key: 'prompts_seen' }, 0)
 const optedOut = atom({ plugin: 'ripwire-broker', key: 'opted_out' }, false)
+const heldEdits = atom({ plugin: 'ripwire-broker', key: 'held_edits' }, [] as string[])
+const lastEditMs = atom({ plugin: 'ripwire-broker', key: 'last_edit_ms' }, 0)
+const slowStatuses = atom({ plugin: 'ripwire-broker', key: 'slow_statuses' }, 0)
+const worktreeOff = atom({ plugin: 'ripwire-broker', key: 'worktree_off' }, false)
 
 /** A prompt's marker and the task without it: the whole last word, else the whole first word
  *  (`hook::marker`), so a marker quoted inside the text toggles nothing. */
@@ -65,6 +83,72 @@ function render(env, text: string): string {
   return [...full].length <= MAX_CONTEXT_CHARS ? full : header + JSON.stringify(env)
 }
 
+/** Whether an after-edit answer tells the agent anything new (`hook::has_news`): with
+ *  `incremental` the server already leaves out the tests, risks and memories it gave. */
+function hasNews(env): boolean {
+  return (
+    (env.items ?? []).some((i) => i.why_included !== SEEN_REFERENCE) ||
+    ['tests', 'risks', 'memories'].some((k) => (env[k]?.length ?? 0) > 0)
+  )
+}
+
+/** `path` relative to the workspace `root`, or undefined outside it. */
+function inside(root: string, path: string): string | undefined {
+  const absolute = path.startsWith('/') ? path : `${root}/${path}`
+  return absolute.startsWith(`${root}/`) ? absolute.slice(root.length + 1) : undefined
+}
+
+/** The dirty files of the work tree and when each last changed (`worktree::fingerprint`):
+ *  `{ entries }`, `{ off: true }` when the tree is too dirty, or undefined outside git. A
+ *  snapshot over SLOW_STATUS_MS counts, and SLOW_STATUSES_OFF of them in a row switch Bash
+ *  detection off for the session (D-129). */
+async function snapshot($, root: string) {
+  const started = await $.clock.now()
+  const top = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd: root })
+  if (top.exitCode !== 0) return undefined
+  const status = await $.process.run(['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+    cwd: root,
+    env: { GIT_OPTIONAL_LOCKS: '0' },
+  })
+  if (status.exitCode !== 0) return undefined
+  const base = top.stdout.replace(/\n$/, '')
+  const fields = status.stdout.split('\0').filter((f) => f !== '')
+  const entries = new Map<string, string>()
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]
+    if (field.length < 4) continue
+    // A rename or copy is followed by one more field, the original path.
+    if (/[RC]/.test(field.slice(0, 2))) i++
+    const path = `${base}/${field.slice(3)}`
+    const stat = await $.fs.stat(path).catch(() => undefined)
+    entries.set(path, stat ? `${stat.mtimeMs}:${stat.size}` : '')
+    if (entries.size > MAX_STATUS_ENTRIES) return { off: true }
+  }
+  const slow = (await $.clock.now()) - started > SLOW_STATUS_MS
+  const count = slow ? (await read($, slowStatuses)) + 1 : 0
+  await update($, slowStatuses, () => count)
+  if (count >= SLOW_STATUSES_OFF) return { off: true }
+  return { entries }
+}
+
+/** The paths new, changed or deleted between two snapshots (`worktree::changed`). */
+function changed(before: Map<string, string>, after: Map<string, string>): string[] {
+  const out = [...after].filter(([path, stamp]) => before.get(path) !== stamp).map(([path]) => path)
+  for (const path of before.keys()) if (!after.has(path)) out.push(path)
+  return out
+}
+
+/** A Bash snapshot, or undefined when detection is off (and, on a switch, turned off). */
+async function bashSnapshot($, root: string) {
+  if (await read($, worktreeOff)) return undefined
+  const shot = await snapshot($, root)
+  if (shot && 'off' in shot) {
+    await update($, worktreeOff, () => true)
+    return undefined
+  }
+  return shot?.entries
+}
+
 export function register(on, options) {
   on('session.start', async ($, e, next) => {
     // The classic hooks run scripts/broker, which does nothing while this is set (DM-5):
@@ -94,6 +178,55 @@ export function register(on, options) {
     } catch (error) {
       $.ui.log(`no context (${error.message}); continuing without it`)
       return next(e)
+    }
+  })
+
+  // PostToolUse: what an edit, or a Bash that changed the tree, did.
+  on('tool.call', { tool: EDIT_TOOLS }, async ($, e, next) => {
+    if (await read($, optedOut)) return next(e)
+    const root = await $.session.cwd()
+    const shell = e.tool === 'Bash'
+    const before = shell ? await bashSnapshot($, root) : undefined
+    const result = await next(e)
+    if (result.deny !== undefined || result.isError) return result
+    let named: string[]
+    if (!shell) {
+      named = [e.file_path ?? e.notebook_path].filter((p) => typeof p === 'string')
+    } else if (Array.isArray(result.result?.bashEditDiff?.changedFiles)) {
+      // What the host says the command changed, as the classic hook reads it (D-131).
+      named = result.result.bashEditDiff.changedFiles
+    } else if (result.isReadOnly || before === undefined) {
+      return result
+    } else {
+      const after = await bashSnapshot($, root)
+      if (after === undefined) return result
+      named = changed(before, after)
+    }
+    let files = named.map((p) => inside(root, p)).filter((p) => p !== undefined)
+    // A formatter or a generator is asked about its first files; the finish gate sees them all.
+    if (shell) files = files.slice(0, MAX_BASH_EDIT_FILES)
+    if (files.length === 0) return result
+    // A burst of edits is one ask (D-106): inside the window the files are held, and ride along
+    // with the next answer. A clock set back past the last edit closes the window.
+    const now = await $.clock.now()
+    const last = await read($, lastEditMs)
+    if (last !== 0 && now >= last && now - last < EDIT_INTERVAL_MS) {
+      await update($, heldEdits, (held) =>
+        [...held, ...files.filter((f) => !held.includes(f))].slice(0, MAX_HELD_EDITS),
+      )
+      return result
+    }
+    await update($, lastEditMs, () => now)
+    const held = await read($, heldEdits)
+    await update($, heldEdits, () => [])
+    files = [...files, ...held.filter((f) => !files.includes(f))]
+    try {
+      const { envelope, text } = await ask($, 'context_after_edit', { files, budget_tokens: EDIT_BUDGET })
+      if (!hasNews(envelope)) return result
+      return { ...result, context: [...(result.context ?? []), render(envelope, text)] }
+    } catch (error) {
+      $.ui.log(`no context (${error.message}); continuing without it`)
+      return result
     }
   })
 }

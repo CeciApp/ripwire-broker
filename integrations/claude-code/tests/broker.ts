@@ -71,3 +71,46 @@ export function logs(on): string[] {
 }
 
 export const typed = (text: string) => ({ text, wait: false, origin: { kind: 'composer' as const } })
+
+/** What `hook::has_news` reads as old: an item the session was already given. */
+export const SEEN = 'already delivered in this session (unchanged); call again with include_seen=true for the full item'
+
+/** The session's directory, which is the server's workspace. */
+export function cwd(on, dir = '/work') {
+  on('session.cwd', () => ({ value: dir }))
+}
+
+/** Claude Code running the tool: `answer` is what `next(e)` resolves to (`{ result }`, `{ deny }`,
+ *  `{ isError, result }`). Records the calls that reached it. */
+export function tools(on, answer: (e) => Record<string, unknown> = () => ({ result: 'ok' })) {
+  const ran: string[] = []
+  on('tool.call', ($, e) => {
+    ran.push(e.tool)
+    return answer(e)
+  })
+  return ran
+}
+
+/** A git work tree for `$.process.run`: `trees` are the successive `git status` answers, each a
+ *  list of porcelain lines ("XY path"), and `stamps` the `$.fs.stat` answers by absolute path,
+ *  each read once per status. `onRun` runs inside each git call (to spend clock time). */
+export function git(
+  on,
+  trees: string[][],
+  stamps: Record<string, Array<{ size: number; mtimeMs: number }>> = {},
+  onRun: () => Promise<void> = async () => {},
+) {
+  const runs: string[][] = []
+  on('process.run', async ($, e) => {
+    runs.push([...e.argv])
+    await onRun()
+    if (e.argv.includes('rev-parse')) return { value: { exitCode: 0, stdout: '/work\n', stderr: '' } }
+    const tree = trees.shift() ?? []
+    return { value: { exitCode: 0, stdout: tree.map((l) => l + '\0').join(''), stderr: '' } }
+  })
+  on('fs.stat', ($, e) => {
+    const next = stamps[e.path]?.shift() ?? { size: 1, mtimeMs: 1 }
+    return { value: { kind: 'file', isLink: false, ...next } }
+  })
+  return runs
+}
