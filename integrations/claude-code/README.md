@@ -6,7 +6,8 @@ The plugin ships, in one versioned package: the MCP server (three read-only tool
 inject context on the first prompt, after edits and before finishing, the `ripwire-broker` skill,
 and the consent options for the online mode and memory.
 
-Tested with Claude Code 2.1.285, on macOS and Linux (the broker is Unix only).
+Tested with Claude Code 2.1.285, on macOS and Linux (the broker is Unix only). The mod (below)
+needs hooks modules turned on.
 
 ## Install
 
@@ -88,6 +89,59 @@ the project's `.mcp.json` and the broker's hooks from `.claude/settings.json`.
   only the binary, into its data directory, and only when you run `install-binary.sh`.
 - **Status line:** a plugin cannot set Claude Code's `statusLine`. Use
   `ripwire-broker install claude-code --workspace DIR --statusline` for it.
+
+## The mod
+
+The plugin is also a [mod](https://code.claude.com/docs/en/plugins/mods/overview): `hooks/hooks.json`
+names a hooks module, `hooks/register.ts`, beside the classic hooks. Where mods load, the module
+answers the same three moments through the MCP server the session already has connected, instead of
+starting a process per event; where they do not load (an older Claude Code, `--bare`,
+`--safe-mode`, `disableAllHooks`), the classic hooks run as before. Never both: on `session.start`
+the mod sets `RIPWIRE_BROKER_MOD_ACTIVE=1`, and `scripts/broker` then leaves every classic hook
+silent.
+
+Tested with Claude Code 2.1.285, which keeps hooks modules in early access behind
+`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`; the documentation asks for 2.1.287 or later. The mods API
+can change between versions without notice.
+
+What it does more than the classic hooks:
+
+- **Memory through the hooks.** With the `memory` option, the server's `context_for_task` reads the
+  memories of the workspace, and the mod's first-prompt context carries them; the classic hooks
+  only collect.
+- **No process per event.** One MCP call per moment, on the connection the session already has.
+- **The band above the prompt**, on the terminal and in the Desktop app:
+  `rw-brkr · hooks on · última: atenção · inj 2 · [jev:3] · [mem: retr 1, stor 2] · (online)`,
+  the classic status line's labels. **`/ripwire-status`** prints the same line anywhere.
+
+And less:
+
+- `ripwire-broker hook-stats` and `hook-log` count only sessions run by the classic hooks, and the
+  classic `statusline` shows `hooks sem dados` in a session with the mod.
+- The band has no `não reenviados`: the mod does not know what the server left out.
+
+Why `incremental` is on by default: the server leaves out, per session, what it already delivered.
+The classic hooks kept their own record of what they had injected; the mod keeps none, so the
+server's is the one that holds. Turning it off makes the mod's answers repeat items and risks it has
+already given.
+
+Before you install it, this is everything the module hooks and calls, as `claude plugin validate`
+reads it from the source (it runs with your permissions, like any code you install):
+
+```text
+hooks: session.start, prompt.submit, tool.call{tool=Edit|Write|MultiEdit|NotebookEdit|Bash}, turn.complete, ui.render{component=AbovePrompt}, command.run{command=ripwire-status}
+calls: $.clock.now, $.command.register, $.env.get (via serverView), $.env.set, $.fs.list (via serverView), $.fs.read (via serverView), $.fs.stat (via serverView, snapshot), $.mcp.call (via ask), $.mcp.connect (via ask), $.process.run (via snapshot), $.prompt.submit, $.session.cwd, $.state.get, $.state.set, $.ui.log, $.ui.resolve
+env writes: RIPWIRE_BROKER_MOD_ACTIVE
+env reads: HOME, XDG_STATE_HOME
+```
+
+`$.process.run` is `git rev-parse --show-toplevel` and `git status --porcelain` around a Bash
+command, to tell what it changed (only until Claude Code reports that itself); `$.fs` reads the
+server's status files under the broker's state directory and stats the dirty files of the work tree;
+`$.prompt.submit` is the finish gate's one extra turn, with the `gate` option only.
+
+Its tests run without a session, sign-in or network:
+`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test integrations/claude-code`.
 
 ## Publishing a version
 

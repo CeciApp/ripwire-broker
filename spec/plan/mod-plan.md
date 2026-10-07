@@ -1,7 +1,9 @@
 # ripwire-broker como plugin e mod do Claude Code — Plano de implementação
 
-**Data:** 2026-10-06 · **Status:** Etapa 1 em andamento, arquivos e testes feitos
-([D-158](../changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes)); aprovado em 2026-10-06 19:00 ([D-157](../changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code));
+**Data:** 2026-10-06 · **Status:** Etapas 1 e 2 implementadas
+([D-158](../changelog.md#d-158--etapa-1-do-plugin-os-arquivos-e-os-testes),
+[D-159](../changelog.md#d-159--etapa-2-do-plugin-o-mod)); o que falta depende do mantenedor
+([§5a](#5a-pendências-do-mantenedor)); aprovado em 2026-10-06 19:00 ([D-157](../changelog.md#d-157--plano-do-plugin-e-do-mod-do-claude-code));
 as sete decisões do §2.4 tomadas, todas na opção recomendada; os quatro achados da revisão
 adversarial (§2.3) incorporados; nada implementado.
 **Spec:** [`spec/ripwire-broker-mcp.md`](../ripwire-broker-mcp.md) (PRD principal; §21 hooks, §24 barra
@@ -623,7 +625,7 @@ orçamento, dedup de itens, memória) é do servidor, que recebe `--incremental`
   `server_status::read`: chave conferida no conteúdo, 30 s de validade, janela de 5 s, no máximo 16
   arquivos, a pior situação da chave. Sem `não reenviados` (o mod não sabe). A faixa mantém o que os
   mods seguintes desenham (`await next(e)` dentro de um `Box`). Ver a faixa de verdade é a P7.
-- [ ] **T5.6 · Documentação da Etapa 2.**
+- [x] **T5.6 · Documentação da Etapa 2.**
   **Vermelho:** `grep -n "hooks: \|calls: " integrations/claude-code/README.md` não encontra.
   **Verde:** o README do plugin publica as linhas `hooks:` e `calls:` do `validate` (o inventário que a
   Anthropic recomenda mostrar a quem instala), a versão do Claude Code testada, o que o mod faz a mais
@@ -686,6 +688,7 @@ o que validar; Claude Code 2.1.285, mods em early access desligados. Preencher a
 |---|---|---|---|---|
 | base | 782 / 809 | — | — | 2.1.285 |
 | Fases 1–3 (parte, D-158) | 802 / 829 | passa no plugin e na raiz | — | 2.1.285 |
+| Fases 4–5 (D-159) | 803 / 830 | passa no plugin e na raiz | 45 testes (com `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`) | 2.1.285 |
 
 ## 8. Registro de evidência
 
@@ -715,5 +718,6 @@ Preenchido por quem executa. Sem a linha completa, a tarefa não está feita.
 | T5.3 | `tests/finish.test.ts`: 5 de 8 falhando sem o hook; depois, o do portão falhando porque o prompt dele voltava ao `prompt.submit` do mod (achado acima), com um teste próprio em `prompt.test.ts` | `25caed5` | dez mutantes, todos mortos: sem o `!looping`; aviso no `ready`; turno interrompido analisado; turno de subagente analisado; pausa ignorada; o texto do portão não reconhecido; a origem `plugin` não reconhecida; tipos de risco sem ordenar; sem deduplicar; orçamento 2000 | — | `validate --strict` passa; kit 28/28 |
 | T5.4 | `tests/hooks.rs::plan_decisions_are_exported_for_the_mod`: `E0425 cannot find function decide in module hook`; depois "parity.ts does not match hook::plan" (arquivo ausente) | `80dc466` | no mod: corte em 60 arquivos; seguradas antes das novas; `<=` na janela. No Rust: `every_prompt` ignorado; janela de 1 200 ms, que **sobreviveu** à primeira versão do cenário da rajada (folga de 1 600 ms) e morreu depois que o cenário passou a ter passos a 999 ms e a 1 000 ms | — | kit 35/35; clippy |
 | T5.2 (revisão) | `edit.test.ts` · "once the host reports bashEditDiff, git is not asked again…": o mod rodava o `git` em volta de todo Bash, enquanto `hook::run` para de perguntar ao `git` depois que o host reporta uma vez | `568e397` | o retrato de antes mesmo com o host reportando. Uma condição redundante (`reports ||`) sobreviveu à mutação e saiu | — | kit 36/36 |
-| T5.5 | `tests/status.test.ts`: 4 de 4 falhando sem os hooks; depois `validate --strict`: "ripwire-broker.injections is not declared", "ripwire-broker.last_status is not declared" | commit da T5.5 | desenhando em qualquer superfície; chave do arquivo ignorada no conteúdo; arquivo velho contando; borda da janela (`<=`); chave ausente sem aviso; `[mem]` sem memória; `inj` sem subir; erro não registrado no prompt, na edição e no fim de turno; o portão sem contar; mais de 16 arquivos. Seis deles **sobreviveram** à primeira rodada e cada um ganhou um caso nos testes antes de morrer | PRD §24 (nota) | kit 45/45 |
+| T5.5 | `tests/status.test.ts`: 4 de 4 falhando sem os hooks; depois `validate --strict`: "ripwire-broker.injections is not declared", "ripwire-broker.last_status is not declared" | `338c889` | desenhando em qualquer superfície; chave do arquivo ignorada no conteúdo; arquivo velho contando; borda da janela (`<=`); chave ausente sem aviso; `[mem]` sem memória; `inj` sem subir; erro não registrado no prompt, na edição e no fim de turno; o portão sem contar; mais de 16 arquivos. Seis deles **sobreviveram** à primeira rodada e cada um ganhou um caso nos testes antes de morrer | PRD §24 (nota) | kit 45/45 |
+| T5.6 | `grep -n "hooks: \|calls: " integrations/claude-code/README.md` sai com 1 | commit da T5.6 | — (texto) | README do plugin (seção "The mod"), PRD §25.2, D-159, `handoff.md`, este plano | portões no worktree do commit |
 | T0.1 | `grep -n "D-157" spec/changelog.md` sai com 1 | commit do plano (a fazer) | o mesmo `grep` contra `git show HEAD:spec/changelog.md` sai com 1 | D-157 e índice do changelog; este plano (Status, §2.3, T0.1) | sem código: os cinco portões Rust iguais à base (782 / 809) |
