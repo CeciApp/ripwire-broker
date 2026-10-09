@@ -2029,6 +2029,7 @@ fn install_refuses_a_binary_path_that_is_not_utf8() {
             codex_home: Some(codex_home.path().to_path_buf()),
             online: false,
             memory: false,
+            memory_debug_log: false,
         };
 
         let Err(err) = ripwire_broker::install::plan(&args, &binary) else {
@@ -2056,6 +2057,7 @@ fn install_refuses_a_workspace_path_that_is_not_utf8() {
         codex_home: None,
         online: false,
         memory: false,
+        memory_debug_log: false,
     };
 
     let Err(err) = ripwire_broker::install::plan(&args, &PathBuf::from("/opt/ripwire-broker"))
@@ -5281,4 +5283,201 @@ fn install_claude_code_mentions_the_plugin_commands_first() {
     );
     assert_eq!(code, 0, "{err}");
     assert!(!out.contains("claude plugin"), "{out}");
+}
+
+// ---------------------------------------------------------------- --memory-debug-log (D-164)
+
+#[test]
+fn the_memory_debug_log_is_asked_for_with_memory_and_nowhere_else() {
+    let Ok(Command::Serve(s)) = parse(&["--workspace", "/w", "--memory", "--memory-debug-log"])
+    else {
+        panic!()
+    };
+    assert!(s.memory.is_some_and(|m| m.debug_log));
+    let Ok(Command::Serve(s)) = parse(&["--workspace", "/w", "--memory"]) else {
+        panic!()
+    };
+    assert!(s.memory.is_some_and(|m| !m.debug_log), "off unless asked");
+
+    let Ok(Command::Hook(h)) = parse(&[
+        "hook",
+        "claude-code",
+        "stop",
+        "--memory",
+        "--memory-debug-log",
+    ]) else {
+        panic!()
+    };
+    assert!(h.memory_debug_log);
+
+    let Ok(Command::Install(i)) = parse(&[
+        "install",
+        "claude-code",
+        "--workspace",
+        "/w",
+        "--memory",
+        "--memory-debug-log",
+    ]) else {
+        panic!()
+    };
+    assert!(i.memory_debug_log);
+
+    for verb in [
+        &["memory", "add", "--workspace", "/w", "--file", "/n.json"][..],
+        &["memory", "forget", "--workspace", "/w", "--all"],
+        &["memory", "drain", "--workspace", "/w", "--online"],
+        &["memory", "retry", "--workspace", "/w"],
+        &["memory", "resume", "--workspace", "/w"],
+    ] {
+        let mut args = verb.to_vec();
+        args.push("--memory-debug-log");
+        let Ok(Command::Memory(m)) = parse(&args) else {
+            panic!("{args:?}")
+        };
+        assert!(m.debug_log, "{args:?}");
+    }
+
+    for bad in [
+        &["--workspace", "/w", "--memory-debug-log"][..],
+        &["--workspace", "/w", "--online", "--memory-debug-log"],
+        &["hook", "claude-code", "stop", "--memory-debug-log"],
+        &[
+            "install",
+            "claude-code",
+            "--workspace",
+            "/w",
+            "--memory-debug-log",
+        ],
+        // `status` changes nothing: there is nothing to follow.
+        &[
+            "memory",
+            "status",
+            "--workspace",
+            "/w",
+            "--memory-debug-log",
+        ],
+    ] {
+        let err = parse(bad).expect_err(&format!("{bad:?}"));
+        assert!(
+            err.contains("--memory-debug-log") || err.contains("unknown argument"),
+            "{bad:?}: {err}"
+        );
+    }
+}
+
+fn debug_log(st: &std::path::Path, ws: &std::path::Path) -> String {
+    use ripwire_broker::memory::{identity, store::Store};
+    let store = Store::new(st, &identity::workspace_id(ws).unwrap());
+    std::fs::read_to_string(store.dir().join(ripwire_broker::memory::debug::FILE))
+        .unwrap_or_default()
+}
+
+#[test]
+fn memory_add_with_the_debug_log_says_what_it_did() {
+    let (ws, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let text = "prefer small PRs";
+    std::fs::write(
+        ws.path().join("note.json"),
+        format!(r#"{{"text": "{text}"}}"#),
+    )
+    .unwrap();
+    let file = ws.path().join("note.json");
+    let (code, _, err) = memory_cmd(
+        ws.path(),
+        st.path(),
+        &[
+            "add",
+            "--file",
+            file.to_str().unwrap(),
+            "--memory-debug-log",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let log = debug_log(st.path(), ws.path());
+    let pid_free: Vec<&str> = log.lines().map(|l| l.get(24..).unwrap_or(l)).collect();
+    assert!(
+        pid_free
+            .iter()
+            .any(|l| l.starts_with("cli#") && l.contains(" spool ")),
+        "{log}"
+    );
+    assert!(pid_free.iter().any(|l| l.contains(" ingest ")), "{log}");
+    assert!(!log.contains(text), "the note's text stays out: {log}");
+
+    // Without the flag nothing more is written.
+    let before = log.len();
+    let (code, _, err) = memory_cmd(ws.path(), st.path(), &["retry"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(debug_log(st.path(), ws.path()).len(), before);
+}
+
+#[test]
+fn a_hook_with_the_debug_log_says_it_collected_the_edit() {
+    require_ripwire!();
+    let (repo, st) = (common::sample_repo(), tempfile::tempdir().unwrap());
+    let ws = repo.path();
+    common::write(
+        ws,
+        "src/auth.py",
+        "def login(user, token):\n    return user\n",
+    );
+    let args = [
+        "hook",
+        "claude-code",
+        "post-tool-use",
+        "--memory",
+        "--memory-debug-log",
+        "--state-dir",
+        st.path().to_str().unwrap(),
+    ];
+    let (code, _, err) = run(&args, &edit_event(ws, "s1"));
+    assert_eq!(code, 0, "{err}");
+    let log = debug_log(st.path(), ws);
+    let collect = log
+        .lines()
+        .find(|l| {
+            l.get(24..)
+                .is_some_and(|r| r.starts_with("hook#") && r.contains(" collect "))
+        })
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(collect.contains("after_edit"), "{collect}");
+    assert!(collect.contains("spooled"), "{collect}");
+}
+
+#[test]
+fn install_with_the_debug_log_writes_it_on_the_server_and_the_hooks() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().canonicalize().unwrap();
+    let args = [
+        "install",
+        "claude-code",
+        "--workspace",
+        root.to_str().unwrap(),
+        "--hooks",
+        "--memory",
+        "--memory-debug-log",
+        "--write",
+    ];
+    let (code, out, err) = run_with_key(&args);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("debug.log"),
+        "the preview names the file: {out}"
+    );
+    let server = read_json(&root.join(".mcp.json"))["mcpServers"]["ripwire-broker"].clone();
+    assert_eq!(
+        server["args"],
+        json!([
+            "--workspace",
+            root.to_str().unwrap(),
+            "--memory",
+            "--memory-debug-log"
+        ])
+    );
+    let settings = read_json(&root.join(".claude/settings.json"));
+    for event in ["UserPromptSubmit", "PostToolUse", "Stop"] {
+        for c in commands(&settings, event) {
+            assert!(c.contains("--memory --memory-debug-log"), "{c}");
+        }
+    }
 }

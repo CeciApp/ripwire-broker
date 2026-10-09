@@ -87,13 +87,41 @@ fn quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
 }
 
+/// The memory flags the server and the hooks get: `--memory`, then `--memory-debug-log`.
+fn memory_flags(args: &InstallArgs) -> &'static [&'static str] {
+    match (args.memory, args.memory_debug_log) {
+        (false, _) => &[],
+        (true, false) => &["--memory"],
+        (true, true) => &["--memory", "--memory-debug-log"],
+    }
+}
+
+/// Where `--memory-debug-log` writes, and how to follow it (D-164).
+fn debug_log_note(workspace: &Path) -> String {
+    let file = crate::state::StateStore::default_dir()
+        .zip(crate::memory::identity::workspace_id(workspace).ok())
+        .map(|(dir, id)| {
+            crate::memory::store::Store::new(&dir, &id)
+                .dir()
+                .join(crate::memory::debug::FILE)
+        });
+    let file = file.map_or("<state-dir>/memory/<workspace id>/debug.log".into(), |f| {
+        f.display().to_string()
+    });
+    format!(
+        "--memory-debug-log: cada evento da memória (servidor, hooks e comandos `memory`) vira uma \
+         linha em\n{file}\nAcompanhe com `tail -F` (o `-F` segue o arquivo quando ele passa de 10 MiB e \
+         é trocado). Ids, contagens e motivos; nunca o texto de uma memória ou de uma tarefa."
+    )
+}
+
 /// Replaces this broker's hooks in `settings` and keeps everything else.
 fn merge_hooks(
     mut settings: Value,
     host: Host,
     binary: &Path,
     workspace: Option<&Path>,
-    memory: bool,
+    memory: &[&str],
 ) -> Value {
     let host_name = match host {
         Host::ClaudeCode => "claude-code",
@@ -130,8 +158,9 @@ fn merge_hooks(
             command.push_str(&format!(" --workspace {}", quote(ws)));
         }
         // Local spool only: a hook never gets --online (D-064, PD-3).
-        if memory {
-            command.push_str(" --memory");
+        for flag in memory {
+            command.push(' ');
+            command.push_str(flag);
         }
         let mut group = Map::new();
         if let Some(m) = matcher {
@@ -385,9 +414,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                         flags.push("--online".into());
                     }
                     // `--memory` implies online on the server: no redundant `--online`.
-                    if args.memory {
-                        flags.push("--memory".into());
-                    }
+                    flags.extend(memory_flags(args).iter().map(|f| Value::from(*f)));
                     if args.online || args.memory {
                         // Expanded by Claude Code from its own environment: a reference, never
                         // the value.
@@ -465,7 +492,13 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 let (mut foreign, mut hooked) = (false, false);
                 plan.changes.push(change(settings_path.clone(), |mut v| {
                     if args.hooks {
-                        v = merge_hooks(v, Host::ClaudeCode, binary, Some(&workspace), args.memory);
+                        v = merge_hooks(
+                            v,
+                            Host::ClaudeCode,
+                            binary,
+                            Some(&workspace),
+                            memory_flags(args),
+                        );
                     }
                     if shadowing && let Some(o) = v.as_object_mut() {
                         o.remove("statusLine");
@@ -497,8 +530,8 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
             if args.online {
                 extra.push_str(", \"--online\"");
             }
-            if args.memory {
-                extra.push_str(", \"--memory\"");
+            for flag in memory_flags(args) {
+                extra.push_str(&format!(", \"{flag}\""));
             }
             let online = match args.online || args.memory {
                 // Forwarded by name from Codex's environment, never the value.
@@ -515,7 +548,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                 toml.push_str("\n[features]\nhooks = true\n");
                 // Global hooks: no --workspace, so each session uses its own cwd.
                 plan.changes.push(change(home.join("hooks.json"), |v| {
-                    merge_hooks(v, Host::Codex, binary, None, args.memory)
+                    merge_hooks(v, Host::Codex, binary, None, memory_flags(args))
                 })?);
             }
             plan.notes.push(toml);
@@ -525,6 +558,9 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
         plan.notes.push(format!(
             "--memory: implica --online. {MEMORY_CONSENT}\n{KEY_NOTE}. To erase and stop collecting:\n`ripwire-broker memory forget --workspace DIR --all`."
         ));
+        if args.memory_debug_log {
+            plan.notes.push(debug_log_note(&args.workspace));
+        }
     } else if args.online {
         plan.notes.push(format!(
             "--online: {ONLINE_CONSENT}\n{KEY_NOTE}; check it with\n`ripwire-broker doctor --workspace DIR --jev-probe`."

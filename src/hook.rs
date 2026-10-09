@@ -897,8 +897,16 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     // hook never enriches or sends them; a revoked store refuses them.
     let memory = match (args.memory, &root) {
         (true, Some(r)) => crate::memory::identity::workspace_id(r).ok().map(|id| {
-            let spool = Arc::new(crate::memory::store::Store::new(store.dir(), &id));
-            crate::memory::publish::MemoryConfig::new(spool, id, HOOK_RETENTION_MS)
+            let mut spool = crate::memory::store::Store::new(store.dir(), &id);
+            // A log that cannot be opened is not the hook's failure: it goes on without one.
+            if args.memory_debug_log {
+                spool = spool.clone().with_debug_log("hook").unwrap_or(spool);
+            }
+            let debug = spool.debug_log().cloned();
+            crate::memory::publish::MemoryConfig {
+                debug,
+                ..crate::memory::publish::MemoryConfig::new(Arc::new(spool), id, HOOK_RETENTION_MS)
+            }
         }),
         _ => None,
     };

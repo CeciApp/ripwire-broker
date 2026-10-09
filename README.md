@@ -43,7 +43,7 @@ commands; `ripwire-broker --help` lists them all:
 | `hook-stats [--json]` | Every saved hook session (one with no events and nothing remembered is skipped) reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
 | `prompt --workspace DIR [--budget N] [--] TASK...` | Prints the task followed by its context, for clients without hooks (`--budget` defaults to `context_for_task`'s 2500). A task word that starts with `--` needs the `--` before the task; `-h` or `--version` inside a task is task text |
 | `doctor --workspace DIR [--json] [--jev-probe [--jev-model M]]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
-| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online] [--memory]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line |
+| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online] [--memory [--memory-debug-log]]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line; `--memory-debug-log` goes to the server and the hooks |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
 | `memory status --workspace DIR [--json]` | The workspace's memory: memories, pending observations, generation, sizes, and the category of the error if the store cannot be read |
 | `memory forget --workspace DIR (--all \| --id ID)` | Forgets one memory and what derives from it, or everything (which also revokes collection) |
@@ -51,6 +51,8 @@ commands; `ripwire-broker --help` lists them all:
 | `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
 | `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker (also if the server takes it during the drain) or the provider refuses the key |
 | `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back, and makes jobs a long `Retry-After` set aside ready now; local |
+
+Every `memory` command but `status` also takes `--memory-debug-log` ([below](#following-memory-live)).
 
 Every command that keeps state (`serve`, `hook`, `hook-log`, `hook-stats`, `doctor`, `statusline`,
 `memory …`) also takes `--state-dir DIR` (for `serve`, where `--memory` keeps its store: give it the
@@ -87,6 +89,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--memory-write-candidates N` | `4` | 0–10 existing memories each new one is compared with |
 | `--memory-retention-days N` | `30` | 1–365 |
 | `--memory-max-nodes N` | `2000` | 1–2000 memories per workspace |
+| `--memory-debug-log` | off | With `--memory`: every memory event, one line each, in `debug.log` beside the store, for `tail -F` ([below](#following-memory-live)) |
 | `--memory-selection jev\|deterministic` | `jev` | **Experimental, for evaluation** ([D-141](spec/changelog.md#d-141--recorte-da-fase-5-do---memory-braço-determinístico-e-sequências)): `deterministic` keeps the same collection and store but enriches nothing and asks the classifier nothing about memory; a read delivers the local matches (task words and files) whose sources are unchanged, with `basis: deterministic_rank`, no `scores` and `stop_reason: deterministic`. Discovery is unchanged |
 
 ### How an MCP host passes configuration
@@ -448,6 +451,37 @@ stay in the JSON either way). `#ripwire-off` stops injection for that session on
 **Hosts: not validated.** Whether Claude Code and Codex actually use the `memories` field or the
 readable section has not been checked in a real session yet
 ([plan](spec/plan/jev-mem-plan.md), T3.11); until it is, neither host counts as consuming memory.
+
+#### Following memory live
+
+`--memory-debug-log` ([D-164](spec/changelog.md#d-164----memory-debug-log-a-memória-acompanhada-ao-vivo))
+writes one line per memory event to `<state-dir>/memory/<workspace id>/debug.log` (0600, opened
+without following a link). `serve` prints the path on stderr, and `install --memory
+--memory-debug-log` names it. Every process of the workspace writes to the same file: the
+server, each hook and the `memory` commands, each line in one write, so lines never interleave.
+
+```sh
+ripwire-broker install claude-code --workspace "$PWD" --hooks --memory --memory-debug-log --write
+tail -F ~/.local/state/ripwire-broker/memory/*/debug.log
+```
+
+```
+2026-10-09 19:02:11 UTC hook#4121  collect   after_edit scope=2 spooled 6c59ca9d4f65
+2026-10-09 19:02:14 UTC serve#9800 ingest    added=1 duplicates=0 rejected=0 forgotten=0
+2026-10-09 19:02:15 UTC serve#9800 enrich    6c59ca9d4f65 run=1 state=complete requests=3 relations=2 412ms
+2026-10-09 19:03:40 UTC serve#9800 read      task#a1c9e04b (34 chars) kept=1 [6c59ca9d4f65] visited=4 requests=2 stop=sufficient 388ms
+```
+
+The stages: `collect` (an observation admitted, refused with its reason, skipped or unconfirmed),
+`spool`, `ingest`, `enrich`, `consolidate`, `read`, `retention`, `forget`, `retry`, `resume`,
+`drain`, and `worker` (what the worker also says on stderr: a stage that starts failing, a refused
+key, a panic). A tick with nothing to do writes nothing. A line holds ids (their first 12
+characters), counts, reasons and durations; never a memory's text, a file's body or the task,
+which appears only as `task#` and the first 8 hex digits of its SHA-256. What goes to the provider
+is `jev.log`'s (`--log`). Past 10 MiB the file becomes `debug.log.1` (replacing the previous
+one) and a new one starts; `tail -F` follows the new file, `tail -f` stays on the old one.
+Without the flag nothing is written. Two processes that cross the limit at the same moment can
+set aside one file each, and the second replaces the first's `debug.log.1`.
 
 **Forgetting:** forgetting a memory removes it, every note derived from it and its pending
 copies, in a new generation, and keeps its id from coming back for the retention period, even

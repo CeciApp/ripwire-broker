@@ -29,6 +29,8 @@ pub struct MemoryConfig {
     pub read: Option<super::retrieve::ReadSetup>,
     /// Where `serve` counts memory reads and stores for the status line (D-154); `None` elsewhere.
     pub activity: Option<Arc<crate::server_status::Activities>>,
+    /// `--memory-debug-log` (D-164): each observation's fate, one line each.
+    pub debug: Option<Arc<super::debug::DebugLog>>,
 }
 
 impl std::fmt::Debug for MemoryConfig {
@@ -51,6 +53,7 @@ impl MemoryConfig {
             worker: None,
             read: None,
             activity: None,
+            debug: None,
         }
     }
 }
@@ -122,11 +125,25 @@ impl Publisher {
         scope: Vec<String>,
         event_key: String,
     ) {
+        let say = |what: String| {
+            if let Some(log) = &self.config.debug {
+                let event = match event {
+                    Event::AfterEdit => "after_edit",
+                    Event::BeforeFinish => "before_finish",
+                };
+                log.event("collect", &format!("{event} {what}"));
+            }
+        };
         if env.status == Status::Unknown || scope.is_empty() {
+            say(match scope.is_empty() {
+                true => "skipped: nothing in scope".into(),
+                false => "skipped: the analysis was unknown".into(),
+            });
             return;
         }
         let Some(reader) = self.reader.clone() else {
             self.count(|c| c.rejected += 1);
+            say("rejected: the workspace cannot be read".into());
             return;
         };
         // Reserved in one step, so concurrent answers never go past the cap.
@@ -138,8 +155,10 @@ impl Publisher {
             });
         if reserved.is_err() {
             self.count(|c| c.unconfirmed += 1);
+            say(format!("dropped: {max} writes already in flight"));
             return;
         }
+        let in_scope = scope.len();
         let slot = Slot(self.in_flight.clone());
         let draft = Draft {
             event_key,
@@ -169,17 +188,38 @@ impl Publisher {
         let (spool, workspace_id) = (self.config.spool.clone(), self.config.workspace_id.clone());
         let write = tokio::task::spawn_blocking(move || {
             let _slot = slot;
-            admission::admit(&reader, &workspace_id, &draft, stamp)
-                .map_err(|_| ())
-                .and_then(|record| spool.enqueue(&record).map_err(|_| ()))
+            let record = admission::admit(&reader, &workspace_id, &draft, stamp)
+                .map_err(|why| format!("refused={}", why.as_str()))?;
+            spool
+                .enqueue(&record)
+                .map(|()| record.node_id)
+                .map_err(|r| format!("spool refused={}", r.as_str()))
         });
-        match tokio::time::timeout(self.config.wait, write).await {
-            Ok(Ok(Ok(()))) => self.count(|c| c.confirmed += 1),
-            Ok(_) => self.count(|c| c.rejected += 1),
+        let wait = self.config.wait;
+        match tokio::time::timeout(wait, write).await {
+            Ok(Ok(Ok(id))) => {
+                self.count(|c| c.confirmed += 1);
+                say(format!(
+                    "scope={in_scope} spooled {}",
+                    super::debug::short(&id)
+                ));
+            }
+            Ok(Ok(Err(why))) => {
+                self.count(|c| c.rejected += 1);
+                say(format!("scope={in_scope} {why}"));
+            }
+            Ok(Err(_)) => {
+                self.count(|c| c.rejected += 1);
+                say(format!("scope={in_scope} failed: the write panicked"));
+            }
             Err(_) => {
                 // Still running: a late write keeps the same node id and is reconciled on
                 // ingestion; it is never counted as durable here.
-                self.count(|c| c.unconfirmed += 1)
+                self.count(|c| c.unconfirmed += 1);
+                say(format!(
+                    "scope={in_scope} unconfirmed: still writing after {} ms",
+                    wait.as_millis()
+                ));
             }
         }
     }

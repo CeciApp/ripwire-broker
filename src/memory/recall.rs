@@ -35,6 +35,46 @@ enum Miss {
     Unavailable(Unavailable),
 }
 
+/// A read for `--memory-debug-log` (D-164): the task only by a short hash and its length, the
+/// memories by id, and why the read stopped.
+fn said(query: &str, got: &Recalled, took: std::time::Duration) -> String {
+    use sha2::Digest as _;
+    let hash = format!("{:x}", sha2::Sha256::digest(query.as_bytes()));
+    let mut line = format!("task#{} ({} chars)", &hash[..8], query.chars().count());
+    match &got.read {
+        Some(r) => {
+            let kept: Vec<&str> = r
+                .memories
+                .iter()
+                .map(|f| super::debug::short(&f.record.node_id))
+                .collect();
+            line.push_str(&format!(
+                " kept={} [{}] visited={} requests={} stop={}",
+                kept.len(),
+                kept.join(" "),
+                r.visited,
+                r.requests,
+                super::debug::name(&r.stop)
+            ));
+            if r.degraded {
+                line.push_str(" degraded");
+            }
+            if r.partial {
+                line.push_str(" partial");
+            }
+            if r.stale_omitted > 0 {
+                line.push_str(&format!(" stale_omitted={}", r.stale_omitted));
+            }
+        }
+        None => line.push_str(" no read"),
+    }
+    for l in &got.limitations {
+        line.push_str(&format!(" limitation={}", l.kind));
+    }
+    line.push_str(&format!(" {}ms", took.as_millis()));
+    line
+}
+
 /// Of the read's deadline, what the checks right before delivery keep for themselves: 50 ms, or a
 /// fifth of a shorter deadline.
 fn revalidation(deadline: std::time::Duration) -> std::time::Duration {
@@ -74,6 +114,15 @@ impl Recall {
     /// Reads memory for `query` inside the read's deadline, the snapshot load and the checks right
     /// before delivery included. Never fails: what goes wrong is a limitation.
     pub async fn read(&self, query: &str) -> Recalled {
+        let started = std::time::Instant::now();
+        let got = self.read_now(query).await;
+        self.setup
+            .store
+            .debug("read", || said(query, &got, started.elapsed()));
+        got
+    }
+
+    async fn read_now(&self, query: &str) -> Recalled {
         let cfg = &self.setup.cfg;
         let until = tokio::time::Instant::now() + cfg.deadline;
         let left = || until.saturating_duration_since(tokio::time::Instant::now());
