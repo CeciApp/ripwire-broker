@@ -302,6 +302,30 @@ fn zero_context_shows_and_missing_or_out_of_range_does_not() {
 }
 
 #[test]
+fn a_missing_session_id_is_told_apart_from_a_missing_snapshot() {
+    // No session id: no projection can be named, so the bar says so instead of blaming the hooks.
+    assert_eq!(
+        render(
+            &host(r#"{"model":{"display_name":"Opus"}}"#),
+            None,
+            &WIDE,
+            0
+        ),
+        "rw-brkr · Opus · hooks sem sessão"
+    );
+    // A session id with no projection behind it is still `sem dados`.
+    assert_eq!(
+        render(
+            &host(r#"{"session_id":"s","model":{"display_name":"Opus"}}"#),
+            None,
+            &WIDE,
+            0
+        ),
+        "rw-brkr · Opus · hooks sem dados"
+    );
+}
+
+#[test]
 fn host_fields_with_the_wrong_type_are_omitted() {
     let line = render(
         &host(r#"{"model":"Sonnet","effort":3,"context_window":[]}"#),
@@ -309,7 +333,7 @@ fn host_fields_with_the_wrong_type_are_omitted() {
         &WIDE,
         0,
     );
-    assert_eq!(line, "rw-brkr · hooks sem dados");
+    assert_eq!(line, "rw-brkr · hooks sem sessão");
 }
 
 #[test]
@@ -317,7 +341,7 @@ fn invalid_or_empty_input_degrades_to_the_prefix() {
     for text in ["", "{", "[]", "null", "\u{0}"] {
         assert_eq!(
             render(&host(text), None, &WIDE, 0),
-            "rw-brkr · hooks sem dados",
+            "rw-brkr · hooks sem sessão",
             "{text:?}"
         );
     }
@@ -638,7 +662,7 @@ fn invisible_format_characters_are_dropped_like_controls() {
         &WIDE,
         0,
     );
-    assert_eq!(line, "rw-brkr · Opus · hooks sem dados");
+    assert_eq!(line, "rw-brkr · Opus · hooks sem sessão");
 }
 
 fn detail_line(s: &Snapshot, now: u64) -> String {
@@ -1345,7 +1369,7 @@ fn without_a_session_id_nothing_is_read() {
         br#"{"model":{"display_name":"Opus"}}"#,
         &[],
     );
-    assert!(out.contains("hooks sem dados"), "{out}");
+    assert!(out.contains("hooks sem sessão"), "{out}");
 }
 
 #[test]
@@ -1356,7 +1380,7 @@ fn bad_stdin_degrades_and_still_exits_zero() {
     for stdin in [&b""[..], b"{", b"\xff\xfe", &huge[..]] {
         let (code, out, err) = run_bar(&["--state-dir", sd], stdin, &[]);
         assert_eq!(code, 0, "{err}");
-        assert_eq!(out, "rw-brkr · hooks sem dados\n");
+        assert_eq!(out, "rw-brkr · hooks sem sessão\n");
         assert!(err.len() < 200, "no long logs: {err}");
     }
 
@@ -1368,7 +1392,7 @@ fn bad_stdin_degrades_and_still_exits_zero() {
     let (code, out, err) = run_bar(&["--state-dir", sd], &oversized, &[]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(
-        out, "rw-brkr · hooks sem dados\n",
+        out, "rw-brkr · hooks sem sessão\n",
         "model must not appear when over limit"
     );
     assert!(err.len() < 200, "no long logs: {err}");
@@ -1379,7 +1403,7 @@ fn bad_stdin_degrades_and_still_exits_zero() {
     let (code, out, err) = run_bar(&["--state-dir", sd], &at_limit, &[]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(
-        out, "rw-brkr · X · hooks sem dados\n",
+        out, "rw-brkr · X · hooks sem sessão\n",
         "model appears at limit"
     );
     assert!(err.len() < 200, "no long logs: {err}");
@@ -1539,7 +1563,7 @@ fn a_cut_after_a_space_leaves_no_trailing_space() {
     let line = render(&host(&json), None, &WIDE, 0);
     assert_eq!(
         line,
-        format!("rw-brkr · agente: {} · hooks sem dados", "x".repeat(23))
+        format!("rw-brkr · agente: {} · hooks sem sessão", "x".repeat(23))
     );
 }
 

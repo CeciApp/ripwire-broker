@@ -559,6 +559,7 @@ rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · inj 7 · não reenviados 18 
 | `inj 7` | Injections and blocks the hooks counted in this session |
 | `não reenviados 18` | Logical items not resent because the session already had them (not tokens, not Anthropic prompt-cache hits) |
 | `hooks sem dados` | No projection for this session |
+| `hooks sem sessão` | The host input has no `session_id`, so no projection can be looked up |
 | `[jev:3]` | With a live `serve --online`: Jev requests it sent in the last five seconds, refused ones included |
 | `[jev: no key]` / `[jev: invalid key]` | In place of `[jev:N]`, red when colored, kept when the line is narrow: the key is unset (nothing is sent), or malformed or refused by Jev |
 | `[mem: retr 1, stor 2]` | With a live `serve --memory`: memory reads by `context_for_task` and observations written by the tools, in the last five seconds |
