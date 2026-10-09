@@ -1523,3 +1523,30 @@ async fn a_spend_that_missed_the_quota_file_is_written_later() {
 
     assert_eq!(used(), expected, "both reads are on the quota file");
 }
+
+// ---------------------------------------------------------------- --memory-debug-log (D-164)
+
+#[tokio::test]
+async fn a_read_is_logged_by_its_outcome_and_never_by_the_task_text() {
+    let (root, st) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::write(root.path(), "src/a.rs", "fn a() {}\n");
+    let ws = identity::workspace_id(root.path()).unwrap();
+    let store = Arc::new(Store::new(st.path(), &ws).with_debug_log("test").unwrap());
+    let record = observed(root.path(), &ws, "src/a.rs", "eviction");
+    store.enqueue(&record).unwrap();
+    store.ingest().unwrap();
+    let recall = recall(&store, root.path(), passing());
+    let task = "why does the cache evict too early";
+    let got = recall.read(task).await;
+    assert!(got.read.is_some());
+
+    let log =
+        std::fs::read_to_string(store.dir().join(ripwire_broker::memory::debug::FILE)).unwrap();
+    let read = log
+        .lines()
+        .find(|l| l.get(24..).and_then(|r| r.split_whitespace().nth(1)) == Some("read"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(read.contains("task#"), "the task by a hash: {read}");
+    assert!(read.contains("stop="), "{read}");
+    assert!(!log.contains(task) && !log.contains("evict too"), "{log}");
+}

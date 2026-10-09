@@ -139,6 +139,20 @@ pub enum Refusal {
     Revoked,
 }
 
+impl Refusal {
+    /// A category for a log line; never a path or content.
+    pub fn as_str(self) -> String {
+        match self {
+            Self::Unavailable(u) => format!("unavailable:{}", u.as_str()),
+            Self::Full(f) => format!("full:{}", format!("{f:?}").to_lowercase()),
+            Self::Locked => "locked".into(),
+            Self::InvalidId => "invalid_id".into(),
+            Self::Crashed => "crashed".into(),
+            Self::Revoked => "revoked".into(),
+        }
+    }
+}
+
 impl From<Unavailable> for Refusal {
     fn from(u: Unavailable) -> Self {
         Self::Unavailable(u)
@@ -233,6 +247,8 @@ pub enum Version {
 pub struct Store {
     dir: PathBuf,
     limits: Limits,
+    /// `--memory-debug-log` (D-164): what this process does to the store, line by line.
+    debug: Option<std::sync::Arc<super::debug::DebugLog>>,
 }
 
 impl Store {
@@ -258,6 +274,29 @@ impl Store {
         Self {
             dir: state_dir.join("memory").join(workspace_id),
             limits,
+            debug: None,
+        }
+    }
+
+    /// This store, writing what it does to `debug.log` in its directory; `process` names the
+    /// writer in each line (`serve`, `hook`, `drain`, `cli`).
+    pub fn with_debug_log(self, process: &str) -> std::io::Result<Self> {
+        let log = super::debug::DebugLog::open(&self.dir, process)?;
+        Ok(Self {
+            debug: Some(std::sync::Arc::new(log)),
+            ..self
+        })
+    }
+
+    /// The log [`Store::with_debug_log`] opened, for what happens around the store.
+    pub fn debug_log(&self) -> Option<&std::sync::Arc<super::debug::DebugLog>> {
+        self.debug.as_ref()
+    }
+
+    /// A line in the debug log, when there is one; `detail` is only built then.
+    pub fn debug(&self, stage: &str, detail: impl FnOnce() -> String) {
+        if let Some(log) = &self.debug {
+            log.event(stage, &detail());
         }
     }
 
@@ -389,7 +428,15 @@ impl Store {
     /// Publishes an admitted observation to the spool. Durable once it returns; no lock, no
     /// snapshot read. A replay of a pending node replaces its file and takes no room.
     pub fn enqueue(&self, record: &Record) -> Result<(), Refusal> {
-        self.enqueue_with(record, || {})
+        let done = self.enqueue_with(record, || {});
+        self.debug("spool", || {
+            let id = super::debug::short(&record.node_id);
+            match done {
+                Ok(()) => format!("{id} kind={} queued", super::debug::name(&record.kind)),
+                Err(r) => format!("{id} refused={}", r.as_str()),
+            }
+        });
+        done
     }
 
     /// [`Store::enqueue`] with `between` run after the revocation check and before the file
@@ -455,7 +502,24 @@ impl Store {
 
     /// Incorporates the spool into a new generation under the writer lock.
     pub fn ingest(&self) -> Result<Ingested, Refusal> {
-        self.ingest_until(None)
+        let done = self.ingest_until(None);
+        match done {
+            // A tick with nothing to do says nothing: the worker runs one every few seconds.
+            Ok(i) if i == Ingested::default() => {}
+            Ok(i) => self.debug("ingest", || {
+                let mut d = format!(
+                    "added={} duplicates={} rejected={} forgotten={}",
+                    i.added, i.duplicates, i.rejected, i.forgotten
+                );
+                if let Some(f) = i.refused {
+                    d.push_str(&format!(" stopped={}", Refusal::Full(f).as_str()));
+                }
+                d
+            }),
+            Err(Refusal::Locked) => {}
+            Err(r) => self.debug("ingest", || format!("failed={}", r.as_str())),
+        }
+        done
     }
 
     /// [`Store::ingest`] stopped at `step`, as a crash there would: for fault-injection tests.
@@ -577,6 +641,23 @@ impl Store {
     /// Retention (PRD jev-mem §6): removes what expired by `now_ms` and every note derived from
     /// it, at any depth. A derived note never outlives a parent.
     pub fn sweep(&self, now_ms: u64) -> Result<Swept, Refusal> {
+        let done = self.sweep_at(now_ms);
+        match done {
+            Ok(Swept {
+                removed: 0,
+                suspended: false,
+            })
+            | Err(Refusal::Locked) => {}
+            Ok(w) => self.debug("retention", || match w.suspended {
+                true => "clock behind the trusted reading: nothing expires by age".into(),
+                false => format!("expired={}", w.removed),
+            }),
+            Err(r) => self.debug("retention", || format!("failed={}", r.as_str())),
+        }
+        done
+    }
+
+    fn sweep_at(&self, now_ms: u64) -> Result<Swept, Refusal> {
         let _writer = self.writer()?;
         let mut state = self.load()?;
         if now_ms < state.trusted_ms {
@@ -619,6 +700,18 @@ impl Store {
     /// without them, then their spool entries go. A tombstone keeps each id out until `until_ms`,
     /// including an id that never reached the store. Returns how many nodes were removed.
     pub fn forget(&self, node_id: &str, until_ms: u64) -> Result<usize, Refusal> {
+        let done = self.forget_one(node_id, until_ms);
+        self.debug("forget", || {
+            let id = super::debug::short(node_id);
+            match done {
+                Ok(n) => format!("{id} removed={n} (with derived notes)"),
+                Err(r) => format!("{id} failed={}", r.as_str()),
+            }
+        });
+        done
+    }
+
+    fn forget_one(&self, node_id: &str, until_ms: u64) -> Result<usize, Refusal> {
         let name = spool_name(node_id)?;
         let _writer = self.writer()?;
         let mut state = self.load()?;
@@ -650,6 +743,15 @@ impl Store {
     /// `forget --all`: revokes collection first, so a crash midway never leaves it on, then
     /// forgets every node and every pending observation. Returns how many nodes were removed.
     pub fn forget_all(&self, until_ms: u64) -> Result<usize, Refusal> {
+        let done = self.forget_everything(until_ms);
+        self.debug("forget", || match done {
+            Ok(n) => format!("all removed={n}; collection revoked"),
+            Err(r) => format!("all failed={}", r.as_str()),
+        });
+        done
+    }
+
+    fn forget_everything(&self, until_ms: u64) -> Result<usize, Refusal> {
         let _writer = self.writer()?;
         crate::state::write_private(&self.dir, &self.dir.join(REVOKED), b"")
             .and_then(|()| fs::File::open(&self.dir)?.sync_all())
@@ -733,6 +835,16 @@ impl Store {
 
     /// `memory resume`: lifts the revocation. `false` when there was none.
     pub fn resume(&self) -> Result<bool, Refusal> {
+        let done = self.lift_revocation();
+        self.debug("resume", || match done {
+            Ok(true) => "collection resumed".into(),
+            Ok(false) => "collection was not revoked".into(),
+            Err(r) => format!("failed={}", r.as_str()),
+        });
+        done
+    }
+
+    fn lift_revocation(&self) -> Result<bool, Refusal> {
         let _writer = self.writer()?;
         if !self.is_revoked() {
             return Ok(false);
@@ -866,6 +978,15 @@ impl Store {
     /// `memory retry`: every failed job back to pending, with its runs, and every pending job set
     /// aside by a wait made ready now. Returns how many.
     pub fn retry_all_failed(&self) -> Result<usize, Refusal> {
+        let done = self.retry_every_failed();
+        self.debug("retry", || match done {
+            Ok(n) => format!("jobs back={n}"),
+            Err(r) => format!("failed={}", r.as_str()),
+        });
+        done
+    }
+
+    fn retry_every_failed(&self) -> Result<usize, Refusal> {
         let _writer = self.writer()?;
         let mut state = self.load()?;
         let mut n = 0;

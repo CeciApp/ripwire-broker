@@ -1816,3 +1816,63 @@ async fn a_stopped_worker_says_nothing() {
     let said: Vec<String> = rx.try_iter().collect();
     assert!(said.is_empty(), "{said:?}");
 }
+
+// ---------------------------------------------------------------- --memory-debug-log (D-164)
+
+#[tokio::test]
+async fn the_worker_logs_each_enrichment_by_node_and_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = stored(dir.path(), &[rec(1, "cache layer", &["e"])]);
+    let store = Arc::new(plain.with_debug_log("test").unwrap());
+    let fake = Scripted::new(vec![Some(ClassifyError::Auth(401))]);
+    let w = worker(&store, fake.clone());
+    w.run_once(1_000).await.unwrap().expect("one job");
+
+    let log =
+        std::fs::read_to_string(store.dir().join(ripwire_broker::memory::debug::FILE)).unwrap();
+    let line = log
+        .lines()
+        .find(|l| l.get(24..).and_then(|r| r.split_whitespace().nth(1)) == Some("enrich"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(line.contains(&id(1)[..12]), "{line}");
+    assert!(line.contains("run=1 state=failed"), "{line}");
+    assert!(line.contains("auth_failed"), "{line}");
+    assert!(!log.contains("cache layer"), "no memory text: {log}");
+}
+
+#[tokio::test]
+async fn serve_with_the_debug_log_opens_it_beside_the_store_and_hands_it_to_collection() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let w = ws.path().to_str().unwrap();
+    let on = runtime::from_serve(
+        &serve(&["--workspace", w, "--memory", "--memory-debug-log"]),
+        state.path(),
+        Some(Scripted::new(vec![])),
+    )
+    .unwrap()
+    .unwrap();
+    let log = on
+        .publish()
+        .debug
+        .as_ref()
+        .expect("collection writes to it");
+    let ws_id = ripwire_broker::memory::identity::workspace_id(ws.path()).unwrap();
+    assert_eq!(
+        log.path(),
+        state
+            .path()
+            .join("memory")
+            .join(ws_id)
+            .join(ripwire_broker::memory::debug::FILE)
+    );
+    assert!(log.path().exists());
+
+    let off = runtime::from_serve(
+        &serve(&["--workspace", w, "--memory"]),
+        state.path(),
+        Some(Scripted::new(vec![])),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(off.publish().debug.is_none());
+}

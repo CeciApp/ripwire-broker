@@ -21,25 +21,27 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                                 [--jev-lookahead-max N] [--log]]
                       [--memory [--memory-read-deadline-ms N] [--memory-read-request-limit N]
                                 [--memory-write-candidates N] [--memory-retention-days N] [--memory-max-nodes N]
-                                [--memory-selection jev|deterministic]]
+                                [--memory-selection jev|deterministic] [--memory-debug-log]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
-                      [--edit-interval-ms N] [--memory]
+                      [--edit-interval-ms N] [--memory [--memory-debug-log]]
        ripwire-broker hook-log --session ID [--state-dir DIR]
        ripwire-broker hook-stats [--state-dir DIR] [--json]
        ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] [--] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
                       [--jev-probe [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
-       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online] [--memory]
+       ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online]
+                      [--memory [--memory-debug-log]]
        ripwire-broker statusline [--workspace DIR] [--state-dir DIR] [--detail] [--width N] [--color never|always]
        ripwire-broker memory status --workspace DIR [--state-dir DIR] [--json]
-       ripwire-broker memory forget --workspace DIR [--state-dir DIR] (--all | --id ID)
-       ripwire-broker memory add --workspace DIR [--state-dir DIR] --file PATH
+       ripwire-broker memory forget --workspace DIR [--state-dir DIR] (--all | --id ID) [--memory-debug-log]
+       ripwire-broker memory add --workspace DIR [--state-dir DIR] --file PATH [--memory-debug-log]
        ripwire-broker memory drain --workspace DIR [--state-dir DIR] --online [--jev-model MODEL] [--memory-write-candidates N]
-       ripwire-broker memory retry --workspace DIR [--state-dir DIR]
-       ripwire-broker memory resume --workspace DIR [--state-dir DIR]
+                      [--memory-debug-log]
+       ripwire-broker memory retry --workspace DIR [--state-dir DIR] [--memory-debug-log]
+       ripwire-broker memory resume --workspace DIR [--state-dir DIR] [--memory-debug-log]
 
 --online: O modo online envia previews e trechos elegíveis do workspace ao provider Jev.
 Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
@@ -108,6 +110,8 @@ pub struct MemoryArgs {
     pub max_nodes: usize,
     /// `--memory-selection`: the classifier (default) or, for evaluation, the local ranking.
     pub selection: crate::memory::retrieve::Selection,
+    /// `--memory-debug-log`: every memory event, one line each, in the store's `debug.log` (D-164).
+    pub debug_log: bool,
 }
 
 /// `--online` and its `--jev-*` companions (PRD §23.6, D-059). No credential here: it comes
@@ -165,6 +169,8 @@ pub struct HookArgs {
     /// Publish observations to the workspace's memory spool (PD-3): local only, never HTTP,
     /// and never implies `--online`.
     pub memory: bool,
+    /// `--memory-debug-log`: what the hook does to memory, in the store's `debug.log` (D-164).
+    pub memory_debug_log: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,6 +210,8 @@ pub struct InstallArgs {
     pub online: bool,
     /// `--memory` on the server and the hooks (PD-3); implies online on the server only.
     pub memory: bool,
+    /// `--memory-debug-log` on the server and the hooks, beside `--memory` (D-164).
+    pub memory_debug_log: bool,
 }
 
 /// What `memory` does; every action is local: no network, credential or `online` feature.
@@ -235,6 +243,8 @@ pub struct MemoryCommand {
     pub action: MemoryAction,
     pub workspace: PathBuf,
     pub state_dir: Option<PathBuf>,
+    /// `--memory-debug-log`: what the command does, in the store's `debug.log` (D-164).
+    pub debug_log: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -418,8 +428,17 @@ impl Flags {
         }
     }
 
+    /// `--memory-debug-log` follows `--memory`, wherever it is taken.
+    fn memory_debug_log(&self) -> Result<bool, String> {
+        match (self.on("--memory-debug-log"), self.on("--memory")) {
+            (true, false) => Err(usage("--memory-debug-log needs --memory")),
+            (on, _) => Ok(on),
+        }
+    }
+
     fn memory(&self) -> Result<Option<MemoryArgs>, String> {
         if !self.on("--memory") {
+            self.memory_debug_log()?;
             return match self.memory.is_empty() {
                 true => Ok(None),
                 false => Err(usage("the --memory-* options need --memory")),
@@ -445,6 +464,7 @@ impl Flags {
                     return Err(usage("--memory-selection takes jev or deterministic"));
                 }
             },
+            debug_log: self.on("--memory-debug-log"),
         }))
     }
 
@@ -468,6 +488,7 @@ const SWITCHES: &[&str] = &[
     "--write",
     "--online",
     "--memory",
+    "--memory-debug-log",
     "--jev-no-cache",
     "--jev-probe",
     "--log",
@@ -663,6 +684,7 @@ fn parse_serve(it: Args) -> Result<Command, String> {
                 SUMMARIZER[3],
                 "--online",
                 "--memory",
+                "--memory-debug-log",
                 "--jev-no-cache",
                 "--log",
                 "--state-dir",
@@ -738,6 +760,7 @@ fn parse_hook(mut it: Args) -> Result<Command, String> {
             "--log-refs",
             "--edit-interval-ms",
             "--memory",
+            "--memory-debug-log",
         ]),
     )?;
     no_words(&f)?;
@@ -752,6 +775,7 @@ fn parse_hook(mut it: Args) -> Result<Command, String> {
         log_refs: f.on("--log-refs"),
         edit_interval_ms: f.edit_interval_ms,
         memory: f.on("--memory"),
+        memory_debug_log: f.memory_debug_log()?,
     }))
 }
 
@@ -826,6 +850,7 @@ fn parse_install(mut it: Args) -> Result<Command, String> {
             "--codex-home",
             "--online",
             "--memory",
+            "--memory-debug-log",
         ],
     )?;
     no_words(&f)?;
@@ -841,6 +866,7 @@ fn parse_install(mut it: Args) -> Result<Command, String> {
         codex_home: f.codex_home.clone(),
         online: f.on("--online"),
         memory: f.on("--memory"),
+        memory_debug_log: f.memory_debug_log()?,
     }))
 }
 
@@ -878,11 +904,16 @@ fn parse_memory(mut it: Args) -> Result<Command, String> {
     let verb = it.next();
     let extra: &[&str] = match verb.as_deref() {
         Some("status") => &["--json"],
-        Some("forget") => &["--all", "--id"],
-        Some("add") => &["--file"],
-        Some("drain") => &["--online", "--jev-model", "--memory-write-candidates"],
-        Some("retry") => &[],
-        Some("resume") => &[],
+        Some("forget") => &["--all", "--id", "--memory-debug-log"],
+        Some("add") => &["--file", "--memory-debug-log"],
+        Some("drain") => &[
+            "--online",
+            "--jev-model",
+            "--memory-write-candidates",
+            "--memory-debug-log",
+        ],
+        Some("retry") => &["--memory-debug-log"],
+        Some("resume") => &["--memory-debug-log"],
         other => return Err(usage(format_args!("unknown memory command {other:?}"))),
     };
     let allowed: Vec<&str> = ["--workspace", "--state-dir"]
@@ -928,6 +959,7 @@ fn parse_memory(mut it: Args) -> Result<Command, String> {
     Ok(Command::Memory(MemoryCommand {
         action,
         workspace: f.workspace()?,
+        debug_log: f.on("--memory-debug-log"),
         state_dir: f.state_dir,
     }))
 }

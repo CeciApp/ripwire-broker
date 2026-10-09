@@ -138,6 +138,7 @@ Descoberta e memória compartilham cliente HTTP, autenticação e controle globa
 | `--memory-write-candidates` | `4`, faixa 0–10 |
 | `--memory-retention-days` | `30`, faixa 1–365 |
 | `--memory-max-nodes` | `2000`, faixa 1–2000 |
+| `--memory-debug-log` | falso; com `--memory` (no `serve`, nos hooks e no `install`) e nos comandos `memory` que mudam o store: uma linha por evento da memória em `debug.log`, ao lado do store, para `tail -F`. Ids, contagens, motivos e durações; nunca o texto de uma memória, o corpo de um arquivo nem a tarefa (só um hash dela). Rotação em 10 MiB (D-164) |
 | `--memory-selection` | `jev`; `deterministic` é o controle da avaliação (braço C, D-141): a mesma coleta e o mesmo store, sem enriquecer nem perguntar ao Jev sobre memória, leitura pelas âncoras locais |
 | `memory status --workspace PATH` | leitura local, sem rede ou credencial: filas, schema, tamanhos, último erro categorizado |
 | `memory drain --workspace PATH --online` | execução explícita limitada a 60 s, até 20 jobs; exige feature `online` e credencial. Único subcomando, além do `serve`, que aceita `--online`: exceção explícita ao [D-064](../spec/changelog.md#d-064--cache-diagnóstico-e-integração-proposta), não a revogação dele (D-135, PD-2) |

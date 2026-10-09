@@ -74,6 +74,9 @@ fn settings(
             memory::runtime::from_serve(&a, &dir, memory_client)?
         }
     };
+    if let Some(log) = runtime.as_ref().and_then(|r| r.publish().debug.as_ref()) {
+        eprintln!("ripwire-broker: memory debug log: {}", log.path().display());
+    }
     let workspace = a
         .workspace
         .canonicalize()
@@ -181,10 +184,11 @@ async fn memory_drain(
     state_dir: Option<std::path::PathBuf>,
     model: Option<String>,
     candidates: Option<usize>,
+    debug_log: bool,
 ) -> ExitCode {
     #[cfg(not(feature = "online"))]
     {
-        let _ = (workspace, state_dir, model, candidates);
+        let _ = (workspace, state_dir, model, candidates, debug_log);
         eprintln!(
             "memory drain --online: this binary was built without the online feature; \
              rebuild it with `cargo build --release --features online`"
@@ -218,7 +222,14 @@ async fn memory_drain(
             Ok(id) => id,
             Err(e) => return fail(e),
         };
-        let store = Arc::new(memory::store::Store::new(&dir, &id));
+        let mut store = memory::store::Store::new(&dir, &id);
+        if debug_log {
+            store = match store.with_debug_log("drain") {
+                Ok(s) => s,
+                Err(e) => return fail(format!("--memory-debug-log: {e}")),
+            };
+        }
+        let store = Arc::new(store);
         let classifier: MemoryClient =
             Arc::new(Shared::new(Arc::new(client), DEFAULT_MAX_IN_FLIGHT));
         let config = Config {
@@ -227,7 +238,12 @@ async fn memory_drain(
         };
         let worker = Worker::new(store.clone(), classifier, config);
         let clock = memory::time::SystemClock;
-        match drain(&store, &worker, &clock, DRAIN_JOBS, DRAIN_DEADLINE).await {
+        let drained = drain(&store, &worker, &clock, DRAIN_JOBS, DRAIN_DEADLINE).await;
+        store.debug("drain", || match &drained {
+            Ok(d) => format!("jobs={} stop={:?}", d.jobs, d.stop),
+            Err(r) => format!("failed={}", r.as_str()),
+        });
+        match drained {
             Ok(d) if matches!(d.stop, memory::runtime::DrainStop::Busy) => fail(
                 "a running server holds this workspace's memory worker; it drains it already"
                     .into(),
@@ -450,7 +466,8 @@ async fn main() -> ExitCode {
             action: cli::MemoryAction::Drain { model, candidates },
             workspace,
             state_dir,
-        })) => memory_drain(&workspace, state_dir, model, candidates).await,
+            debug_log,
+        })) => memory_drain(&workspace, state_dir, model, candidates, debug_log).await,
         // Dispatched before `settings`: local, never online (PRD jev-mem §4).
         Ok(Command::Memory(a)) => memory_local(&a),
         Err(msg) => {

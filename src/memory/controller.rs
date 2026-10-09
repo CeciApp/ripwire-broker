@@ -569,7 +569,24 @@ impl Worker {
         let Some(lease) = self.store.blocking(move |s| s.lease_next(now_ms)).await? else {
             return Ok(None);
         };
-        let ran = enrich(&self.store, &*self.classifier, lease, &self.cfg, now_ms).await?;
+        let (node, run) = (lease.node_id().to_string(), lease.run());
+        let started = std::time::Instant::now();
+        let ran = enrich(&self.store, &*self.classifier, lease, &self.cfg, now_ms).await;
+        self.store.debug("enrich", || {
+            let id = super::debug::short(&node);
+            let ms = started.elapsed().as_millis();
+            match &ran {
+                Ok(e) => format!(
+                    "{id} run={run} state={} requests={} relations={}{} {ms}ms",
+                    super::debug::name(&e.state),
+                    e.requests,
+                    e.edges,
+                    if e.auth_failed { " auth_failed" } else { "" }
+                ),
+                Err(r) => format!("{id} run={run} failed={} {ms}ms", r.as_str()),
+            }
+        });
+        let ran = ran?;
         self.metrics.lock().unwrap().add(&ran.metrics);
         if ran.auth_failed {
             self.suspended
@@ -598,7 +615,31 @@ impl Worker {
         if now_ms < self.next_round_ms.load(SeqCst) {
             return Ok(None);
         }
+        let started = std::time::Instant::now();
         let ran = super::consolidate::round(&self.store, &*self.classifier, &cfg, now_ms).await;
+        // A round that was not due says nothing: the worker asks on every tick.
+        if !matches!(ran, Ok(None)) {
+            self.store.debug("consolidate", || {
+                let ms = started.elapsed().as_millis();
+                match &ran {
+                    Ok(Some(r)) => format!(
+                        "pairs={} decided={} notes={} notes_rejected={} requests={}{} {ms}ms",
+                        r.asked.len(),
+                        r.decided,
+                        r.notes,
+                        r.notes_rejected,
+                        r.requests,
+                        if r.auth_failed { " auth_failed" } else { "" }
+                    ),
+                    Ok(None) => String::new(),
+                    Err(r) => format!(
+                        "failed={} {ms}ms; next try in {} s",
+                        r.as_str(),
+                        super::consolidate::RETRY_AFTER_MS / 1_000
+                    ),
+                }
+            });
+        }
         if ran.is_err() {
             // What it paid for is not bought again at the next tick.
             let next = now_ms.saturating_add(super::consolidate::RETRY_AFTER_MS);

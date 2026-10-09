@@ -56,7 +56,17 @@ pub fn from_serve(
         max_nodes: memory.max_nodes,
         ..Limits::default()
     };
-    let store = Arc::new(Store::with_limits(state_dir, &workspace_id, limits));
+    let mut store = Store::with_limits(state_dir, &workspace_id, limits);
+    if memory.debug_log {
+        let dir = store.dir().to_path_buf();
+        store = store.with_debug_log("serve").map_err(|e| {
+            format!(
+                "--memory-debug-log: {}: {e}",
+                dir.join(super::debug::FILE).display()
+            )
+        })?;
+    }
+    let store = Arc::new(store);
     let config = Config {
         model: args
             .online
@@ -84,6 +94,7 @@ pub fn from_serve(
     let publish = MemoryConfig {
         worker: Some(worker.metrics_handle()),
         read: Some(read),
+        debug: store.debug_log().cloned(),
         ..publish
     };
     Ok(Some(Runtime {
@@ -131,7 +142,14 @@ impl Runtime {
         let (store, worker, cancel) =
             (self.store.clone(), self.worker.clone(), self.cancel.clone());
         let enrich = self.selection == Selection::Jev;
-        let say: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(say);
+        // What the worker says on stderr also goes to the debug log, where the rest of it is.
+        let log = self.store.debug_log().cloned();
+        let say: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |line: &str| {
+            say(line);
+            if let Some(log) = &log {
+                log.event("worker", line);
+            }
+        });
         let watch = say.clone();
         let task = tokio::spawn(async move {
             let mut swept_at: Option<u64> = None;

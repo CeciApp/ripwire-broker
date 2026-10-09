@@ -37,7 +37,12 @@ pub fn run(cmd: &MemoryCommand) -> Result<String, String> {
         .or_else(StateStore::default_dir)
         .ok_or("no state directory: pass --state-dir")?;
     let workspace_id = identity::workspace_id(&cmd.workspace)?;
-    let store = Store::new(&dir, &workspace_id);
+    let mut store = Store::new(&dir, &workspace_id);
+    if cmd.debug_log {
+        store = store
+            .with_debug_log("cli")
+            .map_err(|e| format!("--memory-debug-log: {e}"))?;
+    }
     let now = SystemClock.now_ms();
     match &cmd.action {
         MemoryAction::Status { json } => Ok(status(&store, *json)),
@@ -58,7 +63,10 @@ pub fn run(cmd: &MemoryCommand) -> Result<String, String> {
             ))
         }
         MemoryAction::Add { file } => {
-            let refused = |why: &str| format!("memory add: refused ({why})");
+            let refused = |why: &str| {
+                store.debug("collect", || format!("note refused={why}"));
+                format!("memory add: refused ({why})")
+            };
             // A file inside the workspace passes the whole policy on its path from the root
             // (hidden and dependency directories included); one outside, on its own name.
             let file = std::path::absolute(file).map_err(|_| refused("outside"))?;

@@ -106,6 +106,7 @@
 | 2026-10-06 23:10 | Claude Code 2.1.292: o canal `stable` do instalador parava no 2.1.285; com o 2.1.292 o mod carrega e o kit roda sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, que sai dos portões, do CI e dos READMEs; o job `plugin` fixa o 2.1.292 | [D-161](#d-161--claude-code-21292-sem-a-variável-dos-mods) |
 | 2026-10-07 01:20 | Trabalho futuro (T6.2): um braço `broker-plugin` no eval, que carregue o plugin com `--plugin-dir`, fica proposto e não feito; o que ele exigiria do `src/eval/arm.rs` (os dois nomes do servidor do plugin) e por que esperar | [D-162](#d-162--trabalho-futuro-o-braço-broker-plugin-do-eval) |
 | 2026-10-09 16:30 | Sem `session_id` na entrada do host, a barra mostra `hooks sem sessão` em vez de `hooks sem dados`: sem ele nenhum retrato pode ser lido, e o texto antigo parecia acusar os hooks; 1 teste novo, 6 expectativas ajustadas | [D-163](#d-163--hooks-sem-sessão-quando-falta-o-session_id) |
+| 2026-10-09 18:00 | `--memory-debug-log`: com `--memory`, cada evento da memória (coleta, spool, ingestão, enriquecimento, consolidação, leitura, retenção, esquecimento, worker) vira uma linha em `debug.log` ao lado do store, escrita por todos os processos do workspace, para `tail -F`; ids, contagens e motivos, nunca conteúdo; rotação em 10 MiB; o `install` passa a flag ao servidor e aos hooks | [D-164](#d-164----memory-debug-log-a-memória-acompanhada-ao-vivo) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7305,4 +7306,61 @@ aparece com uma entrada fora do contrato; a nota do `install` sobre `hooks sem d
 
 **Testes:** `a_missing_session_id_is_told_apart_from_a_missing_snapshot` (novo); as expectativas de
 `hooks sem dados` com entrada sem `session_id` passam a `hooks sem sessão` em `tests/statusline.rs`.
+
+## D-164 — `--memory-debug-log`: a memória acompanhada ao vivo
+
+**Data:** 2026-10-09 18:00.
+
+**Pedido do usuário:** "É possível adicionar um parametro novo (--memory-debug-log) que gera um
+arquivo local com tudo o que está acontecendo para que um outro processo rode um `tail -f`", e
+depois "sim, implemente com esse desenho".
+
+**O que faltava:** acompanhar uma observação do começo ao fim. Havia contagens (`memory status`, o
+resource de status), uma linha no stderr quando uma etapa passa a falhar e o `jev.log` (D-155), que
+só mostra as conversas com o Jev. A coleta acontece nos hooks, processos curtos que não fazem HTTP;
+o enriquecimento e a leitura, no `serve`; o `drain` e os comandos, em processos próprios.
+
+**O desenho:**
+- **Um arquivo por workspace, escrito por todos os processos:** `debug.log` no diretório do store,
+  0600, aberto com `O_NOFOLLOW` e `O_APPEND`; cada linha numa única escrita, então linhas de
+  processos diferentes não se misturam. O log fica no `Store`, que todos os processos já abrem
+  (`Store::with_debug_log`); o `Publisher` recebe o mesmo pelo `MemoryConfig::debug`.
+- **Uma linha por evento:** hora UTC, `processo#pid` (`serve`, `hook`, `drain`, `cli`), etapa
+  alinhada e detalhes `chave=valor`. Etapas: `collect`, `spool`, `ingest`, `enrich`, `consolidate`,
+  `read`, `retention`, `forget`, `retry`, `resume`, `drain` e `worker` (o que o worker já diz no
+  stderr). Um ciclo sem nada a fazer não escreve.
+- **O que entra:** ids (12 primeiros caracteres), contagens, motivos de recusa e de parada,
+  probabilidades agregadas, durações. **O que não entra:** o texto de uma memória, o corpo de um
+  arquivo, o prompt e a tarefa, que aparece como `task#` e 8 dígitos hex do SHA-256, mais o
+  tamanho: o README promete que a tarefa nunca vai para o disco, e o log não quebra isso. O payload
+  inteiro continua sendo do `jev.log` (`--log`), que é outra escolha.
+- **Rotação:** passando de 10 MiB, o arquivo vira `debug.log.1` e outro começa; um escritor que
+  acha o caminho apontando para outro inode reabre. `tail -F` segue a troca. Dois processos que
+  cruzam o limite no mesmo instante podem pôr de lado um arquivo cada, e o segundo substitui o
+  `debug.log.1` do primeiro: aceito num log de depuração.
+- **Onde se liga:** `serve --memory --memory-debug-log` (sem `--memory` é erro de uso, como os
+  outros `--memory-*`), `hook … --memory --memory-debug-log`, `install … --memory
+  --memory-debug-log` (escreve a flag no servidor e nos hooks e mostra o caminho) e os comandos
+  `memory` que mudam o store (`add`, `forget`, `drain`, `retry`, `resume`; o `status` não). Só por
+  argumento: a configuração não usa variáveis de ambiente (D-022).
+- **Falhas:** o `serve`, o `drain` e os comandos param se o arquivo não abre (pediram o log); o
+  hook segue sem ele, porque um hook nunca falha o host. Uma escrita que falha é ignorada.
+
+**Outras mudanças:** o `utc()` do `jev.log` saiu de `online/log.rs` (só com a feature `online`)
+para `memory/time.rs`, que compila no build padrão; o `jev.log` passa a usá-lo de lá.
+`Refusal::as_str` dá a categoria de uma recusa do store para as linhas.
+
+**Testes:** `tests/memory_debug.rs` (formato, permissões e link recusado, caracteres de controle,
+dois escritores sem mistura, rotação seguida por quem tinha o arquivo antigo sem sobrescrever o
+`debug.log.1`, o `Store` dizendo o que fez por id e não por conteúdo, nenhum arquivo sem a flag);
+em `tests/cli.rs`, as flags em cada comando, `memory add`, o hook e o `install`; em
+`tests/memory_retrieval.rs`, a leitura sem o texto da tarefa; em `tests/memory_controller.rs`, o
+enriquecimento e o `serve`. Dez mutações (cada ponto de log, a rotação, a detecção do arquivo
+trocado, a troca de caracteres de controle, a flag do `install`) são pegas.
+
+**Nota de método:** a primeira rodada de mutações deu "sobreviveu" para todas, falso: no zsh, o
+`$t` sem aspas chegou ao cargo como um argumento só e nenhum teste rodou, a mesma armadilha do
+D-140 que o handoff registra. Com `${=t}` e conferindo `panicked` no log, nove das dez foram pegas;
+a que sobrou (a detecção do arquivo trocado) passava porque, no cenário do teste, o arquivo antigo
+também estava cheio, e o teste foi refeito para deixar o novo com pouco conteúdo.
 

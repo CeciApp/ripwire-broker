@@ -6,6 +6,7 @@ pub mod admission;
 pub mod command;
 pub mod consolidate;
 pub mod controller;
+pub mod debug;
 pub mod identity;
 pub mod index;
 pub mod metrics;
