@@ -2,6 +2,7 @@
 // PARITY, hook::plan's decision for each recorded event of each scenario; here the same events go
 // through the mod, which must ask the same tool with the same arguments, or nothing. A difference
 // is the mod's bug, never the Rust's.
+import type { ToolCallResult } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import { broker, cwd, envelope, git, logs } from './broker.ts'
 import { PARITY } from './parity.ts'
@@ -15,7 +16,7 @@ for (const scenario of PARITY) {
     const calls = broker(on, Array.from({ length: 20 }, (_, i) => envelope('any', i + 1)))
     on('prompt.submit', ($, e) => ({ text: e.text }))
     on('turn.complete', () => ({ text: '' }))
-    let answer: Record<string, unknown> = { result: 'ok' }
+    let answer: ToolCallResult = { result: 'ok' }
     on('tool.call', () => answer)
     for (const step of scenario.steps) {
       await clock.set(step.now_ms)
@@ -27,7 +28,7 @@ for (const scenario of PARITY) {
         answer = { result: e.tool_response }
         await $.tool.call({ tool: e.tool_name, ...e.tool_input })
       } else {
-        await $.turn.complete({ turnId: 't', answer: 'done', durationMs: 1, isAborted: false, reason: 'answer', usage: null })
+        await $.turn.complete({ turnId: 't', answer: 'done', durationMs: 1, isAborted: false, reason: 'answer' })
       }
       const asked = calls.slice(before).map((c) => ({ tool: c.tool, args: c.args }))
       const d: any = step.decision

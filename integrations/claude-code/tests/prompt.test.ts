@@ -15,9 +15,9 @@ test('the first prompt gets context and the second does not', async ($, on) => {
     { server: SERVER, tool: 'context_for_task', args: { task: 'fix the parser', budget_tokens: 1500 } },
   ])
   // The prompt the user typed reaches the model as typed, with the envelope after it.
-  expect(reached[0].text).toBe('fix the parser')
-  expect(reached[0].context).toEqual([HEADER + JSON.stringify(envelope('context_for_task', 7))])
-  expect(reached[1].context).toBeUndefined()
+  expect(reached[0]?.text).toBe('fix the parser')
+  expect(reached[0]?.context).toEqual([HEADER + JSON.stringify(envelope('context_for_task', 7))])
+  expect(reached[1]?.context).toBeUndefined()
 })
 
 test('every_prompt asks on every prompt', { options: { every_prompt: true } }, async ($, on) => {
@@ -55,7 +55,7 @@ test('an envelope without content is not injected', async ($, on) => {
   const reached = core(on)
   logs(on)
   await $.prompt.submit(typed('fix the parser'))
-  expect(reached[0].context).toBeUndefined()
+  expect(reached[0]?.context).toBeUndefined()
 })
 
 test('a failed mcp call passes the prompt through and says why', async ($, on) => {
@@ -72,7 +72,7 @@ test('a server that did not connect passes the prompt through', async ($, on) =>
   const reached = core(on)
   const lines = logs(on)
   await $.prompt.submit(typed('fix the parser'))
-  expect(reached[0].context).toBeUndefined()
+  expect(reached[0]?.context).toBeUndefined()
   expect(lines.some((l) => l.includes('did not start'))).toBe(true)
 })
 
