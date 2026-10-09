@@ -3002,8 +3002,8 @@ async fn a_read_asks_no_more_questions_than_the_quota_has_left() {
 async fn reads_in_a_row_count_what_the_ones_before_spent() {
     let agreeable = Arc::new(Agreeable::default());
     let (b, _ws, _st, store) = remembering(agreeable.clone(), ReadConfig::default()).await;
-    // Room for four requests: the first read takes three of them.
-    store.charge(now_ms(), 996, 0).unwrap();
+    // Room for three requests: the first read takes two of them.
+    store.charge(now_ms(), 997, 0).unwrap();
     // Another process holds the quota for now: what the first read spent is not written yet.
     let quota = std::fs::File::open(store.dir().join("quota.lock")).unwrap();
     quota.try_lock().unwrap();
@@ -3014,7 +3014,10 @@ async fn reads_in_a_row_count_what_the_ones_before_spent() {
         })
     };
     let first = ask().await.unwrap().provenance.memory.unwrap();
-    assert_eq!(first.requests, 3, "routing, scoring and stopping");
+    assert_eq!(
+        first.requests, 2,
+        "routing with the scoring (D-165), then stopping"
+    );
     let second = ask().await.unwrap().provenance.memory.unwrap();
     assert!(
         second.requests <= 1,
@@ -3144,7 +3147,8 @@ async fn memory_bookkeeping_never_pushes_the_envelope_past_its_budget() {
 #[tokio::test]
 async fn discovery_and_the_memory_read_share_one_jev_request_limit() {
     use ripwire_broker::online::OnlineConfig;
-    for (jev_limit, memory, discovery) in [(24, 4, 20), (2, 2, 0)] {
+    // With one request the read routes and scores (D-165) and finds the limit before stopping.
+    for (jev_limit, memory, discovery) in [(24, 4, 20), (1, 1, 0)] {
         let fake = FakeUpstream::new().answer("explore", "explore_export_auth");
         let r = common::memory::remembering_configured(
             fake,
