@@ -1,6 +1,8 @@
 // T5.5: the band above the prompt and /ripwire-status, with src/statusline.rs's labels: the mod's
 // own counters (it replaces the classic hooks, whose snapshot feeds the classic status line) and
 // the server's file (statusline/server-<key>-<pid>.json, src/server_status.rs).
+import type { On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
 import { broker, envelope, logs } from './broker.ts'
 
@@ -16,23 +18,23 @@ const hex = (s: string) => [...new TextEncoder().encode(s)].map((b) => b.toStrin
 
 /** The session runs in /work; the state dir is /state/ripwire-broker; `files` are the server
  *  status files there, by name. */
-function machine(on, files: Record<string, unknown> = {}) {
+function machine(on: On, files: Record<string, unknown> = {}) {
   mock.env(on, { XDG_STATE_HOME: '/state', HOME: '/home/u' })
   on('session.cwd', () => ({ value: '/work' }))
   on('fs.stat', ($, e) => ({ value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: e.path } }))
   on('fs.list', ($, e) =>
     e.path === '/state/ripwire-broker/statusline'
-      ? { value: Object.keys(files).map((name) => ({ name, kind: 'file', size: 100, mtimeMs: 1 })) }
+      ? { value: Object.keys(files).map((name) => ({ name, kind: 'file' as const, size: 100, mtimeMs: 1, isLink: false })) }
       : { deny: 'no such directory' },
   )
   on('fs.read', ($, e) => {
-    const name = e.path.split('/').pop()
+    const name = e.path.split('/').pop() ?? ''
     return name in files ? { value: JSON.stringify(files[name]) } : { deny: 'no such file' }
   })
   on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
 }
 
-async function finishWithAttention($, on) {
+async function finishWithAttention($: Engine, on: On) {
   broker(on, [
     envelope('context_before_finish', 3, { status: 'attention_required', risks: [{ kind: 'contract_change' }] }),
   ])
@@ -44,7 +46,7 @@ test('the band draws the status segments on terminal and desktop', async ($, on)
   mock.clock(on, { now: 1_000_000 })
   machine(on)
   await finishWithAttention($, on)
-  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 1, isAborted: false, reason: 'answer', usage: null })
+  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 1, isAborted: false, reason: 'answer' })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...ABOVE, surface })
     expect(await ui.find({ type: 'Text', text: 'rw-brkr · hooks on · última: atenção · inj 0' })).toBeDefined()
@@ -102,7 +104,7 @@ test('/ripwire-status prints the same line', async ($, on) => {
   const registered: string[] = []
   on('command.register', ($, e) => {
     registered.push(e.name)
-    return { value: undefined }
+    return { value: { command: e.name } }
   })
   on('env.set', () => ({ value: undefined }))
   on('session.start', () => ({ cwd: '/work' }))
@@ -110,7 +112,12 @@ test('/ripwire-status prints the same line', async ($, on) => {
   logs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await $.prompt.submit({ text: '#ripwire-off', wait: false, origin: { kind: 'composer' } })
-  const answer = await $.command.run({ command: 'ripwire-status', args: '' })
+  const answer = await $.command.run({
+    command: 'ripwire-status',
+    args: '',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 120 },
+  })
   expect(registered).toEqual(['ripwire-status'])
   expect(answer.text).toBe('rw-brkr · hooks off · inj 0')
 })
@@ -135,7 +142,7 @@ test('at most 16 server files are read', async ($, on) => {
   const now = 1_000_000
   mock.clock(on, { now: now * 1000 })
   const key = hex('/work')
-  const files = {}
+  const files: Record<string, unknown> = {}
   for (let pid = 1; pid <= 17; pid++) {
     files[`server-${key}-${pid}.json`] = {
       schema_version: 1, workspace_key: key, pid, updated_at: now, online: true, memory: false,
@@ -164,7 +171,7 @@ test('a failed finish check shows as an error', async ($, on) => {
   broker(on, [{ deny: 'server gone' }])
   on('turn.complete', () => ({ text: '' }))
   logs(on)
-  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 1, isAborted: false, reason: 'answer', usage: null })
+  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 1, isAborted: false, reason: 'answer' })
   const ui = await $.ui.mount({ ...ABOVE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'rw-brkr · hooks on · última: erro · inj 0' })).toBeDefined()
 })
@@ -174,7 +181,7 @@ test("the finish gate's prompt counts in inj", { options: { gate: true } }, asyn
   machine(on)
   await finishWithAttention($, on)
   on('prompt.submit', ($, e) => ({ text: e.text }))
-  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 1, isAborted: false, reason: 'answer', usage: null })
+  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 1, isAborted: false, reason: 'answer' })
   const ui = await $.ui.mount({ ...ABOVE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'rw-brkr · hooks on · última: atenção · inj 1' })).toBeDefined()
 })
