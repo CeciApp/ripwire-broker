@@ -107,6 +107,7 @@
 | 2026-10-07 01:20 | Trabalho futuro (T6.2): um braço `broker-plugin` no eval, que carregue o plugin com `--plugin-dir`, fica proposto e não feito; o que ele exigiria do `src/eval/arm.rs` (os dois nomes do servidor do plugin) e por que esperar | [D-162](#d-162--trabalho-futuro-o-braço-broker-plugin-do-eval) |
 | 2026-10-09 16:30 | Sem `session_id` na entrada do host, a barra mostra `hooks sem sessão` em vez de `hooks sem dados`: sem ele nenhum retrato pode ser lido, e o texto antigo parecia acusar os hooks; 1 teste novo, 6 expectativas ajustadas | [D-163](#d-163--hooks-sem-sessão-quando-falta-o-session_id) |
 | 2026-10-09 18:00 | `--memory-debug-log`: com `--memory`, cada evento da memória (coleta, spool, ingestão, enriquecimento, consolidação, leitura, retenção, esquecimento, worker) vira uma linha em `debug.log` ao lado do store, escrita por todos os processos do workspace, para `tail -F`; ids, contagens e motivos, nunca conteúdo; rotação em 10 MiB; o `install` passa a flag ao servidor e aos hooks | [D-164](#d-164----memory-debug-log-a-memória-acompanhada-ao-vivo) |
+| 2026-10-09 19:00 | A leitura de memória faz menos idas e voltas ao Jev: o routing vai na mesma request do primeiro scoring, e sem nenhum candidato aceito a leitura termina em `empty` sem a request de stopping. Medido: a latência do Jev não depende das perguntas por request (217 chamadas, r = −0,06); uma leitura que estourava os 850 ms em 3 requests passa a 1–2 requests, 290–560 ms. Uma request basta para ler (revê o D-150) | [D-165](#d-165--a-leitura-de-memória-em-menos-idas-e-voltas) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7363,4 +7364,58 @@ trocado, a troca de caracteres de controle, a flag do `install`) são pegas.
 D-140 que o handoff registra. Com `${=t}` e conferindo `panicked` no log, nove das dez foram pegas;
 a que sobrou (a detecção do arquivo trocado) passava porque, no cenário do teste, o arquivo antigo
 também estava cheio, e o teste foi refeito para deixar o novo com pouco conteúdo.
+
+## D-165 — A leitura de memória em menos idas e voltas
+
+**Data:** 2026-10-09 19:00.
+
+**Pedido do usuário:** depois de ver uma leitura real voltar vazia com `stop=deadline`, "verifique
+se vale reduzir as perguntas por leitura, ou o número de candidatas, para caber no prazo", e então
+"sim, implemente as duas mudanças".
+
+**O que se viu:** com o Jev real, `context_for_task` com `--memory` parava em `deadline` com 3
+requests e nada entregue, mesmo com a memória certa entre as candidatas. O `jev.log` mostrou o
+caminho: o routing respondeu em 364 ms, o scoring em 246 ms e rejeitou as candidatas (relevância
+0,54 contra o limite 0,60), e a request de stopping, perguntando se uma evidência **vazia** bastava,
+estourou o prazo. O recurso local do D-156 não entrou, como desenhado: o Jev já tinha decidido.
+
+**A medição:** nas 217 chamadas com HTTP 200 do `jev.log`, a latência não depende do número de
+perguntas nem do tamanho da request: p50 293 ms com 1–6 perguntas, 284 ms com 12–16, 281 ms com
+17–20; correlação r = −0,06. O que custa é cada ida e volta, ~290 ms. Com ~800 ms úteis, duas
+requests cabem (p95 ~760 ms) e três não (p50 ~870 ms). Cortar perguntas ou candidatas não ganha
+tempo e tira informação do Jev; juntar perguntas numa request não custa tempo.
+
+**O que muda:**
+- **Routing com o primeiro scoring:** `Run::route_and_score` manda as 6 perguntas de routing e as
+  de scoring das âncoras numa request só, sobre o estado do scoring (`query`, `evidence` vazia,
+  `candidates`). O routing só usa a `query`, que está no estado, e o seu resultado só é usado
+  depois, na expansão. Uma request a menos em toda leitura.
+- **Sem stopping sem evidência:** se nada passou no scoring nem na expansão, a leitura termina em
+  `stop_reason: empty` sem perguntar. Antes, a pergunta ia com a evidência vazia, gastava uma
+  request e, no caso visto, estourava o prazo, e o `stop_reason` dizia `deadline` quando o resultado
+  já estava decidido.
+- **Uma request basta para ler:** com `--memory-read-request-limit 1`, a request única roteia e
+  pontua e entrega o que o Jev validou (`stop: request_limit`). Revê o D-150, que exigia duas
+  porque o routing gastava a primeira. Com 0, nada muda (`degraded`, nada enviado).
+
+**Risco aceito:** o Jev responde as perguntas de routing vendo também as candidatas. O routing só
+escolhe visões e profundidade da expansão; o scoring não depende dele. A qualidade da seleção deve
+ser medida nos braços do eval (`broker-memory`), que ainda não rodaram com esta mudança.
+
+**Medido depois, com o Jev real e o mesmo store:**
+
+| Tarefa | Antes | Depois |
+|---|---|---|
+| "como o CI exige a branch em dia em handoff.md" | 3 requests, 802 ms, `deadline` | 1 request, 332 ms, `empty` |
+| "o que fazer quando o PR não está em dia com o master em handoff.md" | — | 2 requests, 560 ms, a nota entregue (`jev_scored`) |
+| "update README.md status line section" | 3 requests, 802 ms, `deadline` | 1 request, 290 ms, `empty` |
+
+**Testes:** em `tests/memory_retrieval.rs`, dois novos
+(`routing_travels_with_the_anchor_scoring_in_one_request`,
+`with_nothing_validated_the_read_ends_without_asking_to_stop`) e as contagens revistas
+(`question_limit`, `the_deadline_cuts_the_requests`, o recurso local com scoring mudo,
+`the_last_request_is_reserved_for_stopping`, `a_single_request_routes_scores_and_delivers`); em
+`tests/broker.rs`, a cota de leituras seguidas e o limite compartilhado com a descoberta, que passa a
+usar 1 request para continuar exercitando o teto. Três mutações (sem o atalho do `empty`, o routing
+sem as respostas certas, a guarda antiga de duas requests) são pegas.
 

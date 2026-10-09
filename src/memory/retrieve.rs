@@ -297,19 +297,37 @@ impl Run<'_> {
         evidence: &[Found],
         batch: Vec<Candidate>,
     ) -> Result<Vec<Found>, StopReason> {
-        let state = json!({
-            "query": query,
-            "evidence": evidence.iter().map(|f| &f.record.content).collect::<Vec<_>>(),
-            "candidates": batch.iter().map(candidate_item).collect::<Vec<_>>(),
-        });
-        let questions = (0..batch.len())
-            .flat_map(|i| {
-                prompts::questions(Stage::Scoring, i)
-                    .into_iter()
-                    .map(|(_, q)| q)
-            })
-            .collect();
+        let (state, questions) = scoring(query, evidence, &batch);
         let decisions = self.ask(state, questions).await?;
+        Ok(self.admit(batch, &decisions))
+    }
+
+    /// Routes and scores the anchors in one request (D-165): Jev's latency does not grow with the
+    /// questions a request carries, only with the requests, so routing, which needs the query
+    /// alone, travels with the first scoring instead of costing a round trip of its own.
+    async fn route_and_score(
+        &mut self,
+        query: &str,
+        batch: Vec<Candidate>,
+    ) -> Result<(Route, Vec<Found>), StopReason> {
+        let routing = prompts::questions(Stage::Routing, 0);
+        let (state, scoring) = scoring(query, &[], &batch);
+        let mut questions: Vec<_> = routing.iter().map(|(_, q)| q.clone()).collect();
+        questions.extend(scoring);
+        let decisions = self.ask(state, questions).await?;
+        let (routed, scored) = decisions.split_at(routing.len().min(decisions.len()));
+        let by_name: BTreeMap<&str, Decision> = routing
+            .iter()
+            .map(|(n, _)| *n)
+            .zip(routed.iter().cloned())
+            .collect();
+        let route = route(&by_name);
+        self.partial |= route.partial;
+        Ok((route, self.admit(batch, scored)))
+    }
+
+    /// The candidates of `batch` that pass the gate, from their four answers each.
+    fn admit(&mut self, batch: Vec<Candidate>, decisions: &[Decision]) -> Vec<Found> {
         let mut out = vec![];
         for (c, d) in batch.into_iter().zip(decisions.chunks(4)) {
             let known: Vec<f64> = d.iter().filter_map(Decision::probability).collect();
@@ -328,8 +346,29 @@ impl Run<'_> {
                 });
             }
         }
-        Ok(out)
+        out
     }
+}
+
+/// The state and the questions that score `batch` for `query`, given `evidence`.
+fn scoring(
+    query: &str,
+    evidence: &[Found],
+    batch: &[Candidate],
+) -> (Value, Vec<crate::online::request::JevQuestion>) {
+    let state = json!({
+        "query": query,
+        "evidence": evidence.iter().map(|f| &f.record.content).collect::<Vec<_>>(),
+        "candidates": batch.iter().map(candidate_item).collect::<Vec<_>>(),
+    });
+    let questions = (0..batch.len())
+        .flat_map(|i| {
+            prompts::questions(Stage::Scoring, i)
+                .into_iter()
+                .map(|(_, q)| q)
+        })
+        .collect();
+    (state, questions)
 }
 
 /// Best first; with `recency`, a tie goes to the later observation; then the id.
@@ -509,25 +548,14 @@ async fn read_with(
         })
         .collect();
     // There is no decision cache yet: with no request allowed, nothing can be validated. One is
-    // not enough either: routing would spend it, and scoring would find the limit (D-150).
-    if cfg.request_limit < 2 {
+    // enough since routing travels with the scoring (D-165; before, D-150 needed two).
+    if cfg.request_limit == 0 {
         out.degraded = true;
         out.stop = StopReason::RequestLimit;
         return out;
     }
 
-    // 1. Routing, on the query alone.
-    let routing = prompts::questions(Stage::Routing, 0);
-    let questions = routing.iter().map(|(_, q)| q.clone()).collect();
-    let answers = match run.ask(json!({"query": query}), questions).await {
-        Ok(a) => a,
-        Err(reason) => return fall_back(out, run, reason, local_rank),
-    };
-    let by_name: BTreeMap<&str, Decision> = routing.iter().map(|(n, _)| *n).zip(answers).collect();
-    let route = route(&by_name);
-    run.partial |= route.partial;
-
-    // 2. The anchors, scored.
+    // 1 and 2. Routing, on the query, and the anchors, scored, in one request (D-165).
     let best = anchors.first().map_or(1.0, |a| a.1).max(f64::MIN_POSITIVE);
     let batch: Vec<Candidate> = anchors
         .into_iter()
@@ -539,8 +567,8 @@ async fn read_with(
         .collect();
     let mut visited: BTreeSet<String> = batch.iter().map(|c| c.record.node_id.clone()).collect();
     out.visited = visited.len();
-    let mut selected = match run.score(query, &[], batch).await {
-        Ok(s) => s,
+    let (route, mut selected) = match run.route_and_score(query, batch).await {
+        Ok(done) => done,
         Err(reason) => return fall_back(out, run, reason, local_rank),
     };
     rank(&mut selected, route.recency);
@@ -635,6 +663,12 @@ async fn read_with(
         rank(&mut selected, route.recency);
     }
     out.memories = selected;
+    // Nothing passed: there is no evidence to ask about, and the request would only spend the
+    // deadline (D-165).
+    if out.memories.is_empty() {
+        out.stop = StopReason::Empty;
+        return finish(out, run);
+    }
 
     // 4. Stopping, on the evidence gathered.
     let stopping = prompts::questions(Stage::Stopping, 0);

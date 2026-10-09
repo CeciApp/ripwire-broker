@@ -632,8 +632,8 @@ async fn deadline() {
 
 #[tokio::test]
 async fn request_limit() {
-    // Two requests route and score; the read stops at the limit instead of asking a third. With
-    // one, it never asks at all (`a_single_request_is_not_spent_on_a_read_that_cannot_deliver`).
+    // One request routes and scores (D-165), the second asks whether to stop; answers that settle
+    // nothing leave the read at its limit, with what was scored.
     let r = stopping(|_| p(0.5));
     let cfg = ReadConfig {
         request_limit: 2,
@@ -641,6 +641,7 @@ async fn request_limit() {
     };
     let got = stop_of(&one(), &r, cfg).await;
     assert_eq!((got.stop, got.requests), (StopReason::RequestLimit, 2));
+    assert_eq!(got.memories.len(), 1);
 }
 
 #[tokio::test]
@@ -653,8 +654,8 @@ async fn question_limit() {
     let got = stop_of(&one(), &r, cfg).await;
     assert_eq!(
         (got.stop, got.questions),
-        (StopReason::QuestionLimit, 6),
-        "routing fit, scoring did not"
+        (StopReason::QuestionLimit, 0),
+        "routing travels with the scoring (D-165): together they do not fit, and nothing is sent"
     );
 }
 
@@ -765,13 +766,13 @@ async fn the_deadline_cuts_the_requests() {
         started.elapsed()
     );
 
-    // Two answers at 240 ms each, then the third would start after the 480 ms: never sent.
+    // Routing and the anchors answer at 240 ms; the expansion's request is cut at 400 ms.
     let slow = Slow(
         reader(&["semantic"], 0.0, |_, _| p(0.9)),
         std::time::Duration::from_millis(240),
     );
     let cfg = ReadConfig {
-        deadline: std::time::Duration::from_millis(480),
+        deadline: std::time::Duration::from_millis(400),
         ..Default::default()
     };
     let got = retrieve::read(&expandable(), "eviction", &slow, &cfg).await;
@@ -918,10 +919,10 @@ async fn a_read_jev_cannot_answer_in_time_delivers_the_local_anchors_degraded() 
     assert_eq!(delivered_bases(&got), ["deterministic_rank"; 2]);
     assert!(retrieve::provenance(&got).degraded);
 
-    // Routing answered, scoring never did: the same fallback.
+    // The request that routes also scores (D-165): unanswered, the same fallback after one request.
     let r = SilentScoring(reader(&[], 0.0, |_, _| p(0.9)));
     let got = retrieve::read(&one(), "eviction", &r, &ReadConfig::default()).await;
-    assert_eq!((got.stop, got.requests), (StopReason::Deadline, 2));
+    assert_eq!((got.stop, got.requests), (StopReason::Deadline, 1));
     assert!(got.degraded);
     assert_eq!(delivered_bases(&got), ["deterministic_rank"]);
 }
@@ -943,20 +944,23 @@ async fn memories_jev_scored_say_so() {
 }
 
 #[tokio::test]
-async fn the_fourth_request_is_reserved_for_stopping() {
+async fn the_last_request_is_reserved_for_stopping() {
     let is_stopping = |r: &StateRequest| r.state.get("depth").is_some();
     let r = reader(&["semantic"], 0.0, |_, _| p(0.9));
     let got = retrieve::read(&expandable(), "eviction", &r, &ReadConfig::default()).await;
-    assert_eq!(got.requests, 4, "routing, anchors, expansion, stopping");
+    assert_eq!(
+        got.requests, 3,
+        "routing with the anchors, expansion, stopping"
+    );
 
     let r = reader(&["semantic"], 0.0, |_, _| p(0.9));
     let cfg = ReadConfig {
-        request_limit: 3,
+        request_limit: 2,
         ..Default::default()
     };
     let got = retrieve::read(&expandable(), "eviction", &r, &cfg).await;
     let last_is_stopping = is_stopping(r.seen.lock().unwrap().last().unwrap());
-    assert_eq!(got.requests, 3);
+    assert_eq!(got.requests, 2);
     assert!(last_is_stopping, "the expansion gave way to stopping");
     assert!(!r.scored().contains(&id(2)));
 }
@@ -980,10 +984,10 @@ async fn request_limit_zero_serves_only_cache_and_says_degraded() {
     );
 }
 
-/// One request cannot both route and score, so it is never spent (D-150): the read paid for the
-/// routing and stopped at the limit before it could deliver anything.
+/// One request routes and scores (D-165), so a single one delivers what Jev validated; before,
+/// routing spent it and the read sent nothing (D-150).
 #[tokio::test]
-async fn a_single_request_is_not_spent_on_a_read_that_cannot_deliver() {
+async fn a_single_request_routes_scores_and_delivers() {
     let r = reader(&[], 0.0, |_, _| p(0.9));
     let cfg = ReadConfig {
         request_limit: 1,
@@ -992,9 +996,9 @@ async fn a_single_request_is_not_spent_on_a_read_that_cannot_deliver() {
 
     let got = retrieve::read(&one(), "eviction", &r, &cfg).await;
 
-    assert!(got.degraded);
-    assert_eq!((got.stop, got.requests), (StopReason::RequestLimit, 0));
-    assert!(r.seen.lock().unwrap().is_empty(), "nothing sent");
+    assert_eq!((got.stop, got.requests), (StopReason::RequestLimit, 1));
+    assert_eq!(got.memories.len(), 1);
+    assert!(got.memories[0].scores.is_some() && !got.degraded);
 }
 
 #[test]
@@ -1549,4 +1553,51 @@ async fn a_read_is_logged_by_its_outcome_and_never_by_the_task_text() {
     assert!(read.contains("task#"), "the task by a hash: {read}");
     assert!(read.contains("stop="), "{read}");
     assert!(!log.contains(task) && !log.contains("evict too"), "{log}");
+}
+
+// ---------------------------------------------------------------- round trips (D-165)
+
+#[tokio::test]
+async fn routing_travels_with_the_anchor_scoring_in_one_request() {
+    let r = stopping(|_| p(0.5));
+    let got = stop_of(&one(), &r, ReadConfig::default()).await;
+    let seen = r.seen.lock().unwrap();
+    let first = &seen[0];
+    let stages: Vec<Stage> = first
+        .questions
+        .0
+        .iter()
+        .map(|(_, q)| which(&q.instructions).0)
+        .collect();
+    assert!(
+        stages.contains(&Stage::Routing) && stages.contains(&Stage::Scoring),
+        "{stages:?}"
+    );
+    assert!(first.state.get("candidates").is_some());
+    assert_eq!(got.requests, 2, "routing with the anchors, then stopping");
+    assert_eq!(
+        got.memories.len(),
+        1,
+        "the routing answers did not shift the scores"
+    );
+}
+
+#[tokio::test]
+async fn with_nothing_validated_the_read_ends_without_asking_to_stop() {
+    // The anchors are scored and none passes: there is no evidence to ask about.
+    let r = Reader::new(|stage, _, _| match stage {
+        Stage::Scoring => p(0.1),
+        _ => p(0.5),
+    });
+    let got = stop_of(&one(), &r, ReadConfig::default()).await;
+    assert_eq!((got.stop, got.requests), (StopReason::Empty, 1));
+    assert!(got.memories.is_empty() && !got.degraded);
+    assert!(
+        r.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|q| q.state.get("depth").is_none()),
+        "no stopping request"
+    );
 }
