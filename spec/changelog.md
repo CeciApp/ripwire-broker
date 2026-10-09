@@ -105,6 +105,7 @@
 | 2026-10-06 22:21 | Workflow de release: a tag `v*` igual à versão do `Cargo.toml` roda os portões do `rust.yml`, compila com `--features online` para os quatro alvos do `install-binary.sh`, publica `ripwire-broker-<tag>-<alvo>.tar.gz` e `SHA256SUMS` num release que só sai do rascunho com tudo no lugar; o mantenedor autorizou a tag `v0.1.0` | [D-160](#d-160--workflow-de-release) |
 | 2026-10-06 23:10 | Claude Code 2.1.292: o canal `stable` do instalador parava no 2.1.285; com o 2.1.292 o mod carrega e o kit roda sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, que sai dos portões, do CI e dos READMEs; o job `plugin` fixa o 2.1.292 | [D-161](#d-161--claude-code-21292-sem-a-variável-dos-mods) |
 | 2026-10-07 01:20 | Trabalho futuro (T6.2): um braço `broker-plugin` no eval, que carregue o plugin com `--plugin-dir`, fica proposto e não feito; o que ele exigiria do `src/eval/arm.rs` (os dois nomes do servidor do plugin) e por que esperar | [D-162](#d-162--trabalho-futuro-o-braço-broker-plugin-do-eval) |
+| 2026-10-09 16:30 | Sem `session_id` na entrada do host, a barra mostra `hooks sem sessão` em vez de `hooks sem dados`: sem ele nenhum retrato pode ser lido, e o texto antigo parecia acusar os hooks; 1 teste novo, 6 expectativas ajustadas | [D-163](#d-163--hooks-sem-sessão-quando-falta-o-session_id) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7285,3 +7286,23 @@ T6.1), que ainda não existem. Sem elas não há pergunta para o braço responde
 depois da P8, ou se o eval passar a medir latência por evento.
 
 **Nada muda no código.** A T6.2 sai do plano como decidida: proposta, não feita.
+
+## D-163 — `hooks sem sessão` quando falta o `session_id`
+
+**Data:** 2026-10-09 16:30.
+
+**Pedido do usuário:** "mostra \"sem sessão\" quando não vier session_id".
+
+**Por quê:** o retrato da barra é achado por `(host, session_id, raiz)` (`statusline_state::path`).
+Sem `session_id` nenhum arquivo pode ser nomeado, e a barra dizia `hooks sem dados`, o mesmo texto de
+uma sessão cujos hooks ainda não gravaram. Ao testar o comando da barra à mão com um JSON sem
+`session_id`, o `hooks sem dados` levou a investigar hooks que estavam funcionando.
+
+**O que muda:** sem retrato, `hooks_segments` mostra `hooks sem sessão` quando a entrada não traz
+`session_id`, e `hooks sem dados` quando traz. Mesma prioridade (`Keep::Soft`) e sem cor, como o
+`sem dados` (D-124). O Claude Code sempre manda `session_id`, então na barra real o texto novo só
+aparece com uma entrada fora do contrato; a nota do `install` sobre `hooks sem dados` continua certa.
+
+**Testes:** `a_missing_session_id_is_told_apart_from_a_missing_snapshot` (novo); as expectativas de
+`hooks sem dados` com entrada sem `session_id` passam a `hooks sem sessão` em `tests/statusline.rs`.
+
