@@ -21,6 +21,20 @@ test('an edit asks after_edit with the file and adds the answer as context', asy
   expect(out.context).toEqual([HEADER + JSON.stringify(envelope('context_after_edit', 9))])
 })
 
+test('a MultiEdit, which only older builds have, is asked about like an edit', async ($, on) => {
+  mock.clock(on, { now: 10_000 })
+  cwd(on)
+  logs(on)
+  const calls = broker(on, [envelope('context_after_edit', 9)])
+  tools(on)
+  // An older build's input: this build's types know no MultiEdit, so it passes as Edit's shape.
+  const multiEdit = { tool: 'MultiEdit', file_path: '/work/src/lexer.rs', edits: [] }
+  await $.tool.call(multiEdit as unknown as ReturnType<typeof edit>)
+  expect(calls.map((c) => [c.tool, c.args])).toEqual([
+    ['context_after_edit', { files: ['src/lexer.rs'], budget_tokens: 800 }],
+  ])
+})
+
 test('a denied or failed tool is not analysed', async ($, on) => {
   mock.clock(on, { now: 10_000 })
   cwd(on)

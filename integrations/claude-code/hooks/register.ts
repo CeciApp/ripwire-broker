@@ -331,9 +331,9 @@ export const register: Register = (on, options) => {
         'Edit',
         'Write',
         // Not a built-in of current builds; kept for the ones that still have it, as the classic
-        // hook's matcher does (src/install.rs).
-        // @ts-expect-error MultiEdit is absent from this build's built-in tools
-        'MultiEdit',
+        // hook's matcher does (src/install.rs). A pattern, as the literal is not a tool name this
+        // build's types know, and the matcher takes one where it takes a name.
+        /^MultiEdit$/,
         'NotebookEdit',
         'Bash',
       ],
