@@ -616,6 +616,17 @@ rw-brkr · Sonnet 4.6 hig · ctx 32% · hooks on · inj 7 · não reenviados 18 
   them); the prefix, `ctx`, `hooks off` and an
   `atenção`/`erro` alert are kept. **`--color never`** is the default; `--color always` emits ANSI even
   without a TTY and even with `NO_COLOR`.
+- **Counters missing from the bar? Pass `--width`.** Claude Code runs the status line command without
+  a terminal; where this was found, `COLUMNS` did not reach it, so the bar fell back to 100 columns. A
+  real session's line is often wider: with the hooks' counters and a server running `--memory`, for
+  example `rw-brkr · Opus 5.5 · ctx 12% · hooks on · última: pronta · inj 15 · não reenviados 418 ·
+  [jev:0] · [mem: retr 0, stor 0] · (online)`, it is 142 columns, and at 100 every counter goes at once
+  (`inj`, `não reenviados`, `[jev:N]`, `[mem: …]`) while `(online)` stays. Set the width of your
+  terminal (`tput cols`) in the command:
+  `ripwire-broker statusline --workspace DIR --width 160`. Keep it at or below the terminal's width:
+  past it, what does not fit is left to the host, without the bar's priorities. When testing the bar by
+  hand, feed it a real `session_id`: without one it shows `hooks sem sessão` and the line is shorter
+  than in a session.
 - **Install:** `ripwire-broker install claude-code --workspace DIR --hooks --statusline --write` writes the
   hooks and `statusLine` into the same `.claude/settings.json` change. A bar that is not ours is never
   overwritten: one in your user settings is left to win (the install prints the snippet to add by hand), one in
