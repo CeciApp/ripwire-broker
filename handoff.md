@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
-Estado em 2026-10-07, até o
-[D-162](spec/changelog.md#d-162--trabalho-futuro-o-braço-broker-plugin-do-eval).
+Estado em 2026-10-09, até o
+[D-163](spec/changelog.md#d-163--hooks-sem-sessão-quando-falta-o-session_id).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -22,7 +22,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 2 · hooks, contexto incremental, `install`, `doctor` | feita |
 | 3 · notas por modelo local | feita, com cache só em memória (o de disco espera a medição do §21.3) |
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
-| barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131) |
+| barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131); `hooks sem sessão` quando a entrada não traz `session_id` (D-163, #82) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
 | auditoria de 2026-10-04 (D-143, D-144) | os cinco defeitos mais graves e os achados médios corrigidos em TDD; ficam os baixos, o código morto e as simplificações (lista abaixo) |
 | achados baixos, área da CLI e dos hooks (D-147) | corrigidos em TDD, com o código morto e as simplificações da área; as outras áreas seguem |
@@ -32,7 +32,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | achados baixos, memória (segunda parte) e eval (D-151) | corrigidos em TDD, com o pânico do worker, o `is_error` de infraestrutura e o prompt que segurava o timeout (grupo 3); o `connected` conferido num init real |
 | leitor do workspace por `openat` (D-152) | cada componente aberto relativo ao anterior, sem seguir link, pela crate `rustix`: um diretório trocado por link depois das conferências não leva mais para fora do workspace |
 | revisão de 2026-10-04 (D-146) | os cinco achados de maior impacto em produção corrigidos em TDD (leitura do online fora da thread assíncrona, TOCTOU do leitor, chave fora dos processos filhos, prazo no `ripwire --version`, erros do worker de memória no stderr); os demais ficam na lista abaixo |
-| plugin do Claude Code ([plano](spec/plan/mod-plan.md), §25 do PRD) | Etapas 1 e 2 implementadas (D-158, D-159): `integrations/claude-code/` é o plugin e o mod (`hooks/register.ts`, testes em `integrations/claude-code/tests/`, `claude plugin test integrations/claude-code`, Claude Code 2.1.292), a raiz é o marketplace `aquental`. Release `v0.1.0` publicado pelo `release.yml` e fixado no `checksums.txt` (D-160). Mods sem variável de early access desde o 2.1.292 (D-161); o braço `broker-plugin` do eval é trabalho futuro (D-162). O que falta é do mantenedor, listado no §5a do plano: verificações numa sessão real (P1, P2, P6, P7), instalar pelo marketplace (P3), medir (P8); depois a T3.4 e a T6.1 |
+| plugin do Claude Code ([plano](spec/plan/mod-plan.md), §25 do PRD) | Etapas 1 e 2 implementadas (D-158, D-159): `integrations/claude-code/` é o plugin e o mod (`hooks/register.ts`, testes em `integrations/claude-code/tests/`, `claude plugin test integrations/claude-code`, Claude Code 2.1.292), a raiz é o marketplace `aquental`. Release `v0.1.0` publicado pelo `release.yml` e fixado no `checksums.txt` (D-160). Mods sem variável de early access desde o 2.1.292 (D-161); o `register.ts` e o kit tipados com as declarações do host, e `MultiEdit` como `/^MultiEdit$/` no matcher, porque o literal quebrava a inferência nos tipos do 2.1.295 (#83); o braço `broker-plugin` do eval é trabalho futuro (D-162). O que falta é do mantenedor, listado no §5a do plano: verificações numa sessão real (P1, P2, P6, P7), instalar pelo marketplace (P3), medir (P8); depois a T3.4 e a T6.1 |
 | `--memory` · memória persistente ([PRD](docs/jev-mem-prd.md), [plano](spec/plan/jev-mem-plan.md)) | Fases 0 a 5 feitas (D-136 a D-142): store, coleta pelas tools e pelos hooks, comandos locais, worker de enriquecimento no `serve --memory`, `memory drain --online`, a leitura em `context_for_task` (`memories[]`, `provenance.memory`, seção legível no texto MCP), a consolidação (cadência de 20 enriquecimentos ou 24 h, decisões e ligações por par, nota derivada pelo `--summarizer-cmd` só com o gate de 0,85) e o instrumento da avaliação (`--memory-selection deterministic`, braços `broker-memory` e `broker-memory-deterministic`, sequências no corpus, custo da memória no relatório). A T2.0 (Choice no modelo pinado) rodou com a chave real. Pendente: a T3.11, validar num Claude Code e num Codex reais que os hosts usam as memórias; os hooks não as trazem na v1 (não fazem HTTP e não há cache de decisões). Pendente também a T5.3, a rodada da avaliação (≥ 30 tarefas em sequências, fora do repositório; o plano lista o que o instrumento ainda não faz). Fase 6 (fechamento) não começada; **experimental** |
 
 O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23.17) e no
@@ -41,13 +41,13 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 804 testes, 5 ignorados (opt-in)
-cargo test --all-targets --features online  # 831 testes, 8 ignorados
+cargo test --all-targets                    # 805 testes, 5 ignorados (opt-in)
+cargo test --all-targets --features online  # 832 testes, 8 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 claude plugin validate --strict integrations/claude-code   # o plugin
 claude plugin validate --strict .                          # o marketplace
-claude plugin test integrations/claude-code                # o mod: 45 testes, sem sessão nem rede
+claude plugin test integrations/claude-code                # o mod: 46 testes, sem sessão nem rede
 ```
 
 - **CI** (`.github/workflows/rust.yml`): dois jobs, `default` e `online`, obrigatórios no `master`.
@@ -191,9 +191,12 @@ Cada uma custou uma conclusão errada antes de ser achada. O changelog conta sei
   (D-129). Folga pequena acima do limite, e mutação para confirmar.
 - **O CI não tem identidade git.** Teste que faz commit passa `-c user.email=… -c user.name=…`, como
   o `common::sample_repo`.
-- **O `master` é protegido** (checks obrigatórios, `enforce_admins`). Tudo entra por PR, e os PRs
-  entram por squash. Um push num branch de PR já mesclado não volta ao `master`: foi o que gerou o
-  #29.
+- **O `master` é protegido** (checks `default` e `online` obrigatórios, `enforce_admins`, e o branch
+  precisa estar em dia com a base). Tudo entra por PR, e os PRs entram por merge commit ("Merge pull
+  request #N", assim desde pelo menos o #68). Dois PRs abertos ao mesmo tempo: depois de mesclar o
+  primeiro, o segundo é recusado ("not up to date"); `gh pr update-branch N` traz o `master`, o CI
+  roda de novo e aí ele entra (#83). Um push num branch de PR já mesclado não volta ao `master`: foi
+  o que gerou o #29.
 - **O canal `stable` do Claude Code pode estar atrás.** Em 2026-10-06 o `stable` era o 2.1.285 e
   o `latest` o 2.1.292; `claude update` não saía do 2.1.285, e o updater voltava a ele. A saída foi
   `autoUpdatesChannel: "latest"` e `minimumVersion` no `~/.claude/settings.json` e `claude install
@@ -206,6 +209,19 @@ Cada uma custou uma conclusão errada antes de ser achada. O changelog conta sei
   (`memory_controller::auth_failures_suspend_the_worker_until_reauthorized`,
   `memory_retrieval::hashes_and_generation_are_revalidated_right_before_delivery`, `Err(Locked)`).
   Já existiam antes do plugin (D-158). Rodar de novo, isolado, antes de concluir que algo quebrou.
+- **A barra de status testada à mão precisa de `session_id`.** O retrato é achado por `(host,
+  session_id, raiz)`; um JSON de teste sem ele nunca acha nada. Antes do D-163 isso aparecia como
+  `hooks sem dados` e mandava investigar hooks que funcionavam; agora aparece `hooks sem sessão`.
+  O `session_id` de uma sessão do Claude Code é o nome da pasta dela no scratchpad.
+- **O repositório saiu de `~/projects/ai/CECI/ripwire-broker` para `~/projects/ai/ripwire-broker`.**
+  O que guardava o caminho absoluto quebrou em silêncio: o `statusLine` do
+  `.claude/settings.local.json` (a barra some, sem erro) e o registro do `cargo install`. O local agora
+  usa `"${CLAUDE_PROJECT_DIR:-.}/.claude/statusline.sh"`, e o script não passa `--workspace` (a barra
+  o lê do stdin). Os `--workspace` do `.claude/settings.json` e do `.mcp.json`, que o `install`
+  escreve, continuam absolutos: mudar o repositório de lugar pede rodar o `install` de novo.
+- **`cargo install` não lembra as features.** O binário em `~/.cargo/bin` tem `online`; reinstalar
+  sem `--features online` tira o cliente HTTP em silêncio. `cargo install --path . --features online
+  --locked`; o `~/.cargo/.crates2.json` diz com que features foi instalado.
 - **O repositório é público.** Detalhes dos repositórios privados do corpus não entram em commit,
   changelog nem PR.
 - **A suíte do repositório A abre uma porta fixa, e parte dos testes lê a data.** A porta é da
@@ -221,6 +237,7 @@ Cada uma custou uma conclusão errada antes de ser achada. O changelog conta sei
   função privada.
 - **Mutação para provar que um teste morde.** Já pegou meia dúzia de testes que não testavam nada.
 - **Toda decisão vira uma entrada `D-NNN` em `spec/changelog.md`,** em português: linha no índice
-  do topo (a ordem do bloco recente é decrescente) e seção no fim.
+  do topo e seção no fim. A ordem do índice não é uma só: o bloco do D-155 em diante é crescente
+  (linha nova depois da última), o que vem antes dele é decrescente.
 - **Commits e PRs em inglês;** código e comentários também. Docs de `spec/` em português.
 - **Nada de dependência nova sem motivo:** o grafo do build padrão é uma promessa (CA-10).
