@@ -308,7 +308,12 @@ fn hooks_segments(
         });
     }
     let Some(s) = snapshot else {
-        out.push(seg("hooks sem dados", Keep::Soft, Style::Plain));
+        // Without a session id no projection can be named: say so rather than blame the hooks.
+        let none = match input.session_id {
+            Some(_) => "hooks sem dados",
+            None => "hooks sem sessão",
+        };
+        out.push(seg(none, Keep::Soft, Style::Plain));
         out.extend(counters);
         return out;
     };

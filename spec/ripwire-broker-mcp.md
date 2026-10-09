@@ -2724,7 +2724,7 @@ O effort vem exclusivamente de `effort.level` do payload da execução, com este
 
 Omitir effort ausente, nulo ou desconhecido, sem assumir um padrão do modelo. As abreviações são rótulos da barra, não valores para configurar o Claude Code. Os nomes e versões dos exemplos são ilustrativos. [Campos de modelo e effort](https://code.claude.com/docs/en/statusline#available-data).
 
-`hooks sem dados` não prova que os hooks estão desinstalados. Pode ser uma sessão nova, ausência de snapshot, falha de persistência ou execução somente por MCP. Não usar `offline`, `MCP ok`, `synced` ou `grafo pronto` como substitutos.
+`hooks sem dados` não prova que os hooks estão desinstalados. Pode ser uma sessão nova, ausência de snapshot, falha de persistência ou execução somente por MCP. Sem `session_id` na entrada, a barra mostra `hooks sem sessão`, porque nenhum snapshot pode ser procurado (D-163). Não usar `offline`, `MCP ok`, `synced` ou `grafo pronto` como substitutos.
 
 #### 24.5.2 Modo detalhado opcional
 
@@ -2751,7 +2751,7 @@ Colorir o segmento inteiro `ctx xx%` conforme o percentual inteiro exibido, depo
 | `60 <= ctx <= 80` | Amarelo | `"\x1b[33m"` |
 | `80 < ctx <= 100` | Vermelho | `"\x1b[31m"` |
 
-O segmento de estado dos hooks também é colorido: `hooks off` em vermelho (`"\x1b[31m"`), por ser uma pausa que o usuário precisa ver, e `hooks on` em azul claro (`"\x1b[38;5;117m"`). `hooks sem dados` não é um estado escolhido pela sessão e fica sem cor (D-124).
+O segmento de estado dos hooks também é colorido: `hooks off` em vermelho (`"\x1b[31m"`), por ser uma pausa que o usuário precisa ver, e `hooks on` em azul claro (`"\x1b[38;5;117m"`). `hooks sem dados` e `hooks sem sessão` não são estados escolhidos pela sessão e ficam sem cor (D-124, D-163).
 
 Usar `"\x1b[0m"` ao terminar cada segmento colorido, antes do separador, para impedir vazamento de cor aos campos seguintes. Aplicar ANSI somente após sanitização e cálculo de largura; os escapes gerados pelo renderizador não contam como colunas. Percentual ausente/inválido continua omitido, sem cor artificial. Essa paleta é um requisito de produto; a aparência exata depende da paleta do terminal.
 
