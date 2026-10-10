@@ -107,7 +107,7 @@
 | 2026-10-07 01:20 | Trabalho futuro (T6.2): um braço `broker-plugin` no eval, que carregue o plugin com `--plugin-dir`, fica proposto e não feito; o que ele exigiria do `src/eval/arm.rs` (os dois nomes do servidor do plugin) e por que esperar | [D-162](#d-162--trabalho-futuro-o-braço-broker-plugin-do-eval) |
 | 2026-10-09 16:30 | Sem `session_id` na entrada do host, a barra mostra `hooks sem sessão` em vez de `hooks sem dados`: sem ele nenhum retrato pode ser lido, e o texto antigo parecia acusar os hooks; 1 teste novo, 6 expectativas ajustadas | [D-163](#d-163--hooks-sem-sessão-quando-falta-o-session_id) |
 | 2026-10-09 18:00 | `--memory-debug-log`: com `--memory`, cada evento da memória (coleta, spool, ingestão, enriquecimento, consolidação, leitura, retenção, esquecimento, worker) vira uma linha em `debug.log` ao lado do store, escrita por todos os processos do workspace, para `tail -F`; ids, contagens e motivos, nunca conteúdo; rotação em 10 MiB; o `install` passa a flag ao servidor e aos hooks | [D-164](#d-164----memory-debug-log-a-memória-acompanhada-ao-vivo) |
-| 2026-10-09 19:00 | A leitura de memória faz menos idas e voltas ao Jev: o routing vai na mesma request do primeiro scoring, e sem nenhum candidato aceito a leitura termina em `empty` sem a request de stopping. Medido: a latência do Jev não depende das perguntas por request (217 chamadas, r = −0,06); uma leitura que estourava os 850 ms em 3 requests passa a 1–2 requests, 290–560 ms. Uma request basta para ler (revê o D-150) | [D-165](#d-165--a-leitura-de-memória-em-menos-idas-e-voltas) |
+| 2026-10-09 19:00 | A leitura de memória faz menos idas e voltas ao Jev: o routing vai na mesma request do primeiro scoring, e sem nenhum candidato aceito a leitura termina em `empty` sem a request de stopping. Medido: a latência do Jev não depende das perguntas por request (217 chamadas, r = −0,06); uma leitura que estourava os 850 ms em 3 requests passa a 1–2 requests, 290–560 ms. Uma request basta para ler (revê o D-150). Num A/B da leitura contra o Jev, a seleção não mudou (mesmo conjunto em 65 de 66 leituras; a única diferença foi o recurso local) e a mediana caiu de 782 para 524 ms | [D-165](#d-165--a-leitura-de-memória-em-menos-idas-e-voltas) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7399,8 +7399,9 @@ tempo e tira informação do Jev; juntar perguntas numa request não custa tempo
   porque o routing gastava a primeira. Com 0, nada muda (`degraded`, nada enviado).
 
 **Risco aceito:** o Jev responde as perguntas de routing vendo também as candidatas. O routing só
-escolhe visões e profundidade da expansão; o scoring não depende dele. A qualidade da seleção deve
-ser medida nos braços do eval (`broker-memory`), que ainda não rodaram com esta mudança.
+escolhe visões e profundidade da expansão; o scoring não depende dele. Medido depois num A/B da
+leitura ([abaixo](#medição-da-seleção-ab-da-leitura)): a seleção não mudou. O efeito na tarefa do
+agente continua para os braços do eval (`broker-memory`, T5.3), que não rodaram.
 
 **Medido depois, com o Jev real e o mesmo store:**
 
@@ -7419,3 +7420,54 @@ ser medida nos braços do eval (`broker-memory`), que ainda não rodaram com est
 usar 1 request para continuar exercitando o teto. Três mutações (sem o atalho do `empty`, o routing
 sem as respostas certas, a guarda antiga de duas requests) são pegas.
 
+### Medição da seleção: A/B da leitura
+
+**Data:** 2026-10-09 21:30.
+
+**Pedido do usuário:** "medir no eval o efeito na qualidade da seleção (T5.3)". A T5.3 não roda nesta
+máquina: o corpus do A/B (32 tarefas, dois repositórios privados) fica noutra máquina e não tem
+sequências; aqui só há o corpus de diagnóstico do D-121 (8 tarefas, sem sequências); e a rodada
+paga sessões reais do agente. Escolhido no lugar: um A/B da leitura, que mede o risco aceito acima
+sem sessões de agente.
+
+**Como:**
+- **Store sintético** num workspace temporário: 20 notas explícitas (`memory add`, sem
+  `references`, para nenhuma ficar velha), em inglês, sobre assuntos de um projeto, com palavras
+  em comum de propósito (deploy, CI, retries, tokens, tenant, worker) para cada tarefa ter
+  distratoras. Enriquecidas uma vez (`memory drain`: 20 jobs e uma rodada de consolidação); o
+  enriquecimento é o mesmo código nos dois binários.
+- **22 tarefas rotuladas** escritas para o teste: 18 com uma nota esperada, 4 sem resposta (falso
+  positivo).
+- **Dois binários**, ambos release com `online`: o `master` antes do #87 (`1d270a4`) e o D-165
+  (`ab958b3`). Um servidor de cada vivo ao mesmo tempo, sobre o mesmo store; para cada tarefa os
+  dois leem em ordem sorteada (semente fixa), uma leitura por vez, depois de uma leitura de
+  aquecimento cada. Três repetições: 132 leituras contra o Jev real.
+
+**Resultado:**
+
+| | antes do #87 | D-165 |
+|---|---|---|
+| nota esperada entregue | 54/54 | 54/54 |
+| precisão (entregues que eram a esperada) | 54/56 (96%) | 54/58 (93%) |
+| algo entregue numa tarefa sem resposta | 0/12 | 0/12 |
+| mesmo conjunto entregue pelos dois | — | 65/66 |
+| leituras paradas em `deadline` | 25/66 | 3/66 |
+| requests por leitura (média) | 3,06 | 1,88 |
+| latência p50 / p95 (medida no cliente) | 782 / 805 ms | 524 / 801 ms |
+
+**Leitura:**
+- **A seleção não mudou.** As memórias a mais, e a única discordância, vieram todas do recurso local
+  do D-156: o Jev não respondeu a tempo e as âncoras saíram sem pontuação (`degraded`), distratoras
+  incluídas, duas vezes no D-165 e uma antes. O que o Jev pontuou foi o mesmo conjunto nos dois.
+- **O ganho é de tempo:** −258 ms na mediana e oito vezes menos leituras cortadas pelo prazo. O p95
+  continua no prazo, que é quem o limita.
+- **Um custo novo, ainda sem tamanho:** com routing e scoring numa request, uma resposta lenta leva
+  a leitura inteira ao recurso local; antes, o routing podia responder e o scoring cair sozinho.
+  Duas leituras contra uma é amostra pequena demais para dizer se é tendência.
+- As três leituras lentas foram todas na primeira repetição, provavelmente com o Jev ainda frio. A
+  maior, 1.278 ms, é do cliente e inclui o resto do `context_for_task`, não só a memória.
+
+**Limites:** mede a seleção da memória, não o efeito na tarefa do agente (isso é a T5.3, que
+continua pendente). Store pequeno e sintético, só notas explícitas, uma nota esperada por tarefa,
+tarefas escritas por quem fez a mudança. O script e os dados ficaram fora do repositório, no
+scratchpad da sessão.
