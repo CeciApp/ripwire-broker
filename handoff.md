@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-09, até o
-[D-165](spec/changelog.md#d-165--a-leitura-de-memória-em-menos-idas-e-voltas).
+[D-166](spec/changelog.md#d-166----jev-provider-cloudflare).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -11,7 +11,8 @@ Um servidor MCP em Rust entre um agente de código (Claude Code, Codex) e o
 `context_after_edit`, `context_before_finish`) e um resource de status, e devolve contexto estrutural
 dentro de um orçamento, sem repetir o que a sessão já recebeu e sem nunca escrever no workspace.
 Também funciona por hooks (o contexto entra sozinho no prompt) e tem um modo opcional `--online`
-que consulta um classificador remoto (Jev). O PRD vigente é
+que consulta um classificador remoto (o Jev da TypeSafe ou, com `--jev-provider cloudflare`, o Clef
+da Cloudflare). O PRD vigente é
 [`spec/ripwire-broker-mcp.md`](spec/ripwire-broker-mcp.md).
 
 ## Estado
@@ -22,6 +23,7 @@ que consulta um classificador remoto (Jev). O PRD vigente é
 | 2 · hooks, contexto incremental, `install`, `doctor` | feita |
 | 3 · notas por modelo local | feita, com cache só em memória (o de disco espera a medição do §21.3) |
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
+| `--jev-provider cloudflare` (D-166, #89) | feito em TDD e rodado contra a Cloudflare real: o Clef (Workers AI) pelo mesmo protocolo do Jev. O provider decide a URL (nenhuma vem da configuração), abre o envelope `{success, errors, messages, result}` e limita o pedido a 64 perguntas; `--jev-account-id` é obrigatório com ele e redigido no `jev.log`; a credencial vem da mesma `RIPWIRE_BROKER_JEV_API_KEY`. O padrão segue `typesafe`, e **o provider em uso é o Jev**. Com Cloudflare o modelo padrão é `clef-flash`, mantido pelo mantenedor depois da medição: com os limiares do Jev ele rejeita o arquivo de teste do corpus sintético, que o `clef` admite (6,3 vezes o preço, `--jev-model clef`). Limiares por provider não existem |
 | barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131); `hooks sem sessão` quando a entrada não traz `session_id` (D-163, #82) |
 | 6 · times e CI (HTTP autenticado, multi-workspace, políticas) | **não começada** |
 | auditoria de 2026-10-04 (D-143, D-144) | os cinco defeitos mais graves e os achados médios corrigidos em TDD; ficam os baixos, o código morto e as simplificações (lista abaixo) |
@@ -41,8 +43,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 822 testes, 5 ignorados (opt-in)
-cargo test --all-targets --features online  # 848 testes, 8 ignorados
+cargo test --all-targets                    # 834 testes, 5 ignorados (opt-in)
+cargo test --all-targets --features online  # 872 testes, 8 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 claude plugin validate --strict integrations/claude-code   # o plugin
@@ -59,9 +61,13 @@ claude plugin test integrations/claude-code                # o mod: 46 testes, s
   ordem de publicar uma versão está no README do plugin ("Publishing a version"): os hashes entram
   no `scripts/checksums.txt` depois do release, num PR.
 - **`cargo-deny`:** agendado às segundas no `master` (`supply-chain.yml`), nunca em PR (D-108).
-- **Ignorados:** precisam de algo externo — modelo local (`RIPWIRE_BROKER_TEST_MODEL`), chave da Jev
-  (`RIPWIRE_BROKER_JEV_API_KEY`) ou um benchmark. O SLO do `hook --memory` também é medição manual em
+- **Ignorados:** precisam de algo externo — modelo local (`RIPWIRE_BROKER_TEST_MODEL`), chave do
+  provider (`RIPWIRE_BROKER_JEV_API_KEY`) ou um benchmark. O SLO do `hook --memory` também é medição manual em
   release (`the_hook_overhead_meets_the_slo`).
+- **Ao vivo** (`tests/online_live.rs`, com `--ignored`): perguntam ao Jev, ou à Cloudflare com
+  `RIPWIRE_BROKER_LIVE_PROVIDER=cloudflare` e `RIPWIRE_BROKER_LIVE_ACCOUNT_ID`. Com o padrão
+  `clef-flash`, `a_real_provider_classifies_the_synthetic_corpus` reprova (D-166); passa com
+  `RIPWIRE_BROKER_LIVE_MODEL=clef`.
 
 ## Onde está o quê
 
@@ -72,7 +78,9 @@ claude plugin test integrations/claude-code                # o mod: 46 testes, s
 - **`src/worktree.rs`:** a impressão digital do `git status` que diz ao hook se um comando do shell
   mudou arquivos (D-129). Com prazo, teto de entradas e desligamento pela sessão; o hook a dispensa
   quando o próprio Claude Code manda a lista de arquivos (`bashEditDiff`, D-131).
-- **`src/online/`:** o adaptador `--online`.
+- **`src/online/`:** o adaptador `--online`. O `JevProvider` (`mod.rs`) é o único lugar que sabe
+  host, caminho, modelo padrão e teto de perguntas de cada provider; o `JevClient` (`jev.rs`) abre o
+  envelope da Cloudflare.
 - **`src/memory/`:** a memória do `--memory` (registro, identidade, admissão, store, coleta, comandos
   `memory …`, e a leitura: `index.rs`, `retrieve.rs`, `recall.rs`). O controlador (`controller.rs`, `runtime.rs`) também compila no build padrão; só o
   `JevClient` exige a feature `online`.
@@ -88,7 +96,7 @@ claude plugin test integrations/claude-code                # o mod: 46 testes, s
   `plugin`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-162, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-166, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -154,6 +162,9 @@ Os instrumentos estão prontos; as medições, não.
   D-128 rodou sem `--agent`, e nenhum dos 121 payloads o trouxe. Uma sessão com `--agent`, gravada
   pelo `capture.sh` do roteiro (`~/projects/ai/CECI/statusline-manual/`, pasta local do mantenedor,
   não versionada), fecha isso.
+- **Cloudflare (D-166):** não há limiares por provider; os de admissão e seleção foram calibrados
+  para o Jev e valem para o Clef como estão. E `RIPWIRE_BROKER_JEV_API_KEY` guarda a credencial de
+  um provider por vez: confira qual está lá antes de uma chamada real.
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.
 - **`sha2` preso abaixo de 0.11** no `dependabot.yml` (D-119). Quem mover o `rust-mcp-sdk` revê
   essa linha na mesma decisão.

@@ -283,4 +283,5 @@ Ciclos 1 a 7 feitos, cada teste visto falhar antes do código; decisões em
 **Ciclo 8 feito** (2026-10-09): probe e `online_live` contra a Cloudflare real, resultados em
 `spec/changelog.md` D-166. O transporte funciona; o Content-Type é `application/json`. Um dos três
 testes ao vivo reprova com o padrão `clef-flash` por julgamento do modelo (rejeita o arquivo de
-teste do corpus), e passa com `clef`. A decisão 4 (padrão `clef-flash`) fica em aberto.
+teste do corpus), e passa com `clef`. A decisão 4 (padrão `clef-flash`) foi mantida pelo
+mantenedor em 2026-10-09 (D-166); para esse teste, `RIPWIRE_BROKER_LIVE_MODEL=clef`.

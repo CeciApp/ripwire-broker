@@ -7589,6 +7589,11 @@ chamada real prova.
   reprova com o padrão `clef-flash` e não foi afrouxado. É um corpus de três arquivos, pouco
   para recalibrar limiar; basta para pôr em dúvida a decisão 7 (o padrão `clef-flash`).
 
-**Em aberto:** o modelo padrão com Cloudflare. `clef` se comporta como o Jev no corpus e custa
-6,3 vezes o `clef-flash`; os limiares por provider ficam fora deste diff. Fora de escopo, como no
+**Decidido pelo mantenedor (2026-10-09, depois das medições):** o modelo padrão com Cloudflare
+continua `clef-flash`. `clef` se comporta como o Jev no corpus e custa 6,3 vezes o `clef-flash`;
+quem o quiser passa `--jev-model clef`. Consequência aceita: com o padrão, o teste ao vivo
+`a_real_provider_classifies_the_synthetic_corpus` reprova na Cloudflare (roda-se com
+`RIPWIRE_BROKER_LIVE_MODEL=clef`), e ele não foi afrouxado. O provider em uso segue o Jev.
+
+**Em aberto:** os limiares por provider, que ficam fora deste diff. Fora de escopo, como no
 pedido: `images`, Clef local, e os padrões de `--jev-deadline-ms` e `--jev-max-candidates`.
