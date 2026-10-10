@@ -1,7 +1,9 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-10, até o
-[D-168](spec/changelog.md#d-168--s315-cache-persistente-de-notas).
+[D-169](spec/changelog.md#d-169--roteiro-dos-testes-pendentes-e-três-medições).
+O passo a passo de cada teste que falta está em
+[`spec/plan/roteiro-testes-pendentes.md`](spec/plan/roteiro-testes-pendentes.md).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -96,7 +98,7 @@ claude plugin test integrations/claude-code                # o mod: 46 testes, s
   `plugin`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-168, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-169, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
