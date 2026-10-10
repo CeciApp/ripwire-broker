@@ -98,7 +98,6 @@ fn a_transcript_is_reduced_to_counts() {
     assert_eq!(s.calls.edit, 1, "{:?}", s.calls);
     assert_eq!(s.calls.mcp, 1, "{:?}", s.calls);
     assert_eq!(s.calls.other, 2, "Task and pytest: {:?}", s.calls);
-    assert_eq!(s.calls.exploratory(), 5);
     // The result event carries the session's totals.
     assert_eq!(s.tokens.total(), 50 + 2000 + 30000 + 800);
     assert!((s.cost_usd - 0.1234).abs() < 1e-9);

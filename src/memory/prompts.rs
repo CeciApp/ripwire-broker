@@ -23,19 +23,6 @@ pub enum Stage {
     Consolidation,
 }
 
-/// The state fields a stage's questions read.
-pub fn state_fields(stage: Stage) -> &'static [&'static str] {
-    match stage {
-        Stage::Typing => &["observation"],
-        Stage::Relations | Stage::Alias => &["new_memory", "candidates"],
-        Stage::Consolidation => &["pairs"],
-        Stage::ImplicitTime => &["new_memory", "candidates", "temporal_references"],
-        Stage::Routing => &["query"],
-        Stage::Scoring => &["query", "evidence", "candidates"],
-        Stage::Stopping => &["query", "evidence", "depth"],
-    }
-}
-
 fn noul(question: &str, yes: &str, no: &str) -> JevQuestion {
     JevQuestion::noul(&format!(
         "{question}\ntrue: {yes}\nfalse: {no}\n{UNTRUSTED}"

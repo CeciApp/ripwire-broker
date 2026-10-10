@@ -53,9 +53,11 @@
           "broker",
           "notes",
           "online",
-          "jev"
+          "jevclient",
+          "typesafe",
+          "clef"
         ],
-        "note": "Local-model notes and the --online classifier only add to context_for_task."
+        "note": "Notes and the --online classifier only add to context_for_task. The classifier is TypeSafe Jev or Cloudflare Clef."
       },
       {
         "id": "memory",
@@ -64,14 +66,16 @@
           "broker",
           "memstore",
           "memworker",
-          "jev"
+          "jevclient",
+          "typesafe",
+          "clef"
         ],
-        "note": "The tools spool observations and recall from the store; a worker started by serve --memory enriches them through Jev."
+        "note": "The tools spool observations and recall from the store; a worker started by serve --memory enriches them through the chosen provider."
       }
     ],
     "repository": {
       "url": "https://github.com/aquental/ripwire-broker",
-      "revision": "dff7a9d7dcc2e9ef351cbb5dba9ce3d5f5af34aa"
+      "revision": "872d8422c2a2b913c93c0877b0dbb3245a86e27a"
     }
   },
   "components": [
@@ -292,10 +296,10 @@
       ]
     },
     {
-      "id": "jev",
-      "type": "cloud",
-      "label": "TypeSafe Jev",
-      "sublabel": "remote classifier",
+      "id": "jevclient",
+      "type": "backend",
+      "label": "Jev client",
+      "sublabel": "two providers",
       "pos": [
         880,
         430
@@ -307,6 +311,10 @@
       "sources": [
         {
           "path": "src/online/jev.rs"
+        },
+        {
+          "path": "src/online/mod.rs",
+          "label": "JevProvider"
         }
       ]
     },
@@ -396,6 +404,34 @@
           "path": "src/memory/consolidate.rs"
         }
       ]
+    },
+    {
+      "id": "typesafe",
+      "type": "cloud",
+      "label": "TypeSafe Jev",
+      "sublabel": "default provider",
+      "pos": [
+        1090,
+        430
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "clef",
+      "type": "cloud",
+      "label": "Cloudflare Clef",
+      "sublabel": "--jev-provider",
+      "pos": [
+        1090,
+        540
+      ],
+      "size": [
+        140,
+        64
+      ]
     }
   ],
   "connections": [
@@ -477,11 +513,10 @@
       "toSide": "left"
     },
     {
-      "id": "online-to-jev",
+      "id": "online-to-jevclient",
       "from": "online",
-      "to": "jev",
-      "label": "HTTPS",
-      "variant": "security"
+      "to": "jevclient",
+      "label": "questions"
     },
     {
       "id": "host-to-statusline",
@@ -530,13 +565,32 @@
       "toSide": "right"
     },
     {
-      "id": "memworker-to-jev",
+      "id": "memworker-to-jevclient",
       "from": "memworker",
-      "to": "jev",
+      "to": "jevclient",
+      "label": "questions",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "labelAt": [
+        868,
+        560
+      ]
+    },
+    {
+      "id": "jevclient-to-typesafe",
+      "from": "jevclient",
+      "to": "typesafe",
+      "label": "HTTPS",
+      "variant": "security"
+    },
+    {
+      "id": "jevclient-to-clef",
+      "from": "jevclient",
+      "to": "clef",
       "label": "HTTPS",
       "variant": "security",
-      "fromSide": "right",
-      "toSide": "bottom"
+      "fromSide": "bottom",
+      "toSide": "left"
     }
   ],
   "cards": [
@@ -566,7 +620,7 @@
         "Only allowlisted read-only verbs reach ripwire",
         "context_after_edit paths must resolve inside the root",
         "Repository text under untrusted_repository_data",
-        "Jev key only from RIPWIRE_BROKER_JEV_API_KEY"
+        "One provider key, only from RIPWIRE_BROKER_JEV_API_KEY"
       ]
     }
   ]

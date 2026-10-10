@@ -18,13 +18,6 @@ pub struct Calls {
     pub other: u64,
 }
 
-impl Calls {
-    /// Searches and reads: the "chamadas exploratórias" of §17 and §23.15.
-    pub fn exploratory(&self) -> u64 {
-        self.search + self.read
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Tokens {
     pub input: u64,

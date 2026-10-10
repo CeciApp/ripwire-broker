@@ -109,6 +109,7 @@
 | 2026-10-09 18:00 | `--memory-debug-log`: com `--memory`, cada evento da memória (coleta, spool, ingestão, enriquecimento, consolidação, leitura, retenção, esquecimento, worker) vira uma linha em `debug.log` ao lado do store, escrita por todos os processos do workspace, para `tail -F`; ids, contagens e motivos, nunca conteúdo; rotação em 10 MiB; o `install` passa a flag ao servidor e aos hooks | [D-164](#d-164----memory-debug-log-a-memória-acompanhada-ao-vivo) |
 | 2026-10-09 19:00 | A leitura de memória faz menos idas e voltas ao Jev: o routing vai na mesma request do primeiro scoring, e sem nenhum candidato aceito a leitura termina em `empty` sem a request de stopping. Medido: a latência do Jev não depende das perguntas por request (217 chamadas, r = −0,06); uma leitura que estourava os 850 ms em 3 requests passa a 1–2 requests, 290–560 ms. Uma request basta para ler (revê o D-150). Num A/B da leitura contra o Jev, a seleção não mudou (mesmo conjunto em 65 de 66 leituras; a única diferença foi o recurso local) e a mediana caiu de 782 para 524 ms | [D-165](#d-165--a-leitura-de-memória-em-menos-idas-e-voltas) |
 | 2026-10-09 22:30 | `--jev-provider cloudflare`: o Clef da Cloudflare (Workers AI) no lugar do Jev, pelo mesmo protocolo. O provider decide a URL, desembrulha o envelope `{success, errors, messages, result}` e limita o pedido a 64 perguntas; `--jev-account-id` é obrigatório com ele e recusado sem ele; a credencial vem da mesma variável; o account id é redigido no `jev.log`. Padrão `typesafe`, sem mudança para quem não passa a flag. Rodado contra a Cloudflare real: o transporte funciona nos dois modelos; com os limiares do Jev, o `clef` admite o mesmo que o Jev no corpus sintético e o `clef-flash` (o padrão) rejeita o arquivo de teste | [D-166](#d-166----jev-provider-cloudflare) |
+| 2026-10-10 00:15 | Pendências do handoff: 14 itens que nenhum binário alcançava saíram, com os testes que só os testavam (a lista veio do compilador, numa cópia com tudo `pub(crate)`); o `Drop` do `Unfinished` recupera o lock envenenado em vez de dar `unwrap`; o diagrama ganhou a Cloudflare; o `sha2` foi revisto e segue preso; a Cloudflare não será o provider | [D-167](#d-167--código-sem-uso-mutex-no-drop-diagrama) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7597,3 +7598,81 @@ quem o quiser passa `--jev-model clef`. Consequência aceita: com o padrão, o t
 
 **Em aberto:** os limiares por provider, que ficam fora deste diff. Fora de escopo, como no
 pedido: `images`, Clef local, e os padrões de `--jev-deadline-ms` e `--jev-max-candidates`.
+
+## D-167 — Código sem uso, mutex no `Drop`, diagrama
+
+**Data:** 2026-10-10 00:15.
+
+**Pedido do usuário**, sobre a lista de pendências do [`handoff.md`](../handoff.md): a Cloudflare
+não será o provider; auditar o código e remover o que não é usado; atacar o `unwrap` de mutex no
+`Drop`; rever o `sha2`; pôr a Cloudflare no diagrama.
+
+### Código sem uso
+
+**Método.** Numa biblioteca, o compilador não acusa item `pub` sem uso. Numa cópia descartável do
+`src/`, todo `pub` virou `pub(crate)` e os dois binários viraram módulos da biblioteca; aí o
+`dead_code` lista o que nenhum binário alcança. Rodado com e sem a feature `online`: 32 itens.
+
+**Removidos** (nenhum binário alcança, e os testes que os usavam só testavam o próprio item):
+
+| Item | O que foi com ele |
+|---|---|
+| `statusline::segments` | nada; ninguém chamava |
+| o reexport `online::OnlineTotals` | nada |
+| `JevClient::new` e `jev::ENDPOINT` | o teste que fixava a assinatura; o de `for_provider`, que fixa a mesma garantia (nenhuma URL vem da configuração) para os dois providers, ficou |
+| `identity::Symbol` e `symbol_entity` | dois testes; a parte sobre `file_entity` virou `a_file_entity_belongs_to_its_workspace`. Nada em produção cria entidade de símbolo |
+| `prompts::state_fields` | um bloco de asserções |
+| `Worker::reauthorize` | o fim de um teste; em produção só um processo novo retoma, e o comentário agora diz isso |
+| `Worker::metrics` | os testes usam `metrics_handle`, que a produção já usava |
+| `Runtime::config` e o campo `config` | uma asserção |
+| `Store::retry_failed` | os testes usam `retry_all_failed`, o do `memory retry` |
+| `consolidate::MAX_QUESTIONS` e `PER_PAIR` | uma asserção; o teste continua contando as 20 perguntas enviadas |
+| `Sequence::resume`, `Sequence::stamp`, `time::elapsed_ms` | os testes montam o `Stamp` como a produção, com `advance`; a propriedade retoma a sequência pelo formato gravado |
+| `Calls::exploratory` | uma asserção; `RunRecord::exploratory` é o que o relatório usa |
+
+**Ficam, com o motivo** (os 20 que a análise ainda acusa):
+
+- **costuras de teste**, por onde os testes exercitam código de produção: `JevClient::loopback*`
+  e `endpoint`, `JevProvider::loopback`, `Broker::inspect_semantic_cache` e
+  `OnlineEngine::inspect_cache` com `SemanticCache::dump` e `FifoMap::iter` (CA-ONLINE-13),
+  `wait_background` (dois), `hook::decide`, `statusline::render`, `retrieve::read` com o
+  `Local::Inline`, `request::batches`, `Store::publish` e `ingest_crashing_at`,
+  `Runtime::workspace_id`, `Report::incomplete`;
+- **`is_empty`** em `SemanticCache` e `SessionMemory`: o clippy o exige ao lado de um `len` público;
+- **`Role::{Test, Config, Risk}`**: reservados no schema v1 (PRD §10.1). Tirá-los muda o contrato
+  publicado; é decisão do mantenedor;
+- **`queue::Outcome::Failed`**: só os testes o constroem, mas o store o trata; é um estado da
+  máquina de jobs, não um item solto.
+
+As simplificações maiores do D-143 (`read_with`, `commit_*`, batches, `admit`/`admit_note`) não
+entraram: são refatoração, não remoção.
+
+### `unwrap` de mutex no `Drop`
+
+`Unfinished::drop` roda enquanto um pânico desenrola a pilha, e um segundo pânico ali aborta o
+servidor. Os três locks desse caminho (`metrics`, `spans`, `stages`) agora recuperam o lock
+envenenado com `unwrap_or_else(|e| e.into_inner())`, o idioma que `server_status.rs`, `log.rs` e
+`debug.rs` já usavam. **Sem teste novo:** nenhuma costura pública envenena esses locks (o motivo
+do D-148 para não fazer); a mudança segue por pedido do mantenedor, e a troca de volta para
+`unwrap` não é pega por nenhum teste.
+
+### `sha2`
+
+Revisto, sem mudança. O `rust-mcp-sdk` publicado mais novo ainda é o 2.0.0, o pinado, e ele traz o
+`sha2` 0.10.9; o 0.11.0 existe, e subir o nosso sozinho só duplicaria a crate (D-114). A linha do
+`dependabot.yml` fica.
+
+### Diagrama
+
+`spec/diagrams/`: o nó do provider virou `Jev client` (`src/online/jev.rs`, `JevProvider` em
+`mod.rs`), com dois destinos de rede: `TypeSafe Jev`, o padrão, e `Cloudflare Clef`
+(`--jev-provider`). O coordenador do `--online` e o worker da memória perguntam ao cliente, e só
+ele fala HTTPS. Entregue pelo `deliver` do archify (9 de 9 checagens, evidência conferida no
+commit `872d842`).
+
+### Cloudflare
+
+Decisão do mantenedor: a Cloudflare não será o provider; o Jev é. Limiares por provider saem da
+lista de pendências.
+
+**Testes:** 834 → 833 no build padrão, 872 → 870 com `online`; clippy e fmt limpos nas duas.

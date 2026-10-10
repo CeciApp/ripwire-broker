@@ -809,7 +809,7 @@ fn a_job_runs_at_most_twice_and_then_stays_failed_until_asked() {
     );
     assert_eq!(store.load().unwrap().jobs[&id].state, JobState::Failed);
 
-    assert!(store.retry_failed(&id).unwrap(), "an explicit action");
+    assert_eq!(store.retry_all_failed().unwrap(), 1, "an explicit action");
     let again = store.lease_next(10_000).unwrap().unwrap();
     store.finish(again, Outcome::Done).unwrap();
     assert_eq!(store.load().unwrap().jobs[&id].state, JobState::Done);

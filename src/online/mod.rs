@@ -22,7 +22,7 @@ pub mod response;
 pub mod retry_after;
 pub mod scheduler;
 
-pub use coordinator::{OnlineConfig, OnlineEngine, OnlineTotals};
+pub use coordinator::{OnlineConfig, OnlineEngine};
 
 /// The pinned model when no `--jev-model` is given.
 pub const DEFAULT_MODEL: &str = "jev-1.13.0";

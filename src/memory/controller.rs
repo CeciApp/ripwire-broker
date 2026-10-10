@@ -220,7 +220,7 @@ pub const RUN_DEADLINE: std::time::Duration = std::time::Duration::from_millis(5
 
 /// Why a request got no decisions.
 pub(crate) enum Failure {
-    /// 401/403: the worker stops until reauthorized.
+    /// 401/403: the worker stops for the rest of the process.
     Auth,
     /// A 429 whose wait does not fit the run: try again no sooner than this many ms.
     Cooldown(u64),
@@ -528,7 +528,7 @@ pub async fn enrich(
 }
 
 /// The process's memory worker (PRD jev-mem §8.1): one job at a time, and nothing more sent
-/// after the provider refused the credential, until `reauthorize` (a new process is one).
+/// after the provider refused the credential: only a new process, with a new credential, resumes.
 pub struct Worker {
     store: std::sync::Arc<Store>,
     classifier: std::sync::Arc<dyn MemoryClassifier>,
@@ -671,17 +671,7 @@ impl Worker {
         self.metrics.clone()
     }
 
-    /// What this worker cost so far, by operation; counts only.
-    pub fn metrics(&self) -> Metrics {
-        self.metrics.lock().unwrap().clone()
-    }
-
     pub fn is_suspended(&self) -> bool {
         self.suspended.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn reauthorize(&self) {
-        self.suspended
-            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }

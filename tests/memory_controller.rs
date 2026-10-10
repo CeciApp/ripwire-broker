@@ -82,16 +82,6 @@ fn every_stage_names_its_state_fields_and_carries_the_untrusted_guidance() {
             "{stage:?}"
         );
 
-        let fields = prompts::state_fields(stage);
-        assert!(!fields.is_empty(), "{stage:?}");
-        for field in fields {
-            assert!(
-                questions
-                    .iter()
-                    .any(|(_, q)| q.instructions.contains(field)),
-                "{stage:?}: no question names `{field}`"
-            );
-        }
         for (name, q) in &questions {
             let text = &q.instructions;
             assert!(
@@ -726,8 +716,9 @@ fn the_enrichment_counter_increments_exactly_once_per_node() {
             &[],
         )
         .unwrap();
-    assert!(
-        !store.retry_failed(&id(1)).unwrap(),
+    assert_eq!(
+        store.retry_all_failed().unwrap(),
+        0,
         "only a failed job comes back"
     );
     assert_eq!(
@@ -809,7 +800,7 @@ fn worker(store: &Arc<Store>, classifier: Arc<dyn MemoryClassifier>) -> Worker {
 }
 
 #[tokio::test]
-async fn auth_failures_suspend_the_worker_until_reauthorized() {
+async fn auth_failures_suspend_the_worker_for_the_rest_of_the_process() {
     for status in [401, 403] {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(stored(dir.path(), &[rec(1, "cache layer", &["e"])]));
@@ -823,11 +814,6 @@ async fn auth_failures_suspend_the_worker_until_reauthorized() {
             "{status}: nothing more is sent"
         );
         assert_eq!(fake.sent(), 1, "{status}: never retried");
-        w.reauthorize();
-        assert!(
-            w.run_once(1_000_000).await.unwrap().is_some(),
-            "{status}: a new credential resumes"
-        );
     }
 }
 
@@ -1132,7 +1118,6 @@ async fn memory_and_online_memory_start_one_worker() {
     .unwrap()
     .unwrap();
     assert_eq!(a.workspace_id(), b.workspace_id());
-    assert_eq!(a.config().candidates, b.config().candidates);
     assert_eq!(a.publish().retention_ms, 30 * 24 * 60 * 60 * 1000);
 }
 
@@ -1235,7 +1220,7 @@ async fn questions_attempts_bytes_and_cache_are_counted_per_operation_without_co
     let w = worker(&store, fake.clone());
     while w.run_once(1_000).await.unwrap().is_some() {}
 
-    let m = w.metrics();
+    let m = w.metrics_handle().lock().unwrap().clone();
     assert_eq!(
         m.typing.questions,
         4 * 2 + 4,
@@ -1299,7 +1284,7 @@ async fn a_spent_quota_keeps_jobs_pending_and_uses_no_run() {
     );
     assert_eq!(job.runs, 0, "a run that sent nothing does not count");
     assert_eq!(fake.sent(), 0);
-    assert_eq!(w.metrics().typing.quota_refusals, 5);
+    assert_eq!(w.metrics_handle().lock().unwrap().typing.quota_refusals, 5);
 }
 
 #[tokio::test]
