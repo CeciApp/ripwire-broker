@@ -351,7 +351,7 @@ faltantes são registradas como `note_pending` sem geração.
 | S3.12 | 6: `the_command_summarizer_feeds_stdin_and_reads_stdout` | `CommandSummarizer` |
 | S3.13 | 6: `arguments_reach_the_program_literally_without_a_shell` (um `;` no argv não executa nada) | argv sem shell |
 | S3.14 | 6: `a_hung_model_is_killed_at_the_hard_limit` e `a_nonzero_exit_is_an_error` | `kill_on_drop` + timeout |
-| S3.15 | 1: `the_note_cache_survives_a_restart_and_ignores_corrupt_files` (dois `Broker`, mesmo `cache_dir`) | leitura tolerante |
+| S3.15 | 1: `the_note_cache_survives_a_restart_and_ignores_corrupt_files` (dois `Broker`, mesmo `cache_dir`) | leitura tolerante. **Feita no D-168**, opt-in: [plano](plan-s3-15-cache-de-notas.md) |
 | S3.16 | 2: `the_server_adds_notes_with_a_command_summarizer` (script `sh` como modelo) + flags em `cli.rs` | `Settings` |
 | S3.17 | 5: `hooks_use_cached_notes_only` | política de hook |
 | S3.18 | 6, `#[ignore]` + `RIPWIRE_BROKER_TEST_MODEL="ollama run phi4"`: `a_real_local_model_writes_a_note` | opt-in, fora da suíte padrão |

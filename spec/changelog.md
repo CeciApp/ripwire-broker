@@ -110,6 +110,7 @@
 | 2026-10-09 19:00 | A leitura de memória faz menos idas e voltas ao Jev: o routing vai na mesma request do primeiro scoring, e sem nenhum candidato aceito a leitura termina em `empty` sem a request de stopping. Medido: a latência do Jev não depende das perguntas por request (217 chamadas, r = −0,06); uma leitura que estourava os 850 ms em 3 requests passa a 1–2 requests, 290–560 ms. Uma request basta para ler (revê o D-150). Num A/B da leitura contra o Jev, a seleção não mudou (mesmo conjunto em 65 de 66 leituras; a única diferença foi o recurso local) e a mediana caiu de 782 para 524 ms | [D-165](#d-165--a-leitura-de-memória-em-menos-idas-e-voltas) |
 | 2026-10-09 22:30 | `--jev-provider cloudflare`: o Clef da Cloudflare (Workers AI) no lugar do Jev, pelo mesmo protocolo. O provider decide a URL, desembrulha o envelope `{success, errors, messages, result}` e limita o pedido a 64 perguntas; `--jev-account-id` é obrigatório com ele e recusado sem ele; a credencial vem da mesma variável; o account id é redigido no `jev.log`. Padrão `typesafe`, sem mudança para quem não passa a flag. Rodado contra a Cloudflare real: o transporte funciona nos dois modelos; com os limiares do Jev, o `clef` admite o mesmo que o Jev no corpus sintético e o `clef-flash` (o padrão) rejeita o arquivo de teste | [D-166](#d-166----jev-provider-cloudflare) |
 | 2026-10-10 00:15 | Pendências do handoff: 14 itens que nenhum binário alcançava saíram, com os testes que só os testavam (a lista veio do compilador, numa cópia com tudo `pub(crate)`); o `Drop` do `Unfinished` recupera o lock envenenado em vez de dar `unwrap`; o diagrama ganhou a Cloudflare; o `sha2` foi revisto e segue preso; a Cloudflare não será o provider | [D-167](#d-167--código-sem-uso-mutex-no-drop-diagrama) |
+| 2026-10-10 01:30 | S3.15: `--summarizer-cache` guarda as notas do modelo local em `<state-dir>/notes/`, um arquivo privado por workspace, e um servidor novo parte delas. Opt-in; o arquivo é lido como dado não confiável. Decidido com 17 sessões e 44,6% de repetição entre sessões. A T3.11 foi tentada num Claude Code real: a memória é coletada e enriquecida, mas a leitura não manteve nenhuma | [D-168](#d-168--s315-cache-persistente-de-notas) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7676,3 +7677,82 @@ Decisão do mantenedor: a Cloudflare não será o provider; o Jev é. Limiares p
 lista de pendências.
 
 **Testes:** 834 → 833 no build padrão, 872 → 870 com `online`; clippy e fmt limpos nas duas.
+
+## D-168 — S3.15: cache persistente de notas
+
+**Data:** 2026-10-10 01:30.
+
+**Pedido do usuário:** "Implemente o S3.15 agora", depois de ver a medição do §21.3; e rodar os
+passos 1 a 3 do roteiro da T3.11.
+
+### A medição que decidiu
+
+`hook-stats` nesta máquina: 17 sessões, 852 eventos, 85,2% de acerto dentro da sessão e **44,6% de
+repetição entre sessões** (160 de 359 fingerprints). A regra proposta no
+[plano](plan/plano-ab-e-session-hits.md) põe o S3.15 no plano a partir de 30%, depois de 20
+sessões. O mantenedor decidiu com 17.
+
+### O que mudou
+
+[Plano](plan/plan-s3-15-cache-de-notas.md). `--summarizer-cache`, só com `--summarizer-cmd`, no
+`serve`:
+
+- as notas vão também para `<state-dir>/notes/<sha256 da raiz>.json`, um arquivo por workspace,
+  escrito inteiro a cada nota gerada por `write_private` (0600, diretório 0700, temporário e
+  rename), fora da thread assíncrona e depois de acordar quem esperava a nota;
+- um `serve` novo no mesmo workspace parte delas: a nota volta com `cached: true` e conta em
+  `cache_hits`, e o modelo não roda;
+- a chave não mudou, então evidência, prompt ou modelo diferente dão outra nota;
+- o arquivo é dado não confiável: aberto uma vez sem seguir link e sem bloquear, só arquivo
+  regular até 2 MiB, chaves só em hex de 64, todo texto de novo pelo `sanitize`, no máximo
+  `MAX_CACHED_NOTES`. Ilegível, corrompido ou de outra versão vale como vazio;
+- o status ganha `summarizer.persistent: true`, sem o caminho.
+
+**Escolhas que o pedido deixava em aberto:**
+
+1. **Opt-in.** Grava em disco texto de um modelo sobre o código; quem não pede não ganha um
+   arquivo novo. É a decisão a rever se o uso mostrar que todo mundo liga.
+2. **Dois servidores no mesmo workspace: o último a escrever vence.** Sem lock entre processos nem
+   merge; dentro de um processo as escritas são em fila, cada uma com o estado do momento, para o
+   arquivo nunca voltar a um estado mais velho (a primeira versão escrevia o retrato tirado na hora
+   da nota, e duas escritas fora de ordem perdiam uma nota: o teste pegou).
+3. **Os hooks ficam de fora.** Um hook não roda modelo, e o S3.17 saiu no D-046.
+4. **Sem comando para apagar:** é um arquivo, e o README diz qual.
+
+### Testes
+
+Vermelhos antes: `the_note_cache_survives_a_restart_and_ignores_corrupt_files`,
+`the_cache_file_is_private_and_belongs_to_one_workspace`,
+`a_tampered_cache_file_is_sanitized_capped_and_never_read_through_a_link`,
+`the_status_says_when_the_note_cache_is_persistent` (`tests/notes.rs`),
+`serve_takes_summarizer_cache_only_with_a_summarizer` (`tests/cli.rs`) e
+`the_server_keeps_notes_across_restarts_only_with_summarizer_cache` (`tests/mcp_surface.rs`, pelo
+binário, com o controle sem a flag). `without_a_cache_dir_nothing_is_written` é a guarda do padrão.
+
+**Mutações**, todas derrubadas: sem `O_NOFOLLOW`; sem `sanitize` na leitura; sem a checagem da
+chave; sem a checagem da versão (sobreviveu ao primeiro teste, que usava um arquivo de outra
+versão sem notas; agora usa o arquivo honesto com a versão trocada); um arquivo só para todos os
+workspaces; a flag ignorada no `main`; nunca escrever.
+
+**Nota de método:** um `Broker` gera uma nota por chamada (uma geração por vez, as outras ficam
+`note_pending`). Os testes pedem até todo módulo ter a sua antes de comparar dois processos.
+
+### T3.11, passos 1 a 3
+
+Rodados num repositório sintético (três arquivos Python), com o Claude Code 2.1.296 headless
+(`claude -p --mcp-config .mcp.json --strict-mcp-config`, `stream-json`), o `.mcp.json` escrito por
+`install claude-code --online --memory --memory-debug-log --write`, e a chave do Jev.
+
+| Passo | Resultado |
+|---|---|
+| 1. Sessão que edita `src/auth.py` | o agente chamou as três tools; 2 observações coletadas, ingeridas e enriquecidas pelo worker (`state=complete`, 2 requests cada) |
+| 2. `memory drain`, `memory status` | nada a drenar (o worker já tinha feito); 2 memórias, depois 4 |
+| 3. Sessão com tarefa ligada (teste novo para `validate_token`) | `context_for_task` leu a memória: `visited=2`, 14 perguntas, 1 request, **`kept=0`, `stop=empty`**; nenhum `memories[]` no envelope |
+| 3b. Tarefa que nomeia a edição anterior | `visited=4`, 22 perguntas, **`kept=0`** |
+
+**Conclusão:** o caminho inteiro funciona num host real até a leitura, e a leitura não entrega
+nada. Sem memória no envelope não há como observar se o host a usa: a T3.11 segue aberta, e antes
+dela vem saber por que o scoring do Jev rejeita memórias do mesmo arquivo e símbolo da tarefa.
+Não investigado aqui. Custo das três sessões: US$ 0,84.
+
+**Testes:** 833 → 840 no build padrão, 870 → 877 com `online`; clippy e fmt limpos nas duas.

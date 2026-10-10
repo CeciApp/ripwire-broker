@@ -105,6 +105,13 @@ fn settings(
                 }
                 broker.summarizer = Some(model);
                 broker.summarizer_wait = m.wait;
+                if m.cache {
+                    // Without a state dir the notes stay in memory, as without the flag.
+                    match a.state_dir.clone().or_else(StateStore::default_dir) {
+                        Some(dir) => broker.note_cache_dir = Some(dir.join("notes")),
+                        None => eprintln!("ripwire-broker: note cache disabled: no state dir"),
+                    }
+                }
             }
             Err(e) => eprintln!("ripwire-broker: notes disabled: {e}"),
         }

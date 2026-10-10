@@ -61,4 +61,11 @@ impl<K: Eq + Hash + Clone, V> FifoMap<K, V> {
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.entries.iter()
     }
+
+    /// Oldest insertion first: the order that, inserted again, rebuilds the same map.
+    pub(crate) fn in_order(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.order
+            .iter()
+            .filter_map(|k| self.entries.get(k).map(|v| (k, v)))
+    }
 }

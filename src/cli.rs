@@ -23,7 +23,8 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
                       [--memory [--memory-read-deadline-ms N] [--memory-read-request-limit N]
                                 [--memory-write-candidates N] [--memory-retention-days N] [--memory-max-nodes N]
                                 [--memory-selection jev|deterministic] [--memory-debug-log]]
-                      [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]]
+                      [--summarizer-cmd CMD [--summarizer-version-cmd CMD] [--summarizer-wait-ms N] [--summarizer-timeout-ms N]
+                                [--summarizer-cache]]
        ripwire-broker hook <claude-code|codex> <user-prompt-submit|post-tool-use|stop> [--workspace DIR]
                       [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--every-prompt] [--gate] [--log-refs]
                       [--edit-interval-ms N] [--memory [--memory-debug-log]]
@@ -157,6 +158,8 @@ pub struct SummarizerArgs {
     pub wait: Duration,
     /// Hard limit for one generation; the process is killed after it.
     pub timeout: Duration,
+    /// `--summarizer-cache`: notes are kept in the state dir, across restarts (D-168).
+    pub cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -363,7 +366,8 @@ impl Flags {
         let Some(command) = self.summarizer_cmd.clone() else {
             let companion = self.summarizer_version_cmd.is_some()
                 || self.summarizer_wait.is_some()
-                || self.summarizer_timeout.is_some();
+                || self.summarizer_timeout.is_some()
+                || self.on("--summarizer-cache");
             return match companion {
                 true => Err(usage("the --summarizer-* options need --summarizer-cmd")),
                 false => Ok(None),
@@ -374,6 +378,7 @@ impl Flags {
             version_cmd: self.summarizer_version_cmd.clone(),
             wait: self.summarizer_wait.unwrap_or(Duration::from_millis(1500)),
             timeout: self.summarizer_timeout.unwrap_or(Duration::from_secs(60)),
+            cache: self.on("--summarizer-cache"),
         }))
     }
 
@@ -517,6 +522,7 @@ const SWITCHES: &[&str] = &[
     "--jev-probe",
     "--log",
     "--all",
+    "--summarizer-cache",
 ];
 
 /// The valued `--jev-*` flags; kept as text until `Flags::online` checks them.
@@ -707,6 +713,7 @@ fn parse_serve(it: Args) -> Result<Command, String> {
                 SUMMARIZER[1],
                 SUMMARIZER[2],
                 SUMMARIZER[3],
+                "--summarizer-cache",
                 "--online",
                 "--memory",
                 "--memory-debug-log",

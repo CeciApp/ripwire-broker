@@ -1,7 +1,7 @@
 # Handoff — ripwire-broker
 
 Estado em 2026-10-10, até o
-[D-167](spec/changelog.md#d-167--código-sem-uso-mutex-no-drop-diagrama).
+[D-168](spec/changelog.md#d-168--s315-cache-persistente-de-notas).
 Para quem pega o projeto agora: o que existe, o que está no meio, o que falta e onde já se tropeçou.
 
 ## O que é
@@ -21,7 +21,7 @@ da Cloudflare). O PRD vigente é
 | --- | --- |
 | 0–1 · spike e MVP | feitas |
 | 2 · hooks, contexto incremental, `install`, `doctor` | feita |
-| 3 · notas por modelo local | feita, com cache só em memória (o de disco espera a medição do §21.3) |
+| 3 · notas por modelo local | feita; o cache é em memória e, com `--summarizer-cache`, também em disco, no state dir (S3.15, D-168, [plano](spec/plan/plan-s3-15-cache-de-notas.md)) |
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
 | `--jev-provider cloudflare` (D-166, #89) | feito em TDD e rodado contra a Cloudflare real: o Clef (Workers AI) pelo mesmo protocolo do Jev. O provider decide a URL (nenhuma vem da configuração), abre o envelope `{success, errors, messages, result}` e limita o pedido a 64 perguntas; `--jev-account-id` é obrigatório com ele e redigido no `jev.log`; a credencial vem da mesma `RIPWIRE_BROKER_JEV_API_KEY`. O padrão segue `typesafe`, e **o provider em uso é o Jev**. Com Cloudflare o modelo padrão é `clef-flash`, mantido pelo mantenedor depois da medição: com os limiares do Jev ele rejeita o arquivo de teste do corpus sintético, que o `clef` admite (6,3 vezes o preço, `--jev-model clef`). A Cloudflare não será o provider (D-167), então não há limiares por provider nem planos de tê-los |
 | barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131); `hooks sem sessão` quando a entrada não traz `session_id` (D-163, #82) |
@@ -43,8 +43,8 @@ O código não tem `TODO`/`FIXME`. As pendências moram no PRD (§19, §21, §23
 ## Como verificar
 
 ```sh
-cargo test --all-targets                    # 833 testes, 5 ignorados (opt-in)
-cargo test --all-targets --features online  # 870 testes, 8 ignorados
+cargo test --all-targets                    # 840 testes, 5 ignorados (opt-in)
+cargo test --all-targets --features online  # 877 testes, 8 ignorados
 cargo clippy --all-targets -- -D warnings   # também com --features online
 cargo fmt --check
 claude plugin validate --strict integrations/claude-code   # o plugin
@@ -96,7 +96,7 @@ claude plugin test integrations/claude-code                # o mod: 46 testes, s
   `plugin`). As fixtures do ripwire e dos hosts são gravações reais.
 - **`spec/`:**
   - `ripwire-broker-mcp.md`: o PRD;
-  - `changelog.md`: D-001 a D-167, a tabela de índice no topo;
+  - `changelog.md`: D-001 a D-168, a tabela de índice no topo;
   - `plan/`: os planos de cada fase;
   - `diagrams/`: arquitetura, mantida à mão.
 - **`integrations/`:** configuração e skill para Claude Code e Codex.
@@ -148,8 +148,9 @@ Os instrumentos estão prontos; as medições, não.
   em 2026-10-10: 17 sessões, 852 eventos, 85,2% de acerto dentro da sessão e **44,6% de repetição
   entre sessões** (160 de 359 fingerprints). Faltam 3 sessões para as 20 da regra; o número já
   está acima dos 30%.
-- **Regra proposta (o mantenedor decide):** repetição entre sessões < 15% recusa o S3.15;
-  ≥ 30% o põe no plano.
+- **Decidido (D-168):** com 44,6% o mantenedor mandou implementar o S3.15 sem esperar as 20
+  sessões. O cache persistente de notas existe, opt-in (`--summarizer-cache`). Ele só serve ao
+  `serve`: os hooks continuam sem notas, porque um hook não roda modelo.
 
 ## Pendências conhecidas, fora das medições
 
@@ -164,6 +165,11 @@ Os instrumentos estão prontos; as medições, não.
   D-128 rodou sem `--agent`, e nenhum dos 121 payloads o trouxe. Uma sessão com `--agent`, gravada
   pelo `capture.sh` do roteiro (`~/projects/ai/CECI/statusline-manual/`, pasta local do mantenedor,
   não versionada), fecha isso.
+- **T3.11, primeira tentativa (D-168):** três sessões reais do Claude Code 2.1.296 num repositório
+  sintético, com `serve --online --memory`. Coleta, ingestão e enriquecimento funcionaram (4
+  memórias), e a leitura visitou as 4 e perguntou ao Jev (22 perguntas, 1 request), mas **não
+  manteve nenhuma** (`stop=empty`). Sem memória entregue, o consumo pelo host segue sem validar; o
+  que falta saber primeiro é por que a leitura rejeita memórias do mesmo arquivo da tarefa.
 - **A chave:** `RIPWIRE_BROKER_JEV_API_KEY` guarda a credencial de um provider por vez: confira
   qual está lá antes de uma chamada real.
 - **Fase 6:** inteira. A política de falhar em CI com `strict=true` (§21.4) depende dela.

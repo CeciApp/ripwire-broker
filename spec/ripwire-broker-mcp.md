@@ -862,7 +862,9 @@ padrão. Requisitos:
 - **Cache:** fica em memória, endereçado por
   `sha256(versão do prompt, modelo, módulo, evidência)`. A versão do modelo entra na chave
   pelo hash da saída de `--summarizer-version-cmd`. Sem ele, o requisito fica
-  parcialmente atendido, e o `doctor` avisa.
+  parcialmente atendido, e o `doctor` avisa. Com `--summarizer-cache` (D-168) o mesmo cache
+  também vai para `<state-dir>/notes/`, um arquivo privado por workspace, lido como dado não
+  confiável; sem a flag, nada vai para o disco.
 - **Espera:** a resposta espera no máximo `--summarizer-wait-ms`. Depois disso, a nota
   continua em segundo plano, com no máximo uma geração por vez.
 - **Fallback:** as limitações `note_pending`, `summarizer_unavailable` e `notes_omitted`
@@ -1271,7 +1273,7 @@ Se Streamable HTTP for implementado:
 | Itens mostrados/omitidos | não | Calibrar truncamento |
 | Cache hit lógico do broker | não | Medir reaproveitamento: `metrics.session_hits`, os itens, testes e riscos não reenviados porque a sessão já os tinha ([D-040](changelog.md#d-040--ponto-de-parada-1-contexto-incremental-no-núcleo)) |
 | Status final | não | Medir `ready`, atenção e desconhecido |
-| Notas do modelo local | não | `summarizer.generated`, `cache_hits`, `pending`, `failures` e `cached_notes`: só contagens, nunca texto de nota ou prompt |
+| Notas do modelo local | não | `summarizer.generated`, `cache_hits`, `pending`, `failures` e `cached_notes`: só contagens, nunca texto de nota ou prompt; `persistent: true` com `--summarizer-cache`, nunca o caminho |
 
 Prompt, código, caminhos, símbolos e respostas não são registrados por padrão.
 
@@ -1594,8 +1596,10 @@ persistente. O MVP deve começar sem cache semântico persistente.
 
 **Estado:** a deduplicação por sessão está implementada, e `session_hits` a mede. A
 Fase 3 começou com o cache de notas só em memória
-([D-046](changelog.md#d-046--fase-3-com-cache-em-memória)). O cache persistente
-continua pendente dessa medição em uso real.
+([D-046](changelog.md#d-046--fase-3-com-cache-em-memória)). **Medido e decidido
+([D-168](changelog.md#d-168--s315-cache-persistente-de-notas)):** com 17 sessões reais, 44,6% de
+repetição entre sessões; o cache persistente entrou, opt-in por `--summarizer-cache`
+([plano](plan/plan-s3-15-cache-de-notas.md)).
 
 Até o [D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real), essa medição
 era impossível, não só pendente. Cada evento de hook é um processo novo, e `session_hits` morria
