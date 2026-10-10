@@ -334,6 +334,79 @@ async fn the_server_adds_notes_with_a_command_summarizer() {
     client.shut_down().await.unwrap();
 }
 
+/// S3.15 (D-168) through the real server: with `--summarizer-cache` a second process serves the
+/// first one's note from the state dir; without it, it asks its own model.
+#[tokio::test]
+async fn the_server_keeps_notes_across_restarts_only_with_summarizer_cache() {
+    require_ripwire!();
+    let repo = common::sample_repo();
+    let bin = tempfile::tempdir().unwrap();
+    // One program, so one model to the broker; what it says changes between the processes.
+    let script = bin.path().join("fake-llm");
+    let says = |text: &str| {
+        common::write_executable(
+            &script,
+            format!("#!/bin/sh\ncat >/dev/null\necho '{text}'\n"),
+        );
+    };
+    let llm = script.to_str().unwrap();
+    let first_note = |args: Vec<String>| {
+        let root = repo.path().to_path_buf();
+        async move {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let client = start_broker(&root, &args).await;
+            let (is_error, out) = call(
+                &client,
+                "context_for_task",
+                json!({"task": "how is login validated?", "mode": "orient"}),
+            )
+            .await;
+            assert!(!is_error, "{out}");
+            let st = status(&client).await;
+            client.shut_down().await.unwrap();
+            (out["notes"][0].clone(), st["summarizer"].clone())
+        }
+    };
+    let args = |script: &str, state: &std::path::Path, cache: bool| {
+        let mut a = vec![
+            "--summarizer-cmd".to_string(),
+            script.to_string(),
+            "--summarizer-wait-ms".into(),
+            "10000".into(),
+            "--state-dir".into(),
+            state.to_str().unwrap().into(),
+        ];
+        if cache {
+            a.push("--summarizer-cache".into());
+        }
+        a
+    };
+
+    let state = tempfile::tempdir().unwrap();
+    says("first process");
+    let (a, st) = first_note(args(llm, state.path(), true)).await;
+    assert_eq!(a["text"]["untrusted_repository_data"], "first process");
+    assert_eq!(st["persistent"], true, "{st}");
+    says("second process");
+    let (b, st) = first_note(args(llm, state.path(), true)).await;
+    assert_eq!(
+        b["text"]["untrusted_repository_data"], "first process",
+        "served from the state dir: {b}"
+    );
+    assert_eq!(b["cached"], true);
+    assert_eq!(st["cache_hits"], 1, "{st}");
+
+    // The control: the same two processes without the flag.
+    let state = tempfile::tempdir().unwrap();
+    says("first process");
+    first_note(args(llm, state.path(), false)).await;
+    says("second process");
+    let (b, st) = first_note(args(llm, state.path(), false)).await;
+    assert_eq!(b["text"]["untrusted_repository_data"], "second process");
+    assert!(st.get("persistent").is_none(), "{st}");
+    assert!(!state.path().join("notes").exists());
+}
+
 /// The broker binary spoken to in raw JSON-RPC, so the test owns the request ids.
 struct Raw {
     child: std::process::Child,

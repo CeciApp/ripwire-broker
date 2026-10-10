@@ -891,3 +891,250 @@ fn a_note_key_is_unchanged() {
         "3ba0304eb583877497abef6760a4fd1bca13a24ad502a605ad97ed9da3f8e426"
     );
 }
+
+// --- S3.15: the note cache on disk (D-168) ---
+
+/// A broker on `ws` whose notes are kept under `cache_dir`, when one is given.
+async fn cached_broker(
+    ws: &std::path::Path,
+    cache_dir: Option<&std::path::Path>,
+    model: Arc<FakeSummarizer>,
+) -> Broker {
+    let mut config = BrokerConfig::new(ws);
+    config.summarizer = Some(model);
+    config.summarizer_wait = Duration::from_secs(5);
+    config.note_cache_dir = cache_dir.map(Into::into);
+    let fake = Arc::new(FakeUpstream::new().answer("explore", "explore_export_auth"));
+    Broker::connect(fake, config).await.unwrap()
+}
+
+/// The one file under `dir`, the cache of the only workspace that wrote there.
+fn cache_file(dir: &std::path::Path) -> std::path::PathBuf {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    files.remove(0)
+}
+
+/// Asks until every module has its note: one generation runs at a time, so one call is not enough.
+async fn warm(b: &Broker) -> Value {
+    for _ in 0..4 {
+        b.context_for_task(orient(4000)).await.unwrap();
+        settle(b).await;
+    }
+    to_json(&b.context_for_task(orient(4000)).await.unwrap())
+}
+
+fn note_texts(out: &Value) -> Vec<String> {
+    out["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| {
+            n["text"]["untrusted_repository_data"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_note_cache_survives_a_restart_and_ignores_corrupt_files() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let dir = state.path().join("notes");
+
+    let first = Arc::new(FakeSummarizer::replying("Routes delegate to login."));
+    let a = cached_broker(ws.path(), Some(&dir), first.clone()).await;
+    let out = warm(&a).await;
+    let written = first.prompts().len();
+    assert_eq!(written, note_texts(&out).len(), "{out}");
+    assert!(written > 1, "more than one module: {out}");
+    drop(a);
+
+    // Another process: the same notes, and the model is never asked.
+    let second = Arc::new(FakeSummarizer::replying("a different answer"));
+    let b = cached_broker(ws.path(), Some(&dir), second.clone()).await;
+    let again = to_json(&b.context_for_task(orient(4000)).await.unwrap());
+    assert_eq!(second.prompts().len(), 0, "served from disk");
+    assert_eq!(note_texts(&again), note_texts(&out));
+    assert!(
+        again["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["cached"] == true),
+        "{again}"
+    );
+    assert_eq!(
+        to_json(&b.status().await)["summarizer"]["cached_notes"],
+        written as u64
+    );
+    drop(b);
+
+    // A corrupt file is an empty cache, never an error; the next note rewrites it.
+    let file = cache_file(&dir);
+    // The last one is the honest file under another version: its notes are not this cache's.
+    let honest = std::fs::read_to_string(&file).unwrap();
+    assert!(honest.contains(r#""schema_version":1"#), "{honest}");
+    let other_version = honest.replace(r#""schema_version":1"#, r#""schema_version":99"#);
+    for garbage in ["", "{", "[1,2,3]", other_version.as_str()] {
+        std::fs::write(&file, garbage).unwrap();
+        let third = Arc::new(FakeSummarizer::replying("written again"));
+        let c = cached_broker(ws.path(), Some(&dir), third.clone()).await;
+        let out = warm(&c).await;
+        assert_eq!(
+            third.prompts().len(),
+            written,
+            "{garbage:?}: generated anew"
+        );
+        assert!(
+            note_texts(&out).iter().all(|t| t == "written again"),
+            "{garbage:?}: {out}"
+        );
+        drop(c);
+        let fourth = Arc::new(FakeSummarizer::replying("never asked"));
+        let d = cached_broker(ws.path(), Some(&dir), fourth.clone()).await;
+        d.context_for_task(orient(4000)).await.unwrap();
+        assert_eq!(
+            fourth.prompts().len(),
+            0,
+            "{garbage:?}: the file was rewritten"
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_a_cache_dir_nothing_is_written() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let model = Arc::new(FakeSummarizer::replying("note"));
+    let a = cached_broker(ws.path(), None, model.clone()).await;
+    warm(&a).await;
+    let calls = model.prompts().len();
+    drop(a);
+
+    assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(ws.path()).unwrap().count(),
+        0,
+        "and never in the workspace"
+    );
+    let b = cached_broker(ws.path(), None, model.clone()).await;
+    warm(&b).await;
+    assert_eq!(
+        model.prompts().len(),
+        calls * 2,
+        "a new process starts empty"
+    );
+    assert!(
+        to_json(&b.status().await)["summarizer"]
+            .get("persistent")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn the_cache_file_is_private_and_belongs_to_one_workspace() {
+    use std::os::unix::fs::PermissionsExt;
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let dir = state.path().join("notes");
+    let model = Arc::new(FakeSummarizer::replying("note"));
+    let a = cached_broker(ws.path(), Some(&dir), model.clone()).await;
+    warm(&a).await;
+    let calls = model.prompts().len();
+
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(mode(&cache_file(&dir)), 0o600);
+    assert_eq!(
+        std::fs::read_dir(ws.path()).unwrap().count(),
+        0,
+        "nothing is ever written in the workspace"
+    );
+    let name = cache_file(&dir);
+    let name = name.file_name().unwrap().to_str().unwrap();
+    assert!(
+        !name.contains(ws.path().file_name().unwrap().to_str().unwrap()),
+        "the workspace path is hashed: {name}"
+    );
+
+    // The same evidence in another workspace: its own file, and its own generation.
+    let other = tempfile::tempdir().unwrap();
+    let b = cached_broker(other.path(), Some(&dir), model.clone()).await;
+    warm(&b).await;
+    assert_eq!(model.prompts().len(), calls * 2, "nothing read across");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn a_tampered_cache_file_is_sanitized_capped_and_never_read_through_a_link() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let dir = state.path().join("notes");
+    let model = Arc::new(FakeSummarizer::replying("note"));
+    let a = cached_broker(ws.path(), Some(&dir), model.clone()).await;
+    warm(&a).await;
+    let calls = model.prompts().len();
+    drop(a);
+    let file = cache_file(&dir);
+    let honest = std::fs::read_to_string(&file).unwrap();
+
+    // Text no model run could have left in the cache: control bytes, and far too long.
+    let mut doc: Value = serde_json::from_str(&honest).unwrap();
+    let hostile = format!("\u{1b}[31mred\u{7} {}", "x".repeat(5_000));
+    for e in doc["entries"].as_array_mut().unwrap() {
+        e["text"] = hostile.clone().into();
+    }
+    // And entries under keys that are no hash at all.
+    let mut entries = doc["entries"].as_array().unwrap().clone();
+    entries.push(serde_json::json!({ "key": "../../etc/passwd", "text": "x" }));
+    entries.push(serde_json::json!({ "key": "A".repeat(64), "text": "x" }));
+    doc["entries"] = entries.into();
+    std::fs::write(&file, doc.to_string()).unwrap();
+
+    let b = cached_broker(ws.path(), Some(&dir), model.clone()).await;
+    let out = to_json(&b.context_for_task(orient(4000)).await.unwrap());
+    assert_eq!(model.prompts().len(), calls, "the entries were read");
+    for text in note_texts(&out) {
+        assert!(text.chars().count() <= 600, "{}", text.chars().count());
+        assert!(!text.chars().any(|c| c.is_control()), "{text:?}");
+        assert!(text.starts_with("red"), "{text:?}");
+    }
+    assert_eq!(
+        to_json(&b.status().await)["summarizer"]["cached_notes"],
+        calls as u64,
+        "the two that are not hashes were dropped"
+    );
+    drop(b);
+
+    // A link where the file should be is not followed: not read, and replaced, not written through.
+    let elsewhere = state.path().join("elsewhere.json");
+    std::fs::write(&elsewhere, &honest).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+    let c = cached_broker(ws.path(), Some(&dir), model.clone()).await;
+    warm(&c).await;
+    assert_eq!(
+        model.prompts().len(),
+        calls * 2,
+        "nothing read through the link"
+    );
+    assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), honest);
+    assert!(std::fs::symlink_metadata(&file).unwrap().is_file());
+}
+
+#[tokio::test]
+async fn the_status_says_when_the_note_cache_is_persistent() {
+    let (ws, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let model = Arc::new(FakeSummarizer::replying("note"));
+    let b = cached_broker(ws.path(), Some(&state.path().join("notes")), model).await;
+
+    let status = to_json(&b.status().await);
+
+    assert_eq!(status["summarizer"]["persistent"], true, "{status}");
+    assert!(
+        !status.to_string().contains(state.path().to_str().unwrap()),
+        "never the path: {status}"
+    );
+}

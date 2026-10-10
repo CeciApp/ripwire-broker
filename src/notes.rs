@@ -4,7 +4,10 @@
 
 use crate::model::{Basis, Item, Limitation, Note, Source, Untrusted};
 use crate::summarizer::Summarizer;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::io::Read as _;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,6 +22,11 @@ pub const MAX_NOTE_CHARS: usize = 600;
 /// 350 KiB, roughly 500 calls of history. The same ceiling bounds the failures, whose entries
 /// are removed when read and so only accumulate when nobody reads them.
 pub const MAX_CACHED_NOTES: usize = 500;
+/// The note cache on disk (S3.15, D-168): another version is an empty cache.
+pub const CACHE_SCHEMA_VERSION: u32 = 1;
+/// `MAX_CACHED_NOTES` notes of `MAX_NOTE_CHARS` four-byte characters, with room for the JSON
+/// around them. A bigger file is not this cache, and is not read.
+const MAX_CACHE_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 fn source() -> Source {
     Source {
@@ -201,6 +209,100 @@ pub fn omitted(n: usize) -> Limitation {
 /// way (D-097). Insertion order is kept explicitly so eviction is deterministic.
 type Bounded = crate::fifo::FifoMap<String, String>;
 
+#[derive(Serialize, Deserialize)]
+struct CachedNote {
+    key: String,
+    text: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CacheFile {
+    schema_version: u32,
+    /// Oldest first, as the in-memory cache evicts.
+    entries: Vec<CachedNote>,
+}
+
+/// One file per workspace under `dir`, named by a hash of the root: no path component comes
+/// from the workspace, and no workspace reads another's notes.
+pub fn cache_file(dir: &Path, workspace: &Path) -> PathBuf {
+    let key = crate::statusline_state::workspace_key(workspace);
+    dir.join(format!("{key}.json"))
+}
+
+/// What `file` holds, as untrusted data: opened once without following a link or blocking on a
+/// FIFO, only a regular file under the size ceiling, only keys that are hashes, and every text
+/// through `sanitize` again. Anything else is an empty cache, never an error.
+fn load(file: &Path) -> Bounded {
+    let mut cache = Bounded::new(MAX_CACHED_NOTES);
+    let Some(doc) = read_cache(file) else {
+        return cache;
+    };
+    for e in doc.entries {
+        let is_hash = e.key.len() == 64
+            && e.key
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let text = sanitize(&e.text);
+        if is_hash && !text.is_empty() {
+            cache.insert(e.key, text);
+        }
+    }
+    cache
+}
+
+fn read_cache(file: &Path) -> Option<CacheFile> {
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(file)
+        .ok()?;
+    let meta = f.metadata().ok()?;
+    if !meta.file_type().is_file() || meta.len() > MAX_CACHE_FILE_BYTES {
+        return None;
+    }
+    let mut text = String::new();
+    f.take(MAX_CACHE_FILE_BYTES + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    if text.len() as u64 > MAX_CACHE_FILE_BYTES {
+        return None;
+    }
+    let doc: CacheFile = serde_json::from_str(&text).ok()?;
+    (doc.schema_version == CACHE_SCHEMA_VERSION).then_some(doc)
+}
+
+/// The cache's file and the lock its writers take in turn.
+#[derive(Debug)]
+struct Persisted {
+    file: PathBuf,
+    writing: Mutex<()>,
+}
+
+/// The whole cache as it is now, replacing the file: readers see the old one or the new one.
+/// One writer at a time, each with what the cache holds when its turn comes, so the file never
+/// goes back to an older state. A failure leaves the notes in memory, where they were anyway.
+fn save(to: &Persisted, cache: &Mutex<Bounded>) {
+    let _turn = to.writing.lock().unwrap_or_else(|e| e.into_inner());
+    let bytes = snapshot(&cache.lock().unwrap_or_else(|e| e.into_inner()));
+    if let Some(dir) = to.file.parent() {
+        let _ = crate::state::write_private(dir, &to.file, &bytes);
+    }
+}
+
+fn snapshot(cache: &Bounded) -> Vec<u8> {
+    let doc = CacheFile {
+        schema_version: CACHE_SCHEMA_VERSION,
+        entries: cache
+            .in_order()
+            .map(|(key, text)| CachedNote {
+                key: key.clone(),
+                text: text.clone(),
+            })
+            .collect(),
+    };
+    serde_json::to_vec(&doc).unwrap_or_default()
+}
+
 /// Counts for the status resource; never note text or prompts.
 #[derive(Debug, Default)]
 pub struct NoteStats {
@@ -220,6 +322,9 @@ pub struct SummarizerStatus {
     pub pending: u64,
     pub failures: u64,
     pub cached_notes: usize,
+    /// The notes outlive the process (`--summarizer-cache`); never the path.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub persistent: bool,
 }
 
 pub enum Outcome {
@@ -236,6 +341,8 @@ pub struct NoteEngine {
     summarizer: Arc<dyn Summarizer>,
     wait: Duration,
     cache: Arc<Mutex<Bounded>>,
+    /// Where the cache is written after every note (S3.15); `None` keeps it in memory.
+    file: Option<Arc<Persisted>>,
     failed: Arc<Mutex<Bounded>>,
     running: Mutex<Running>,
     /// Woken every time a generation settles, so a waiter is handed its note at once
@@ -250,11 +357,22 @@ impl NoteEngine {
             summarizer,
             wait,
             cache: Arc::new(Mutex::new(Bounded::new(MAX_CACHED_NOTES))),
+            file: None,
             failed: Arc::new(Mutex::new(Bounded::new(MAX_CACHED_NOTES))),
             running: Mutex::new(None),
             settled_signal: Default::default(),
             stats: Default::default(),
         }
+    }
+
+    /// Starts from the notes in `file`, if it holds any, and writes every new one back to it.
+    pub fn persistent(mut self, file: PathBuf) -> Self {
+        self.cache = Arc::new(Mutex::new(load(&file)));
+        self.file = Some(Arc::new(Persisted {
+            file,
+            writing: Mutex::new(()),
+        }));
+        self
     }
 
     pub fn model_id(&self) -> String {
@@ -271,6 +389,7 @@ impl NoteEngine {
             pending: n(&self.stats.pending),
             failures: n(&self.stats.failures),
             cached_notes: self.cache.lock().unwrap().len(),
+            persistent: self.file.is_some(),
         }
     }
 
@@ -319,10 +438,13 @@ impl NoteEngine {
                         self.settled_signal.clone(),
                     );
                     let k = key.clone();
+                    let file = self.file.clone();
                     let task = tokio::spawn(async move {
+                        let mut written = None;
                         match model.summarize(&prompt).await {
                             Ok(text) => {
                                 cache.lock().unwrap().insert(k, sanitize(&text));
+                                written = file;
                                 stats.generated.fetch_add(1, Ordering::Relaxed);
                             }
                             Err(e) => {
@@ -331,6 +453,11 @@ impl NoteEngine {
                             }
                         }
                         signal.notify_waiters();
+                        // After the waiters are woken, and off the async threads: the answer
+                        // never waits for the disk.
+                        if let Some(to) = written {
+                            let _ = tokio::task::spawn_blocking(move || save(&to, &cache)).await;
+                        }
                     });
                     *running = Some((key.clone(), task));
                     true

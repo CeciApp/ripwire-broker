@@ -241,6 +241,31 @@ fn serve_takes_an_optional_local_model() {
 }
 
 #[test]
+fn serve_takes_summarizer_cache_only_with_a_summarizer() {
+    let Ok(Command::Serve(s)) = parse(&["--workspace", "/w", "--summarizer-cmd", "llm"]) else {
+        panic!()
+    };
+    assert!(!s.summarizer.unwrap().cache, "off unless asked for");
+
+    let Ok(Command::Serve(s)) = parse(&[
+        "--workspace",
+        "/w",
+        "--summarizer-cmd",
+        "llm",
+        "--summarizer-cache",
+    ]) else {
+        panic!()
+    };
+    assert!(s.summarizer.unwrap().cache);
+
+    let err = parse(&["--workspace", "/w", "--summarizer-cache"]).unwrap_err();
+    assert!(err.contains("--summarizer-cmd"), "{err}");
+    let err = parse(&["doctor", "--workspace", "/w", "--summarizer-cache"]).unwrap_err();
+    assert!(err.contains("--summarizer-cache"), "{err}");
+    assert!(ripwire_broker::cli::USAGE.contains("--summarizer-cache"));
+}
+
+#[test]
 fn unknown_input_is_a_usage_error() {
     for bad in [
         &["--bogus"][..],

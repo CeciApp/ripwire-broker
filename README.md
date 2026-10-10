@@ -82,6 +82,7 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--summarizer-version-cmd CMD` | none | Prints the model's version; its hash invalidates cached notes. It gets 10 s |
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
+| `--summarizer-cache` | off | Keep the notes in the state dir, so a new server process reuses them ([below](#architectural-notes-local-model)) |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
 | `--jev-provider typesafe\|cloudflare` | `typesafe` | With `--online`: who answers. `cloudflare` is Clef on Workers AI, over the same protocol ([below](#two-providers)) |
 | `--jev-account-id ID` | none | The Cloudflare account, part of its URL: required with `--jev-provider cloudflare`, refused without it. Letters and digits only |
@@ -223,6 +224,15 @@ ripwire-broker --workspace /repo \
   gives a new note. So does a model change, once `--summarizer-version-cmd` is set; without it, new weights
   under the same tag keep old notes. The cache lives only as long as the server process, so hooks and
   `prompt` get no notes (D-046).
+- **Across restarts:** with `--summarizer-cache` the notes are also kept in
+  `<state-dir>/notes/<hash of the workspace root>.json`, and the next server process on that workspace
+  starts from them. It is off by default because it writes model text about your code to disk, outside
+  the repository, readable only by you (file `0600`, directory `0700`). The key is the same, so a note
+  is never served for code, a prompt or a model that changed. The file is read as untrusted data: never
+  through a link, only up to 2 MiB, and every note passes the same cleaning and 600-character cap again;
+  a file that is missing, corrupt or from another version is an empty cache. Two servers on one
+  workspace overwrite each other's file (the last note written wins). The status resource shows
+  `summarizer.persistent: true`. To erase the notes, delete the file.
 - **Budget:** notes come after every item; one that doesn't fit becomes `notes_omitted`.
 - **ollama:** pass `--nowordwrap`. Without it, `ollama run` word-wraps with terminal redraws even through a
   pipe, which garbles notes. `doctor --summarizer-cmd ...` warns about this and checks the version command;

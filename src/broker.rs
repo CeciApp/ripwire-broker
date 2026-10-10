@@ -197,6 +197,8 @@ pub struct BrokerConfig {
     pub summarizer: Option<Arc<dyn Summarizer>>,
     /// Longest a response waits for a note before moving on (D-036).
     pub summarizer_wait: Duration,
+    /// Where notes outlive the process (S3.15, D-168); `None` keeps them in memory only.
+    pub note_cache_dir: Option<PathBuf>,
     /// The remote classifier (PRD §23); `None` keeps the broker offline (RF-ONLINE-01).
     pub online: Option<OnlineConfig>,
     /// Persistent memory (PRD jev-mem); `None` keeps no history.
@@ -214,6 +216,7 @@ impl BrokerConfig {
             incremental: false,
             summarizer: None,
             summarizer_wait: Duration::from_millis(1500),
+            note_cache_dir: None,
             online: None,
             memory: None,
         }
@@ -459,9 +462,13 @@ impl Broker {
             max_item_tokens: config.max_item_tokens,
             incremental: config.incremental,
             session: Mutex::new(SessionMemory::default()),
-            notes: config
-                .summarizer
-                .map(|m| NoteEngine::new(m, config.summarizer_wait)),
+            notes: config.summarizer.map(|m| {
+                let engine = NoteEngine::new(m, config.summarizer_wait);
+                match &config.note_cache_dir {
+                    Some(dir) => engine.persistent(note_engine::cache_file(dir, &config.workspace)),
+                    None => engine,
+                }
+            }),
             online,
             memory,
             recall,
