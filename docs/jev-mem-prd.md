@@ -1,6 +1,6 @@
 # PRD: memória persistente com Jev no ripwire-broker
 
-**Versão:** 0.3 · **Data:** 2026-10-03 · **Status:** proposta revisada, reconciliada com o estudo e com as decisões do mantenedor (D-135); implementada nas Fases 0 a 5 do [plano](../spec/plan/jev-mem-plan.md) (D-136 a D-142, com as correções da auditoria nos D-143 e D-144), **experimental**: faltam a validação nos hosts (T3.11), a rodada da avaliação (T5.3) e o fechamento (Fase 6).  
+**Versão:** 0.4 · **Data:** 2026-10-10 · **Status:** proposta revisada, reconciliada com o estudo e com as decisões do mantenedor (D-135); implementada nas Fases 0 a 5 do [plano](../spec/plan/jev-mem-plan.md) (D-136 a D-142, com as correções da auditoria nos D-143 e D-144), **experimental**: faltam o texto enriquecido das observações (§5.2, `memory-observation/v2`, T3.12, decidido no D-171 e ainda não implementado), a validação nos hosts (T3.11), a rodada da avaliação (T5.3) e o fechamento (Fase 6).  
 **Base do broker:** `3b60a1b29252485bc43a3e2b0ee914203dde9211`, pacote `0.1.0`.  
 **Implementação:** Rust; System One remoto Jev `jev-1.13.0`; System Two é o agente do host, com sumarizador local opcional para notas derivadas.
 
@@ -161,12 +161,12 @@ A extensão amplia o consentimento do §23 do PRD principal: `--memory` autoriza
 
 | Campo | Tipo/contrato |
 |---|---|
-| `schema_version`, `policy_version` | `u32=1`, string `memory-policy/v1` |
+| `schema_version`, `policy_version` | `u32=1`, string `memory-policy/v1`; `memory-policy/v2` nos registros com o texto enriquecido do §5.2 |
 | `node_id`, `content_hash` | SHA-256 hexadecimal de tuplas versionadas, com comprimento por componente |
 | `workspace_id` | hash de raiz canônica, git-dir da worktree e common-dir; sem Git usar raiz canônica; nunca somente URL remota |
 | `event_key` | hash de host + sessão opaca + evento estável; para MCP usar conteúdo/revisão quando não houver ID durável |
 | `kind` | `edit_observation`, `finish_observation`, `explicit_note`, `derived_note` |
-| `content` (`x_t`) | texto UTF-8 canônico, no máximo 2.000 bytes, obtido pelo renderizador abaixo |
+| `content` (`x_t`) | texto UTF-8 canônico, no máximo 2.000 bytes, obtido pelo renderizador abaixo (`memory-observation/v1`, ou `v2` com o texto enriquecido) |
 | `observed_at_ms`, `ingest_seq` | UTC local em milissegundos + sequência monotônica persistida por workspace |
 | `event_time` | opcional: início/fim, precisão e referência de origem; nunca inferido de mtime |
 | `timestamp_role` | `observation`, `explicit_event` ou `unknown` |
@@ -186,11 +186,33 @@ Limite do registro serializado: 16 KiB; excesso rejeita a entrada inteira com mo
 
 Renderizador determinístico `memory-observation/v1`, ordem fixa: tipo de evento; ação observada; outcome com sua origem; escopo; referências elegíveis e seus hashes. Exemplo sintético: `Evento: análise após edição. Escopo: src/cache.rs. Observado pelo broker: análise concluída; execução de testes desconhecida. Evidência: quality_delta; revisão de fonte sha256:…`. Ausência de regressão reportada não vira “testes passaram”, “bug corrigido” ou “merge seguro”.
 
-`context_after_edit` e `context_before_finish` podem produzir observações após o envelope estrutural. Não guardar automaticamente prompt, transcript, diff, corpo integral de arquivo, saída de shell ou resultado gerativo. Esses registros descrevem o que foi analisado, não a intenção humana que o broker desconhece.
+**Texto enriquecido, `memory-observation/v2` (v0.4, D-171; implementação na T3.12).** O texto da v1 diz que uma análise rodou sobre um arquivo e não diz sobre o quê. Numa sessão real, o Jev deu a duas observações desse tipo relevância 0,20 e 0,16 para uma tarefa sobre o mesmo arquivo, contra a barra de 0,60 do §10; uma nota explícita com o fato, no mesmo store e para a mesma tarefa, teve 0,91 e foi entregue. A leitura estava certa em recusar: o defeito era o conteúdo. A v2 acrescenta ao texto, depois do escopo e na ordem abaixo, o que o envelope da análise já traz:
+
+| Acréscimo | O que entra | Teto |
+|---|---|---|
+| Símbolos do escopo | nome qualificado e path relativo de cada símbolo que o Ripwire resolveu na análise | 16, os mesmos de `entities` |
+| Dependentes | nome e path dos símbolos que o envelope traz como `caller` ou dependente do que mudou | 8 |
+| Testes ligados | path, e o nome quando houver, dos testes que o envelope aponta | 8 |
+| Achados | o `kind` de cada risco e de cada limitação do envelope, com a contagem | os `kind` enumerados |
+
+Regras da v2:
+
+- **Só o que o Ripwire devolveu.** Um nome que o host passou em `symbols` e o Ripwire não resolveu não entra: texto do host sem confirmação estrutural continua fora.
+- **Nomes, nunca código.** Entram identificadores e paths. Continuam fora a assinatura, o corpo, uma linha de código, o valor antigo ou novo de uma constante, o diff, o texto de `detail` de um risco e o `summary` do envelope.
+- **Ordem e corte determinísticos.** Cada lista sai na ordem do envelope; o que passa do teto, ou dos 2.000 bytes de `content`, é cortado no fim da lista, e o texto diz quantos ficaram de fora (`+3`). Cortar uma lista não rejeita o registro; a regra do registro de 16 KiB do §5.1 não muda.
+- **A mesma varredura.** Cada identificador passa pela varredura de segredo e PII; um que falhe rejeita a observação inteira, como hoje.
+- **Sem migração.** Um registro `v1` continua válido, é lido como está e sai pela retenção. `policy_version` passa a `memory-policy/v2` nos registros novos, e o renderizador entra no `content_hash`: a mesma análise renderizada pelas duas versões são dois nós.
+- **Consentimento.** Os nomes de símbolos e de testes passam a ir ao provider nas perguntas de memória. O `install`, o `--help` e o README dizem isso onde hoje descrevem o que `--memory` envia.
+
+Exemplo sintético: `Evento: análise após edição. Escopo: src/auth.py. Símbolos: TOKEN_TTL_SECONDS, validate_token (src/auth.py). Dependentes: nenhum. Testes ligados: tests/test_auth.py::test_valid. Achados: nenhum risco; limitações: counts_floor. Observado pelo broker: análise concluída; execução de testes desconhecida. Evidência: situational_awareness, edit_check; revisão de fonte sha256:…`.
+
+**O que a v2 não garante.** A nota que passou na medição dizia o valor que mudou, e a v2 continua sem poder dizê-lo. Que os nomes bastem para o Jev aceitar uma observação é hipótese: mede-se repetindo o bloco B do [roteiro](../spec/plan/roteiro-testes-pendentes.md) só com observações automáticas, e o aceite é `kept≥1`. Se não bastar, o que se revê é este contrato, não a barra de entrada do §10.
+
+`context_after_edit` e `context_before_finish` podem produzir observações após o envelope estrutural. Não guardar automaticamente prompt, texto da tarefa, transcript, diff, assinatura ou corpo de arquivo, saída de shell ou resultado gerativo; a v2 não muda nenhum desses. Esses registros descrevem o que foi analisado, não a intenção humana que o broker desconhece.
 
 Notas/preferências entram somente por comando explícito proposto `memory add --workspace PATH --file PATH`: JSON `explicit_note` com texto, referências opcionais e atribuição `operator_supplied`. Conteúdo é dado não confiável; não vira política do host. O arquivo de entrada não pode estar em path proibido; o mesmo filtro de segurança se aplica. Sem captura explícita não inventar preferências a partir de uma edição.
 
-Reutilizar regras de elegibilidade do leitor online, bloqueando `.env`, credenciais, binários, arquivos ignorados, escapes de raiz e symlinks inseguros. Acrescentar varredura conservadora para valores secretos e PII identificável, com rejeição integral e razão categorizada. Não prometer detecção perfeita: reduzir a superfície com campos enumerados e nenhum texto arbitrário automático. Na dúvida, não persistir nem enviar. Contar rejeições sem registrar o conteúdo rejeitado.
+Reutilizar regras de elegibilidade do leitor online, bloqueando `.env`, credenciais, binários, arquivos ignorados, escapes de raiz e symlinks inseguros. Acrescentar varredura conservadora para valores secretos e PII identificável, com rejeição integral e razão categorizada. Não prometer detecção perfeita: reduzir a superfície com campos enumerados e nenhum texto arbitrário automático. Os identificadores da v2 não são texto arbitrário: são nomes que o Ripwire leu do código, com teto por lista, e passam pela mesma varredura. Na dúvida, não persistir nem enviar. Contar rejeições sem registrar o conteúdo rejeitado.
 
 ### 5.3 Entidades, renames e idempotência
 
@@ -441,5 +463,7 @@ Rollback operacional: iniciar sem `--memory`; nenhuma coleta/consulta/inferênci
 - [Perguntas da implementação de referência](https://github.com/libingzheren/Jev-Mem/blob/main/memory/jev_questions.py) e [perfil Jev](https://github.com/libingzheren/Jev-Mem/blob/main/config/jev_mem.json): referências complementares; o broker mantém prompts/política próprios e não importa pipeline Python.
 - [API oficial TypeSafe](https://docs.typesafe.ai/api) e [OpenAPI](https://api.typesafe.ai/openapi.json), consultados em 03/10/2026, contrato de Noul/Choice. Disponibilidade real de Choice no modelo pinado será validada em teste de contrato sintético; não foi chamada API autenticada nesta revisão.
 - Base local: [Cargo.toml](../Cargo.toml), [Cargo.lock](../Cargo.lock), [toolchain](../rust-toolchain.toml), [CI Rust](../.github/workflows/rust.yml), [supply chain](../.github/workflows/supply-chain.yml), [README](../README.md), [PRD principal](../spec/ripwire-broker-mcp.md), [changelog](../spec/changelog.md) e fontes do §13.
+
+**v0.4 (2026-10-10, D-171):** o §5.2 ganha o texto enriquecido `memory-observation/v2`, decisão do mantenedor depois de a leitura recusar todas as observações automáticas numa sessão real; o §5.1 registra a versão do renderizador e da política. Nada mais muda.
 
 **Revisão documental fechada na v0.3:** a cópia do PDF está confirmada pelo hash e o estudo está confrontado por inteiro (§1, §2.4). A implementação segue o [plano](../spec/plan/jev-mem-plan.md) (D-134, D-135). A incorporação ao PRD principal continua dependendo do mantenedor (§16).

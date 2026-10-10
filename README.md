@@ -387,7 +387,8 @@ improves correctness.
 `--memory` keeps observations of the workspace between sessions
 ([PRD](docs/jev-mem-prd.md), [plan](spec/plan/jev-mem-plan.md)). Phases 0 to 5 are built: collection,
 enrichment, consolidation, reading in `context_for_task`, and the evaluation arms. It stays
-experimental until it is validated in real hosts (T3.11) and measured (T5.3).
+experimental until the observations carry enough to be worth reading (T3.12, below), it is
+validated in real hosts (T3.11) and measured (T5.3).
 
 **What an automatic memory holds:** which analysis ran (after an edit, before finishing), its
 outcome as the broker saw it, the files in scope with the SHA-256 of their bytes, and the names
@@ -395,6 +396,15 @@ of the analyses. The text is rendered from those fields (`memory-observation/v1`
 `Evento: análise após edição. Escopo: src/cache.rs. Observado pelo broker: análise concluída;
 execução de testes desconhecida. …`. The broker never runs the tests, so it never records that
 they passed, that a bug was fixed or that a merge is safe.
+
+**Today no automatic memory reaches an answer.** In a real session the read visited the two
+observations of an earlier edit and kept neither: Jev scored them 0.20 and 0.16 against a bar of
+0.60, because the text says an analysis ran on a file and not what it was about. A note added
+with `memory add`, in the same store and for the same task, scored 0.91 and was delivered
+([D-171](spec/changelog.md#d-171--a-leitura-recusa-as-observações-automáticas-prd-v04)). The PRD
+now allows a richer text (`memory-observation/v2`, §5.2): the names of the symbols in scope, of
+their dependents and of the tests the analysis points to, and the kinds of its findings; never a
+signature, a body, a value or a diff. It is not built yet (T3.12).
 
 **When it is collected:** after `context_after_edit` and `context_before_finish` build their
 answer, never before and never changing it; `context_for_task` collects nothing, and an answer
@@ -407,8 +417,10 @@ unconfirmed, and no more than four such writes run at once. The status resource 
 `Stop`. It only writes to the local spool: it never makes an HTTP request, needs no credential
 and does not imply `--online`. The observation waits in the spool until a process with
 `--memory` incorporates it, so a hook that exits leaves nothing half done. `#ripwire-off` stops
-collection for that session only. Measured on a laptop in release, with the real ripwire, the
-flag adds about 4–7 ms at p95 to a hook of about 80 ms (the PRD's bar is 10 ms).
+collection for that session only. Measured on a laptop in release, with the real ripwire and by
+the hook's own timers, the flag adds about 8 ms at the median and 9.5–9.9 ms at p95 to a hook of
+about 125 ms (the PRD's bar is 10 ms); p99 is 9.8–12.4 ms against a bar of 25
+([D-170](spec/changelog.md#d-170--o-slo-do-hook---memory-medido-pelo-próprio-hook)).
 
 **What is never kept:** the prompt, the transcript, a diff, a file's body, shell output or
 anything a model generated. A source the online policy refuses (`.env` and other sensitive
@@ -501,6 +513,7 @@ stay in the JSON either way). `#ripwire-off` stops injection for that session on
 **Hosts: not validated.** Whether Claude Code and Codex actually use the `memories` field or the
 readable section has not been checked in a real session yet
 ([plan](spec/plan/jev-mem-plan.md), T3.11); until it is, neither host counts as consuming memory.
+Until T3.12 only an explicit note is delivered, so that is what a host can be checked with.
 
 #### Following memory live
 
