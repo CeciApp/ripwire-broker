@@ -516,13 +516,15 @@ tail -F ~/.local/state/ripwire-broker/memory/*/debug.log
 ```
 
 ```
-2026-10-09 19:02:11 UTC hook#4121  collect   after_edit scope=2 spooled 6c59ca9d4f65
+2026-10-09 19:02:11 UTC hook#4121  collect   setup 0.07ms
+2026-10-09 19:02:11 UTC hook#4121  collect   after_edit scope=2 spooled 6c59ca9d4f65 6.79ms
 2026-10-09 19:02:14 UTC serve#9800 ingest    added=1 duplicates=0 rejected=0 forgotten=0
 2026-10-09 19:02:15 UTC serve#9800 enrich    6c59ca9d4f65 run=1 state=complete requests=3 relations=2 412ms
 2026-10-09 19:03:40 UTC serve#9800 read      task#a1c9e04b (34 chars) kept=1 [6c59ca9d4f65] visited=4 requests=2 stop=sufficient 388ms
 ```
 
-The stages: `collect` (an observation admitted, refused with its reason, skipped or unconfirmed),
+The stages: `collect` (an observation admitted, refused with its reason, skipped or unconfirmed,
+with how long the answer was held for it; a hook's `setup` line is what switching memory on cost),
 `spool`, `ingest`, `enrich`, `consolidate`, `read`, `retention`, `forget`, `retry`, `resume`,
 `drain`, and `worker` (what the worker also says on stderr: a stage that starts failing, a refused
 key, a panic). A tick with nothing to do writes nothing. A line holds ids (their first 12

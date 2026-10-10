@@ -125,13 +125,16 @@ impl Publisher {
         scope: Vec<String>,
         event_key: String,
     ) {
+        // Every line ends with how long the answer was held here (PRD jev-mem §8.2).
+        let started = std::time::Instant::now();
         let say = |what: String| {
             if let Some(log) = &self.config.debug {
                 let event = match event {
                     Event::AfterEdit => "after_edit",
                     Event::BeforeFinish => "before_finish",
                 };
-                log.event("collect", &format!("{event} {what}"));
+                let took = super::debug::millis(started.elapsed());
+                log.event("collect", &format!("{event} {what} {took}"));
             }
         };
         if env.status == Status::Unknown || scope.is_empty() {
