@@ -1,5 +1,6 @@
 //! The provider credential (PRD §23.6): only from `RIPWIRE_BROKER_JEV_API_KEY` in the server's
-//! environment, never from the command line, never serialized, never persisted.
+//! environment, never from the command line, never serialized, never persisted. One variable
+//! for either provider (D-166): a TypeSafe key or a Cloudflare token, as `--jev-provider` says.
 
 use secrecy::{ExposeSecret, SecretString};
 
@@ -22,7 +23,8 @@ impl std::fmt::Display for CredentialError {
         match self {
             Self::Missing => write!(
                 f,
-                "{ENV_VAR} is not set in the environment (--online and --jev-probe need it)"
+                "{ENV_VAR} is not set in the environment (--online and --jev-probe need it: \
+                 chave TypeSafe ou token Cloudflare, conforme --jev-provider)"
             ),
             Self::InternalWhitespace => write!(f, "{ENV_VAR} contains whitespace inside the value"),
         }

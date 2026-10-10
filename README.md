@@ -16,7 +16,8 @@ agent ⇄ stdio ⇄ ripwire-broker ⇄ stdio ⇄ ripwire <workspace> --mcp
 
 - Rust 1.98.1 (pinned in `rust-toolchain.toml`)
 - `ripwire` ≥ 0.6.4 on `PATH` (or pass `--ripwire BIN`)
-- Online mode only: a build with `--features online` and a TypeSafe API key
+- Online mode only: a build with `--features online` and a TypeSafe API key, or a Cloudflare
+  Workers AI token and account id with `--jev-provider cloudflare`
 
 ## Build and run
 
@@ -42,14 +43,14 @@ commands; `ripwire-broker --help` lists them all:
 | `hook-log --session ID` | What the hooks injected in a session (counts only) |
 | `hook-stats [--json]` | Every saved hook session (one with no events and nothing remembered is skipped) reduced to counts: what the per-session dedup saved, and what a persistent cache would add ([below](#measuring-the-session-cache)) |
 | `prompt --workspace DIR [--budget N] [--] TASK...` | Prints the task followed by its context, for clients without hooks (`--budget` defaults to `context_for_task`'s 2500). A task word that starts with `--` needs the `--` before the task; `-h` or `--version` inside a task is task text |
-| `doctor --workspace DIR [--json] [--jev-probe [--jev-model M]]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
-| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online] [--memory [--memory-debug-log]]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line; `--memory-debug-log` goes to the server and the hooks |
+| `doctor --workspace DIR [--json] [--jev-probe [--jev-provider P] [--jev-account-id ID] [--jev-model M]]` | Checks ripwire, its version and verbs, git history, the state dir and a smoke call; `--jev-probe` also sends one synthetic question to the classifier |
+| `install <claude-code\|codex> --workspace DIR [--hooks] [--statusline] [--write] [--online] [--memory [--memory-debug-log]] [--jev-provider P --jev-account-id ID]` | Wires the broker into a host (dry run unless `--write`); `--statusline` also registers the Claude Code status line; `--memory-debug-log` goes to the server and the hooks |
 | `statusline [--workspace DIR] [--detail] [--width N] [--color never\|always]` | One status line for Claude Code, from the host's stdin and the hooks' projection ([below](#status-line)) |
 | `memory status --workspace DIR [--json]` | The workspace's memory: memories, pending observations, generation, sizes, and the category of the error if the store cannot be read |
 | `memory forget --workspace DIR (--all \| --id ID)` | Forgets one memory and what derives from it, or everything (which also revokes collection) |
 | `memory add --workspace DIR --file PATH` | Adds an explicit note from a JSON file, `{"text": "...", "references": ["src/a.rs"]}` |
 | `memory resume --workspace DIR` | Lifts the revocation a full forget leaves on the workspace's memory |
-| `memory drain --workspace DIR --online [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker (also if the server takes it during the drain) or the provider refuses the key |
+| `memory drain --workspace DIR --online [--jev-provider P] [--jev-account-id ID] [--jev-model M] [--memory-write-candidates N]` | Incorporates pending observations and enriches ready ones with the classifier, for at most 60 s or 20 jobs; the only `memory` command that uses the network (needs `--features online` and the key). Give it the server's provider, model and K. It fails, instead of reporting nothing to do, when a running server already holds the workspace's worker (also if the server takes it during the drain) or the provider refuses the key |
 | `memory retry --workspace DIR` | Gives failed enrichment jobs their runs back, and makes jobs a long `Retry-After` set aside ready now; local |
 
 Every `memory` command but `status` also takes `--memory-debug-log` ([below](#following-memory-live)).
@@ -82,6 +83,8 @@ arguments; the only secret, the online mode's API key, comes from the environmen
 | `--summarizer-wait-ms N` | `1500` | Longest an answer waits for a note |
 | `--summarizer-timeout-ms N` | `60000` | Hard limit for one generation; the process is killed after it |
 | `--online` and `--jev-*` | off | The optional remote classifier ([below](#online-mode-optional)) |
+| `--jev-provider typesafe\|cloudflare` | `typesafe` | With `--online`: who answers. `cloudflare` is Clef on Workers AI, over the same protocol ([below](#two-providers)) |
+| `--jev-account-id ID` | none | The Cloudflare account, part of its URL: required with `--jev-provider cloudflare`, refused without it. Letters and digits only |
 | `--log` | off | With `--online`: every exchange with Jev written to `jev.log` in the state dir, readable ([below](#online-mode-optional)) |
 | `--memory` | off | Persistent per-workspace memory; implies `--online`, so it needs a binary built with `--features online` (exit 2 before anything starts without it); without the credential it starts with no request to Jev ([D-155](spec/changelog.md#d-155--sem-chave-chave-recusada-e-o-log-do-jev)). **Experimental** ([PRD](docs/jev-mem-prd.md#4-ativação-e-fronteira-de-consentimento)): it collects, enriches, consolidates and reads memories back in `context_for_task`; the hooks do not deliver them yet, and no host has been validated (T3.11) |
 | `--memory-read-deadline-ms N` | `850` | 1–850; longest a task waits for memory ([D-156](spec/changelog.md#d-156--prazos-da-leitura-de-memória-e-recurso-local)) |
@@ -229,7 +232,7 @@ ripwire-broker --workspace /repo \
 
 Off unless the server process starts with `--online`
 ([PRD §23](spec/ripwire-broker-mcp.md#23-adaptador-opcional---online)). A remote semantic classifier
-(TypeSafe `jev-1.13.0`) then rates, in `context_for_task`, the files ripwire ranked and their
+(TypeSafe `jev-1.13.0`, or Cloudflare's Clef with `--jev-provider cloudflare`) then rates, in `context_for_task`, the files ripwire ranked and their
 direct siblings, and the broker merges its probabilities with ripwire's facts. Nothing else
 changes: no new tool, and `context_after_edit`, `context_before_finish`, hooks and `prompt`
 stay offline.
@@ -243,6 +246,40 @@ export RIPWIRE_BROKER_JEV_API_KEY=...          # in the host's environment, neve
 ripwire-broker doctor --workspace /repo --jev-probe   # one synthetic question, no workspace bytes
 ripwire-broker install claude-code --workspace /repo --online --write
 ```
+
+### Two providers
+
+`--jev-provider` chooses who answers ([D-166](spec/changelog.md#d-166----jev-provider-cloudflare)).
+Both speak the same `systemone` protocol, so the questions, the thresholds and the answer are the
+same; only the transport differs. The default is `typesafe`, and nothing changes without the flag.
+
+| | `typesafe` (default) | `cloudflare` |
+|---|---|---|
+| Endpoint | `https://api.typesafe.ai/v1/systemone` | `https://api.cloudflare.com/client/v4/accounts/<ID>/ai/run/@cf/cloudflare/<MODEL>` |
+| `RIPWIRE_BROKER_JEV_API_KEY` holds | a TypeSafe API key | a Cloudflare API token with Workers AI Read and Edit |
+| Also needs | nothing | `--jev-account-id ID` |
+| `--jev-model` | `jev-1.13.0` (pinned default) | `clef-flash` (default) or `clef`; any other name is refused at startup |
+| Answer | `{model, answers, usage}` | the same inside `{success, errors, messages, result}`, opened by the client |
+| Questions a request | 128 | 64, so the same files may take more requests |
+| Context window | — | `clef` 65,536 tokens; `clef-flash` 24,576 on its model page (64K in the launch changelog) |
+| Input price, $ per M tokens | 0.042 | `clef-flash` 0.038, `clef` 0.24; output is not billed |
+
+Prices and limits are Cloudflare's as published on 2026-10-09; check its
+[pricing page](https://developers.cloudflare.com/workers-ai/platform/pricing/) before relying on them.
+
+```sh
+export RIPWIRE_BROKER_JEV_API_KEY=...          # the Cloudflare token: one variable for either provider
+ripwire-broker doctor --workspace /repo --jev-probe --jev-provider cloudflare --jev-account-id ID
+ripwire-broker install claude-code --workspace /repo --online \
+  --jev-provider cloudflare --jev-account-id ID --write   # both flags go into .mcp.json
+```
+
+A discovery request is at most 38,000 bytes whatever the provider, about 10,000 tokens, so it fits either
+context window; `--jev-max-source-bytes` caps the source rendered in the answer, not what is sent.
+No URL comes from configuration: the provider is chosen by name and the account id only fills
+Cloudflare's path. Never put a TypeSafe key in the variable while starting with
+`--jev-provider cloudflare`, or the reverse: the bearer goes to the provider the flag names.
+`images`, which Clef accepts, are not sent.
 
 **What leaves the machine:** the task text, paths relative to the workspace, file previews
 (16 KiB for files ripwire ranked, 4 KiB for their siblings) and blocks of up to 24 KiB of the
@@ -271,7 +308,9 @@ stderr at start): one block per call, separated by rules, with the request (`env
 answer (`recebido`, with the HTTP status) as pretty-printed JSON, and the time between sending and
 the last byte read (`duração`). The file is private (0600) and only grows; delete it when done. It
 holds the source sent to the classifier. The key is never in it: the `Authorization` header is
-written as `Bearer [redacted]`, and an echo of the key in an answer is replaced.
+written as `Bearer [redacted]`, and an echo of the key in an answer is replaced. With Cloudflare
+the account id is hidden the same way: the URL is written `accounts/[redacted]/`. It is not a
+credential, but it names the tenant and this file is made to be read and pasted.
 
 ```text
 ════════════════════════════════════════════════════════════════════════
@@ -318,12 +357,13 @@ HTTP 200
 `--jev-timeout-ms 15000` per attempt, `--jev-deadline-ms 8000` for the whole discovery
 (`interrupted` after it), `--jev-max-candidates 16`, `--jev-lookahead-max 32` (0 turns the
 lookahead off), `--jev-max-source-bytes` (source rendered, not evaluated), `--jev-no-cache`,
-`--jev-model` (pinned; `jev-latest` is never a default), `--jev-provider typesafe` (the only
-provider). Transient failures are retried by stage, a 429 waits for its `Retry-After` up to 30 s (a longer one is
+`--jev-model` (pinned; `jev-latest` is never a default), `--jev-provider typesafe|cloudflare`
+([above](#two-providers)). Transient failures are retried by stage, a 429 waits for its `Retry-After` up to 30 s (a longer one is
 not waited for, and the discovery ends incomplete), and a client cancel aborts the HTTP requests.
 Decisions are cached in memory, keyed by digests only.
 
-**Status:** `online` in `ripwire-broker://status` carries the
+**Status:** `online` in `ripwire-broker://status` names the `provider` (`typesafe` or `cloudflare`)
+and its `endpoint_host`, never the account id, and carries the
 [§23.11](spec/ripwire-broker-mcp.md#2311-observabilidade) metrics (requests, latency
 percentiles, bytes, retries, 429s, candidates, gain beyond ripwire...), and each call in
 `recent_requests` lists its online stages. Counts and times only.

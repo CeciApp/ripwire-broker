@@ -1075,6 +1075,59 @@ async fn lookahead_respects_eligibility_and_its_cap() {
     );
 }
 
+/// The largest request of each discovery over a directory of many small files, where one request
+/// could carry them all.
+async fn largest_request(tune: impl FnOnce(&mut OnlineConfig)) -> (usize, usize) {
+    let ws = with_siblings();
+    for n in 0..100 {
+        common::write(ws.path(), &format!("src/extra_{n:03}.py"), "x = 1\n");
+    }
+    let s = online_with(ws, budget_is_evidence(), |o| {
+        o.lookahead_max = 100;
+        tune(o);
+    })
+    .await;
+
+    s.broker
+        .context_for_task(TaskRequest::new(TASK))
+        .await
+        .unwrap();
+
+    // Before `seen` is locked: `asked` locks it too.
+    let extras = s
+        .classifier
+        .asked(SemanticStage::FileAdmission)
+        .iter()
+        .filter(|p| p.starts_with("src/extra_"))
+        .count();
+    let seen = s.classifier.seen.lock().unwrap();
+    let largest = seen.iter().map(|r| r.questions.0.len()).max().unwrap();
+    assert!(
+        seen.iter()
+            .all(|r| r.questions.0.len() == r.state.items.len()),
+        "one question an item"
+    );
+    (largest, extras)
+}
+
+/// D-166: Workers AI refuses a request with more than 64 questions (422), so with Cloudflare a
+/// request closes at 64. The same files are asked about, in more requests.
+#[tokio::test]
+async fn a_request_to_cloudflare_never_carries_more_than_64_questions() {
+    let (default, asked) = largest_request(|_| {}).await;
+    assert!(
+        default > 64,
+        "the control: without the ceiling this discovery sends {default} questions at once"
+    );
+
+    let cloudflare = ripwire_broker::online::JevProvider::Cloudflare;
+    let (capped, asked_capped) =
+        largest_request(|o| o.max_questions = cloudflare.max_questions()).await;
+
+    assert_eq!(capped, 64);
+    assert_eq!(asked_capped, asked, "split, never dropped");
+}
+
 #[tokio::test]
 async fn lookahead_files_are_admitted_with_short_previews() {
     let ws = with_siblings();

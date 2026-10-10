@@ -2273,6 +2273,17 @@ estágios); `JevRequestBuilder` (`state` e perguntas puras e versionadas);
 `JevScheduler` (batch, concorrência, cooldown, retries, split e cancelamento);
 `SemanticCache`; `EvidenceMerger`; `OnlineMetrics`.
 
+**Dois providers** [D-166]: `--jev-provider cloudflare` aponta o broker para o Clef da
+Cloudflare (Workers AI), que fala o mesmo protocolo de pedido e resposta. A fronteira de
+provider passa a ter dois lados, e a diferença entre eles é só de transporte: a URL, o
+token e um envelope `{success, errors, messages, result}` em volta da resposta. Continua
+sem URL vinda da configuração: o provider é escolhido pelo nome e monta a própria URL
+num de dois hosts allowlisted (`api.typesafe.ai`, `api.cloudflare.com`), sempre HTTPS. O
+account id da Cloudflare entra no path depois de validado (só letras e dígitos) e o
+modelo é `clef` ou `clef-flash`. A credencial vem da mesma variável, e o account id é
+redigido no `jev.log` como a chave (`accounts/[redacted]/`): não é credencial, mas
+identifica o tenant.
+
 ### 23.10 Tratamento de falhas
 
 [v0.1 §17]
@@ -2349,6 +2360,14 @@ incluem query, fonte ou path em claro.
   builders puros; cliente, scheduler e política separados; limites em configuração
   tipada; provider atrás de trait interna, mesmo com uma implementação; dependências
   no lockfile; nenhuma dependência dos internals do cache do Ripwire.
+
+**Fronteira de provider com dois lados** [D-166]: a trait interna `Classifier` tem
+agora dois providers atrás do mesmo cliente HTTP. O request builder e o parser de
+respostas não conhecem nenhum dos dois: o cliente desembrulha o envelope da Cloudflare
+antes de entregar o corpo ao parser, byte a byte, e o provider informa ao coordenador
+quantas perguntas cabem num pedido (128 na TypeSafe, 64 na Cloudflare). RF-ONLINE-15
+vale como estava: o status informa o provider pelo nome (`typesafe` ou `cloudflare`) e o
+host, nunca o account id.
 
 ### 23.13 Critérios de aceite
 

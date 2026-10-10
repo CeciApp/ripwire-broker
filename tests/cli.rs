@@ -1,5 +1,6 @@
 //! Seam 5: the binary's command line. `cli::parse` is pure; e2e runs of the binary follow.
 use ripwire_broker::cli::{self, Color, Command, Event, Host};
+use ripwire_broker::online::JevProvider;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -286,7 +287,8 @@ fn online_flags_parse_and_default_to_the_pinned_model() {
     assert_eq!(
         s.online,
         Some(cli::OnlineArgs {
-            provider: "typesafe".into(),
+            provider: JevProvider::TypeSafe,
+            account_id: None,
             model: "jev-1.13.0".into(),
             max_in_flight: 4,
             request_limit: 24,
@@ -338,6 +340,158 @@ fn online_flags_parse_and_default_to_the_pinned_model() {
     assert!(t.no_cache);
     assert_eq!(t.max_source_bytes, Some(4096));
     assert_eq!(t.lookahead_max, 7);
+}
+
+/// `serve --online` plus `extra`.
+fn online_with(extra: &[&str]) -> Result<cli::OnlineArgs, String> {
+    let mut args = vec!["--workspace", "/w", "--online"];
+    args.extend(extra);
+    match parse(&args)? {
+        Command::Serve(s) => Ok(s.online.unwrap()),
+        other => panic!("{other:?}"),
+    }
+}
+
+const CLOUDFLARE: [&str; 4] = ["--jev-provider", "cloudflare", "--jev-account-id", "abc123"];
+
+#[test]
+fn the_cloudflare_provider_takes_an_account_and_one_of_its_models() {
+    let o = online_with(&CLOUDFLARE).unwrap();
+    assert_eq!(o.provider, JevProvider::Cloudflare);
+    assert_eq!(o.account_id.as_deref(), Some("abc123"));
+    assert_eq!(o.model, "clef-flash", "a Jev name is refused there (5006)");
+
+    let mut clef = CLOUDFLARE.to_vec();
+    clef.extend(["--jev-model", "clef"]);
+    assert_eq!(online_with(&clef).unwrap().model, "clef");
+
+    // `--memory` implies `--online`, with the same provider.
+    let memory = ["--workspace", "/w", "--memory"];
+    let Ok(Command::Serve(s)) = parse(&[&memory[..], &CLOUDFLARE[..]].concat()) else {
+        panic!()
+    };
+    assert_eq!(s.online.unwrap().provider, JevProvider::Cloudflare);
+}
+
+#[test]
+fn the_provider_and_its_account_are_checked_together() {
+    let says = |extra: &[&str], want: &str| {
+        let err = online_with(extra).expect_err(&format!("{extra:?}"));
+        assert!(
+            err.contains("usage") && err.contains(want),
+            "{extra:?}: {err}"
+        );
+    };
+    says(&["--jev-provider", "cloudflare"], "--jev-account-id");
+    says(
+        &["--jev-provider", "typesafe", "--jev-account-id", "x"],
+        "--jev-provider cloudflare",
+    );
+    says(&["--jev-account-id", "x"], "--jev-provider cloudflare");
+    says(&["--jev-provider", "other"], "typesafe or cloudflare");
+    for account in ["a/b", "../x", "a?b"] {
+        says(
+            &["--jev-provider", "cloudflare", "--jev-account-id", account],
+            "--jev-account-id",
+        );
+    }
+    for model in ["jev-1.13.0", " clef ", "clef-latest"] {
+        let mut extra = CLOUDFLARE.to_vec();
+        extra.extend(["--jev-model", model]);
+        says(&extra, "clef or clef-flash");
+    }
+    // Without `--online` they are refused like every other `--jev-*` option.
+    let offline = [&["--workspace", "/w"][..], &CLOUDFLARE[..]].concat();
+    assert!(parse(&offline).unwrap_err().contains("--online"));
+}
+
+#[test]
+fn doctor_drain_and_install_take_the_provider_too() {
+    let Ok(Command::Doctor(d)) = parse(
+        &[
+            &["doctor", "--workspace", "/w", "--jev-probe"][..],
+            &CLOUDFLARE[..],
+        ]
+        .concat(),
+    ) else {
+        panic!()
+    };
+    assert_eq!(d.jev_provider, JevProvider::Cloudflare);
+    assert_eq!(d.jev_account_id.as_deref(), Some("abc123"));
+    assert_eq!(d.jev_model, None, "the provider's default at the probe");
+    let Ok(Command::Doctor(d)) = parse(&["doctor", "--workspace", "/w", "--jev-probe"]) else {
+        panic!()
+    };
+    assert_eq!(
+        (d.jev_provider, d.jev_account_id),
+        (JevProvider::TypeSafe, None)
+    );
+    let err = parse(&[&["doctor", "--workspace", "/w"][..], &CLOUDFLARE[..]].concat()).unwrap_err();
+    assert!(err.contains("--jev-probe"), "{err}");
+    let err = parse(&[
+        "doctor",
+        "--workspace",
+        "/w",
+        "--jev-probe",
+        "--jev-provider",
+        "cloudflare",
+    ])
+    .unwrap_err();
+    assert!(err.contains("--jev-account-id"), "{err}");
+
+    let drain = ["memory", "drain", "--workspace", "/w", "--online"];
+    let Ok(Command::Memory(m)) = parse(&[&drain[..], &CLOUDFLARE[..]].concat()) else {
+        panic!()
+    };
+    assert_eq!(
+        m.action,
+        cli::MemoryAction::Drain {
+            provider: JevProvider::Cloudflare,
+            account_id: Some("abc123".into()),
+            model: None,
+            candidates: None
+        }
+    );
+    let err = parse(&[&drain[..], &["--jev-provider", "cloudflare"][..]].concat()).unwrap_err();
+    assert!(err.contains("--jev-account-id"), "{err}");
+    let err = parse(
+        &[
+            &drain[..],
+            &CLOUDFLARE[..],
+            &["--jev-model", "jev-1.13.0"][..],
+        ]
+        .concat(),
+    )
+    .unwrap_err();
+    assert!(err.contains("clef or clef-flash"), "{err}");
+
+    let install = ["install", "codex", "--workspace", "/w"];
+    for mode in ["--online", "--memory"] {
+        let Ok(Command::Install(i)) = parse(&[&install[..], &[mode][..], &CLOUDFLARE[..]].concat())
+        else {
+            panic!()
+        };
+        assert_eq!(i.provider, JevProvider::Cloudflare, "{mode}");
+        assert_eq!(i.account_id.as_deref(), Some("abc123"), "{mode}");
+    }
+    let Ok(Command::Install(i)) = parse(&[&install[..], &["--online"][..]].concat()) else {
+        panic!()
+    };
+    assert_eq!((i.provider, i.account_id), (JevProvider::TypeSafe, None));
+    let err = parse(&[&install[..], &CLOUDFLARE[..]].concat()).unwrap_err();
+    assert!(
+        err.contains("--online"),
+        "the server is offline otherwise: {err}"
+    );
+    let err = parse(
+        &[
+            &install[..],
+            &["--online", "--jev-provider", "cloudflare"][..],
+        ]
+        .concat(),
+    )
+    .unwrap_err();
+    assert!(err.contains("--jev-account-id"), "{err}");
 }
 
 #[test]
@@ -810,7 +964,11 @@ fn the_credential_never_appears_in_errors_or_debug_output() {
         Credential::from_env_value(Some("")).is_err(),
         "empty counts as absent"
     );
-    assert!(Credential::from_env_value(None).is_err());
+    let missing = Credential::from_env_value(None).unwrap_err().to_string();
+    assert!(
+        missing.contains("chave TypeSafe ou token Cloudflare, conforme --jev-provider"),
+        "what the doctor's probe says when it has no key (D-166): {missing}"
+    );
 }
 
 fn prompt_event(ws: &std::path::Path, session: &str, prompt: &str) -> String {
@@ -1821,6 +1979,12 @@ fn the_usage_text_carries_the_consent_notice() {
         help.contains("Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.")
     );
     assert!(help.contains("RIPWIRE_BROKER_JEV_API_KEY"));
+    // D-166: one variable for either provider, and the help says what goes in it.
+    assert!(
+        help.contains("chave TypeSafe ou token Cloudflare, conforme --jev-provider"),
+        "{help}"
+    );
+    assert!(help.contains("[--jev-provider typesafe|cloudflare] [--jev-account-id ID]"));
 }
 
 #[test]
@@ -1944,6 +2108,59 @@ fn install_online_adds_the_flag_and_references_the_key_by_name() {
 }
 
 #[test]
+fn install_online_carries_the_cloudflare_provider_and_account() {
+    let (_ws, root, _, out) = install_online(&[&CLOUDFLARE[..], &["--write"][..]].concat());
+
+    let server = read_json(&root.join(".mcp.json"))["mcpServers"]["ripwire-broker"].clone();
+    assert_eq!(
+        server["args"],
+        json!([
+            "--workspace",
+            root.to_str().unwrap(),
+            "--online",
+            "--jev-provider",
+            "cloudflare",
+            "--jev-account-id",
+            "abc123"
+        ])
+    );
+    assert_eq!(
+        server["env"],
+        json!({"RIPWIRE_BROKER_JEV_API_KEY": "${RIPWIRE_BROKER_JEV_API_KEY}"}),
+        "one variable for either provider"
+    );
+    assert!(out.contains("token Cloudflare"), "{out}");
+}
+
+#[test]
+fn install_memory_for_codex_carries_the_cloudflare_provider_and_account() {
+    let ws = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let base = [
+        "install",
+        "codex",
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--memory",
+        "--codex-home",
+        home.path().to_str().unwrap(),
+    ];
+    let (code, out, err) = run_with_key(&[&base[..], &CLOUDFLARE[..]].concat());
+
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains(
+            r#""--memory", "--jev-provider", "cloudflare", "--jev-account-id", "abc123"]"#
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("env_vars = [\"RIPWIRE_BROKER_JEV_API_KEY\"]"),
+        "{out}"
+    );
+}
+
+#[test]
 fn install_online_keeps_hooks_offline() {
     let (_ws, root, _, _) = install_online(&["--hooks", "--write"]);
 
@@ -2030,6 +2247,8 @@ fn install_refuses_a_binary_path_that_is_not_utf8() {
             online: false,
             memory: false,
             memory_debug_log: false,
+            provider: JevProvider::TypeSafe,
+            account_id: None,
         };
 
         let Err(err) = ripwire_broker::install::plan(&args, &binary) else {
@@ -2058,6 +2277,8 @@ fn install_refuses_a_workspace_path_that_is_not_utf8() {
         online: false,
         memory: false,
         memory_debug_log: false,
+        provider: JevProvider::TypeSafe,
+        account_id: None,
     };
 
     let Err(err) = ripwire_broker::install::plan(&args, &PathBuf::from("/opt/ripwire-broker"))
@@ -4731,6 +4952,8 @@ fn memory_drain_needs_online_and_a_credential() {
     assert_eq!(
         m.action,
         cli::MemoryAction::Drain {
+            provider: JevProvider::TypeSafe,
+            account_id: None,
             model: None,
             candidates: None
         }
@@ -4751,6 +4974,8 @@ fn memory_drain_needs_online_and_a_credential() {
     assert_eq!(
         m.action,
         cli::MemoryAction::Drain {
+            provider: JevProvider::TypeSafe,
+            account_id: None,
             model: Some("jev-1.14.0".into()),
             candidates: Some(7)
         },

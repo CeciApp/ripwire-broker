@@ -10,14 +10,21 @@ use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
 use std::time::Duration;
 
-/// The only endpoint of the first increment (v0.1 §13.4): no URL comes from configuration.
+/// TypeSafe's endpoint, the only one of the first increment (v0.1 §13.4). No URL comes from
+/// configuration: a provider is chosen by name and builds its own (D-166).
 pub const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 /// Responses carry a few probabilities; anything bigger is refused unread.
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
+const TYPESAFE: super::JevProvider = super::JevProvider::TypeSafe;
+
 pub struct JevClient {
     http: reqwest::Client,
     endpoint: String,
+    /// Decides the URL and whether the answer comes in an envelope (D-166).
+    provider: super::JevProvider,
+    /// Cloudflare's account: part of the URL, and hidden in the log like the key (D-166).
+    account: Option<String>,
     /// `None` (D-155): no usable key, so no call is sent.
     key: Option<Credential>,
     model: String,
@@ -31,20 +38,38 @@ pub struct JevClient {
 
 impl JevClient {
     pub fn new(key: Credential, model: &str, timeout: Duration) -> Result<Self, String> {
-        Self::build(ENDPOINT.into(), true, false, Some(key), model, timeout)
+        Self::build(
+            ENDPOINT.into(),
+            TYPESAFE,
+            true,
+            false,
+            Some(key),
+            model,
+            timeout,
+        )
     }
 
-    /// No usable key (D-155): every call fails with [`ClassifyError::NoKey`] before anything is
-    /// sent.
-    pub fn without_key(model: &str, timeout: Duration) -> Result<Self, String> {
-        Self::build(ENDPOINT.into(), true, false, None, model, timeout)
+    /// The client of `provider` (D-166). Still no URL from configuration: the provider is one
+    /// of two allowlisted hosts, and `account_id` and `model` only fill Cloudflare's path after
+    /// [`super::JevProvider::endpoint`] checked them. Without a usable `key` (D-155) every call
+    /// fails with [`ClassifyError::NoKey`] before anything is sent.
+    pub fn for_provider(
+        provider: super::JevProvider,
+        account_id: Option<&str>,
+        key: Option<Credential>,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let endpoint = provider.endpoint(account_id, model)?;
+        let client = Self::build(endpoint, provider, true, false, key, model, timeout)?;
+        Ok(client.with_account(account_id))
     }
 
     /// Test fixtures only: [`Self::loopback`] without a key.
     #[doc(hidden)]
     pub fn loopback_without_key(port: u16, model: &str, timeout: Duration) -> Result<Self, String> {
         let endpoint = format!("http://127.0.0.1:{port}/v1/systemone");
-        Self::build(endpoint, false, false, None, model, timeout)
+        Self::build(endpoint, TYPESAFE, false, false, None, model, timeout)
     }
 
     /// Test fixtures only: plain HTTP to `127.0.0.1`. No command line option reaches it.
@@ -56,7 +81,22 @@ impl JevClient {
         timeout: Duration,
     ) -> Result<Self, String> {
         let endpoint = format!("http://127.0.0.1:{port}/v1/systemone");
-        Self::build(endpoint, false, false, Some(key), model, timeout)
+        Self::build(endpoint, TYPESAFE, false, false, Some(key), model, timeout)
+    }
+
+    /// Test fixtures only: [`Self::loopback`] speaking as `provider`, on that provider's path.
+    #[doc(hidden)]
+    pub fn loopback_with(
+        port: u16,
+        provider: super::JevProvider,
+        account_id: Option<&str>,
+        key: Credential,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let endpoint = provider.loopback(port, account_id, model)?;
+        let client = Self::build(endpoint, provider, false, false, Some(key), model, timeout)?;
+        Ok(client.with_account(account_id))
     }
 
     /// Test fixtures only: like [`Self::loopback`], but HTTP/2 from the first byte (h2c),
@@ -69,11 +109,12 @@ impl JevClient {
         timeout: Duration,
     ) -> Result<Self, String> {
         let endpoint = format!("http://127.0.0.1:{port}/v1/systemone");
-        Self::build(endpoint, false, true, Some(key), model, timeout)
+        Self::build(endpoint, TYPESAFE, false, true, Some(key), model, timeout)
     }
 
     fn build(
         endpoint: String,
+        provider: super::JevProvider,
         https_only: bool,
         h2c: bool,
         key: Option<Credential>,
@@ -96,12 +137,19 @@ impl JevClient {
         Ok(Self {
             http,
             endpoint,
+            provider,
+            account: None,
             key,
             model: model.into(),
             received: std::sync::Mutex::default(),
             activity: None,
             log: None,
         })
+    }
+
+    fn with_account(mut self, account_id: Option<&str>) -> Self {
+        self.account = account_id.map(str::to_string);
+        self
     }
 
     /// Writes every exchange to `log` (`--log`).
@@ -134,6 +182,46 @@ impl JevClient {
             .map_err(|_| ClassifyError::Auth(0))?;
         v.set_sensitive(true);
         Ok(v)
+    }
+}
+
+/// Cloudflare's v4 envelope around the `systemone` body (D-166).
+#[derive(serde::Deserialize)]
+struct Envelope<'a> {
+    success: Option<bool>,
+    #[serde(borrow)]
+    result: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    errors: Option<&'a serde_json::value::RawValue>,
+}
+
+/// How much of a provider's `errors` survives into [`InvalidResponse::Refused`].
+const MAX_REFUSAL_BYTES: usize = 256;
+
+/// The `systemone` body of an answer, as text for the parsers. TypeSafe answers with it at the
+/// root. Cloudflare's REST wraps it: `{success, errors, messages, result}`, and `result` goes
+/// on byte for byte, so a question answered twice is still seen by the parser. `success: false`
+/// is a refusal, with the `errors` as sanitized text without `key`. A root without the envelope
+/// goes on whole (a Worker binding answers that way).
+fn unwrap_envelope(
+    provider: super::JevProvider,
+    text: String,
+    key: Option<&str>,
+) -> Result<String, InvalidResponse> {
+    if provider != super::JevProvider::Cloudflare {
+        return Ok(text);
+    }
+    let Ok(envelope) = serde_json::from_str::<Envelope>(&text) else {
+        return Ok(text);
+    };
+    match (envelope.success, envelope.result) {
+        (Some(false), _) => {
+            let errors = envelope.errors.map_or("", |e| e.get());
+            let errors = super::redact::remote_text(errors, key, MAX_REFUSAL_BYTES);
+            Err(InvalidResponse::Refused(errors))
+        }
+        (Some(true), Some(body)) => Ok(body.get().to_string()),
+        _ => Ok(text),
     }
 }
 
@@ -190,6 +278,10 @@ impl JevClient {
         let started = std::time::Instant::now();
         let sent = self.log.as_ref().map(|_| body.clone());
         let (result, status, received) = self.exchange(bearer, body, discovery).await;
+        let result = result.and_then(|text| {
+            let key = self.key.as_ref().map(Credential::expose);
+            unwrap_envelope(self.provider, text, key).map_err(ClassifyError::Invalid)
+        });
         if let Some(a) = &self.activity {
             match &result {
                 Ok(_) => a.set_key(crate::server_status::KeyState::Ok),
@@ -208,7 +300,9 @@ impl JevClient {
                 error,
                 elapsed: started.elapsed(),
             };
-            log.record(&exchange, self.key.as_ref().map(Credential::expose));
+            let key = self.key.as_ref().map(Credential::expose);
+            let secrets: Vec<&str> = key.into_iter().chain(self.account.as_deref()).collect();
+            log.record(&exchange, &secrets);
         }
         result
     }

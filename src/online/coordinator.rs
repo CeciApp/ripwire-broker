@@ -25,6 +25,8 @@ pub struct OnlineConfig {
     pub provider: String,
     /// Host of the allowlisted endpoint, for the cache key and the status.
     pub endpoint_host: String,
+    /// Questions one request may carry: the provider's ceiling (D-166).
+    pub max_questions: usize,
     pub max_in_flight: usize,
     pub request_limit: usize,
     /// Planner paths the rescore evaluates (D-061).
@@ -48,6 +50,7 @@ impl OnlineConfig {
             classifier,
             provider: "typesafe".into(),
             endpoint_host: "api.typesafe.ai".into(),
+            max_questions: request::MAX_QUESTIONS,
             max_in_flight: 4,
             request_limit: 24,
             max_candidates: 16,
@@ -57,6 +60,15 @@ impl OnlineConfig {
             deadline: std::time::Duration::from_millis(8_000),
             max_source_bytes: None,
         }
+    }
+
+    /// What depends on who answers (D-166): the name in the status, the provenance and the
+    /// cache key, the host, and how many questions a request may carry.
+    pub fn with_provider(mut self, provider: super::JevProvider) -> Self {
+        self.provider = provider.name().into();
+        self.endpoint_host = provider.host().into();
+        self.max_questions = provider.max_questions();
+        self
     }
 }
 
@@ -624,7 +636,8 @@ impl OnlineEngine {
         if send.is_empty() {
             return out;
         }
-        let (requests, too_large) = request::batches(self.model(), query, stage, send);
+        let max = self.config.max_questions;
+        let (requests, too_large) = request::batches_within(max, self.model(), query, stage, send);
         disc.too_large += too_large.len();
         if disc.auth_refused {
             disc.unfinished += requests.len();

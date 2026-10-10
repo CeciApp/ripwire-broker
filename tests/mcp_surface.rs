@@ -682,17 +682,19 @@ async fn a_key_in_the_environment_without_online_changes_nothing() {
     client.shut_down().await.unwrap();
 }
 
+/// An `--online` server that never reaches ripwire or the provider, with a key in its
+/// environment. The workspace lives as long as what is returned.
 #[cfg(feature = "online")]
-#[tokio::test]
-async fn an_online_server_says_so_in_its_status_without_the_credential() {
+async fn start_online(extra: &[&str]) -> (tempfile::TempDir, Arc<ClientRuntime>) {
     let repo = tempfile::tempdir().unwrap();
-    let args = vec![
+    let mut args = vec![
         "--workspace".to_string(),
         repo.path().display().to_string(),
         "--ripwire".into(),
         "/nonexistent/ripwire".into(),
         "--online".into(),
     ];
+    args.extend(extra.iter().map(|a| a.to_string()));
     let env = std::collections::HashMap::from([(
         "RIPWIRE_BROKER_JEV_API_KEY".to_string(),
         "tok-e2e-secret".to_string(),
@@ -721,6 +723,37 @@ async fn an_online_server_says_so_in_its_status_without_the_credential() {
         Quiet.to_mcp_client_handler(),
     ));
     client.clone().start().await.unwrap();
+    (repo, client)
+}
+
+/// D-166: the status names the provider, and the host it talks to. The account is part of the
+/// URL, not of the status.
+#[cfg(feature = "online")]
+#[tokio::test]
+async fn a_cloudflare_server_names_its_provider_in_the_status_without_the_account() {
+    let (_repo, client) = start_online(&[
+        "--jev-provider",
+        "cloudflare",
+        "--jev-account-id",
+        "acct0123456789",
+    ])
+    .await;
+
+    let st = status(&client).await;
+
+    assert_eq!(st["online"]["enabled"], true, "{st}");
+    assert_eq!(st["online"]["provider"], "cloudflare");
+    assert_eq!(st["online"]["model"], "clef-flash");
+    assert_eq!(st["online"]["endpoint_host"], "api.cloudflare.com");
+    assert!(!st.to_string().contains("acct0123456789"), "{st}");
+    assert!(!st.to_string().contains("tok-e2e-secret"));
+    client.shut_down().await.unwrap();
+}
+
+#[cfg(feature = "online")]
+#[tokio::test]
+async fn an_online_server_says_so_in_its_status_without_the_credential() {
+    let (_repo, client) = start_online(&[]).await;
 
     let st = status(&client).await;
 
@@ -728,6 +761,7 @@ async fn an_online_server_says_so_in_its_status_without_the_credential() {
     assert_eq!(st["online"]["enabled"], true);
     assert_eq!(st["online"]["model"], "jev-1.13.0");
     assert_eq!(st["online"]["endpoint_host"], "api.typesafe.ai");
+    assert_eq!(st["online"]["provider"], "typesafe");
     assert!(!st.to_string().contains("tok-e2e-secret"));
     let tools = client.request_tool_list(None).await.unwrap();
     let task = tools

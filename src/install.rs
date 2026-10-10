@@ -96,6 +96,20 @@ fn memory_flags(args: &InstallArgs) -> &'static [&'static str] {
     }
 }
 
+/// `--jev-provider` and `--jev-account-id` for the server (D-166): nothing for TypeSafe, the
+/// default, so its configuration is the one it always was.
+fn provider_flags(args: &InstallArgs) -> Vec<&str> {
+    match (args.provider, args.account_id.as_deref()) {
+        (crate::online::JevProvider::TypeSafe, _) | (_, None) => vec![],
+        (provider, Some(account)) => vec![
+            "--jev-provider",
+            provider.name(),
+            "--jev-account-id",
+            account,
+        ],
+    }
+}
+
 /// Where `--memory-debug-log` writes, and how to follow it (D-164).
 fn debug_log_note(workspace: &Path) -> String {
     let file = crate::state::StateStore::default_dir()
@@ -372,7 +386,8 @@ Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.";
 /// Where the key comes from with `install`; the plugin has its own option for it.
 const KEY_NOTE: &str =
     "The key is never written here: export RIPWIRE_BROKER_JEV_API_KEY in the environment the host
-starts from. The binary must be built with `--features online`";
+starts from (chave TypeSafe ou token Cloudflare, conforme --jev-provider). The binary must be built
+with `--features online`";
 
 pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
     // Both host configs are text (JSON, TOML). A path they cannot carry is refused for what
@@ -415,6 +430,7 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
                     }
                     // `--memory` implies online on the server: no redundant `--online`.
                     flags.extend(memory_flags(args).iter().map(|f| Value::from(*f)));
+                    flags.extend(provider_flags(args).into_iter().map(Value::from));
                     if args.online || args.memory {
                         // Expanded by Claude Code from its own environment: a reference, never
                         // the value.
@@ -530,8 +546,12 @@ pub fn plan(args: &InstallArgs, binary: &Path) -> Result<Plan, String> {
             if args.online {
                 extra.push_str(", \"--online\"");
             }
-            for flag in memory_flags(args) {
-                extra.push_str(&format!(", \"{flag}\""));
+            for flag in memory_flags(args)
+                .iter()
+                .copied()
+                .chain(provider_flags(args))
+            {
+                extra.push_str(&format!(", {}", toml_string(flag)));
             }
             let online = match args.online || args.memory {
                 // Forwarded by name from Codex's environment, never the value.

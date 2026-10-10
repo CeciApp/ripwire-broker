@@ -7,6 +7,7 @@ use ripwire_broker::cli::{self, Command, ServeArgs};
 use ripwire_broker::hook;
 use ripwire_broker::mcp::{BrokerServer, Settings};
 use ripwire_broker::memory::{self, publish::MemoryConfig, runtime::Runtime};
+use ripwire_broker::online::JevProvider;
 use ripwire_broker::server_status::{Activities, Mode, Publisher};
 use ripwire_broker::state::StateStore;
 use ripwire_broker::summarizer::CommandSummarizer;
@@ -135,8 +136,17 @@ fn online_config(
     use ripwire_broker::online::credential::{Credential, CredentialError};
     use ripwire_broker::online::jev::JevClient;
     use ripwire_broker::server_status::KeyState;
+    let client = |key| {
+        JevClient::for_provider(
+            o.provider,
+            o.account_id.as_deref(),
+            key,
+            &o.model,
+            o.timeout,
+        )
+    };
     let client = match Credential::from_env() {
-        Ok(key) => JevClient::new(key, &o.model, o.timeout)?,
+        Ok(key) => client(Some(key))?,
         Err(e) => {
             let (state, label) = match e {
                 CredentialError::Missing => {
@@ -147,7 +157,7 @@ fn online_config(
             };
             eprintln!("ripwire-broker: {e}; no request goes to Jev {label}");
             activity.set_key(state);
-            JevClient::without_key(&o.model, o.timeout)?
+            client(None)?
         }
     };
     let mut client = client.with_activity(activity);
@@ -165,8 +175,7 @@ fn online_config(
     // With memory, one client and one ceiling of requests in flight for discovery and memory;
     // without it, discovery as before (PRD jev-mem §4).
     let (discovery, memory_client) = for_process(Arc::new(client), o.max_in_flight, with_memory);
-    let mut config = ripwire_broker::online::OnlineConfig::new(discovery);
-    config.provider = o.provider.clone();
+    let mut config = ripwire_broker::online::OnlineConfig::new(discovery).with_provider(o.provider);
     config.max_in_flight = o.max_in_flight;
     config.request_limit = o.request_limit;
     config.max_candidates = o.max_candidates;
@@ -182,6 +191,7 @@ fn online_config(
 async fn memory_drain(
     workspace: &std::path::Path,
     state_dir: Option<std::path::PathBuf>,
+    (provider, account_id): (JevProvider, Option<String>),
     model: Option<String>,
     candidates: Option<usize>,
     debug_log: bool,
@@ -189,6 +199,7 @@ async fn memory_drain(
     #[cfg(not(feature = "online"))]
     {
         let _ = (workspace, state_dir, model, candidates, debug_log);
+        let _ = (provider, account_id);
         eprintln!(
             "memory drain --online: this binary was built without the online feature; \
              rebuild it with `cargo build --release --features online`"
@@ -199,7 +210,7 @@ async fn memory_drain(
     {
         use memory::controller::{Config, Worker};
         use memory::runtime::{DEFAULT_WRITE_CANDIDATES, DRAIN_DEADLINE, DRAIN_JOBS, drain};
-        use ripwire_broker::online::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_MODEL, DEFAULT_TIMEOUT_MS};
+        use ripwire_broker::online::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS};
         use ripwire_broker::online::{classifier::Shared, credential::Credential, jev::JevClient};
         let fail = |e: String| {
             eprintln!("memory drain --online: {e}");
@@ -209,9 +220,11 @@ async fn memory_drain(
             Ok(k) => k,
             Err(e) => return fail(e.to_string()),
         };
-        let model = model.unwrap_or_else(|| DEFAULT_MODEL.into());
+        let model = model.unwrap_or_else(|| provider.default_model().into());
         let timeout = std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
-        let client = match JevClient::new(key, &model, timeout) {
+        let client =
+            JevClient::for_provider(provider, account_id.as_deref(), Some(key), &model, timeout);
+        let client = match client {
             Ok(c) => c,
             Err(e) => return fail(e),
         };
@@ -463,11 +476,20 @@ async fn main() -> ExitCode {
         Ok(Command::Install(a)) => install(&a),
         Ok(Command::Statusline(a)) => statusline(&a),
         Ok(Command::Memory(cli::MemoryCommand {
-            action: cli::MemoryAction::Drain { model, candidates },
+            action:
+                cli::MemoryAction::Drain {
+                    provider,
+                    account_id,
+                    model,
+                    candidates,
+                },
             workspace,
             state_dir,
             debug_log,
-        })) => memory_drain(&workspace, state_dir, model, candidates, debug_log).await,
+        })) => {
+            let target = (provider, account_id);
+            memory_drain(&workspace, state_dir, target, model, candidates, debug_log).await
+        }
         // Dispatched before `settings`: local, never online (PRD jev-mem §4).
         Ok(Command::Memory(a)) => memory_local(&a),
         Err(msg) => {

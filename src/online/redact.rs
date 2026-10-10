@@ -1,6 +1,19 @@
 //! Remote text that survives into an error (PRD §23.9, v0.1 §13.3, §17): sanitized to
 //! printable ASCII, capped, and with every occurrence of the credential redacted before it
-//! can reach a status, a log or the agent.
+//! can reach a status, a log or the agent. Also what `--log` hides: the credential and, for
+//! Cloudflare, the account in the URL, written `accounts/[redacted]/` (D-166).
+
+/// What stands for a secret wherever one would be written.
+pub const REDACTED: &str = "[redacted]";
+
+/// `text` with every occurrence of each of `secrets` replaced by [`REDACTED`]. An empty secret
+/// hides nothing.
+pub fn hide(mut text: String, secrets: &[&str]) -> String {
+    for secret in secrets.iter().filter(|s| !s.is_empty()) {
+        text = text.replace(secret, REDACTED);
+    }
+    text
+}
 
 /// `text` reduced to printable ASCII and spaces, trimmed, with `secret` replaced by
 /// `[redacted]`, at most `max` bytes.
@@ -22,7 +35,7 @@ pub fn remote_text(text: &str, secret: Option<&str>, max: usize) -> String {
     if let Some(secret) = secret.filter(|s| !s.is_empty()) {
         let form = printable(secret);
         if !form.is_empty() {
-            clean = clean.replace(&form, "[redacted]");
+            clean = clean.replace(&form, REDACTED);
         }
     }
     let clean = clean.trim();
