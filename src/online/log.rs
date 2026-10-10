@@ -5,6 +5,13 @@
 //! The file holds what the broker sends, so source the classifier saw is in it: it is private
 //! (0600) and stays local. The key is never in it: the `Authorization` header is written redacted
 //! and any echo of the key in a response is replaced before the block is written.
+//!
+//! Cloudflare's URL carries the account id (D-166). It is not a credential: alone it grants
+//! nothing, and Cloudflare shows it in dashboard URLs. It is treated as a secret here anyway,
+//! because it names the tenant, it is stable, and this file exists to be read and pasted into an
+//! issue. So the URL is written `accounts/[redacted]/`, and an echo of the id in a response is
+//! replaced like an echo of the key. Hiding it costs nothing: the model is still in the URL, and
+//! whoever reads the log knows which account they started the server with.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -56,15 +63,12 @@ impl JevLog {
         })
     }
 
-    /// Writes one block in a single write, so concurrent calls never interleave. `secret` is
-    /// replaced wherever it appears. A failed write is ignored: the log never fails a call.
-    pub fn record(&self, e: &Exchange<'_>, secret: Option<&str>) {
+    /// Writes one block in a single write, so concurrent calls never interleave. Each of
+    /// `secrets` is replaced wherever it appears: in the URL, in what was sent and in what came
+    /// back. A failed write is ignored: the log never fails a call.
+    pub fn record(&self, e: &Exchange<'_>, secrets: &[&str]) {
         let n = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let block = block(n, e, now_utc());
-        let block = match secret.filter(|s| !s.is_empty()) {
-            Some(s) => block.replace(s, "[redacted]"),
-            None => block,
-        };
+        let block = super::redact::hide(block(n, e, now_utc()), secrets);
         let mut f = self.file.lock().unwrap_or_else(|p| p.into_inner());
         let _ = f.write_all(block.as_bytes());
     }

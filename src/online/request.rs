@@ -182,6 +182,19 @@ pub fn batches(
     stage: SemanticStage,
     items: Vec<StateItem>,
 ) -> (Vec<JevRequest>, Vec<StateItem>) {
+    batches_within(MAX_QUESTIONS, model, query, stage, items)
+}
+
+/// [`batches`] for a provider that takes fewer questions a request (D-166): a request closes
+/// at `max_questions`, never above [`MAX_QUESTIONS`]. The requests themselves are the same.
+pub fn batches_within(
+    max_questions: usize,
+    model: &str,
+    query: &str,
+    stage: SemanticStage,
+    items: Vec<StateItem>,
+) -> (Vec<JevRequest>, Vec<StateItem>) {
+    let max_questions = max_questions.clamp(1, MAX_QUESTIONS);
     let base = request_bytes(model, query, stage, &[]);
     let evidence = stage == SemanticStage::SourceSelection;
     let (mut sent, mut too_large) = (vec![], vec![]);
@@ -192,7 +205,7 @@ pub fn batches(
             let within_evidence = !evidence
                 || n == 0
                 || (n < MAX_EVIDENCE_UNITS && text + item.text.len() <= EVIDENCE_BATCH_BYTES);
-            n < MAX_QUESTIONS
+            n < max_questions
                 && within_evidence
                 && bytes.saturating_add(item_bytes(stage, n, &item)) <= MAX_REQUEST_BYTES
         };

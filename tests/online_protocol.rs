@@ -953,3 +953,298 @@ async fn the_log_shows_each_call_sent_received_and_timed_without_the_key() {
     );
     assert!(text.contains("Bearer [redacted]"), "{text}");
 }
+
+// ---- `--jev-provider cloudflare` (D-166): the same protocol behind another transport ----
+
+use ripwire_broker::online::JevProvider;
+
+/// What Workers AI answers over REST: Cloudflare's v4 envelope around the `systemone` body.
+const CF_OK: &str = r#"{"result":{"model":"clef-flash","answers":{"q0":{"type":"noul","noul":0.81},"q1":{"type":"noul","noul":0.03}},"usage":{"input_tokens":10,"output_tokens":0}},"success":true,"errors":[],"messages":[]}"#;
+
+fn cloudflare(port: u16) -> JevClient {
+    let key = Credential::from_env_value(Some("tok-123")).unwrap();
+    let timeout = Duration::from_secs(5);
+    JevClient::loopback_with(
+        port,
+        JevProvider::Cloudflare,
+        Some("abc123"),
+        key,
+        "clef-flash",
+        timeout,
+    )
+    .unwrap()
+}
+
+fn clef_request() -> JevRequest {
+    let mut req = request();
+    req.model = "clef-flash".into();
+    req
+}
+
+#[tokio::test]
+async fn a_cloudflare_envelope_is_unwrapped_before_the_answers() {
+    let f = fixture(vec![json(200, CF_OK)]).await;
+
+    let answers = cloudflare(f.port).classify(&clef_request()).await;
+
+    assert_eq!(answers, Ok(vec![Some(0.81), Some(0.03)]));
+}
+
+#[tokio::test]
+async fn the_memory_path_unwraps_the_cloudflare_envelope_too() {
+    let body = r#"{"result":{"model":"clef-flash","answers":{"q0":{"type":"noul","noul":0.9},"q1":{"type":"noul","noul":0.1}}},"success":true,"errors":[],"messages":[]}"#;
+    let f = fixture(vec![json(200, body)]).await;
+    let mut req = memory_request();
+    req.model = "clef-flash".into();
+
+    let got = cloudflare(f.port).decide(&req).await;
+
+    assert_eq!(
+        got,
+        Ok(vec![
+            Decision::Noul { probability: 0.9 },
+            Decision::Noul { probability: 0.1 }
+        ])
+    );
+}
+
+const CF_REFUSED: &str = r#"{"result":null,"success":false,"errors":[{"code":5006,"message":"model not found for tok-123"}],"messages":[]}"#;
+
+#[tokio::test]
+async fn a_cloudflare_refusal_is_invalid_with_its_errors() {
+    let f = fixture(vec![json(200, CF_REFUSED)]).await;
+
+    let err = cloudflare(f.port)
+        .classify(&clef_request())
+        .await
+        .unwrap_err();
+
+    let ClassifyError::Invalid(InvalidResponse::Refused(why)) = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        why.contains("5006") && why.contains("model not found"),
+        "{why}"
+    );
+    assert!(!why.contains("tok-123"), "the key is redacted: {why}");
+    assert!(why.len() <= 256, "capped: {}", why.len());
+    assert_eq!(err.category(), "invalid_response");
+    assert!(err.to_string().contains("5006"), "{err}");
+}
+
+#[tokio::test]
+async fn a_cloudflare_answer_without_the_envelope_is_still_accepted() {
+    let bare = r#"{"model":"clef-flash","answers":{"q0":{"type":"noul","noul":0.81},"q1":{"type":"noul","noul":0.03}}}"#;
+    let f = fixture(vec![json(200, bare)]).await;
+
+    let answers = cloudflare(f.port).classify(&clef_request()).await;
+
+    assert_eq!(answers, Ok(vec![Some(0.81), Some(0.03)]));
+}
+
+/// The envelope is opened, never re-serialized: the parser still sees a question answered twice.
+#[tokio::test]
+async fn a_question_answered_twice_inside_the_envelope_is_still_seen() {
+    let twice = r#"{"result":{"model":"clef-flash","answers":{"q0":{"type":"noul","noul":0.1},"q0":{"type":"noul","noul":0.9}}},"success":true,"errors":[],"messages":[]}"#;
+    let f = fixture(vec![json(200, twice)]).await;
+
+    let answers = cloudflare(f.port).classify(&clef_request()).await;
+
+    assert_eq!(
+        answers,
+        Err(ClassifyError::Invalid(InvalidResponse::DuplicateQuestion))
+    );
+}
+
+/// TypeSafe never answers with an envelope, so one is not opened for it.
+#[tokio::test]
+async fn the_typesafe_client_does_not_open_envelopes() {
+    let f = fixture(vec![json(200, CF_OK), json(200, CF_REFUSED)]).await;
+    let c = client(f.port, Duration::from_secs(5));
+    let malformed = Err(ClassifyError::Invalid(InvalidResponse::Malformed));
+
+    assert_eq!(c.classify(&request()).await, malformed);
+    assert_eq!(c.classify(&request()).await, malformed);
+}
+
+/// What Workers AI does in practice: a refused request is a 4xx, with the envelope as its body.
+/// The status decides the category, as for any provider, and the errors are in the log.
+#[tokio::test]
+async fn a_cloudflare_4xx_keeps_its_status_and_logs_its_errors() {
+    use ripwire_broker::online::log::JevLog;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("jev.log");
+    let f = fixture(vec![json(422, CF_REFUSED)]).await;
+    let c = cloudflare(f.port).with_log(Arc::new(JevLog::open(&file).unwrap()));
+
+    assert_eq!(
+        c.classify(&clef_request()).await,
+        Err(ClassifyError::Rejected(422))
+    );
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("HTTP 422") && text.contains("5006"), "{text}");
+    assert!(text.contains("erro: rejected"), "{text}");
+    assert!(!text.contains("tok-123"), "{text}");
+}
+
+/// The path Workers AI serves, with the same body and bearer as TypeSafe's.
+#[tokio::test]
+async fn the_cloudflare_client_posts_to_the_run_path_of_its_account_and_model() {
+    let f = fixture(vec![json(200, CF_OK)]).await;
+    let req = clef_request();
+
+    cloudflare(f.port).classify(&req).await.unwrap();
+
+    let seen = f.seen.lock().unwrap().clone();
+    assert!(
+        seen[0].head.starts_with(
+            "POST /client/v4/accounts/abc123/ai/run/@cf/cloudflare/clef-flash HTTP/1.1\r\n"
+        ),
+        "{}",
+        seen[0].head
+    );
+    assert_eq!(
+        seen[0].header("authorization").as_deref(),
+        Some("Bearer tok-123")
+    );
+    assert_eq!(seen[0].body, serde_json::to_vec(&req).unwrap());
+}
+
+type ForProvider =
+    fn(JevProvider, Option<&str>, Option<Credential>, &str, Duration) -> Result<JevClient, String>;
+
+/// As for TypeSafe: the constructor takes a provider's name, never a URL, so the bearer can only
+/// go to one of the two allowlisted hosts, over HTTPS.
+#[test]
+fn the_provider_client_cannot_be_pointed_anywhere_but_an_allowlisted_https_endpoint() {
+    let new: ForProvider = JevClient::for_provider;
+    let key = || Credential::from_env_value(Some("tok-123")).ok();
+    let timeout = Duration::from_secs(15);
+
+    let cf = new(
+        JevProvider::Cloudflare,
+        Some("abc123"),
+        key(),
+        "clef",
+        timeout,
+    )
+    .unwrap();
+    assert_eq!(
+        cf.endpoint(),
+        "https://api.cloudflare.com/client/v4/accounts/abc123/ai/run/@cf/cloudflare/clef"
+    );
+    let ts = new(JevProvider::TypeSafe, None, key(), "jev-1.13.0", timeout).unwrap();
+    assert_eq!(ts.endpoint(), "https://api.typesafe.ai/v1/systemone");
+
+    for account in ["evil.example/x", "a@evil.example", "..", "a/../../b"] {
+        let refused = new(
+            JevProvider::Cloudflare,
+            Some(account),
+            key(),
+            "clef",
+            timeout,
+        );
+        assert!(refused.is_err(), "{account:?}");
+    }
+    assert!(new(JevProvider::Cloudflare, None, key(), "clef", timeout).is_err());
+    assert!(
+        new(
+            JevProvider::Cloudflare,
+            Some("abc123"),
+            key(),
+            "jev-1.13.0",
+            timeout
+        )
+        .is_err()
+    );
+}
+
+/// D-166: the account is not a credential, but it names the tenant and the log is made to be
+/// read and pasted. It is written redacted, like the bearer.
+#[tokio::test]
+async fn the_log_redacts_the_cloudflare_account() {
+    use ripwire_broker::online::log::JevLog;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("jev.log");
+    // An answer that echoes the URL it was asked on, as an error message may.
+    let echo = r#"{"result":null,"success":false,"errors":[{"code":7003,"message":"no route for /client/v4/accounts/abc123/ai/run"}],"messages":[]}"#;
+    let f = fixture(vec![json(200, CF_OK), json(404, echo)]).await;
+    let c = cloudflare(f.port).with_log(Arc::new(JevLog::open(&file).unwrap()));
+
+    c.classify(&clef_request()).await.unwrap();
+    let _ = c.classify(&clef_request()).await.unwrap_err();
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    let port = f.port;
+    assert!(
+        text.contains(&format!(
+            "POST http://127.0.0.1:{port}/client/v4/accounts/[redacted]/ai/run/@cf/cloudflare/clef-flash\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        !text.contains("abc123"),
+        "the account never reaches the log: {text}"
+    );
+    // The envelope is logged as it came: unwrapping is the client's, after the log.
+    assert!(
+        text.contains("\"success\": true") && text.contains("\"noul\": 0.81"),
+        "{text}"
+    );
+    assert!(text.contains("HTTP 404") && text.contains("7003"), "{text}");
+}
+
+/// The default provider's log is what it was before there was a second one (D-166).
+#[tokio::test]
+async fn the_typesafe_log_is_what_it_always_was() {
+    use ripwire_broker::online::log::JevLog;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("jev.log");
+    let f = fixture(vec![json(200, OK)]).await;
+    let c = client(f.port, Duration::from_secs(5)).with_log(Arc::new(JevLog::open(&file).unwrap()));
+    let req = request();
+
+    c.classify(&req).await.unwrap();
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    let pretty = |json: &str| {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        serde_json::to_string_pretty(&v).unwrap()
+    };
+    let rule = |c: &str| c.repeat(72);
+    let section = |title: &str| {
+        let head = format!("── {title} ");
+        format!("{head}{}\n", "─".repeat(72 - head.chars().count()))
+    };
+    let (head, rest) = text.split_once("\n\n").unwrap();
+    let stamp = head
+        .lines()
+        .nth(1)
+        .and_then(|l| l.strip_prefix("Jev call #1 · "))
+        .and_then(|l| l.strip_suffix(" · discovery"))
+        .unwrap_or_else(|| panic!("{head}"));
+    assert_eq!(stamp.len(), "2026-10-06 18:52:01 UTC".len(), "{stamp}");
+    assert_eq!(
+        head,
+        format!(
+            "{}\nJev call #1 · {stamp} · discovery\n{}",
+            rule("═"),
+            rule("═")
+        )
+    );
+    let (body, took) = rest.split_once(&section("duração")).unwrap();
+    let expected = format!(
+        "{}POST http://127.0.0.1:{}/v1/systemone\nAuthorization: Bearer [redacted]\nContent-Type: application/json\n\n{}\n\n{}HTTP 200\n\n{}\n\n",
+        section("enviado"),
+        f.port,
+        pretty(&serde_json::to_string(&req).unwrap()),
+        section("recebido"),
+        pretty(OK),
+    );
+    assert_eq!(body, expected);
+    assert!(
+        took.ends_with(" ms\n\n") && took.trim_end_matches(" ms\n\n").parse::<u64>().is_ok(),
+        "{took:?}"
+    );
+}

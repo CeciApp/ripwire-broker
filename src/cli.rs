@@ -2,6 +2,7 @@
 //! `hook-stats`, `prompt`, `doctor`, `install`, `statusline` and `memory` (PRD jev-mem §4).
 //! Parsing is pure; nothing here touches the disk.
 
+use crate::online::JevProvider;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,8 +16,8 @@ pub enum Color {
 pub const USAGE: &str = "\
 usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [--redact-workspace] [--incremental]
                       [--ripwire-max-rss-mb N] [--state-dir DIR]
-                      [--online [--jev-provider typesafe] [--jev-model MODEL] [--jev-max-in-flight N]
-                                [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
+                      [--online [--jev-provider typesafe|cloudflare] [--jev-account-id ID] [--jev-model MODEL]
+                                [--jev-max-in-flight N] [--jev-request-limit N] [--jev-timeout-ms N] [--jev-no-cache]
                                 [--jev-max-source-bytes N] [--jev-max-candidates N] [--jev-deadline-ms N]
                                 [--jev-lookahead-max N] [--log]]
                       [--memory [--memory-read-deadline-ms N] [--memory-read-request-limit N]
@@ -30,16 +31,16 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
        ripwire-broker hook-stats [--state-dir DIR] [--json]
        ripwire-broker prompt --workspace DIR [--ripwire BIN] [--timeout-ms N] [--budget N] [--] TASK...
        ripwire-broker doctor --workspace DIR [--ripwire BIN] [--timeout-ms N] [--state-dir DIR] [--json]
-                      [--jev-probe [--jev-model MODEL]]
+                      [--jev-probe [--jev-provider typesafe|cloudflare] [--jev-account-id ID] [--jev-model MODEL]]
                       [--summarizer-cmd CMD [--summarizer-version-cmd CMD]]
        ripwire-broker install <claude-code|codex> --workspace DIR [--hooks] [--statusline] [--write] [--codex-home DIR] [--online]
-                      [--memory [--memory-debug-log]]
+                      [--memory [--memory-debug-log]] [--jev-provider typesafe|cloudflare] [--jev-account-id ID]
        ripwire-broker statusline [--workspace DIR] [--state-dir DIR] [--detail] [--width N] [--color never|always]
        ripwire-broker memory status --workspace DIR [--state-dir DIR] [--json]
        ripwire-broker memory forget --workspace DIR [--state-dir DIR] (--all | --id ID) [--memory-debug-log]
        ripwire-broker memory add --workspace DIR [--state-dir DIR] --file PATH [--memory-debug-log]
-       ripwire-broker memory drain --workspace DIR [--state-dir DIR] --online [--jev-model MODEL] [--memory-write-candidates N]
-                      [--memory-debug-log]
+       ripwire-broker memory drain --workspace DIR [--state-dir DIR] --online [--jev-provider typesafe|cloudflare]
+                      [--jev-account-id ID] [--jev-model MODEL] [--memory-write-candidates N] [--memory-debug-log]
        ripwire-broker memory retry --workspace DIR [--state-dir DIR] [--memory-debug-log]
        ripwire-broker memory resume --workspace DIR [--state-dir DIR] [--memory-debug-log]
 
@@ -47,7 +48,10 @@ usage: ripwire-broker [serve] --workspace DIR [--ripwire BIN] [--timeout-ms N] [
 Selecione somente uma raiz cujo conteúdo você tem autorização para enviar.
 --memory: implica --online; guarda observações do workspace localmente e envia as elegíveis ao Jev.
 --memory-selection deterministic: experimental, para avaliação; a mesma coleta, sem enriquecer nem perguntar ao Jev sobre memória.
-The credential comes only from RIPWIRE_BROKER_JEV_API_KEY in the server's environment.";
+--jev-provider cloudflare: o Clef da Cloudflare (Workers AI) no lugar do Jev; precisa de --jev-account-id,
+e --jev-model é clef-flash (padrão) ou clef.
+The credential comes only from RIPWIRE_BROKER_JEV_API_KEY in the server's environment:
+chave TypeSafe ou token Cloudflare, conforme --jev-provider.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
@@ -118,8 +122,10 @@ pub struct MemoryArgs {
 /// only from the server's environment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnlineArgs {
-    /// The only provider of the first increment.
-    pub provider: String,
+    /// TypeSafe unless `--jev-provider cloudflare` (D-166).
+    pub provider: JevProvider,
+    /// `--jev-account-id`: part of Cloudflare's URL, and only of Cloudflare's.
+    pub account_id: Option<String>,
     /// Pinned by default; never a moving alias like `jev-latest`.
     pub model: String,
     pub max_in_flight: usize,
@@ -193,8 +199,11 @@ pub struct DoctorArgs {
     /// Send one synthetic request to the classifier (D-064); off, the doctor never uses the
     /// network.
     pub jev_probe: bool,
-    /// The model the probe asks; the pinned default otherwise.
+    /// The model the probe asks; the provider's default otherwise.
     pub jev_model: Option<String>,
+    /// Who the probe asks (D-166).
+    pub jev_provider: JevProvider,
+    pub jev_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -212,6 +221,9 @@ pub struct InstallArgs {
     pub memory: bool,
     /// `--memory-debug-log` on the server and the hooks, beside `--memory` (D-164).
     pub memory_debug_log: bool,
+    /// `--jev-provider` and `--jev-account-id` for the server it configures (D-166).
+    pub provider: JevProvider,
+    pub account_id: Option<String>,
 }
 
 /// What `memory` does; every action is local: no network, credential or `online` feature.
@@ -228,6 +240,8 @@ pub enum MemoryAction {
     /// Incorporates the spool and runs ready jobs against the provider; needs `--online` (PD-2).
     /// `model` and `candidates` should match the server's, so edge keys do.
     Drain {
+        provider: JevProvider,
+        account_id: Option<String>,
         model: Option<String>,
         candidates: Option<usize>,
     },
@@ -363,6 +377,18 @@ impl Flags {
         }))
     }
 
+    /// `--jev-provider` with its `--jev-account-id` (D-166), checked against `--jev-model` or
+    /// the provider's default: whatever its URL cannot be built from is refused here.
+    fn provider(&self) -> Result<(JevProvider, Option<String>), String> {
+        let text = |k: &str| self.jev.get(k).map(String::as_str);
+        let provider = JevProvider::parse(text("--jev-provider").unwrap_or("typesafe"))
+            .ok_or_else(|| usage("--jev-provider takes typesafe or cloudflare"))?;
+        let account_id = text("--jev-account-id");
+        let model = text("--jev-model").unwrap_or(provider.default_model());
+        provider.endpoint(account_id, model).map_err(usage)?;
+        Ok((provider, account_id.map(str::to_string)))
+    }
+
     /// `--memory` counts as `--online` (PRD jev-mem §4).
     fn online(&self) -> Result<Option<OnlineArgs>, String> {
         if !self.on("--online") && !self.on("--memory") {
@@ -387,13 +413,11 @@ impl Flags {
             0 => Err(usage(format_args!("{k} must be at least 1"))),
             n => Ok(n),
         };
-        let provider = text("--jev-provider", "typesafe");
-        if provider != "typesafe" {
-            return Err(usage("--jev-provider: the only provider is typesafe"));
-        }
+        let (provider, account_id) = self.provider()?;
         Ok(Some(OnlineArgs {
             provider,
-            model: text("--jev-model", crate::online::DEFAULT_MODEL),
+            account_id,
+            model: text("--jev-model", provider.default_model()),
             max_in_flight: positive(
                 "--jev-max-in-flight",
                 crate::online::DEFAULT_MAX_IN_FLIGHT as u64,
@@ -498,6 +522,7 @@ const SWITCHES: &[&str] = &[
 /// The valued `--jev-*` flags; kept as text until `Flags::online` checks them.
 const JEV: &[&str] = &[
     "--jev-provider",
+    "--jev-account-id",
     "--jev-model",
     "--jev-max-in-flight",
     "--jev-request-limit",
@@ -810,6 +835,10 @@ fn parse_prompt(it: Args) -> Result<Command, String> {
     }))
 }
 
+/// Who answers and under what name: the `--jev-*` options every command that reaches the
+/// provider takes (D-166).
+const PROVIDER: [&str; 3] = ["--jev-model", "--jev-provider", "--jev-account-id"];
+
 fn parse_doctor(it: Args) -> Result<Command, String> {
     let f = flags(
         it,
@@ -819,14 +848,20 @@ fn parse_doctor(it: Args) -> Result<Command, String> {
             SUMMARIZER[0],
             SUMMARIZER[1],
             "--jev-probe",
-            "--jev-model",
+            PROVIDER[0],
+            PROVIDER[1],
+            PROVIDER[2],
         ]),
     )?;
     no_words(&f)?;
     let jev_model = f.jev.get("--jev-model").cloned();
-    if jev_model.is_some() && !f.on("--jev-probe") {
-        return Err(usage("--jev-model needs --jev-probe here"));
+    if let (Some(given), false) = (
+        PROVIDER.iter().find(|k| f.jev.contains_key(*k)),
+        f.on("--jev-probe"),
+    ) {
+        return Err(usage(format_args!("{given} needs --jev-probe here")));
     }
+    let (jev_provider, jev_account_id) = f.provider()?;
     Ok(Command::Doctor(DoctorArgs {
         workspace: f.workspace()?,
         upstream: f.upstream.clone(),
@@ -835,6 +870,8 @@ fn parse_doctor(it: Args) -> Result<Command, String> {
         json: f.on("--json"),
         jev_probe: f.on("--jev-probe"),
         jev_model,
+        jev_provider,
+        jev_account_id,
     }))
 }
 
@@ -851,12 +888,18 @@ fn parse_install(mut it: Args) -> Result<Command, String> {
             "--online",
             "--memory",
             "--memory-debug-log",
+            PROVIDER[1],
+            PROVIDER[2],
         ],
     )?;
     no_words(&f)?;
     if f.on("--statusline") && host != Host::ClaudeCode {
         return Err(usage("--statusline is only available to claude-code"));
     }
+    if !f.jev.is_empty() && !f.on("--online") && !f.on("--memory") {
+        return Err(usage("the --jev-* options need --online"));
+    }
+    let (provider, account_id) = f.provider()?;
     Ok(Command::Install(InstallArgs {
         host,
         workspace: f.workspace()?,
@@ -867,6 +910,8 @@ fn parse_install(mut it: Args) -> Result<Command, String> {
         online: f.on("--online"),
         memory: f.on("--memory"),
         memory_debug_log: f.memory_debug_log()?,
+        provider,
+        account_id,
     }))
 }
 
@@ -908,7 +953,9 @@ fn parse_memory(mut it: Args) -> Result<Command, String> {
         Some("add") => &["--file", "--memory-debug-log"],
         Some("drain") => &[
             "--online",
-            "--jev-model",
+            PROVIDER[0],
+            PROVIDER[1],
+            PROVIDER[2],
             "--memory-write-candidates",
             "--memory-debug-log",
         ],
@@ -930,20 +977,23 @@ fn parse_memory(mut it: Args) -> Result<Command, String> {
         (Some("forget"), true, None) => MemoryAction::ForgetAll,
         (Some("forget"), false, Some(id)) => MemoryAction::Forget { id },
         (Some("forget"), ..) => return Err(usage("memory forget takes --all or --id ID")),
-        (Some("drain"), ..) => match f.on("--online") {
-            true => MemoryAction::Drain {
+        (Some("drain"), ..) => {
+            if !f.on("--online") {
+                return Err(usage(
+                    "memory drain needs --online: it sends memories to the provider",
+                ));
+            }
+            let (provider, account_id) = f.provider()?;
+            MemoryAction::Drain {
+                provider,
+                account_id,
                 model: f.jev.get("--jev-model").cloned(),
                 candidates: match f.memory.contains_key("--memory-write-candidates") {
                     true => Some(f.within("--memory-write-candidates", 4, 0, 10)? as usize),
                     false => None,
                 },
-            },
-            false => {
-                return Err(usage(
-                    "memory drain needs --online: it sends memories to the provider",
-                ));
             }
-        },
+        }
         (Some("add"), ..) => MemoryAction::Add {
             file: f
                 .file

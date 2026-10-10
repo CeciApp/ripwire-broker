@@ -108,6 +108,7 @@
 | 2026-10-09 16:30 | Sem `session_id` na entrada do host, a barra mostra `hooks sem sessão` em vez de `hooks sem dados`: sem ele nenhum retrato pode ser lido, e o texto antigo parecia acusar os hooks; 1 teste novo, 6 expectativas ajustadas | [D-163](#d-163--hooks-sem-sessão-quando-falta-o-session_id) |
 | 2026-10-09 18:00 | `--memory-debug-log`: com `--memory`, cada evento da memória (coleta, spool, ingestão, enriquecimento, consolidação, leitura, retenção, esquecimento, worker) vira uma linha em `debug.log` ao lado do store, escrita por todos os processos do workspace, para `tail -F`; ids, contagens e motivos, nunca conteúdo; rotação em 10 MiB; o `install` passa a flag ao servidor e aos hooks | [D-164](#d-164----memory-debug-log-a-memória-acompanhada-ao-vivo) |
 | 2026-10-09 19:00 | A leitura de memória faz menos idas e voltas ao Jev: o routing vai na mesma request do primeiro scoring, e sem nenhum candidato aceito a leitura termina em `empty` sem a request de stopping. Medido: a latência do Jev não depende das perguntas por request (217 chamadas, r = −0,06); uma leitura que estourava os 850 ms em 3 requests passa a 1–2 requests, 290–560 ms. Uma request basta para ler (revê o D-150). Num A/B da leitura contra o Jev, a seleção não mudou (mesmo conjunto em 65 de 66 leituras; a única diferença foi o recurso local) e a mediana caiu de 782 para 524 ms | [D-165](#d-165--a-leitura-de-memória-em-menos-idas-e-voltas) |
+| 2026-10-09 22:30 | `--jev-provider cloudflare`: o Clef da Cloudflare (Workers AI) no lugar do Jev, pelo mesmo protocolo. O provider decide a URL, desembrulha o envelope `{success, errors, messages, result}` e limita o pedido a 64 perguntas; `--jev-account-id` é obrigatório com ele e recusado sem ele; a credencial vem da mesma variável; o account id é redigido no `jev.log`. Padrão `typesafe`, sem mudança para quem não passa a flag. Rodado contra a Cloudflare real: o transporte funciona nos dois modelos; com os limiares do Jev, o `clef` admite o mesmo que o Jev no corpus sintético e o `clef-flash` (o padrão) rejeita o arquivo de teste | [D-166](#d-166----jev-provider-cloudflare) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7471,3 +7472,123 @@ sem sessões de agente.
 continua pendente). Store pequeno e sintético, só notas explícitas, uma nota esperada por tarefa,
 tarefas escritas por quem fez a mudança. O script e os dados ficaram fora do repositório, no
 scratchpad da sessão.
+
+## D-166 — `--jev-provider cloudflare`
+
+**Data:** 2026-10-09 22:30.
+
+**Pedido do usuário:** `spec/prompt/jev-provider-cloudflare.md`: apontar o broker para o Clef e o
+Clef-flash da Cloudflare (publicados em 01/10/2026), que implementam o protocolo `systemone`, "sem
+tocar no builder de pedidos nem no parser de respostas", com TDD. Plano em
+`spec/plan/plan-jev-provider-cloudflare.md`. Durante a implementação: "limite MAX_QUESTIONS a 64
+quando o --jev-provider for cloudflare".
+
+**O que a doc da Cloudflare diz, contra o que o pedido trazia** (verificado em 2026-10-09 na
+página dos modelos, na de preços e no guia REST do Workers AI):
+
+| Ponto | Pedido | Doc |
+|---|---|---|
+| Preço do clef-flash | 0,09 $/Mtok | 0,038 $/Mtok de entrada; saída não cobrada |
+| Contexto do clef-flash | 65.536 tokens | 24.576 na página do modelo, 64K no changelog; vale o menor |
+| Como recusa | "erro 5006" | status 4xx (422 observado) com `{"success":false,"errors":[...]}` no corpo |
+| `model` | `clef` ou `clef-flash` | o mesmo, e tem que bater com o da URL |
+| Perguntas por pedido | não dizia | 1 a 64 |
+
+Endpoint, token (Workers AI Read+Edit), envelope e `usage` dentro de `result` conferem. O
+Content-Type da resposta não está documentado, e o cliente exige `application/json`: só uma
+chamada real prova.
+
+**Decisões:**
+
+1. **`JevProvider`** (`src/online/mod.rs`, fora da feature `online` porque a CLI compila sem
+   ela): `TypeSafe` (padrão) ou `Cloudflare`. Dá o nome, o host, o modelo padrão, o teto de
+   perguntas e a URL. `endpoint()` valida o que entra na URL e devolve o erro que nomeia a opção
+   a corrigir; a CLI só repassa. Uma validação, um lugar.
+2. **Nenhuma URL vem da configuração, como antes.** `JevClient::new` fica com a assinatura que o
+   teste `the_production_client_cannot_be_pointed_anywhere...` fixa por tipo. O construtor novo,
+   `for_provider`, recebe o enum e o account id, nunca uma URL, e tem o seu teste igual. O account
+   id só aceita letras e dígitos (até 64): `a/b`, `..`, `a@host` são recusados antes de virar path.
+   O plano previa mudar a assinatura de `new`; isso apagaria a garantia.
+3. **O envelope é aberto no cliente** (`unwrap_envelope`, em `JevClient::post`), então descoberta e
+   memória herdam. TypeSafe: identidade. Cloudflare: `success: true` com `result` entrega o
+   `result`; `success: false` vira `InvalidResponse::Refused` com os `errors` sanitizados, sem a
+   chave, em até 256 bytes; uma raiz sem envelope segue inteira (o binding de Worker responde
+   assim). `parse_answers` e `parse_decisions` não mudaram.
+4. **O `result` segue byte a byte** (`serde_json::value::RawValue`, feature `raw_value`, sem
+   dependência nova). O plano dizia "re-serializado"; passar por `Value` colapsaria chaves
+   repetidas e o parser deixaria de ver `DuplicateQuestion`. Há um teste para isso.
+5. **`InvalidResponse::Refused(String)`** tirou o `Copy` do enum. Nenhum dos 29 usos dependia
+   dele. É a única mudança em `response.rs`, e é no tipo, não nos parsers. A categoria continua
+   `invalid_response`; só o `doctor` mostra o texto, a quem rodou o probe.
+6. **O 4xx real não passa pelo desembrulho.** O status decide a categoria (`rejected`) antes de
+   o corpo ser lido, como para a TypeSafe, e os `errors` ficam no `jev.log`. Teste de
+   caracterização. O ramo `200 + success:false` que o pedido descreve fica como defesa.
+7. **Modelo:** o padrão com Cloudflare é `clef-flash`; `jev-1.13.0` lá é 5006 certo. `--jev-model`
+   com Cloudflare só aceita `clef` ou `clef-flash`, e a recusa é de uso, antes de qualquer pedido.
+8. **64 perguntas por pedido com Cloudflare** (decisão do usuário). `batches_within` fecha o
+   lote no teto que recebe; `batches` continua em 128 e o seu teste não mudou. O coordenador usa
+   `OnlineConfig.max_questions`, que `with_provider` preenche junto com o nome e o host. Com os
+   padrões (16 candidatos + 32 vizinhos) um pedido nunca passava de 48; o teto protege quem sobe
+   `--jev-max-candidates` e `--jev-lookahead-max` num diretório de arquivos pequenos. Os arquivos
+   perguntados são os mesmos, em mais pedidos. **Toca `request.rs`**, que o pedido mandava não
+   mudar: a forma do pedido e `build` são os de antes; mudou só onde o lote fecha, a pedido.
+9. **Account id no log: redigido.** Não é credencial (sozinho não dá acesso, e a Cloudflare o
+   mostra nas URLs do painel), mas identifica o tenant, é estável, e o `jev.log` existe para ser
+   lido e colado numa issue. O cliente o trata como um segundo segredo do bloco inteiro: a URL sai
+   `accounts/[redacted]/` e um eco do id numa resposta também é trocado. O plano redigia só a
+   linha do `POST`; uma mensagem de erro que ecoa a URL vazaria por ali. No status vai só o host.
+10. **Credencial:** a mesma `RIPWIRE_BROKER_JEV_API_KEY`. A ajuda, a mensagem de chave ausente
+    (a que o `doctor --jev-probe` mostra) e a nota do `install` dizem "chave TypeSafe ou token
+    Cloudflare, conforme --jev-provider".
+11. **`doctor --jev-probe`, `memory drain --online` e `install`** levam `--jev-provider` e
+    `--jev-account-id`, validados pela mesma função. O `install` grava as duas flags no
+    `.mcp.json` e no TOML do Codex só quando o provider é Cloudflare: a configuração de quem usa
+    TypeSafe é a de sempre, byte a byte.
+12. **`endpoint_host`** saía fixo em `api.typesafe.ai` e ninguém o sobrescrevia. Com dois hosts
+    isso mentiria no status e juntaria os dois providers na mesma chave de cache.
+
+**Testes** (cada um visto falhar pelo motivo esperado antes do código):
+
+- `tests/online_protocol.rs`: o envelope aberto na descoberta e na memória (falhava com
+  `Malformed`); a recusa com os `errors` e sem a chave (falhava com `Malformed` com a variante já
+  criada, o que prova que a asserção mede o desembrulho); raiz sem envelope; pergunta respondida
+  duas vezes dentro do envelope; a TypeSafe não abre envelopes; o 4xx com os erros no log; o path
+  `/client/v4/accounts/<id>/ai/run/@cf/cloudflare/<model>`; o construtor sem URL; o account id fora
+  do log; e o log da TypeSafe comparado byte a byte com o formato de antes.
+- `tests/online_units.rs`: as duas URLs exatas; o que uma URL não pode carregar; nome, host e
+  modelo padrão; o teto por provider; `batches_within`; `with_provider`.
+- `tests/online.rs`: com 100 arquivos pequenos, um pedido leva 100 perguntas sem o teto (o
+  controle) e no máximo 64 com ele, perguntando sobre os mesmos arquivos.
+- `tests/cli.rs`: provider sem account, account sem provider, account com `/`, modelo de Jev com
+  Cloudflare, os quatro comandos, os snippets do `install`, os textos de ajuda e de chave ausente.
+- `tests/mcp_surface.rs`: o status de um servidor Cloudflare, com o provider e o host e sem o
+  account id (falhava com `api.typesafe.ai` sem a linha do host).
+
+**Medido contra a Cloudflare real** (2026-10-09, só conteúdo sintético):
+
+- **O transporte funciona.** HTTP 200, `Content-Type: application/json` (a dúvida que a doc
+  deixava), envelope `{errors, messages, result, success}` e `result` com `{answers, model, usage}`,
+  como os testes de loopback supunham.
+- **`doctor --jev-probe`** com `clef-flash`: `ok`, 1 pergunta sintética em 1.434 ms na primeira
+  chamada (p=0,94); 786 ms numa segunda. O pedido do probe tem 458 bytes e a Cloudflare conta
+  224 tokens de entrada e 0 de saída: 0,0000085 $ por probe com `clef-flash` (0,038 $/Mtok) e
+  0,000054 $ com `clef` (0,24 $/Mtok).
+- **`online_live`** com `RIPWIRE_BROKER_LIVE_PROVIDER=cloudflare`:
+
+  | Teste | `clef-flash` | `clef` |
+  |---|---|---|
+  | Descoberta num repositório sintético | `complete`, 2 requests, 2.243 ms | não rodado |
+  | Um `choice` da memória | `after` com 0,95, 617 ms | não rodado |
+  | Admissão do corpus (`auth.py`, o teste dele, um CSV alheio) | 0,90 / **0,05** / 0,01: reprova | 0,98 / 0,73 / 0,01: passa |
+  | Seleção do corpus (`validate_token`, outro bloco) | 0,93 / 0,10 | 0,97 / 0,64 |
+
+  Os números se repetiram iguais em duas rodadas de cada modelo.
+- **O achado:** o `clef-flash` rejeita `tests/test_auth.py` (0,05 contra o limiar de 0,25), que o
+  Jev e o `clef` admitem. Não é defeito de transporte: é o modelo menor julgando diferente com os
+  limiares calibrados para o Jev. O teste `a_real_provider_classifies_the_synthetic_corpus`
+  reprova com o padrão `clef-flash` e não foi afrouxado. É um corpus de três arquivos, pouco
+  para recalibrar limiar; basta para pôr em dúvida a decisão 7 (o padrão `clef-flash`).
+
+**Em aberto:** o modelo padrão com Cloudflare. `clef` se comporta como o Jev no corpus e custa
+6,3 vezes o `clef-flash`; os limiares por provider ficam fora deste diff. Fora de escopo, como no
+pedido: `images`, Clef local, e os padrões de `--jev-deadline-ms` e `--jev-max-candidates`.

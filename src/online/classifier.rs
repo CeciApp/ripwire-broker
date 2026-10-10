@@ -1,6 +1,7 @@
-//! The provider boundary (PRD §23.9, §23.12): one internal trait, even with one provider.
-//! The client knows the protocol, never the repository; errors carry categories and HTTP
-//! statuses only, never remote text or the credential.
+//! The provider boundary (PRD §23.9, §23.12): one internal trait, with two providers behind
+//! one client since D-166. The client knows the protocol, never the repository; errors carry
+//! categories and HTTP statuses, and never the credential. The one remote text is a provider's
+//! own refusal ([`InvalidResponse::Refused`]), sanitized and capped, for whoever runs the probe.
 
 use super::request::JevRequest;
 use super::response::InvalidResponse;

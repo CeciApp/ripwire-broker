@@ -4,7 +4,7 @@
 use serde_json::Value;
 
 /// A response that breaks the contract as a whole; every question it answers is unknown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidResponse {
     /// Not JSON, or no `model`/`answers` object.
     Malformed,
@@ -14,6 +14,9 @@ pub enum InvalidResponse {
     UnknownQuestion,
     /// The same question answered twice: which answer counts is undecidable.
     DuplicateQuestion,
+    /// The provider's envelope says the request failed (D-166): its errors, already sanitized,
+    /// capped and without the credential. The parsers never produce it.
+    Refused(String),
 }
 
 impl std::fmt::Display for InvalidResponse {
@@ -23,6 +26,7 @@ impl std::fmt::Display for InvalidResponse {
             Self::WrongModel => "classifier answered with another model",
             Self::UnknownQuestion => "classifier answered a question it was not asked",
             Self::DuplicateQuestion => "classifier answered a question twice",
+            Self::Refused(errors) => return write!(f, "provider refused the request: {errors}"),
         })
     }
 }

@@ -1260,3 +1260,159 @@ fn common_secret_files_are_never_read_for_sending() {
         );
     }
 }
+
+// ---- `--jev-provider` (D-166): the provider decides the URL ----
+
+use ripwire_broker::online::JevProvider;
+
+#[test]
+fn each_provider_has_its_exact_endpoint() {
+    assert_eq!(
+        JevProvider::TypeSafe.endpoint(None, "jev-1.13.0").unwrap(),
+        "https://api.typesafe.ai/v1/systemone"
+    );
+    assert_eq!(
+        JevProvider::Cloudflare
+            .endpoint(Some("abc123"), "clef-flash")
+            .unwrap(),
+        "https://api.cloudflare.com/client/v4/accounts/abc123/ai/run/@cf/cloudflare/clef-flash"
+    );
+    assert_eq!(
+        JevProvider::Cloudflare
+            .endpoint(Some("abc123"), "clef")
+            .unwrap(),
+        "https://api.cloudflare.com/client/v4/accounts/abc123/ai/run/@cf/cloudflare/clef"
+    );
+}
+
+#[test]
+fn a_cloudflare_endpoint_is_never_built_from_what_a_url_cannot_carry_safely() {
+    let cf = JevProvider::Cloudflare;
+    assert!(cf.endpoint(None, "clef").is_err(), "no account, no URL");
+    for account in ["", "a/b", "../x", "a?b", "a b", "a#b", "é"] {
+        assert!(cf.endpoint(Some(account), "clef").is_err(), "{account:?}");
+    }
+    for model in [
+        "jev-1.13.0",
+        "",
+        " clef",
+        "clef/../x",
+        "@cf/cloudflare/clef",
+    ] {
+        assert!(cf.endpoint(Some("abc123"), model).is_err(), "{model:?}");
+    }
+    // TypeSafe has no account in its URL: one given to it is a mistake, not ignored.
+    assert!(
+        JevProvider::TypeSafe
+            .endpoint(Some("abc123"), "jev-1.13.0")
+            .is_err()
+    );
+}
+
+#[test]
+fn a_provider_has_a_name_a_host_and_a_default_model() {
+    let (ts, cf) = (JevProvider::TypeSafe, JevProvider::Cloudflare);
+    assert_eq!(
+        JevProvider::default(),
+        ts,
+        "nothing changes without the flag"
+    );
+    assert_eq!((ts.name(), cf.name()), ("typesafe", "cloudflare"));
+    assert_eq!(JevProvider::parse("typesafe"), Some(ts));
+    assert_eq!(JevProvider::parse("cloudflare"), Some(cf));
+    assert_eq!(JevProvider::parse("Cloudflare"), None);
+    assert_eq!(JevProvider::parse("other"), None);
+    assert_eq!(
+        (ts.host(), cf.host()),
+        ("api.typesafe.ai", "api.cloudflare.com")
+    );
+    assert_eq!(ts.default_model(), ripwire_broker::online::DEFAULT_MODEL);
+    assert_eq!(cf.default_model(), "clef-flash");
+    for p in [ts, cf] {
+        assert!(
+            p.endpoint((p == cf).then_some("abc123"), p.default_model())
+                .is_ok()
+        );
+    }
+}
+
+// ---- Cloudflare takes 64 questions a request, TypeSafe 128 (D-166) ----
+
+use ripwire_broker::online::request::batches_within;
+
+#[test]
+fn a_provider_says_how_many_questions_one_request_may_carry() {
+    assert_eq!(JevProvider::TypeSafe.max_questions(), MAX_QUESTIONS);
+    assert_eq!(JevProvider::Cloudflare.max_questions(), 64);
+}
+
+#[test]
+fn batches_close_at_the_ceiling_they_are_given() {
+    let sizes = |max| {
+        let items = sized(300, 10);
+        let (sent, too_large) =
+            batches_within(max, "clef-flash", "q", SemanticStage::FileAdmission, items);
+        assert!(too_large.is_empty());
+        let ids: Vec<String> = sent
+            .iter()
+            .flat_map(|r| r.state.items.iter().map(|i| i.id.clone()))
+            .collect();
+        assert_eq!(ids.len(), 300, "nothing is dropped, only split");
+        assert!(ids.windows(2).all(|w| w[0] != w[1]));
+        sent.iter().map(|r| r.questions.0.len()).collect::<Vec<_>>()
+    };
+    assert_eq!(sizes(64), vec![64, 64, 64, 64, 44]);
+    assert_eq!(
+        sizes(MAX_QUESTIONS),
+        vec![128, 128, 44],
+        "as `batches` does"
+    );
+    // A ceiling above the protocol's own is not a way around it.
+    assert_eq!(sizes(1_000), vec![128, 128, 44]);
+}
+
+#[test]
+fn the_online_config_takes_its_name_host_and_ceiling_from_the_provider() {
+    use ripwire_broker::online::OnlineConfig;
+    let config = |p| OnlineConfig::new(std::sync::Arc::new(Nobody)).with_provider(p);
+
+    let ts = OnlineConfig::new(std::sync::Arc::new(Nobody));
+    assert_eq!(
+        (
+            ts.provider.as_str(),
+            ts.endpoint_host.as_str(),
+            ts.max_questions
+        ),
+        ("typesafe", "api.typesafe.ai", MAX_QUESTIONS),
+        "the defaults are TypeSafe's"
+    );
+    let same = config(JevProvider::TypeSafe);
+    assert_eq!(
+        (same.provider, same.endpoint_host, same.max_questions),
+        (ts.provider, ts.endpoint_host, ts.max_questions)
+    );
+    let cf = config(JevProvider::Cloudflare);
+    assert_eq!(
+        (
+            cf.provider.as_str(),
+            cf.endpoint_host.as_str(),
+            cf.max_questions
+        ),
+        ("cloudflare", "api.cloudflare.com", 64)
+    );
+}
+
+struct Nobody;
+
+#[async_trait::async_trait]
+impl ripwire_broker::online::classifier::Classifier for Nobody {
+    fn model(&self) -> &str {
+        "nobody"
+    }
+    async fn classify(
+        &self,
+        _: &ripwire_broker::online::request::JevRequest,
+    ) -> Result<Vec<Option<f64>>, ripwire_broker::online::classifier::ClassifyError> {
+        Ok(vec![])
+    }
+}
