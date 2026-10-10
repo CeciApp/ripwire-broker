@@ -4728,52 +4728,88 @@ fn a_short_lived_hook_leaves_a_recoverable_queue() {
     assert!(!other.path().join("memory").exists());
 }
 
+/// What the `collect` lines of a memory debug log add up to, in ms: each ends with how long it
+/// took.
+fn collect_ms(log: &str) -> f64 {
+    log.lines()
+        .filter(|l| l.split_whitespace().nth(4) == Some("collect"))
+        .filter_map(|l| {
+            l.rsplit(' ')
+                .next()?
+                .strip_suffix("ms")?
+                .parse::<f64>()
+                .ok()
+        })
+        .sum()
+}
+
 /// PRD jev-mem §8.2: what `--memory` adds to a hook, p95 ≤ 10 ms and p99 ≤ 25 ms. Run by hand,
 /// in release, with the real ripwire:
 /// `cargo test --release --locked --test cli -- --ignored the_hook_overhead_meets_the_slo --nocapture`.
+///
+/// The hook times its own memory work and says so in the debug log; the percentiles are of that.
+/// The wall clock of two whole hooks cannot give them: each is a process of over 100 ms, and the
+/// difference of two that do the same work already has a p95 of about 6 ms.
 #[test]
 #[ignore = "a measurement: run in release by hand and record the result"]
 fn the_hook_overhead_meets_the_slo() {
     require_ripwire!();
+    const PAIRS: usize = 200;
     let (repo, st) = (common::sample_repo(), tempfile::tempdir().unwrap());
     let ws = repo.path();
     let state = st.path().to_str().unwrap();
-    let time = |memory: bool, i: usize| {
+    let log = || debug_log(st.path(), ws);
+    // Each call gets its own content and session, so both arms do equal work. Returns the wall
+    // clock of the hook and, of that, what its `collect` lines account for.
+    let mut n = 0usize;
+    let mut time = |memory: bool| {
+        n += 1;
         common::write(
             ws,
             "src/auth.py",
-            &format!("def login(user, token):\n    return {i}\n"),
+            &format!("def login(user, token):\n    return {n}\n"),
         );
         let mut args = vec!["hook", "claude-code", "post-tool-use", "--state-dir", state];
         if memory {
-            args.push("--memory");
+            args.extend(["--memory", "--memory-debug-log"]);
         }
+        let seen = log().len();
         let started = std::time::Instant::now();
-        let (code, _, err) = run(&args, &edit_event(ws, &format!("s{i}")));
+        let (code, _, err) = run(&args, &edit_event(ws, &format!("s{n}")));
+        let wall = started.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(code, 0, "{err}");
-        started.elapsed().as_secs_f64() * 1000.0
+        (wall, collect_ms(&log()[seen..]))
     };
-    let (mut with, mut without) = (vec![], vec![]);
-    // The first run after a change pays for ripwire's warm-up: alternate which one goes first.
-    for i in 0..60 {
-        match i % 2 {
+    // The first run after a change pays for ripwire's warm-up: alternate which goes first.
+    let (mut own, mut paired): (Vec<f64>, Vec<f64>) = (0..PAIRS)
+        .map(|i| match i % 2 {
             0 => {
-                without.push(time(false, i));
-                with.push(time(true, i));
+                let (without, _) = time(false);
+                let (with, own) = time(true);
+                (own, with - without)
             }
             _ => {
-                with.push(time(true, i));
-                without.push(time(false, i));
+                let (with, own) = time(true);
+                (own, with - time(false).0)
             }
-        }
-    }
-    let pct = |v: &mut Vec<f64>, p: f64| {
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        v[((v.len() as f64 - 1.0) * p).round() as usize]
-    };
-    let p95 = pct(&mut with, 0.95) - pct(&mut without, 0.95);
-    let p99 = pct(&mut with, 0.99) - pct(&mut without, 0.99);
-    eprintln!("hook overhead of --memory: p95 {p95:.1} ms, p99 {p99:.1} ms (60 runs each)");
+        })
+        .unzip();
+    own.sort_by(f64::total_cmp);
+    paired.sort_by(f64::total_cmp);
+    // Nearest rank: the smallest value with at least `p` of the sample at or below it.
+    let pct = |v: &[f64], p: f64| v[((p * v.len() as f64).ceil() as usize).clamp(1, v.len()) - 1];
+    let (p50, p95, p99) = (pct(&own, 0.50), pct(&own, 0.95), pct(&own, 0.99));
+    let wall = pct(&paired, 0.50);
+    eprintln!(
+        "hook overhead of --memory: p50 {p50:.1} ms, p95 {p95:.1} ms, p99 {p99:.1} ms, max {:.1} ms ({PAIRS} hooks); the wall clock of a pair differs by p50 {wall:.1} ms",
+        own[own.len() - 1]
+    );
+    // Not a performance bound: a measurement that cannot be right fails loudly.
+    assert!(own[0] > 0.0, "a hook with --memory timed nothing");
+    assert!(
+        (wall - p50).abs() <= 3.0,
+        "the hook accounts for {p50:.1} ms, the wall clock says {wall:.1} ms: time is spent outside what it measures"
+    );
     assert!(p95 <= 10.0, "p95 {p95:.1} ms");
     assert!(p99 <= 25.0, "p99 {p99:.1} ms");
 }
@@ -5683,15 +5719,20 @@ fn a_hook_with_the_debug_log_says_it_collected_the_edit() {
     let (code, _, err) = run(&args, &edit_event(ws, "s1"));
     assert_eq!(code, 0, "{err}");
     let log = debug_log(st.path(), ws);
-    let collect = log
-        .lines()
-        .find(|l| {
-            l.get(24..)
-                .is_some_and(|r| r.starts_with("hook#") && r.contains(" collect "))
-        })
-        .unwrap_or_else(|| panic!("{log}"));
-    assert!(collect.contains("after_edit"), "{collect}");
-    assert!(collect.contains("spooled"), "{collect}");
+    let collect = |what: &str| {
+        log.lines()
+            .find(|l| {
+                l.get(24..)
+                    .is_some_and(|r| r.starts_with("hook#") && r.contains(" collect "))
+                    && l.contains(what)
+            })
+            .unwrap_or_else(|| panic!("{log}"))
+    };
+    assert!(collect("after_edit").contains("spooled"), "{log}");
+    // The SLO measurement adds these up: the setup and the observation, each with its duration.
+    for line in [collect(" setup "), collect("after_edit")] {
+        assert!(collect_ms(line) > 0.0, "{line}");
+    }
 }
 
 #[test]

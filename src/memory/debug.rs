@@ -118,6 +118,11 @@ pub fn short(id: &str) -> &str {
     id.get(..12).unwrap_or(id)
 }
 
+/// A duration for a line, to the hundredth of a millisecond: what the hook's SLO is measured in.
+pub fn millis(d: std::time::Duration) -> String {
+    format!("{:.2}ms", d.as_secs_f64() * 1000.0)
+}
+
 /// A serde enum's name as it is written (`snake_case`), for a line.
 pub fn name(v: &impl serde::Serialize) -> String {
     match serde_json::to_value(v) {

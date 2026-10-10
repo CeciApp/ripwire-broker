@@ -895,14 +895,23 @@ pub async fn run(args: &HookArgs, stdin: &str) -> Option<Value> {
     let version = ripwire_version(&args.upstream.ripwire, &mut state);
     // `--memory` (PD-3): observations go to the workspace's spool, under the same state dir. A
     // hook never enriches or sends them; a revoked store refuses them.
+    let memory_started = std::time::Instant::now();
     let memory = match (args.memory, &root) {
         (true, Some(r)) => crate::memory::identity::workspace_id(r).ok().map(|id| {
             let mut spool = crate::memory::store::Store::new(store.dir(), &id);
+            let setup = memory_started.elapsed();
             // A log that cannot be opened is not the hook's failure: it goes on without one.
             if args.memory_debug_log {
                 spool = spool.clone().with_debug_log("hook").unwrap_or(spool);
             }
             let debug = spool.debug_log().cloned();
+            // With the `collect` line of the observation, what `--memory` costs this hook.
+            if let Some(log) = &debug {
+                log.event(
+                    "collect",
+                    &format!("setup {}", crate::memory::debug::millis(setup)),
+                );
+            }
             crate::memory::publish::MemoryConfig {
                 debug,
                 ..crate::memory::publish::MemoryConfig::new(Arc::new(spool), id, HOOK_RETENTION_MS)
