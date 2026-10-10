@@ -1429,7 +1429,7 @@ conexão de rede é necessária ou iniciada.
 - opt-out e visualização do conteúdo injetado;
 - instalação e diagnóstico automatizados.
 
-Estado: implementada ([plano](plan/plan-fases-2-3.md), D-040 a D-045). O contexto
+Estado: implementada ([plano](plan/xtd/plan-fases-2-3.md), D-040 a D-045). O contexto
 incremental vem desligado no `serve` (`--incremental`) e ligado nos hooks. `install` é
 dry-run por padrão, e `doctor` verifica a instalação.
 
@@ -1510,7 +1510,7 @@ barra de produto, que dependem da escolha dos repositórios. Destaques:
 **Estado:** implementada ([D-123](changelog.md#d-123--a-barra-de-status-é-implementada)) e validada
 à mão numa sessão real, com fixture de payload real
 ([D-128](changelog.md#d-128--validação-manual-da-barra-e-fixture-de-payload-real)); as divergências da
-validação foram fechadas no D-129 a D-131 ([plano](plan/status-bar-plan.md), §24).
+validação foram fechadas no D-129 a D-131 ([plano](plan/xtd/status-bar-plan.md), §24).
 Vem antes da Fase 6 por ser pequena, local e independente dela, e por tornar visível o uso dos hooks
 que a medição do §21.3 precisa.
 
@@ -1599,7 +1599,7 @@ Fase 3 começou com o cache de notas só em memória
 ([D-046](changelog.md#d-046--fase-3-com-cache-em-memória)). **Medido e decidido
 ([D-168](changelog.md#d-168--s315-cache-persistente-de-notas)):** com 17 sessões reais, 44,6% de
 repetição entre sessões; o cache persistente entrou, opt-in por `--summarizer-cache`
-([plano](plan/plan-s3-15-cache-de-notas.md)).
+([plano](plan/xtd/plan-s3-15-cache-de-notas.md)).
 
 Até o [D-116](changelog.md#d-116--plano-da-avaliação-ab-e-de-session_hits-em-uso-real), essa medição
 era impossível, não só pendente. Cada evento de hook é um processo novo, e `session_hits` morria
@@ -2630,7 +2630,7 @@ divergências, a 2 foi fechada no D-129 e no D-131, e a 5 e a 6 no D-130 (a 1 e 
 roteiro, e a 4 é conforme por desenho). O campo `agent` (§24.8) ainda não foi visto num payload
 real. O roteiro mora fora do repositório, em `~/projects/ai/CECI/statusline-manual/`, a pasta local
 do mantenedor, não versionada. Plano em
-[status-bar-plan.md](plan/status-bar-plan.md), executado por subagentes, uma tarefa por vez com
+[status-bar-plan.md](plan/xtd/status-bar-plan.md), executado por subagentes, uma tarefa por vez com
 revisão. Vem antes da Fase 6 (§19).
 
 **Com o mod do plugin (§25.2):** a faixa acima do prompt é desenhada pelo mod, no terminal e no

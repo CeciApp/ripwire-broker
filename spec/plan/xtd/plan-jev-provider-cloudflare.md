@@ -1,6 +1,6 @@
 # Plano: `--jev-provider cloudflare` (TDD)
 
-Spec: `spec/prompt/jev-provider-cloudflare.md`. Cada ciclo abaixo é **red → green → refactor**:
+Spec: `spec/prompt/xtd/jev-provider-cloudflare.md`. Cada ciclo abaixo é **red → green → refactor**:
 o teste entra primeiro, roda, falha pelo motivo esperado, e só então vem o código. Nada de
 `request.rs` nem de `parse_answers` muda (restrição do spec); se um ciclo parecer exigir isso,
 pare e explique.
@@ -224,7 +224,7 @@ Arquivo: `tests/online_protocol.rs` (molde: `the_log_shows_each_call_sent_receiv
    previews de 16/4/24 KiB: um lote de 16 candidatos a 16 KiB cabe em 65k mas não em 24k, dizer
    isso) e preços verificados (entrada 0,042 / 0,038 / 0,24 $/Mtok para jev / clef-flash / clef;
    saída da Cloudflare não cobrada), exemplo do log com `accounts/[redacted]/`.
-   Corrigir a tabela do spec (`spec/prompt/jev-provider-cloudflare.md`): 0,09 → 0,038.
+   Corrigir a tabela do spec (`spec/prompt/xtd/jev-provider-cloudflare.md`): 0,09 → 0,038.
 2. PRD `spec/ripwire-broker-mcp.md` §23.9 (linha 2234) e §23.12 (linha 2317): um parágrafo cada
    dizendo que a fronteira de provider (`Classifier`, `classifier.rs:1`) agora tem dois lados, e
    que a diferença é só de transporte (URL, token, envelope).

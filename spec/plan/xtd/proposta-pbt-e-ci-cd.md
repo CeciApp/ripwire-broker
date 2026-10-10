@@ -1,7 +1,7 @@
 # Proposta — testes de propriedade e CI/CD
 
-Status: **cumprida — as sete fatias entregues em [D-107](../changelog.md#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) a [D-113](../changelog.md#d-113--fatia-g-o-escalonador-e-a-quarta-vez-que-o-instrumento-era-o-problema); dois defeitos de segurança achados** · 2026-09-28 22:59, fechada 2026-09-29 00:08 · fonte:
-[`spec/prompt/ci-cd.md`](../prompt/ci-cd.md)
+Status: **cumprida — as sete fatias entregues em [D-107](../../changelog.md#d-107--ci-endurecido-dois-jobs-e-quatro-promessas-viram-portas) a [D-113](../../changelog.md#d-113--fatia-g-o-escalonador-e-a-quarta-vez-que-o-instrumento-era-o-problema); dois defeitos de segurança achados** · 2026-09-28 22:59, fechada 2026-09-29 00:08 · fonte:
+[`spec/prompt/ci-cd.md`](../../prompt/ci-cd.md)
 
 Este documento **não vira código antes de aprovação**. Ele faz três coisas: separa o que o prompt
 afirma do que eu **verifiquei contra a árvore agora**; decide (com custo assumido) o entregável 1,
@@ -11,8 +11,8 @@ esforço **não é estimável** e por quê.
 ## 1. O que foi verificado, não aceito
 
 O prompt já se declara verificado contra o código, mas foi escrito **antes** das nove decisões
-desta sessão ([D-097](../changelog.md#d-097--teto-nos-três-caches-medido-antes-de-escolher-os-números) a
-[D-106](../changelog.md#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição)).
+desta sessão ([D-097](../../changelog.md#d-097--teto-nos-três-caches-medido-antes-de-escolher-os-números) a
+[D-106](../../changelog.md#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição)).
 Refiz as medições que decidem esforço.
 
 ### Os quatro "controles de graça" passam limpos hoje
@@ -33,7 +33,7 @@ valor/esforço.
 `MIT OR Apache-2.0` (105), `MIT` (31), `Unicode-3.0` (18), `Apache-2.0 OR MIT` (11),
 `Unlicense OR MIT` (5), `ISC`, `Zlib`, e uma `Apache-2.0 WITH LLVM-exception`.
 
-> **Corrigido na fatia B ([D-108](../changelog.md#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot)):**
+> **Corrigido na fatia B ([D-108](../../changelog.md#d-108--cadeia-de-suprimentos-cargo-deny-agendado-e-dependabot)):**
 > esta seção afirmava "nenhum crate duplicado em duas versões". **Errado** — o `cargo-deny`
 > encontra quatro (`base64`, `getrandom`, `syn`, `windows-sys`). Meu pipeline de verificação
 > deduplicava nome+versão e só então procurava linhas repetidas, então não podia achar nada.
@@ -52,11 +52,11 @@ fato, não por boa vontade.
 
 1. **A cobertura está desatualizada.** O prompt diz 234 (default) e 247 (`online`); hoje é
    **248 e 261**.
-2. **P0.11 está desatualizado pelo [D-103](../changelog.md#d-103--uma-nota-não-custa-mais-um-item-que-já-foi-evidência).**
+2. **P0.11 está desatualizado pelo [D-103](../../changelog.md#d-103--uma-nota-não-custa-mais-um-item-que-já-foi-evidência).**
    As entradas agora são ajustadas contra `requested_tokens - notes_reserve()` quando há
    summarizer, e o `next_step` é escrito **depois** das decisões de encaixe. Uma propriedade que
    afirme que o encaixe é **máximo** seria falsa — foi exatamente o que derrubou meu teste-ouro do
-   D-099 ([D-102](../changelog.md#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho)).
+   D-099 ([D-102](../../changelog.md#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho)).
    O `estimated_tokens ≤ requested_tokens` continua valendo e é a forma certa de escrever a
    propriedade.
 3. **O prompt não menciona que o job se chama `build`**, e é esse nome que a proteção de branch e
@@ -73,7 +73,7 @@ com custo. **Recomendação:**
 
 Razão: dos cinco, `markup` é o **único que lê bytes de fora do processo** — a saída do ripwire. É
 por isso que P0.12 é controle de disponibilidade e não higiene, e é por isso que ele já teve dois
-panics ([D-091](../changelog.md#d-091--revisão-do-repositório-e-correções-de-robustez)). Fuzzar um parser
+panics ([D-091](../../changelog.md#d-091--revisão-do-repositório-e-correções-de-robustez)). Fuzzar um parser
 *através* de um `FakeUpstream` significa que cada caso gerado atravessa spawn, JSON-RPC e
 normalização — ordens de magnitude mais lento, e a propriedade deixa de ser "para qualquer `&str`"
 para ser "para qualquer `&str` que sobreviva ao transporte". Isso não fecha a classe.
@@ -83,7 +83,7 @@ prescreve P0.11 pela costura pública. Uma linha de superfície nova, pelo únic
 
 **A opção 3 (`#[cfg(test)] mod tests` em `src/`) está descartada** — o repositório não tem nenhum
 por convenção deliberada, e um teto no `Inflight` já foi revertido para preservá-la
-([D-093](../changelog.md#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) → [D-094](../changelog.md#d-094--reversão-do-teto-do-inflight)).
+([D-093](../../changelog.md#d-093--fechamento-das-ressalvas-do-install-e-do-inflight) → [D-094](../../changelog.md#d-094--reversão-do-teto-do-inflight)).
 Não quebro isso por conveniência de teste.
 
 ## 3. Prioridade, com os controles de segurança no topo
@@ -115,7 +115,7 @@ de `cargo tree` do §1 o complementa como porta de CI. Duplicar seria ruído.
 | C | scaffolding do `proptest` + P0.7, P0.5, P0.8, P0.9 | ~12 a 18 propriedades (estimativa) | baixo |
 | D | P0.4, P0.6, P0.10, P0.13, P1.1, P1.2 | ~12 a 18 propriedades (estimativa) | baixo |
 | E | §2 + P0.12 + P0.11 pela costura pública | pequeno **em código** | **alto em achados** |
-| F | P0.1, P0.2, P0.3 (tempdir) | poucas propriedades, muito cuidado | **alto**: `PROPTEST_CASES` baixo, `write_executable()` por causa do ETXTBSY ([D-088](../changelog.md#d-088--ci-revisão-tdd-e-correções)), e uma falha aqui é **vulnerabilidade**, não bug de formatação |
+| F | P0.1, P0.2, P0.3 (tempdir) | poucas propriedades, muito cuidado | **alto**: `PROPTEST_CASES` baixo, `write_executable()` por causa do ETXTBSY ([D-088](../../changelog.md#d-088--ci-revisão-tdd-e-correções)), e uma falha aqui é **vulnerabilidade**, não bug de formatação |
 | G | P1.3 escalonador com o `FakeClassifier` que já existe | pequeno | baixo |
 
 ### O que não é estimável, dito claramente
@@ -132,7 +132,7 @@ O workflow tem hoje **um** job chamado `build`. É esse nome literal que a prote
 como status check e que o monitor de merge desta sessão exige com bucket `pass` — a checagem que
 tive de endurecer depois de ela ter mesclado os PRs #10 e #11 com o job `build` ainda inexistente,
 deixando o `master` vermelho
-([D-102](../changelog.md#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho)).
+([D-102](../../changelog.md#d-102--o-teste-ouro-do-d-099-era-dependente-de-plataforma-e-deixou-o-master-vermelho)).
 
 Reescrever em dois jobs **renomeia os checks**. Se isso for mesclado sem atualizar os status checks
 obrigatórios, o merge seguinte passa **sem porta nenhuma**. Então a PR A tem de vir com:

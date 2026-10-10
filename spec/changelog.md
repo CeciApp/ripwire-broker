@@ -507,7 +507,7 @@ Revisão feita a pedido do usuário. Decisões:
 
 ## D-028 — Plano das Fases 2 e 3
 
-Plano completo em [plan-fases-2-3.md](plan/plan-fases-2-3.md). Estado: **proposta, aguardando
+Plano completo em [plan-fases-2-3.md](plan/xtd/plan-fases-2-3.md). Estado: **proposta, aguardando
 aprovação do usuário**. As decisões D-029 a D-037 também são propostas até essa aprovação.
 
 - TDD em fatias verticais: 30 fatias na Fase 2 (S2.1–S2.30) e 18 na Fase 3 (S3.1–S3.18),
@@ -3008,7 +3008,7 @@ Item 4 do [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-co
 que sobrou em aberto depois do
 [D-100](#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release).
 A proposta está em
-[`spec/plan/proposta-ripwire-por-evento-de-hook.md`](plan/proposta-ripwire-por-evento-de-hook.md).
+[`spec/plan/xtd/proposta-ripwire-por-evento-de-hook.md`](plan/xtd/proposta-ripwire-por-evento-de-hook.md).
 **Nada implementado**: o item envolve superfície de segurança nova e decisão de PRD, então vira
 documento antes de virar código.
 
@@ -3270,7 +3270,7 @@ reescrito. Clippy e fmt limpos nas duas features. Sonda de medição removida.
 
 Item 4 do [D-096](#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos), fechado
 na **opção B** da proposta em
-[`spec/plan/proposta-ripwire-por-evento-de-hook.md`](plan/proposta-ripwire-por-evento-de-hook.md),
+[`spec/plan/xtd/proposta-ripwire-por-evento-de-hook.md`](plan/xtd/proposta-ripwire-por-evento-de-hook.md),
 por escolha do usuário. O ripwire foi instalado em `~/.local/bin` (versão **0.6.5**), o que destravou
 a medição que o [D-101](#d-101--proposta-para-o-item-4-o-ripwire-por-evento-de-hook) declarava como
 bloqueio — e ela derruba a tese central daquela proposta.
@@ -3375,7 +3375,7 @@ esta entrada carrega sem erro.
 ## D-106 — Uma rajada de edições é uma pergunta, não uma por edição
 
 Opção E da proposta do item 4
-([`spec/plan/proposta-ripwire-por-evento-de-hook.md`](plan/proposta-ripwire-por-evento-de-hook.md)),
+([`spec/plan/xtd/proposta-ripwire-por-evento-de-hook.md`](plan/xtd/proposta-ripwire-por-evento-de-hook.md)),
 a única que o [D-105](#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook)
 deixou com ganho grande, por escolha do usuário.
 
@@ -3474,7 +3474,7 @@ anterior continua carregando.
 
 ## D-107 — CI endurecido: dois jobs, e quatro promessas viram portas
 
-Fatia A de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md), que nasce nesta
+Fatia A de [`spec/plan/xtd/proposta-pbt-e-ci-cd.md`](plan/xtd/proposta-pbt-e-ci-cd.md), que nasce nesta
 mesma decisão a partir de [`spec/prompt/ci-cd.md`](prompt/ci-cd.md). Os quatro pontos que a proposta
 deixava para aprovação foram aprovados pelo usuário; este registro diz o que cada um virou.
 
@@ -3573,7 +3573,7 @@ produto além dos dois atributos de lint.
 
 ## D-108 — Cadeia de suprimentos: `cargo-deny` agendado e dependabot
 
-Fatia B de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md).
+Fatia B de [`spec/plan/xtd/proposta-pbt-e-ci-cd.md`](plan/xtd/proposta-pbt-e-ci-cd.md).
 
 ### O desconhecido que eu tinha apontado resolveu-se verde
 
@@ -3660,7 +3660,7 @@ código de produto tocado — 248 e 261 testes seguem iguais.
 
 ## D-109 — Primeiras propriedades, e um vazamento de credencial que elas fecharam
 
-Fatia C de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): `proptest` como
+Fatia C de [`spec/plan/xtd/proposta-pbt-e-ci-cd.md`](plan/xtd/proposta-pbt-e-ci-cd.md): `proptest` como
 dev-dependency, o alvo `tests/props.rs`, e as propriedades de P0.7, P0.5, P0.8 e P0.9. **P0.6 veio
 junto**, fora da ordem da proposta, porque `decision.rs` é vizinho de `response.rs` e as duas
 propriedades se escrevem com o mesmo material.
@@ -3767,7 +3767,7 @@ código de saída — e `cargo deny --all-features check` com as quatro seções
 
 ## D-110 — Fatia D: doze propriedades, e uma afirmação do prompt que não se sustenta
 
-Fatia D de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): P0.4 (lotes de
+Fatia D de [`spec/plan/xtd/proposta-pbt-e-ci-cd.md`](plan/xtd/proposta-pbt-e-ci-cd.md): P0.4 (lotes de
 requisição), P0.10 (linha de comando), P0.13 (injeção de prompt), P1.1 (`Retry-After`) e P1.2
 (ordenação de candidatos).
 
@@ -3838,7 +3838,7 @@ conferido pelo código de saída e não pela saída, depois de um `manual_range_
 
 ## D-111 — Fatia E: o leitor tolerante derrubava o processo por aninhamento
 
-Fatia E de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): a decisão de
+Fatia E de [`spec/plan/xtd/proposta-pbt-e-ci-cd.md`](plan/xtd/proposta-pbt-e-ci-cd.md): a decisão de
 visibilidade aprovada, P0.12 (`markup::parse`) e P0.11 (invariantes do orçamento pela costura
 pública).
 
@@ -3925,7 +3925,7 @@ sementes das corridas de mutação, sintéticas, sem caminho nem nada com cara d
 
 ## D-112 — Fatia F: duas fronteiras de segurança fuzzadas, e quatro testes meus que não testavam nada
 
-Fatia F de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): P0.1 (guarda de
+Fatia F de [`spec/plan/xtd/proposta-pbt-e-ci-cd.md`](plan/xtd/proposta-pbt-e-ci-cd.md): P0.1 (guarda de
 workspace), P0.2 (política de elegibilidade) e P0.3 (unidades de evidência), em alvo próprio
 `tests/props_fs.rs` porque cada caso faz E/S.
 
@@ -3989,7 +3989,7 @@ milhares de casos.
 
 ## D-113 — Fatia G: o escalonador, e a quarta vez que o instrumento era o problema
 
-Fatia G e última de [`spec/plan/proposta-pbt-e-ci-cd.md`](plan/proposta-pbt-e-ci-cd.md): P1.3, o
+Fatia G e última de [`spec/plan/xtd/proposta-pbt-e-ci-cd.md`](plan/xtd/proposta-pbt-e-ci-cd.md): P1.3, o
 escalonador com o `FakeClassifier` que já existia. **Nenhum defeito.**
 
 ### O que a propriedade afirma
@@ -4671,7 +4671,7 @@ pediu a remoção, condicionada à validação abaixo.
 
 ### O plano
 
-[`spec/plan/status-bar-plan.md`](plan/status-bar-plan.md): 9 tarefas em TDD. O link de spec aponta
+[`spec/plan/xtd/status-bar-plan.md`](plan/xtd/status-bar-plan.md): 9 tarefas em TDD. O link de spec aponta
 para o §24, uma nota diz que "spec §N" é o §24.`N`, os comentários de código citam o PRD, e a
 implementação passa a ser o **D-123**.
 
@@ -4696,7 +4696,7 @@ aberto" a "Decisões", e o §21.6 e o §19 dizem o mesmo.
 
 ## D-123 — A barra de status é implementada
 
-O plano de [`spec/plan/status-bar-plan.md`](plan/status-bar-plan.md) foi executado por subagentes, uma
+O plano de [`spec/plan/xtd/status-bar-plan.md`](plan/xtd/status-bar-plan.md) foi executado por subagentes, uma
 tarefa por vez, cada uma com revisão antes da seguinte, no branch `status-bar` (base `3505e67`). O
 contrato é o §24 do PRD. **Duas coisas ficam pendentes e não foram feitas:** a validação manual numa
 sessão real do Claude Code e a fixture de um payload real do `statusLine` (seção própria abaixo).
@@ -5248,7 +5248,7 @@ Os JSONs sintéticos existentes **não** foram trocados: `SONNET` e o de
 ## D-129 — Edições pelo shell chegam ao hook de edição
 
 **Data:** 2026-10-01. **Pedido do mantenedor.** Desenho em
-[proposta-edicoes-por-shell.md](plan/proposta-edicoes-por-shell.md). Fecha a divergência 2 do
+[proposta-edicoes-por-shell.md](plan/xtd/proposta-edicoes-por-shell.md). Fecha a divergência 2 do
 [D-128](#d-128--validação-manual-da-barra-e-fixture-de-payload-real): um `echo >> arquivo` pelo Bash
 não chegava ao `context_after_edit`. Em TDD, com uma mutação por teste novo, como no D-127.
 
@@ -7480,10 +7480,10 @@ scratchpad da sessão.
 
 **Data:** 2026-10-09 22:30.
 
-**Pedido do usuário:** `spec/prompt/jev-provider-cloudflare.md`: apontar o broker para o Clef e o
+**Pedido do usuário:** `spec/prompt/xtd/jev-provider-cloudflare.md`: apontar o broker para o Clef e o
 Clef-flash da Cloudflare (publicados em 01/10/2026), que implementam o protocolo `systemone`, "sem
 tocar no builder de pedidos nem no parser de respostas", com TDD. Plano em
-`spec/plan/plan-jev-provider-cloudflare.md`. Durante a implementação: "limite MAX_QUESTIONS a 64
+`spec/plan/xtd/plan-jev-provider-cloudflare.md`. Durante a implementação: "limite MAX_QUESTIONS a 64
 quando o --jev-provider for cloudflare".
 
 **O que a doc da Cloudflare diz, contra o que o pedido trazia** (verificado em 2026-10-09 na
@@ -7695,7 +7695,7 @@ sessões. O mantenedor decidiu com 17.
 
 ### O que mudou
 
-[Plano](plan/plan-s3-15-cache-de-notas.md). `--summarizer-cache`, só com `--summarizer-cmd`, no
+[Plano](plan/xtd/plan-s3-15-cache-de-notas.md). `--summarizer-cache`, só com `--summarizer-cmd`, no
 `serve`:
 
 - as notas vão também para `<state-dir>/notes/<sha256 da raiz>.json`, um arquivo por workspace,

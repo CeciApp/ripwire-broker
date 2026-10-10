@@ -9,7 +9,7 @@ usado como referência secundária; os contratos abaixo vêm dos fontes e da con
 
 Esta especificação orienta a manutenção dos testes de propriedade (PBT) e do CI.
 O plano incremental está em [ci-cd-plan.md](../plan/ci-cd-plan.md).
-A proposta histórica [proposta-pbt-e-ci-cd.md](../plan/proposta-pbt-e-ci-cd.md)
+A proposta histórica [proposta-pbt-e-ci-cd.md](../plan/xtd/proposta-pbt-e-ci-cd.md)
 registra as sete fatias já entregues em D-107–D-113; não devem ser reimplementadas.
 
 Na versão anterior, os três marcadores de incerteza apareciam na introdução histórica,

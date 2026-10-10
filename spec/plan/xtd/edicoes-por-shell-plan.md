@@ -1127,7 +1127,7 @@ mantenedor antes do merge (spec §2.3). Anote os números para o D-129.
 - Modificar: `spec/ripwire-broker-mcp.md` (PRD, seção dos hooks — 8.4 — e o §24.10 do roteiro manual)
 - Modificar: `README.md` (tabela de hooks e nota de atualização)
 - Modificar: `spec/changelog.md` (linha na tabela + seção D-129)
-- Modificar: `spec/plan/proposta-edicoes-por-shell.md` (Status: feito em D-129)
+- Modificar: `spec/plan/xtd/proposta-edicoes-por-shell.md` (Status: feito em D-129)
 - Fora do repositório: `statusline-manual/ROTEIRO.md` (passo 3.2, variante Bash)
 
 - [ ] **Passo 1: PRD**
@@ -1168,7 +1168,7 @@ sem `--features online`. Diga que fecha a divergência 2 do D-128.
 
 - [ ] **Passo 4: proposta e roteiro**
 
-Na proposta, troque a linha de Status por `**feito em [D-129](../changelog.md#d-129--edições-pelo-shell-chegam-ao-hook-de-edição)**`.
+Na proposta, troque a linha de Status por `**feito em [D-129](../../changelog.md#d-129--edições-pelo-shell-chegam-ao-hook-de-edição)**`.
 No `ROTEIRO.md` local, no passo 3.2, acrescente a variante: "peça também uma edição com Bash (ex.:
 `echo '// x' >> src/lib.rs`): `stats.events` sobe, e o `hook-log` ganha linha `PostToolUse` se houve
 novidade".
@@ -1182,6 +1182,6 @@ cargo clippy --all-targets --locked --features online -- -D warnings
 cargo test --all-targets --locked
 cargo test --all-targets --locked --features online
 cargo tree --locked -e normal | grep -Ei 'reqwest|secrecy|rustls|hyper'   # CA-10: sem saída
-git add spec/ripwire-broker-mcp.md README.md spec/changelog.md spec/plan/proposta-edicoes-por-shell.md
+git add spec/ripwire-broker-mcp.md README.md spec/changelog.md spec/plan/xtd/proposta-edicoes-por-shell.md
 git commit -m "docs: shell edits reach the edit hook (D-129)"
 ```

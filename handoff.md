@@ -23,7 +23,7 @@ da Cloudflare). O PRD vigente é
 | --- | --- |
 | 0–1 · spike e MVP | feitas |
 | 2 · hooks, contexto incremental, `install`, `doctor` | feita |
-| 3 · notas por modelo local | feita; o cache é em memória e, com `--summarizer-cache`, também em disco, no state dir (S3.15, D-168, [plano](spec/plan/plan-s3-15-cache-de-notas.md)) |
+| 3 · notas por modelo local | feita; o cache é em memória e, com `--summarizer-cache`, também em disco, no state dir (S3.15, D-168, [plano](spec/plan/xtd/plan-s3-15-cache-de-notas.md)) |
 | 4–5 · `--online` | feitas, atrás da feature Cargo `online`; **experimental** até o A/B |
 | `--jev-provider cloudflare` (D-166, #89) | feito em TDD e rodado contra a Cloudflare real: o Clef (Workers AI) pelo mesmo protocolo do Jev. O provider decide a URL (nenhuma vem da configuração), abre o envelope `{success, errors, messages, result}` e limita o pedido a 64 perguntas; `--jev-account-id` é obrigatório com ele e redigido no `jev.log`; a credencial vem da mesma `RIPWIRE_BROKER_JEV_API_KEY`. O padrão segue `typesafe`, e **o provider em uso é o Jev**. Com Cloudflare o modelo padrão é `clef-flash`, mantido pelo mantenedor depois da medição: com os limiares do Jev ele rejeita o arquivo de teste do corpus sintético, que o `clef` admite (6,3 vezes o preço, `--jev-model clef`). A Cloudflare não será o provider (D-167), então não há limiares por provider nem planos de tê-los |
 | barra de status do Claude Code (§24) | feita (D-123); validada à mão numa sessão real do Claude Code 2.1.285, com fixture de payload real (D-128); as seis divergências da validação fechadas (D-129 a D-131); `hooks sem sessão` quando a entrada não traz `session_id` (D-163, #82) |

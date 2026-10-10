@@ -1,7 +1,7 @@
 # Plano de implementação — Fases 2 e 3
 
 Status: **Fases 2 e 3 concluídas: pontos de parada 1 (D-040), 2 (D-042), 3 (D-045) e 4 (D-048); S3.15 adiada, S3.17 removida (D-046)** · 2026-09-27 (revisão independente incorporada, ver D-038) · decisões em
-[D-028 a D-037](../changelog.md#d-028--plano-das-fases-2-e-3)
+[D-028 a D-037](../../changelog.md#d-028--plano-das-fases-2-e-3)
 
 Fonte: PRD §8.4, §10.3, §11.1, §16.1, §19 (Fases 2 e 3) e §21.1–21.3.
 
