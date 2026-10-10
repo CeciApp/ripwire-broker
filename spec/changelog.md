@@ -111,6 +111,7 @@
 | 2026-10-09 22:30 | `--jev-provider cloudflare`: o Clef da Cloudflare (Workers AI) no lugar do Jev, pelo mesmo protocolo. O provider decide a URL, desembrulha o envelope `{success, errors, messages, result}` e limita o pedido a 64 perguntas; `--jev-account-id` é obrigatório com ele e recusado sem ele; a credencial vem da mesma variável; o account id é redigido no `jev.log`. Padrão `typesafe`, sem mudança para quem não passa a flag. Rodado contra a Cloudflare real: o transporte funciona nos dois modelos; com os limiares do Jev, o `clef` admite o mesmo que o Jev no corpus sintético e o `clef-flash` (o padrão) rejeita o arquivo de teste | [D-166](#d-166----jev-provider-cloudflare) |
 | 2026-10-10 00:15 | Pendências do handoff: 14 itens que nenhum binário alcançava saíram, com os testes que só os testavam (a lista veio do compilador, numa cópia com tudo `pub(crate)`); o `Drop` do `Unfinished` recupera o lock envenenado em vez de dar `unwrap`; o diagrama ganhou a Cloudflare; o `sha2` foi revisto e segue preso; a Cloudflare não será o provider | [D-167](#d-167--código-sem-uso-mutex-no-drop-diagrama) |
 | 2026-10-10 01:30 | S3.15: `--summarizer-cache` guarda as notas do modelo local em `<state-dir>/notes/`, um arquivo privado por workspace, e um servidor novo parte delas. Opt-in; o arquivo é lido como dado não confiável. Decidido com 17 sessões e 44,6% de repetição entre sessões. A T3.11 foi tentada num Claude Code real: a memória é coletada e enriquecida, mas a leitura não manteve nenhuma | [D-168](#d-168--s315-cache-persistente-de-notas) |
+| 2026-10-10 09:45 | Roteiro dos testes pendentes, e três deles rodados: os testes ao vivo contra o Jev passam (3 de 3), o SLO do `hook --memory` passa (p95 +7,3 ms), e o overhead de batching e merge deu p95 15,8 ms, o dobro dos 8,3 ms de antes e ainda longe da meta de 75 ms | [D-169](#d-169--roteiro-dos-testes-pendentes-e-três-medições) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7756,3 +7757,25 @@ dela vem saber por que o scoring do Jev rejeita memórias do mesmo arquivo e sí
 Não investigado aqui. Custo das três sessões: US$ 0,84.
 
 **Testes:** 833 → 840 no build padrão, 870 → 877 com `online`; clippy e fmt limpos nas duas.
+
+## D-169 — Roteiro dos testes pendentes, e três medições
+
+**Data:** 2026-10-10 09:45.
+
+**Pedido do usuário:** listar os testes pendentes com um passo a passo de cada um, e rodar os que
+não dependem dele.
+
+[`spec/plan/roteiro-testes-pendentes.md`](plan/roteiro-testes-pendentes.md): doze blocos, do mais
+barato ao mais caro, cada um com o que precisa, os comandos, o que conta como aprovado e onde
+registrar. O bloco B (a leitura de memória que não mantém nenhuma, D-168) vem antes da T3.11 e da
+T5.3, que dependem dele.
+
+**Rodados em `c7d4a4d`**, nesta máquina, com a chave do Jev (conferida pelo tamanho antes):
+
+| Bloco | Resultado |
+|---|---|
+| A1 · `online_live` contra o Jev | 3 de 3. Admissão do corpus 0,79 / 0,83 / 0,03 em 269 ms; seleção 0,81 / 0,66 em 247 ms; descoberta `complete` com 2 requests em 637 ms; o `choice` deu `after` com 1,0 em 283 ms |
+| A3 · SLO do `hook --memory` | passa: p95 +7,3 ms e p99 +0,7 ms em 60 pares (limites 10 e 25 ms). O p99 menor que o p95 não é erro: cada número é a diferença entre os percentis com e sem `--memory`, e as duas caudas são ruído de um hook de cerca de 80 ms |
+| A4 · overhead de batching e merge | p50 14,9 ms e p95 15,8 ms, igual em três rodadas (15,6 a 16,0). O número do ponto de parada 2 era p50 7,9 e p95 8,3 ms: **dobrou**, e segue longe da meta de 75 ms. A causa não foi investigada; a máquina estava com carga (load average 9,9) e o código do caminho cresceu desde aquela medição |
+
+Os blocos A2 e A5 pedem um modelo local; os demais, o mantenedor.
