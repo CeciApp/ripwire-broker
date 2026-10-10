@@ -31,7 +31,6 @@ pub struct Runtime {
     store: Arc<Store>,
     workspace_id: String,
     worker: Arc<Worker>,
-    config: Config,
     publish: MemoryConfig,
     cancel: CancellationToken,
     /// The worker's task; a separate one watches it, to say if it panicked.
@@ -90,7 +89,7 @@ pub fn from_serve(
             ..ReadConfig::default()
         },
     };
-    let worker = Arc::new(Worker::new(store.clone(), classifier, config.clone()));
+    let worker = Arc::new(Worker::new(store.clone(), classifier, config));
     let publish = MemoryConfig {
         worker: Some(worker.metrics_handle()),
         read: Some(read),
@@ -101,7 +100,6 @@ pub fn from_serve(
         store,
         workspace_id,
         worker,
-        config,
         publish,
         cancel: CancellationToken::new(),
         task: None,
@@ -112,10 +110,6 @@ pub fn from_serve(
 impl Runtime {
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.config
     }
 
     /// `--summarizer-cmd`: consolidation rounds may write derived notes with it.

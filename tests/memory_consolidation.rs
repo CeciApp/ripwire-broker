@@ -309,7 +309,6 @@ impl<F: MemoryClassifier> MemoryClassifier for Slow<F> {
 #[tokio::test(start_paused = true)]
 async fn a_round_asks_at_most_four_pairs_twenty_questions_in_five_seconds() {
     assert_eq!(consolidate::MAX_PAIRS, 4);
-    assert_eq!(consolidate::MAX_QUESTIONS, 20);
     assert_eq!(consolidate::DEADLINE, Duration::from_secs(5));
     assert_eq!(consolidate::MAX_ATTEMPTS, 4);
     let cfg = Config::new(MODEL);
@@ -793,7 +792,7 @@ async fn the_worker_gives_its_rounds_the_servers_summarizer() {
     assert_eq!((round.decided, round.notes), (1, 1));
     assert_eq!(summarizer.prompts().len(), 1);
     assert_eq!(notes(&store).len(), 1);
-    let m = worker.metrics();
+    let m = worker.metrics_handle().lock().unwrap().clone();
     assert_eq!((m.rounds, m.notes, m.notes_rejected), (1, 1, 0));
 }
 

@@ -1186,22 +1186,6 @@ impl Store {
         Ok(count)
     }
 
-    /// The explicit action that gives a failed job its runs back. `false` when it is not failed.
-    pub fn retry_failed(&self, node_id: &str) -> Result<bool, Refusal> {
-        let _writer = self.writer()?;
-        let mut state = self.load()?;
-        let Some(job) = state
-            .jobs
-            .get_mut(node_id)
-            .filter(|j| j.state == JobState::Failed)
-        else {
-            return Ok(false);
-        };
-        (job.state, job.runs, job.not_before_ms) = (JobState::Pending, 0, 0);
-        self.write_snapshot(state.generation, &on_disk(&state)?)?;
-        Ok(true)
-    }
-
     /// The 24-hour quota spent so far, by every process. A store from before the quota had its
     /// own file still has it in the snapshot.
     pub fn ledger(&self) -> Result<Ledger, Unavailable> {

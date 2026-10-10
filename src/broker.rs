@@ -66,8 +66,8 @@ impl Unfinished<'_> {
             tool: self.tool,
             outcome,
             total_us: took.as_micros() as u64,
-            upstream: std::mem::take(&mut *self.spans.lock().unwrap()),
-            stages: std::mem::take(&mut *self.stages.lock().unwrap()),
+            upstream: std::mem::take(&mut *self.spans.lock().unwrap_or_else(|e| e.into_inner())),
+            stages: std::mem::take(&mut *self.stages.lock().unwrap_or_else(|e| e.into_inner())),
         }
     }
 }
@@ -77,8 +77,14 @@ impl Drop for Unfinished<'_> {
         if self.finished {
             return;
         }
+        // A poisoned lock is recovered, never unwrapped: this runs while a panic unwinds, and a
+        // second panic there aborts the server.
         let record = self.record("cancelled", self.started.elapsed());
-        let mut metrics = self.broker.metrics.lock().unwrap();
+        let mut metrics = self
+            .broker
+            .metrics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         metrics.cancelled(self.tool);
         metrics.request(record);
     }

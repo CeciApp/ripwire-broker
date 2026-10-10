@@ -15,7 +15,7 @@ pub enum JobState {
     #[default]
     Pending,
     Leased,
-    /// Out of runs; stays so until `retry_failed`.
+    /// Out of runs; stays so until `memory retry`.
     Failed,
     Done,
 }

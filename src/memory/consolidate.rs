@@ -37,8 +37,6 @@ pub const EVERY_ENRICHMENTS: u64 = 20;
 pub const PENDING_FOR_MS: u64 = 24 * 60 * 60 * 1000;
 /// Pairs a round asks about.
 pub const MAX_PAIRS: usize = 4;
-/// Questions a round asks: four pairs of five.
-pub const MAX_QUESTIONS: usize = MAX_PAIRS * PER_PAIR;
 /// A round's deadline...
 pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// ...and its classifier attempts, retries included.
@@ -54,8 +52,6 @@ pub const NOTE_GATE: f64 = 0.85;
 /// Both parents together, whole, or no note.
 pub const MAX_PARENT_CHARS: usize = crate::notes::MAX_EVIDENCE_CHARS;
 pub const MAX_NOTE_CHARS: usize = crate::notes::MAX_NOTE_CHARS;
-/// Questions about one pair: four Nouls and the representation Choice.
-const PER_PAIR: usize = 5;
 
 /// Two observations, by id in ascending order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

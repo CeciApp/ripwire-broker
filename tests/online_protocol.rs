@@ -292,20 +292,6 @@ async fn a_closed_connection_is_a_network_failure() {
     assert!(err.is_transient());
 }
 
-#[test]
-fn the_production_client_cannot_be_pointed_anywhere_but_the_allowlisted_https_endpoint() {
-    // The only public constructor takes no URL: adding one fails to compile here. The client's
-    // `https_only` and no-redirect settings are defence in depth behind this; the refused
-    // redirect is exercised in `redirects_are_refused`.
-    let new: fn(Credential, &str, Duration) -> Result<JevClient, String> = JevClient::new;
-    let key = Credential::from_env_value(Some("tok-123")).unwrap();
-
-    let c = new(key, "jev-1.13.0", Duration::from_secs(15)).unwrap();
-
-    assert_eq!(c.endpoint(), "https://api.typesafe.ai/v1/systemone");
-    assert_eq!(c.model(), "jev-1.13.0");
-}
-
 // --- S4.31: the broker end to end through the real client ---
 
 mod common;
@@ -1114,8 +1100,10 @@ async fn the_cloudflare_client_posts_to_the_run_path_of_its_account_and_model() 
 type ForProvider =
     fn(JevProvider, Option<&str>, Option<Credential>, &str, Duration) -> Result<JevClient, String>;
 
-/// As for TypeSafe: the constructor takes a provider's name, never a URL, so the bearer can only
-/// go to one of the two allowlisted hosts, over HTTPS.
+/// The only production constructor takes a provider's name, never a URL: adding one fails to
+/// compile here. So the bearer can only go to one of the two allowlisted hosts, over HTTPS; the
+/// client's `https_only` and no-redirect settings are defence in depth behind this (the refused
+/// redirect is exercised in `redirects_are_refused`).
 #[test]
 fn the_provider_client_cannot_be_pointed_anywhere_but_an_allowlisted_https_endpoint() {
     let new: ForProvider = JevClient::for_provider;

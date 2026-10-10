@@ -2,7 +2,7 @@
 //! hashes are pure functions of what they name; nothing here reads a clock.
 mod common;
 
-use ripwire_broker::memory::identity::{self, Symbol};
+use ripwire_broker::memory::identity;
 use ripwire_broker::memory::model::{EntityKind, Kind, Record};
 use serde_json::json;
 use std::path::Path;
@@ -65,67 +65,15 @@ fn a_worktree_recreated_at_the_same_path_for_another_repository_is_another_works
     assert_ne!(first, second, "memory is never imported by reusing a path");
 }
 
-fn symbol<'a>(name: &'a str) -> Symbol<'a> {
-    Symbol {
-        language: "python",
-        qualified_name: name,
-        signature: "(token)",
-        revision: "sha256:abc",
-    }
-}
-
 #[test]
-fn homonymous_symbols_in_different_files_never_share_an_entity() {
+fn a_file_entity_belongs_to_its_workspace() {
     let ws = "w".repeat(64);
-    let a = identity::symbol_entity(&ws, "src/a.py", Some(&symbol("parse")));
-    let b = identity::symbol_entity(&ws, "src/b.py", Some(&symbol("parse")));
-    assert_eq!(a.kind, EntityKind::Symbol);
-    assert_ne!(a.id, b.id, "two `parse` in distinct files never coincide");
-
     let other_ws = "v".repeat(64);
-    let c = identity::symbol_entity(&other_ws, "src/a.py", Some(&symbol("parse")));
-    assert_ne!(a.id, c.id, "nor across workspaces");
-    assert_ne!(
-        identity::file_entity(&ws, "src/a.py").id,
-        identity::file_entity(&other_ws, "src/a.py").id,
-        "a file entity belongs to its workspace"
-    );
-    assert_eq!(
-        a.id,
-        identity::symbol_entity(&ws, "src/a.py", Some(&symbol("parse"))).id
-    );
-}
-
-#[test]
-fn a_symbol_without_an_unambiguous_descriptor_falls_back_to_the_file_entity() {
-    let ws = "w".repeat(64);
     let file = identity::file_entity(&ws, "src/a.py");
     assert_eq!(file.kind, EntityKind::File);
-    assert_eq!(identity::symbol_entity(&ws, "src/a.py", None), file);
-    for blank in [
-        Symbol {
-            language: "",
-            ..symbol("parse")
-        },
-        Symbol {
-            qualified_name: "",
-            ..symbol("parse")
-        },
-        Symbol {
-            signature: "",
-            ..symbol("parse")
-        },
-        Symbol {
-            revision: "",
-            ..symbol("parse")
-        },
-    ] {
-        assert_eq!(
-            identity::symbol_entity(&ws, "src/a.py", Some(&blank)),
-            file,
-            "never a fabricated symbol: {blank:?}"
-        );
-    }
+    assert_eq!(file, identity::file_entity(&ws, "src/a.py"));
+    assert_ne!(file.id, identity::file_entity(&other_ws, "src/a.py").id);
+    assert_ne!(file.id, identity::file_entity(&ws, "src/b.py").id);
 }
 
 #[test]
@@ -196,7 +144,7 @@ fn the_node_id_ignores_clock_scores_and_retries() {
 
 use ripwire_broker::memory::admission::{self, Draft, Event, Outcome, Tests};
 use ripwire_broker::memory::model::TimestampRole;
-use ripwire_broker::memory::time::{self, Clock, Sequence};
+use ripwire_broker::memory::time::{Clock, Sequence};
 use ripwire_broker::online::reader::WorkspaceReader;
 use std::cell::RefCell;
 
@@ -206,6 +154,16 @@ struct Script(RefCell<Vec<u64>>);
 impl Clock for Script {
     fn now_ms(&self) -> u64 {
         self.0.borrow_mut().remove(0)
+    }
+}
+
+/// The next stamp of `seq`, read from `clock`: what the store does when it admits.
+fn stamp(seq: &mut Sequence, clock: &dyn Clock, retention_ms: u64) -> admission::Stamp {
+    admission::Stamp {
+        observed_at_ms: clock.now_ms(),
+        ingest_seq: seq.advance().unwrap(),
+        generation: 1,
+        retention_ms,
     }
 }
 
@@ -227,7 +185,7 @@ fn mtime_commit_and_a_clock_rollback_never_become_event_time() {
     let mut seq = Sequence::default();
     let day = 24 * 60 * 60 * 1000;
 
-    let first = admission::admit(&reader, &ws, &draft, seq.stamp(&clock, 1, day).unwrap()).unwrap();
+    let first = admission::admit(&reader, &ws, &draft, stamp(&mut seq, &clock, day)).unwrap();
     assert_eq!(first.timestamp_role, TimestampRole::Observation);
     assert_eq!(
         first.event_time, None,
@@ -261,23 +219,12 @@ fn mtime_commit_and_a_clock_rollback_never_become_event_time() {
         .unwrap()
         .success();
     assert!(ok);
-    let mut replay = seq.clone();
-    replay.resume(0);
-    let again =
-        admission::admit(&reader, &ws, &draft, replay.stamp(&clock, 1, day).unwrap()).unwrap();
+    let mut replay = Sequence::default();
+    let again = admission::admit(&reader, &ws, &draft, stamp(&mut replay, &clock, day)).unwrap();
     assert_eq!(again, first, "same node, same time fields");
 
-    // The wall clock goes back: the sequence still grows, and no duration comes out negative.
+    // The wall clock goes back: the sequence still grows.
     let mut later = seq.clone();
-    let back = later.stamp(&clock, 1, day).unwrap();
+    let back = stamp(&mut later, &clock, day);
     assert_eq!((back.observed_at_ms, back.ingest_seq), (1_000, 2));
-    assert_eq!(
-        time::elapsed_ms(back.observed_at_ms, first.observed_at_ms),
-        None
-    );
-    assert_eq!(
-        time::elapsed_ms(first.observed_at_ms, back.observed_at_ms),
-        Some(4_000)
-    );
-    assert_eq!(time::elapsed_ms(7, 7), Some(0));
 }

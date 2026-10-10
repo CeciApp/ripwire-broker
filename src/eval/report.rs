@@ -68,6 +68,7 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    /// Searches and reads: the "chamadas exploratórias" of §17 and §23.15.
     pub fn exploratory(&self) -> u64 {
         self.search + self.read
     }

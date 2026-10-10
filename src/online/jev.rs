@@ -10,9 +10,6 @@ use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
 use std::time::Duration;
 
-/// TypeSafe's endpoint, the only one of the first increment (v0.1 §13.4). No URL comes from
-/// configuration: a provider is chosen by name and builds its own (D-166).
-pub const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 /// Responses carry a few probabilities; anything bigger is refused unread.
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
@@ -37,19 +34,7 @@ pub struct JevClient {
 }
 
 impl JevClient {
-    pub fn new(key: Credential, model: &str, timeout: Duration) -> Result<Self, String> {
-        Self::build(
-            ENDPOINT.into(),
-            TYPESAFE,
-            true,
-            false,
-            Some(key),
-            model,
-            timeout,
-        )
-    }
-
-    /// The client of `provider` (D-166). Still no URL from configuration: the provider is one
+    /// The client of `provider` (D-166). No URL comes from configuration: the provider is one
     /// of two allowlisted hosts, and `account_id` and `model` only fill Cloudflare's path after
     /// [`super::JevProvider::endpoint`] checked them. Without a usable `key` (D-155) every call
     /// fails with [`ClassifyError::NoKey`] before anything is sent.

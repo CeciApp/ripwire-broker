@@ -220,17 +220,7 @@ fn age(secs: u64) -> String {
     }
 }
 
-/// The segments in display order, before fitting (Task 3 drops and colors them).
-pub fn segments(
-    input: &HostInput,
-    snapshot: Option<&Snapshot>,
-    detail: bool,
-    now: u64,
-) -> Vec<Segment> {
-    segments_with_server(input, snapshot, None, detail, now)
-}
-
-/// [`segments`] plus what the live `serve` of the workspace says (D-154), over the last five
+/// The segments in display order, before fitting (Task 3 drops and colors them), plus what the live `serve` of the workspace says (D-154), over the last five
 /// seconds: `[jev:N]`, the Jev requests (`[jev: no key]` or `[jev: invalid key]` instead when the
 /// key is missing or refused, D-155), and with `--memory` `[mem: retr N, stor M]`, the memory
 /// reads and stores, after the counters; `(online)` at the very end. The server is not the hooks,

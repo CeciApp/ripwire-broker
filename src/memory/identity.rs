@@ -69,15 +69,6 @@ fn git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
     Some((git_dir, common))
 }
 
-/// What Ripwire tells about a symbol. Only a complete descriptor makes a symbol identity.
-#[derive(Debug)]
-pub struct Symbol<'a> {
-    pub language: &'a str,
-    pub qualified_name: &'a str,
-    pub signature: &'a str,
-    pub revision: &'a str,
-}
-
 /// `path` is relative to the workspace root and already normalized.
 pub fn file_entity(workspace_id: &str, path: &str) -> Entity {
     Entity {
@@ -85,32 +76,6 @@ pub fn file_entity(workspace_id: &str, path: &str) -> Entity {
         kind: EntityKind::File,
         path: path.into(),
         revision: None,
-    }
-}
-
-/// A symbol entity when the descriptor is unambiguous; otherwise the file's, never a guess.
-pub fn symbol_entity(workspace_id: &str, path: &str, symbol: Option<&Symbol>) -> Entity {
-    let Some(s) = symbol else {
-        return file_entity(workspace_id, path);
-    };
-    let fields = [s.language, s.qualified_name, s.signature, s.revision];
-    if fields.iter().any(|f| f.is_empty()) {
-        return file_entity(workspace_id, path);
-    }
-    Entity {
-        id: hash(&[
-            "memory/v1/entity",
-            workspace_id,
-            "symbol",
-            path,
-            s.language,
-            s.qualified_name,
-            s.signature,
-            s.revision,
-        ]),
-        kind: EntityKind::Symbol,
-        path: path.into(),
-        revision: Some(s.revision.into()),
     }
 }
 
