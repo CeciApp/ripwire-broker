@@ -1,17 +1,17 @@
 # Proposta — o processo ripwire por evento de hook (item 4 da revisão de arquitetura)
 
-Status: **fechado — opção B feita em [D-105](../changelog.md#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook);
+Status: **fechado — opção B feita em [D-105](../../changelog.md#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook);
 C e D recusadas pela medição com o ripwire real; E feita em
-[D-106](../changelog.md#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) — item 4 fechado** ·
+[D-106](../../changelog.md#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) — item 4 fechado** ·
 2026-09-28 · item 4 de
-[D-096](../changelog.md#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos),
-único em aberto depois de [D-100](../changelog.md#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release)
+[D-096](../../changelog.md#d-096--gargalos-de-arquitetura-medidos-e-os-dois-primeiros-corrigidos),
+único em aberto depois de [D-100](../../changelog.md#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release)
 
 Fonte: PRD 8.4 (níveis de automação), 15.3 (superfície de processo e limite de memória),
-RF-14, e as decisões [D-033](../changelog.md#d-033--instalação-e-diagnóstico-proposta),
-[D-050](../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor),
-[D-052](../changelog.md#d-052--code-review-das-fases-2-e-3) e
-[D-064](../changelog.md#d-064--cache-diagnóstico-e-integração-proposta).
+RF-14, e as decisões [D-033](../../changelog.md#d-033--instalação-e-diagnóstico-proposta),
+[D-050](../../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor),
+[D-052](../../changelog.md#d-052--code-review-das-fases-2-e-3) e
+[D-064](../../changelog.md#d-064--cache-diagnóstico-e-integração-proposta).
 
 Este documento **não decide nada**. Ele mede o custo, nomeia o que cada mitigação quebra, e
 separa o que é barato e isolado do que é mudança de arquitetura com superfície de segurança nova.
@@ -44,8 +44,8 @@ O que isso faz com cada opção:
 - **C e D — recusadas.** A justificativa das duas era "a subida de processo domina". Com o ripwire
   real a subida é ~3 a 5 ms de 17 a 219 ms. Elas comprariam pouco e custariam superfície nova de
   segurança — socket autenticado, escopo por workspace, ciclo de vida sob
-  [D-050](../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor) — além de reabrir o
-  [D-064](../changelog.md#d-064--cache-diagnóstico-e-integração-proposta). **A medição que era o
+  [D-050](../../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor) — além de reabrir o
+  [D-064](../../changelog.md#d-064--cache-diagnóstico-e-integração-proposta). **A medição que era o
   bloqueio resolveu o caso, e resolveu contra elas.**
 - **E — segue aberta**, e agora é a única com ganho grande. O `stop` a 219 ms e o `post-tool-use`
   a 33 ms **por edição** são custo real de trabalho do ripwire, não de subida. Reduzir eventos ataca
@@ -54,7 +54,7 @@ O que isso faz com cada opção:
 
 Uma rota que a proposta sugeria para B **não existe**: ler a versão do handshake MCP. O
 `rust-mcp-sdk` 2.0.0 não expõe o `Implementation` do servidor ao cliente — `server_details()` é do
-lado servidor. Mesmo obstáculo que o [D-049](../changelog.md#d-049--cancelamento-pelo-cliente-e-status-que-não-trava)
+lado servidor. Mesmo obstáculo que o [D-049](../../changelog.md#d-049--cancelamento-pelo-cliente-e-status-que-não-trava)
 encontrou. B foi feita pela outra rota, cache no estado de sessão com stamp do binário.
 
 E os testes que exigem ripwire, que até agora "passavam" retornando cedo por ausência dele, passaram
@@ -63,7 +63,7 @@ a saída real.
 
 ## 0. O que foi medido, e o que não foi
 
-Medido em **build release** (a lição do [D-100](../changelog.md#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release):
+Medido em **build release** (a lição do [D-100](../../changelog.md#d-100--itens-7-e-10-medidos-e-recusados-e-os-números-do-d-096-ao-d-099-refeitos-em-release):
 os números de debug inflam de 10 a 20x em trabalho ligado a CPU), com um dublê de `ripwire --mcp`
 em Python que responde **instantaneamente**, mediana de 15 execuções, depois de aquecimento.
 
@@ -96,7 +96,7 @@ um achado sobre o evento e não era.
 
 ## 1. Quantos eventos um turno paga
 
-O `install --hooks` liga três eventos ([`src/install.rs`](../../src/install.rs), `events()`):
+O `install --hooks` liga três eventos ([`src/install.rs`](../../../src/install.rs), `events()`):
 
 | evento | quando dispara |
 | --- | --- |
@@ -109,14 +109,14 @@ fixo por turno, no dublê instantâneo — e o `PostToolUse` é o que escala, po
 
 ## 2. A árvore de processos por evento
 
-[`src/local.rs`](../../src/local.rs) `launch()` → [`src/upstream.rs`](../../src/upstream.rs):
+[`src/local.rs`](../../../src/local.rs) `launch()` → [`src/upstream.rs`](../../../src/upstream.rs):
 
 1. o host sobe `ripwire-broker hook …`
 2. `ripwire_version(&binary)` sobe **`ripwire --version`** e o descarta
 3. `RipwireUpstream::spawn` sobe **`ripwire --mcp`**
 4. `Broker::connect` faz `list_tools()` sobre stdio
 
-Com `--ripwire-max-rss-mb` ([`src/main.rs`](../../src/main.rs)) entram dois processos a mais por
+Com `--ripwire-max-rss-mb` ([`src/main.rs`](../../../src/main.rs)) entram dois processos a mais por
 evento: `ripwire-broker __supervise` e `ripwire-broker __watch`. O supervisor é `None` por padrão
 em `UpstreamConfig::new`, então o caminho padrão são **3 processos por evento**, e **5** com o
 limite de memória ligado.
@@ -127,7 +127,7 @@ Este é o fato que reenquadra o item.
 
 Um `install` padrão escreve **as duas coisas**: o servidor MCP em `.mcp.json` e os hooks em
 `.claude/settings.json`. E o servidor MCP guarda `broker: Mutex<Option<Arc<Broker>>>`
-([`src/mcp.rs`](../../src/mcp.rs)), conectado sob demanda e **mantido pela sessão inteira**, com um
+([`src/mcp.rs`](../../../src/mcp.rs)), conectado sob demanda e **mantido pela sessão inteira**, com um
 ripwire filho vivo e aquecido.
 
 Ou seja: numa instalação padrão já existe um broker de vida longa com ripwire quente, ocioso entre
@@ -144,10 +144,10 @@ Nomeados aqui para que nenhuma opção seja avaliada sem eles.
 
 | invariante | origem | por que colide |
 | --- | --- | --- |
-| Nenhum ripwire fica rodando sem vigia | [D-050](../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor), [D-052](../changelog.md#d-052--code-review-das-fases-2-e-3) | o `__watch` mata o ripwire assim que o supervisor morre. Um ripwire de vida longa compartilhado muda quem é o pai e quando é legítimo matá-lo |
-| O limite de memória do ripwire (PRD 15.3) | [D-050](../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor) | hoje o limite é por processo de vida curta. Um ripwire que atravessa a sessão acumula, e o teto passa a valer contra um processo que ninguém reinicia |
-| Hooks são offline | [D-064](../changelog.md#d-064--cache-diagnóstico-e-integração-proposta) | "processo curto, timeout do host e consentimento por processo não combinam com envio remoto a cada prompt". Um daemon de vida longa **remove as três premissas dessa decisão**, o que reabre o assunto em vez de resolvê-lo |
-| Estado de sessão por `session_id`, com lock | [D-032](../changelog.md#d-032--estado-de-sessão-em-disco-proposta) | `StateStore::lock` hoje serializa hooks paralelos de uma sessão. Um daemon passa a ter o estado em memória e o arquivo vira cache, ou dois donos disputam a verdade |
+| Nenhum ripwire fica rodando sem vigia | [D-050](../../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor), [D-052](../../changelog.md#d-052--code-review-das-fases-2-e-3) | o `__watch` mata o ripwire assim que o supervisor morre. Um ripwire de vida longa compartilhado muda quem é o pai e quando é legítimo matá-lo |
+| O limite de memória do ripwire (PRD 15.3) | [D-050](../../changelog.md#d-050--limite-de-memória-do-ripwire-por-supervisor) | hoje o limite é por processo de vida curta. Um ripwire que atravessa a sessão acumula, e o teto passa a valer contra um processo que ninguém reinicia |
+| Hooks são offline | [D-064](../../changelog.md#d-064--cache-diagnóstico-e-integração-proposta) | "processo curto, timeout do host e consentimento por processo não combinam com envio remoto a cada prompt". Um daemon de vida longa **remove as três premissas dessa decisão**, o que reabre o assunto em vez de resolvê-lo |
+| Estado de sessão por `session_id`, com lock | [D-032](../../changelog.md#d-032--estado-de-sessão-em-disco-proposta) | `StateStore::lock` hoje serializa hooks paralelos de uma sessão. Um daemon passa a ter o estado em memória e o arquivo vira cache, ou dois donos disputam a verdade |
 | Sem telemetria, sem rede no build padrão | CA-10 | um socket local não é rede externa, mas é superfície nova e precisa dizer isso explicitamente |
 
 ## 5. Opções

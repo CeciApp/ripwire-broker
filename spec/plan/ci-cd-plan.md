@@ -7,7 +7,7 @@ Status: **planejado; implementação não realizada nesta revisão documental**.
 ## Objetivo e limites
 
 Fechar as lacunas da especificação revalidada, preservando o CI e as propriedades já
-entregues. O plano histórico [proposta-pbt-e-ci-cd.md](proposta-pbt-e-ci-cd.md) está
+entregues. O plano histórico [proposta-pbt-e-ci-cd.md](xtd/proposta-pbt-e-ci-cd.md) está
 cumprido; suas sete fatias não devem ser abertas novamente.
 
 A entrega atual altera somente `spec/prompt/ci-cd.md` e cria este plano.

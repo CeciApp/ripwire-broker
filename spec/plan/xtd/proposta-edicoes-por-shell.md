@@ -1,13 +1,13 @@
 # Proposta — edições feitas pelo shell chegam ao hook de edição
 
-Status: **feito em [D-129](../changelog.md#d-129--edições-pelo-shell-chegam-ao-hook-de-edição)** · 2026-10-01 ·
-fecha a divergência 2 de [D-128](../changelog.md#d-128--validação-manual-da-barra-e-fixture-de-payload-real)
+Status: **feito em [D-129](../../changelog.md#d-129--edições-pelo-shell-chegam-ao-hook-de-edição)** · 2026-10-01 ·
+fecha a divergência 2 de [D-128](../../changelog.md#d-128--validação-manual-da-barra-e-fixture-de-payload-real)
 (PR #38).
 
 Fonte: PRD 8.4 (níveis de automação) e §24 (barra de status), e as decisões
-[D-105](../changelog.md#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook),
-[D-106](../changelog.md#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) e
-[D-128](../changelog.md#d-128--validação-manual-da-barra-e-fixture-de-payload-real).
+[D-105](../../changelog.md#d-105--a-versão-do-ripwire-deixa-de-custar-um-processo-por-evento-de-hook),
+[D-106](../../changelog.md#d-106--uma-rajada-de-edições-é-uma-pergunta-não-uma-por-edição) e
+[D-128](../../changelog.md#d-128--validação-manual-da-barra-e-fixture-de-payload-real).
 
 ## 1. Problema
 

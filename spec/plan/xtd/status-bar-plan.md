@@ -15,8 +15,8 @@ entra na **mesma** alteração do `.claude/settings.json` que os hooks.
 **Stack:** Rust 1.98.1 (edition 2024), `serde`/`serde_json`, `sha2`, e uma dependência nova:
 `unicode-width` (decisão D1 abaixo).
 
-**Spec:** o [§24 do PRD](../ripwire-broker-mcp.md#24-barra-de-status-do-claude-code), que transporta a
-antiga `spec/status-bar.md` ([D-122](../changelog.md#d-122--a-barra-de-status-entra-no-prd)). Este plano
+**Spec:** o [§24 do PRD](../../ripwire-broker-mcp.md#24-barra-de-status-do-claude-code), que transporta a
+antiga `spec/status-bar.md` ([D-122](../../changelog.md#d-122--a-barra-de-status-entra-no-prd)). Este plano
 argumenta a partir dele: leia os dois. **Onde este plano diz "spec §N", leia §24.N do PRD** (a seção
 `N` da spec virou o §24.`N`); as decisões D1 a D6 abaixo estão também no §24.13.
 
@@ -2087,7 +2087,7 @@ if args.hooks || bar_wanted {
 
 - [ ] **Passo 7: commit.**
   ```bash
-  git add README.md spec/changelog.md handoff.md spec/ripwire-broker-mcp.md spec/plan/status-bar-plan.md integrations
+  git add README.md spec/changelog.md handoff.md spec/ripwire-broker-mcp.md spec/plan/xtd/status-bar-plan.md integrations
   git commit -m "Status line: docs, measurement and D-123"
   ```
 
