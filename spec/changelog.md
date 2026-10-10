@@ -112,6 +112,8 @@
 | 2026-10-10 00:15 | Pendências do handoff: 14 itens que nenhum binário alcançava saíram, com os testes que só os testavam (a lista veio do compilador, numa cópia com tudo `pub(crate)`); o `Drop` do `Unfinished` recupera o lock envenenado em vez de dar `unwrap`; o diagrama ganhou a Cloudflare; o `sha2` foi revisto e segue preso; a Cloudflare não será o provider | [D-167](#d-167--código-sem-uso-mutex-no-drop-diagrama) |
 | 2026-10-10 01:30 | S3.15: `--summarizer-cache` guarda as notas do modelo local em `<state-dir>/notes/`, um arquivo privado por workspace, e um servidor novo parte delas. Opt-in; o arquivo é lido como dado não confiável. Decidido com 17 sessões e 44,6% de repetição entre sessões. A T3.11 foi tentada num Claude Code real: a memória é coletada e enriquecida, mas a leitura não manteve nenhuma | [D-168](#d-168--s315-cache-persistente-de-notas) |
 | 2026-10-10 09:45 | Roteiro dos testes pendentes, e três deles rodados: os testes ao vivo contra o Jev passam (3 de 3), o SLO do `hook --memory` passa (p95 +7,3 ms), e o overhead de batching e merge deu p95 15,8 ms, o dobro dos 8,3 ms de antes e ainda longe da meta de 75 ms | [D-169](#d-169--roteiro-dos-testes-pendentes-e-três-medições) |
+| 2026-10-10 13:10 | O SLO do `hook --memory` passa a ser medido pelo próprio hook: cada linha `collect` do `debug.log` termina com a duração, e o hook escreve uma linha `setup`. p95 de 9,5 a 9,9 ms em 16 rodadas (limite 10). A diferença de relógio entre dois hooks inteiros tem p95 de 6 ms com acréscimo zero e não serve para a cauda | [D-170](#d-170--o-slo-do-hook---memory-medido-pelo-próprio-hook) |
+| 2026-10-10 14:10 | A leitura de memória foi reproduzida e diagnosticada: ela funciona, e recusa as observações automáticas porque o texto delas não diz sobre o que a análise foi (0,20 e 0,16 contra 0,60; uma nota explícita teve 0,91). O PRD jev-mem vai à v0.4 e libera o texto enriquecido `memory-observation/v2`; a implementação é a T3.12 | [D-171](#d-171--a-leitura-recusa-as-observações-automáticas-prd-v04) |
 | 2026-10-06 15:52 | A barra mostra o servidor vivo do workspace: `[jev:N]` (requisições ao Jev), com `--memory` `[mem: retr N, stor M]` (leituras e gravações da memória), nos últimos 5 s, e `(online)` no fim; um arquivo por processo `serve`, renovado a cada 10 s e ignorado depois de 30 s | [D-154](#d-154--o-servidor-na-barra-jev-memória-e-online) |
 | 2026-10-06 15:15 | Repositório migrado da organização `CeciApp` para a conta `aquental`: remoto `origin` atualizado, URLs do diagrama de arquitetura trocadas, histórico (D-054, D-055) mantido | [D-153](#d-153--migração-do-repositório-para-aquental) |
 | 2026-10-05 00:30 | Achados baixos da memória, segunda parte, e do eval, em TDD: lease só sai livre e `finish` velho não assenta nada, somas da quota saturam, `memory retry` alcança jobs adiados, ingest perto do teto toma o que cabe, pânico do worker dito (grupo 3); guarda de shell que vê opções, palavras-chave, `-lc`, `xargs` e `find -exec`, `{repo}`/`{fix}` como uma palavra, `spent` só em braço com memória, ids de tarefa recusados, CLI do `ripwire-eval`, `history_incomplete` fora das médias, sessão cortada pela API inválida e prompt longo que segurava o timeout (grupo 3) | [D-151](#d-151--achados-baixos-da-memória-segunda-parte-e-do-eval) |
@@ -7779,3 +7781,98 @@ T5.3, que dependem dele.
 | A4 · overhead de batching e merge | p50 14,9 ms e p95 15,8 ms, igual em três rodadas (15,6 a 16,0). O número do ponto de parada 2 era p50 7,9 e p95 8,3 ms: **dobrou**, e segue longe da meta de 75 ms. A causa não foi investigada; a máquina estava com carga (load average 9,9) e o código do caminho cresceu desde aquela medição |
 
 Os blocos A2 e A5 pedem um modelo local; os demais, o mantenedor.
+
+## D-170 — O SLO do `hook --memory`, medido pelo próprio hook
+
+**Data:** 2026-10-10 13:10.
+
+**Pedido do usuário:** conferir uma mudança no cálculo do p99 de `the_hook_overhead_meets_the_slo`,
+com a qual o SLO de p95 deixava de passar; depois, implementar a recomendação e medir de novo.
+
+**O que a conferência achou.** A mudança trocava a diferença entre percentis (D-169) pelo percentil
+das diferenças de 200 pares. O código estava certo e a conclusão não: cada hook é um processo de
+cerca de 125 ms com desvio de 3,5 a 5 ms, e a diferença de dois carrega o ruído dos dois. Um
+controle em que nenhum dos lados usa `--memory` leu p95 de 5,6 a 6,7 ms com acréscimo zero. O p95
+de 11,0 a 13,2 ms que reprovava o SLO era a mediana (cerca de 7,5 ms) mais esse piso. A diferença
+entre percentis, com 200 pares, deu de 6,4 a 9,6 ms: passa, e oscila 3 ms entre rodadas. Nenhum dos
+dois mede a cauda do acréscimo.
+
+**O que mudou** (PR #96):
+
+- **Formato do `debug.log`.** Cada linha `collect` de uma observação termina com o tempo em que a
+  resposta ficou retida por ela, com duas casas (`… spooled 6c59ca9d4f65 6.79ms`). Um hook escreve
+  antes uma linha `collect   setup 0.07ms`: o que custou ligar a memória (identidade do workspace e
+  o store). Quem lê o arquivo por posição de campo precisa saber das duas coisas: a duração é o
+  último campo, e a primeira linha `collect` de um hook agora é a `setup`.
+- **O teste** roda o braço com `--memory --memory-debug-log` e tira os percentis da soma das linhas
+  `collect` de cada hook, em 200 hooks. A mediana da diferença de relógio dos pares fica como
+  conferência: mais de 3 ms entre ela e a mediana do hook reprova o teste, para que um cronômetro
+  que deixe custo de fora apareça.
+- `a_hook_with_the_debug_log_says_it_collected_the_edit` pegava a primeira linha `collect`; passou
+  a procurar a da observação e exige a duração nas duas.
+
+**Medido** em release, ripwire 0.6.5, Apple Silicon de 8 núcleos, load average entre 1,6 e 2,5,
+16 rodadas de 200 hooks:
+
+| | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| Faixa | 7,7 a 8,1 ms | 9,5 a 9,9 ms | 9,8 a 12,4 ms | 10,0 a 28,1 ms |
+| PRD jev-mem §8.2 | | 10 ms | 25 ms | |
+
+A mediana de relógio dos pares ficou entre 6,5 e 7,7 ms. O `setup` custa de 0,04 a 0,08 ms; o resto
+é a observação (admissão e gravação durável no spool).
+
+**O que isto corrige do D-169.** O "p95 +7,3 ms" de lá é a diferença entre percentis de 60 pares, de
+um hook de cerca de 80 ms; o número de hoje é outro instrumento, e o hook desta máquina leva cerca
+de 125 ms. A frase do README foi refeita com a medição nova.
+
+**Fica:** a folga do p95 é de 0,1 a 0,5 ms. Meio milissegundo a mais no caminho da observação
+reprova o SLO, e a T3.12 (D-171) mexe nele.
+
+## D-171 — A leitura recusa as observações automáticas; PRD v0.4
+
+**Data:** 2026-10-10 14:10.
+
+**Pedido do usuário:** testar o que falta para o `--memory` sair de experimental; depois, mudar o
+PRD para deixar enriquecer o texto das observações, e os documentos.
+
+**O bloco B, reproduzido.** Claude Code 2.1.296, o repositório sintético do roteiro, `serve --online
+--memory --memory-debug-log --log` com um state dir isolado. A sessão 1 mudou uma constante e deixou
+2 memórias enriquecidas; a sessão 2, uma tarefa sobre o mesmo arquivo, deu `visited=2 requests=1
+kept=0 stop=empty`, sem `memories` no envelope. É o achado do D-168.
+
+**A causa**, lida no `jev.log`. À pergunta "o candidato contém um fato necessário à tarefa?", o Jev
+respondeu 0,20 e 0,16; a barra de entrada é 0,60 (`ENTRY`, `src/memory/retrieve.rs`). O texto de
+cada candidato era `Evento: análise após edição. Escopo: src/auth.py. Observado pelo broker: análise
+concluída; execução de testes desconhecida. Evidência: …; revisão de fonte sha256:…`. Ele não diz
+sobre o que a análise foi; o `context_after_edit` daquela sessão recebeu o nome do símbolo e o
+texto não o traz. O Jev está certo em recusar.
+
+**O controle.** Com `memory add`, uma nota dizendo que `TOKEN_TTL_SECONDS` caiu de 3600 para 900
+entrou no mesmo store. A mesma tarefa, pedida direto ao servidor: `kept=1`, relevância 0,91, a nota
+em `memories[]`. Mesmo store, mesma tarefa, mesma barra: a leitura funciona, e o que decide é o
+conteúdo. Baixar a barra para 0,15 entregaria qualquer coisa.
+
+**Decisão do mantenedor:** o PRD deixa enriquecer o texto. [PRD jev-mem v0.4](../docs/jev-mem-prd.md),
+§5.2, `memory-observation/v2`: entram o nome e o path dos símbolos do escopo que o Ripwire resolveu,
+dos dependentes e dos testes que o envelope aponta, e o `kind` dos riscos e das limitações. Seguem
+fora a assinatura, o corpo, uma linha de código, um valor, o diff, o `detail` de um risco, o
+`summary`, o texto da tarefa e qualquer nome que o host passou sem o Ripwire confirmar. Listas com
+teto e corte determinístico; a mesma varredura de segredo e PII; registros `v1` ficam como estão;
+`memory-policy/v2` nos novos; o consentimento passa a dizer que nomes de símbolos e de testes vão ao
+provider.
+
+**O que não se sabe.** A nota do controle dizia o valor que mudou, e a v2 continua sem poder dizê-lo.
+Que os nomes bastem é hipótese. O aceite é o bloco B só com observações automáticas e `kept≥1`; se
+não der, revê-se o contrato do texto, não a barra.
+
+**Não implementado.** Este registro muda documentos: o PRD, o plano (T3.12, antes da T3.11 e da
+T5.3), o README, o roteiro e o `handoff.md`. O código segue na v1.
+
+**A T5.3 não foi rodada.** Não há corpus em sequências (o de `ab-eval-diag` é o do A/B), e sem
+observação automática entregue o braço `broker-memory` mediria só custo.
+
+**A T3.11 fica com o mantenedor**, e até a T3.12 usa uma nota explícita como memória entregue (o
+roteiro, bloco C, diz como).
+
+**Custo:** duas sessões do Claude Code, US$ 0,37 e US$ 0,26, e alguns requests ao Jev.

@@ -1,7 +1,8 @@
 # Roteiro — testes pendentes
 
 Estado em 2026-10-10, `master` em `c7d4a4d` (D-168). **A1, A3 e A4 já foram rodados nesse commit
-(D-169) e passam**; ficam aqui para a próxima vez. A suíte automática está verde (840 no build
+(D-169) e passam**; o A3 foi medido de novo pelo cronômetro do próprio hook (D-170) e o B foi
+reproduzido e diagnosticado (D-171); ficam aqui para a próxima vez. A suíte automática está verde (840 no build
 padrão, 877 com `online`, 46 do plugin). O que falta são testes que pedem algo de fora: uma chave,
 um modelo local, uma sessão real de um host, o corpus privado ou dinheiro.
 
@@ -76,6 +77,8 @@ cargo test --release --locked --test cli -- --ignored the_hook_overhead_meets_th
 ```
 
 **Aprovado:** o teste passa e imprime os percentis. Rode com a máquina ociosa; anote p95 e p99.
+Desde o D-170 os percentis são do tempo que o hook mede em si mesmo (as linhas `collect` do
+`debug.log`); a diferença de relógio entre dois hooks inteiros sai junto, só como conferência.
 **Registrar:** no changelog, com a data e a máquina.
 
 ## A4 · Overhead de batching e merge
@@ -111,6 +114,11 @@ A nota só aparece pelo servidor (o comando `prompt` não roda o modelo), então
 modelo; o recurso de status mostra `summarizer.persistent: true` e `generated: 0`.
 
 ## B · A leitura de memória não entrega nada (bloqueia o C)
+
+**Diagnosticado no D-171:** a leitura funciona; o que ela recusa é o texto das observações
+automáticas, que não diz sobre o que a análise foi (relevância 0,20 e 0,16 contra a barra de 0,60;
+uma nota explícita no mesmo store teve 0,91 e foi entregue). O conserto é a T3.12 do plano
+(`memory-observation/v2`, PRD v0.4 §5.2). Este bloco passa a ser o aceite dela.
 
 Achado do D-168: num Claude Code real, a memória é coletada, ingerida e enriquecida, mas a leitura
 visita as memórias, pergunta ao Jev e não mantém nenhuma (`kept=0`, `stop=empty`). Enquanto isso
@@ -155,10 +163,9 @@ grep ' read ' "$LOG" | tail -2
 
 - `visited=0`: a leitura não achou candidatos (índice ou recuperação).
 - `visited>0`, `kept=0`, `stop=empty`: os candidatos chegaram ao Jev e ele não aceitou nenhum.
-  É o estado de hoje. Próximos passos: rodar o `serve` com `--log` para ver no `jev.log` as
-  perguntas de scoring e as notas devolvidas; comparar com o limiar de aceitação em
-  `src/memory/retrieve.rs`; conferir se o texto das observações de edição dá ao Jev algo para
-  casar com a tarefa.
+  É o estado de hoje, e a causa é conhecida (D-171). Para ver as notas do Jev, acrescente
+  `--log` aos `args` do `.mcp.json` (o `install` não aceita a flag) e leia o `jev.log` do state
+  dir. Depois da T3.12, se ainda der `kept=0`, o que se revê é o texto da v2, não a barra de 0,60.
 - `kept≥1`: resolvido; siga para o C.
 
 **Aprovado:** `kept≥1` numa tarefa ligada a uma edição anterior, e `memories` no resultado de
@@ -166,7 +173,13 @@ grep ' read ' "$LOG" | tail -2
 
 ## C · T3.11: os hosts usam a memória
 
-Só depois do B. Usa o mesmo repositório e as mesmas sessões.
+Usa o mesmo repositório do B. Enquanto a T3.12 não existir, nenhuma observação automática é
+entregue: semeie com uma nota explícita antes da sessão que lê, e registre que foi assim.
+
+```sh
+echo '{"text": "In src/auth.py, TOKEN_TTL_SECONDS was lowered from 3600 to 900 seconds."}' > ../note.json
+$B memory add --workspace "$W" --file ../note.json
+```
 
 ### Claude Code
 
@@ -279,7 +292,8 @@ experimental e o §23 do PRD muda.
 
 ## H · T5.3: rodada da memória
 
-Depende do B (sem leitura que entregue, os braços de memória medem só o custo).
+Depende da T3.12 e do B (sem observação automática entregue, os braços de memória medem só o
+custo). O corpus em sequências ainda não existe.
 
 - **Corpus:** ≥ 30 tarefas em sequências, fora deste repositório.
 - **Braços:** `broker`, `broker-memory`, `broker-memory-deterministic`.

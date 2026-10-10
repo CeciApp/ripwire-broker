@@ -7,7 +7,8 @@
 [D-139](../changelog.md#d-139--fase-3-do---memory-leitura-e-entrega),
 [D-140](../changelog.md#d-140--fase-4-do---memory-consolidação),
 [D-142](../changelog.md#d-142--fase-5-do---memory-avaliação)), com a T3.11 (hosts) e a T5.3 (rodada
-da avaliação) pendentes e manuais; Fase 6 não começada. A auditoria do sistema de 2026-10-04
+da avaliação) pendentes e manuais, e a T3.12 (texto enriquecido das observações,
+[D-171](../changelog.md#d-171--a-leitura-recusa-as-observações-automáticas-prd-v04)) por implementar; Fase 6 não começada. A auditoria do sistema de 2026-10-04
 ([D-143](../changelog.md#d-143--auditoria-de-2026-10-04-os-cinco-defeitos-mais-graves),
 [D-144](../changelog.md#d-144--auditoria-de-2026-10-04-os-achados-médios)) corrigiu também código da
 memória; ela cobre parte da T6.1, que continua aberta.
@@ -482,8 +483,21 @@ atualizado (archify fora desta sessão).
 - [ ] **T3.11 · manual · Consumo real por host.** CA-15.
   **Vermelho:** `tests/memory_hosts.rs` não tem fixture gravada de Claude Code nem de Codex.
   **Verde:** roteiro manual por host, com versão registrada; a fixture gravada entra no teste. Host
-  que descarta o campo fica marcado "não validado" no README.
+  que descarta o campo fica marcado "não validado" no README. Até a T3.12, a memória entregue no
+  roteiro vem de uma nota explícita (`memory add`), e o registro diz isso.
   **Docs:** `integrations/`, skill, README.
+- [ ] **T3.12 · Renderizador `memory-observation/v2`** (PRD v0.4 §5.2,
+  [D-171](../changelog.md#d-171--a-leitura-recusa-as-observações-automáticas-prd-v04)). CA-3, CA-12.
+  Vem antes da T3.11 e da T5.3: sem ela nenhuma observação automática é entregue.
+  **Vermelho:** `tests/memory_policy.rs`: o texto do exemplo do PRD §5.2 (v2), byte a byte; um nome
+  que o host passou e o Ripwire não resolveu fica fora; uma lista acima do teto é cortada e diz
+  quantos ficaram de fora; assinatura, corpo e `detail` nunca aparecem; um identificador com cara
+  de segredo rejeita o registro inteiro; um registro `v1` continua lido como está.
+  **Verde:** `src/memory/admission.rs` (renderizador e `Draft` com símbolos, dependentes, testes e
+  achados), `src/memory/publish.rs` (o envelope vira `Draft`), `src/memory/model.rs`
+  (`memory-policy/v2`).
+  **Aceite manual:** o bloco B do roteiro só com observações automáticas dá `kept≥1`.
+  **Docs:** README ("What an automatic memory holds", o que vai ao provider), `install`, `--help`.
 
 **Saída da Fase 3:** CA-12, CA-13, CA-15 cobertos; PR único.
 
